@@ -1,0 +1,45 @@
+{
+  "name": "@synap-core/cli",
+  "version": "0.9.0",
+  "description": "Synap CLI — connect OpenClaw to sovereign knowledge infrastructure",
+  "type": "module",
+  "bin": {
+    "synap": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/index.ts",
+    "prepublishOnly": "pnpm build"
+  },
+  "dependencies": {
+    "chalk": "^5.4.0",
+    "commander": "^13.0.0",
+    "ora": "^8.0.0",
+    "prompts": "^2.4.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/prompts": "^2.4.9",
+    "tsx": "^4.0.0",
+    "typescript": "^5.7.0"
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/synap-core/cli"
+  },
+  "license": "MIT",
+  "keywords": [
+    "synap",
+    "openclaw",
+    "ai",
+    "knowledge-graph",
+    "memory",
+    "agent"
+  ]
+}
