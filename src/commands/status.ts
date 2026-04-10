@@ -132,21 +132,37 @@ export async function status(): Promise<void> {
   const creds = getStoredToken();
 
   // Auth status
+  // Strategy: show what we know locally first (email from stored creds),
+  // then validate with the server. If the server is unreachable, trust the
+  // local token as long as it hasn't locally expired. Only prompt to re-login
+  // when the server explicitly rejects it (401) or the local expiry has passed.
   log.heading("Account");
   let loggedIn = false;
   if (creds) {
-    const authStatus = await isLoggedIn();
-    if (authStatus.valid) {
-      loggedIn = true;
-      log.success(`Logged in as ${authStatus.email}`);
-      log.dim(`User ID: ${authStatus.userId}`);
-      log.dim(`Token expires: ${new Date(creds.expiresAt).toLocaleDateString()}`);
-    } else if (isTokenLocallyExpired(creds)) {
-      log.warn("Session expired — run: synap login");
-      log.dim("On a server? Use: synap login --token <token>");
+    // Always show local identity immediately — don't wait for server
+    log.success(`Logged in as ${chalk.bold(creds.email)}`);
+    log.dim(`User ID: ${creds.userId}`);
+
+    if (isTokenLocallyExpired(creds)) {
+      // Local expiry passed — validate against server to confirm
+      const authStatus = await isLoggedIn();
+      if (authStatus.valid) {
+        loggedIn = true;
+        log.dim(`Token refreshed (valid until ${new Date(creds.expiresAt).toLocaleDateString()})`);
+      } else {
+        log.warn("Session expired — run: synap login");
+        log.dim("On a server without a browser? Use: synap login --token <token>");
+      }
     } else {
-      log.warn("Could not reach Synap (network error?)");
-      log.dim("Run: synap status  (when online)");
+      // Token is locally fresh — validate in background but don't block on failure
+      loggedIn = true;
+      const authStatus = await isLoggedIn().catch(() => ({ valid: false as const }));
+      if (authStatus.valid) {
+        log.dim(`Token valid until ${new Date(creds.expiresAt).toLocaleDateString()}`);
+      } else {
+        // CP unreachable but token is fresh — trust it, just note it
+        log.dim(`Token fresh (CP unreachable — cached credentials in use)`);
+      }
     }
   } else {
     log.dim("Not logged in. Run: synap login");
@@ -205,24 +221,34 @@ export async function status(): Promise<void> {
         }
       }
     } else if (localConfig?.podId && creds) {
-      // No Docker container visible — check CP remote status
-      log.dim("No local container — checking CP provisioning state...");
-      const remoteStatus = await getOpenClawRemoteStatus(creds.token, localConfig.podId);
-      if (!remoteStatus || remoteStatus.status === "not_provisioned") {
-        log.dim("Not provisioned. Run: synap init");
+      // No Docker container visible here — check CP for remote provisioning state
+      const remoteStatus = await getOpenClawRemoteStatus(creds.token, localConfig.podId).catch(() => null);
+      if (remoteStatus === null) {
+        // CP unreachable — show what we know locally
+        log.dim(`Pod ID: ${localConfig.podId}`);
+        log.dim("CP unreachable — cannot check remote OpenClaw state");
+        log.dim("If on the pod server, run: docker ps | grep openclaw");
+      } else if (remoteStatus.status === "not_provisioned") {
+        log.dim("Not provisioned on pod server. Run: synap init");
       } else if (remoteStatus.status === "provisioning") {
-        log.info(`CP state: ${chalk.yellow("provisioning")} — may still be starting`);
-        log.dim("Check Docker logs: docker logs synap-backend-openclaw-1 --tail 30");
+        log.info(`Pod server: ${chalk.yellow("provisioning")} — still starting up`);
+        log.dim("Check: docker logs openclaw --tail 30");
+        log.dim("Once ready: synap finish");
       } else if (remoteStatus.status === "running") {
-        log.success(`CP state: ${chalk.green("running")}`);
-        log.dim("But no local container found — run from the server where the pod is hosted");
+        log.success(`Pod server: ${chalk.green("running")}`);
+        if (remoteStatus.url) log.dim(`URL: ${remoteStatus.url}`);
+        log.dim("Run synap finish to install the skill");
       } else if (remoteStatus.status === "error") {
-        log.warn(`CP state: ${chalk.red("error")} — provisioning failed`);
+        log.warn(`Pod server: ${chalk.red("error")} — provisioning failed`);
         log.dim("Re-run: synap init");
       }
     } else {
-      log.dim("Not detected (no container, no local install)");
-      log.dim("Run synap init to set it up");
+      log.dim("Not detected locally");
+      if (!localConfig) {
+        log.dim("Run synap init to connect to a pod");
+      } else {
+        log.dim("Run synap init to set up OpenClaw");
+      }
     }
   }
 
