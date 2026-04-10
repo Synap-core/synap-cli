@@ -1125,81 +1125,128 @@ function detectServer(): boolean {
 }
 
 /**
- * Probe the local machine for a running Synap pod without making HTTP calls.
- * Returns the most likely URL if found, null otherwise.
+ * Probe the local machine for a running Synap pod.
+ * Returns the best URL candidate if found, null otherwise.
  *
- * Checks (in order):
- *   1. Common ports (4000, 3000, 8080) — TCP connect via curl/nc
- *   2. Docker containers with "synap" in the name/image
- *   3. Known deploy directories containing docker-compose files
- *   4. Env vars (SYNAP_POD_URL)
+ * Detection order (cheapest → most reliable):
+ *   1. SYNAP_POD_URL env var
+ *   2. Deploy dir scan — read PUBLIC_URL / DOMAIN from .env, Caddyfile
+ *   3. Docker — inspect synap-backend containers for the Caddy proxy port
+ *   4. HTTP health probe — /health fingerprint confirms it's really Synap
  */
 async function detectLocalPod(): Promise<string | null> {
-  // 1. Env var override
+  // ── 1. Env var ──────────────────────────────────────────────────────────
   if (process.env.SYNAP_POD_URL) return process.env.SYNAP_POD_URL;
 
-  // 2. HTTP health probe on common ports
-  for (const port of [4000, 3000, 8080]) {
+  const candidates: string[] = [];
+
+  // ── 2. Deploy dir scan ──────────────────────────────────────────────────
+  // Look for a .env that has PUBLIC_URL or DOMAIN, which tells us the
+  // canonical URL Caddy is serving on.
+  const deployDirs = [
+    process.cwd(),
+    `${process.env.HOME}/pkm_stacks/synap-backend/deploy`,
+    `${process.env.HOME}/pkm_stacks/synap-backend`,
+    `${process.env.HOME}/synap-backend/deploy`,
+    `${process.env.HOME}/synap-backend`,
+    `${process.env.HOME}/synap/deploy`,
+    `${process.env.HOME}/synap`,
+    "/srv/synap/deploy",
+    "/srv/synap",
+    "/opt/synap/deploy",
+    "/opt/synap",
+  ];
+
+  for (const dir of deployDirs) {
     try {
-      const res = await fetch(`http://localhost:${port}/api/health`, {
-        signal: AbortSignal.timeout(1500),
-      });
-      if (res.ok) {
-        const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
-        // Confirm it's a Synap pod by checking for a known field
-        if (data.status || data.version || data.ok) {
-          return `http://localhost:${port}`;
+      // Read .env for PUBLIC_URL or DOMAIN
+      const envFile = `${dir}/.env`;
+      if (fs.existsSync(envFile)) {
+        const env = fs.readFileSync(envFile, "utf-8");
+        const publicUrl = env.match(/^PUBLIC_URL=(.+)$/m)?.[1]?.trim().replace(/['"]/g, "");
+        if (publicUrl && !publicUrl.includes("backend:4000")) {
+          candidates.push(publicUrl);
+        }
+        const domain = env.match(/^DOMAIN=(.+)$/m)?.[1]?.trim().replace(/['"]/g, "");
+        if (domain && !domain.includes("localhost") && !domain.includes("example")) {
+          candidates.push(`https://${domain}`);
+          candidates.push(`http://${domain}`);
+        }
+      }
+
+      // Check compose file exists — confirms this is a Synap deploy dir
+      const composeFile = [
+        `${dir}/docker-compose.standalone.yml`,
+        `${dir}/docker-compose.yml`,
+      ].find((f) => fs.existsSync(f));
+
+      if (composeFile) {
+        const content = fs.readFileSync(composeFile, "utf-8");
+        if (/ghcr\.io\/synap-core\/backend|synap-backend/i.test(content)) {
+          // Synap compose stack found — Caddy always binds to port 80
+          candidates.push("http://localhost:80");
+          candidates.push("http://localhost");
         }
       }
     } catch {
-      // port not open — continue
+      // skip unreadable dirs
     }
   }
 
-  // 3. Docker container check
+  // ── 3. Docker ps — look for the Caddy container port ───────────────────
   try {
     const out = execSync(
-      "docker ps --format '{{.Names}} {{.Image}} {{.Ports}}' 2>/dev/null",
+      "docker ps --format '{{.Names}}\\t{{.Image}}\\t{{.Ports}}' 2>/dev/null",
       { timeout: 4000 }
     ).toString();
+
     for (const line of out.split("\n")) {
-      if (/synap|backend/i.test(line)) {
-        // Try to extract the mapped host port
+      // Caddy proxy container
+      if (/caddy/i.test(line)) {
+        const portMatch = line.match(/0\.0\.0\.0:(\d+)->80/);
+        if (portMatch) {
+          candidates.push(`http://localhost:${portMatch[1]}`);
+        } else if (/->80\/tcp/.test(line)) {
+          candidates.push("http://localhost");
+        }
+      }
+      // Backend container exposed directly (non-standard setups)
+      if (/synap.*backend|backend.*synap/i.test(line)) {
         const portMatch = line.match(/0\.0\.0\.0:(\d+)->4000/);
-        if (portMatch) return `http://localhost:${portMatch[1]}`;
-        // Default assumption
-        if (/4000/.test(line)) return "http://localhost:4000";
+        if (portMatch) candidates.push(`http://localhost:${portMatch[1]}`);
       }
     }
   } catch {
-    // docker not available or no containers
+    // docker not available
   }
 
-  // 4. Known deploy dirs containing a compose file with synap backend service
-  const deployDirs = [
-    "/srv/synap",
-    "/opt/synap",
-    `${process.env.HOME}/pkm_stacks/synap-backend`,
-    `${process.env.HOME}/synap-backend`,
-    `${process.env.HOME}/synap`,
-    process.cwd(),
-  ];
-  for (const dir of deployDirs) {
+  // ── 4. HTTP probe — confirm with Synap fingerprint ──────────────────────
+  // Add fallback ports to check directly
+  candidates.push("http://localhost:4000", "http://localhost:80", "http://localhost");
+
+  // Deduplicate while preserving order
+  const seen = new Set<string>();
+  const deduped = candidates.filter((u) => {
+    const key = u.replace(/\/$/, "");
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+
+  for (const baseUrl of deduped) {
     try {
-      const composeFile = [
-        `${dir}/docker-compose.standalone.yml`,
-        `${dir}/deploy/docker-compose.standalone.yml`,
-        `${dir}/docker-compose.yml`,
-      ].find((f) => fs.existsSync(f));
-      if (composeFile) {
-        const content = fs.readFileSync(composeFile, "utf-8");
-        if (/synap.backend|synap-backend|image:.*synap/i.test(content)) {
-          // Found a compose file referencing Synap — assume default port
-          return "http://localhost:4000";
-        }
-      }
+      const url = `${baseUrl.replace(/\/$/, "")}/health`;
+      const res = await fetch(url, { signal: AbortSignal.timeout(2000) });
+      if (!res.ok) continue;
+      const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+      // Fingerprint: Synap /health returns { status: "ok", service: "hub-protocol" }
+      // or { status: "ok|ready|degraded" } from the tRPC healthRouter
+      const isSynap =
+        (data.service === "hub-protocol") ||
+        (typeof data.status === "string" && ["ok", "ready", "degraded"].includes(data.status as string));
+      if (isSynap) return baseUrl.replace(/\/$/, "");
     } catch {
-      // skip
+      // not reachable — try next
     }
   }
 
