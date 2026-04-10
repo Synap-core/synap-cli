@@ -11,6 +11,7 @@ import prompts from "prompts";
 import ora from "ora";
 import chalk from "chalk";
 import { execSync } from "child_process";
+import fs from "fs";
 import { log, banner } from "../utils/logger.js";
 import {
   detectOpenClaw,
@@ -53,13 +54,28 @@ export async function init(opts: InitOptions): Promise<void> {
       `OpenClaw detected${oc.version ? ` v${oc.version}` : ""} — connect mode`
     );
     await pathA(opts, oc);
-  } else if (isServer) {
-    log.info("Server detected, no OpenClaw — fresh setup mode");
-    await pathB(opts);
-  } else {
-    log.info("Running on desktop — hosting mode");
-    await pathC(opts);
+    return;
   }
+
+  if (isServer) {
+    // Before assuming fresh install, check if a pod is already running
+    const spinner = ora("Scanning for existing Synap pod...").start();
+    const existingPodUrl = opts.podUrl ?? (await detectLocalPod());
+    spinner.stop();
+
+    if (existingPodUrl) {
+      log.success(`Found existing pod at ${existingPodUrl}`);
+      log.info("Server detected, no OpenClaw — connecting to existing pod");
+      await pathBExisting(opts, existingPodUrl);
+    } else {
+      log.info("Server detected, no OpenClaw — fresh setup mode");
+      await pathB(opts);
+    }
+    return;
+  }
+
+  log.info("Running on desktop — hosting mode");
+  await pathC(opts);
 }
 
 // =============================================================================
@@ -105,11 +121,113 @@ async function pathA(
 }
 
 // =============================================================================
+// PATH B-EXISTING: Server with pod already running, just needs OpenClaw
+// =============================================================================
+
+async function pathBExisting(opts: InitOptions, detectedUrl: string): Promise<void> {
+  log.heading("Step 1: Verify Pod");
+
+  // Confirm URL with the user — let them override if detection was wrong
+  const { podUrl } = await prompts({
+    type: "text",
+    name: "podUrl",
+    message: "Pod URL:",
+    initial: detectedUrl,
+  });
+  if (!podUrl) return;
+
+  const spinner = ora("Checking pod health...").start();
+  const health = await checkPodHealth(podUrl);
+  if (!health.healthy) {
+    spinner.fail(`Pod not reachable at ${podUrl}`);
+    log.dim("Check docker compose logs, or provide the correct URL.");
+    return;
+  }
+  spinner.succeed(`Pod healthy${health.version ? ` (v${health.version})` : ""}`);
+
+  // Connect (generate Hub API key)
+  const apiKey = await connectStep(podUrl, opts, false);
+  if (!apiKey) return;
+
+  // OpenClaw
+  log.heading("Step 2: OpenClaw");
+  log.info("No OpenClaw detected — choose how to add it:");
+  const { ocChoice } = await prompts({
+    type: "select",
+    name: "ocChoice",
+    message: "How would you like to run OpenClaw?",
+    choices: [
+      {
+        title: "Docker container on this server (recommended)",
+        description: "Adds openclaw profile to your existing docker-compose stack",
+        value: "docker",
+      },
+      {
+        title: "npm install -g openclaw (native process)",
+        description: "Runs as a Node.js process, no Docker needed",
+        value: "npm",
+      },
+      {
+        title: "Skip — I'll install OpenClaw separately",
+        value: "skip",
+      },
+    ],
+  });
+
+  if (ocChoice === "docker") {
+    const localConfig = getLocalPodConfig();
+    const startSpinner = ora("Starting OpenClaw container...").start();
+    try {
+      startOpenClawOnServer(
+        apiKey,
+        localConfig?.agentUserId ?? "",
+        localConfig?.workspaceId ?? "",
+        podUrl
+      );
+      startSpinner.succeed("OpenClaw container started");
+    } catch (err) {
+      startSpinner.fail(err instanceof Error ? err.message : String(err));
+      log.dim("Start manually: docker compose --profile openclaw up -d openclaw");
+      log.dim("Then run: synap finish");
+    }
+  } else if (ocChoice === "npm") {
+    log.blank();
+    log.info("Install OpenClaw:");
+    console.log(chalk.cyan("  npm install -g openclaw"));
+    console.log(chalk.cyan("  openclaw start"));
+    log.blank();
+    log.info("Then run: synap finish");
+    return;
+  } else {
+    log.info("Skipped. Run `synap finish` once OpenClaw is running.");
+    return;
+  }
+
+  // Rest of setup
+  await skillStep(true);
+  const oc = detectOpenClaw();
+  await seedStep(podUrl, apiKey, oc);
+  if (!opts.skipIs) {
+    await isStep(podUrl, apiKey, oc.found);
+  }
+  printSummary(podUrl, oc.found);
+}
+
+// =============================================================================
 // PATH B: Fresh server (no OpenClaw)
 // =============================================================================
 
 async function pathB(opts: InitOptions): Promise<void> {
   log.heading("Step 1: Server Setup");
+
+  // Last-chance check: probe localhost ports in case detection missed something
+  // (e.g. pod on a non-standard port or started after init was launched)
+  const existingUrl = await detectLocalPod();
+  if (existingUrl) {
+    log.success(`Found a running pod at ${existingUrl} — switching to connect mode`);
+    await pathBExisting(opts, existingUrl);
+    return;
+  }
 
   // Resource check
   const resources = checkServerResources();
@@ -1004,4 +1122,86 @@ function detectServer(): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * Probe the local machine for a running Synap pod without making HTTP calls.
+ * Returns the most likely URL if found, null otherwise.
+ *
+ * Checks (in order):
+ *   1. Common ports (4000, 3000, 8080) — TCP connect via curl/nc
+ *   2. Docker containers with "synap" in the name/image
+ *   3. Known deploy directories containing docker-compose files
+ *   4. Env vars (SYNAP_POD_URL)
+ */
+async function detectLocalPod(): Promise<string | null> {
+  // 1. Env var override
+  if (process.env.SYNAP_POD_URL) return process.env.SYNAP_POD_URL;
+
+  // 2. HTTP health probe on common ports
+  for (const port of [4000, 3000, 8080]) {
+    try {
+      const res = await fetch(`http://localhost:${port}/api/health`, {
+        signal: AbortSignal.timeout(1500),
+      });
+      if (res.ok) {
+        const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+        // Confirm it's a Synap pod by checking for a known field
+        if (data.status || data.version || data.ok) {
+          return `http://localhost:${port}`;
+        }
+      }
+    } catch {
+      // port not open — continue
+    }
+  }
+
+  // 3. Docker container check
+  try {
+    const out = execSync(
+      "docker ps --format '{{.Names}} {{.Image}} {{.Ports}}' 2>/dev/null",
+      { timeout: 4000 }
+    ).toString();
+    for (const line of out.split("\n")) {
+      if (/synap|backend/i.test(line)) {
+        // Try to extract the mapped host port
+        const portMatch = line.match(/0\.0\.0\.0:(\d+)->4000/);
+        if (portMatch) return `http://localhost:${portMatch[1]}`;
+        // Default assumption
+        if (/4000/.test(line)) return "http://localhost:4000";
+      }
+    }
+  } catch {
+    // docker not available or no containers
+  }
+
+  // 4. Known deploy dirs containing a compose file with synap backend service
+  const deployDirs = [
+    "/srv/synap",
+    "/opt/synap",
+    `${process.env.HOME}/pkm_stacks/synap-backend`,
+    `${process.env.HOME}/synap-backend`,
+    `${process.env.HOME}/synap`,
+    process.cwd(),
+  ];
+  for (const dir of deployDirs) {
+    try {
+      const composeFile = [
+        `${dir}/docker-compose.standalone.yml`,
+        `${dir}/deploy/docker-compose.standalone.yml`,
+        `${dir}/docker-compose.yml`,
+      ].find((f) => fs.existsSync(f));
+      if (composeFile) {
+        const content = fs.readFileSync(composeFile, "utf-8");
+        if (/synap.backend|synap-backend|image:.*synap/i.test(content)) {
+          // Found a compose file referencing Synap — assume default port
+          return "http://localhost:4000";
+        }
+      }
+    } catch {
+      // skip
+    }
+  }
+
+  return null;
 }
