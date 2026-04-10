@@ -108,7 +108,7 @@ async function pathA(
   if (!apiKey) return;
 
   // ── Skill ───────────────────────────────────────────────────────────────
-  await skillStep(true);
+  await skillStep(true, oc);
 
   // ── Seed ────────────────────────────────────────────────────────────────
   await seedStep(podUrl, apiKey, oc);
@@ -474,13 +474,15 @@ async function connectExistingPod(
   // Install skill + seed (if OpenClaw available)
   const ocAfter = detectOpenClaw();
   if (ocAfter.found) {
-    await skillStep(true);
+    await skillStep(true, ocAfter);
     await seedStep(podUrl, apiKey, ocAfter);
     if (!opts.skipIs) await isStep(podUrl, apiKey, true);
   } else {
     log.blank();
-    log.info("Pod connected. Once OpenClaw is running, install the skill:");
-    log.dim("  openclaw skills install synap");
+    log.info("Pod connected. Once OpenClaw is running:");
+    log.dim("  Local:  openclaw skills install synap");
+    log.dim("  Docker: docker exec openclaw openclaw skills install synap");
+    log.dim("  Or run: synap finish");
   }
 
   printSummary(podUrl, ocAfter.found);
@@ -797,18 +799,32 @@ async function connectStep(
   return apiKey ?? null;
 }
 
-export async function skillStep(openclawFound: boolean): Promise<void> {
+export async function skillStep(
+  openclawFound: boolean,
+  oc?: ReturnType<typeof detectOpenClaw>
+): Promise<void> {
   if (!openclawFound) return;
 
   log.heading("Install Skill");
 
+  const isDocker = oc?.runtime === "docker";
+  const containerName = oc?.containerName;
+
+  if (isDocker) {
+    log.dim(`Installing via docker exec ${containerName ?? "openclaw"}...`);
+  }
+
   const spinner = ora("Installing synap skill...").start();
   try {
-    installSynapSkill();
+    installSynapSkill(isDocker ? (containerName ?? "openclaw") : undefined);
     spinner.succeed("Synap skill installed");
   } catch (err) {
     spinner.fail(err instanceof Error ? err.message : "Failed");
-    log.dim("Install manually: openclaw skills install synap");
+    if (isDocker) {
+      log.dim(`Install manually: docker exec ${containerName ?? "openclaw"} openclaw skills install synap`);
+    } else {
+      log.dim("Install manually: openclaw skills install synap");
+    }
   }
 }
 

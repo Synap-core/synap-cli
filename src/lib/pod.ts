@@ -442,17 +442,49 @@ export function startOpenClawOnServer(
 /**
  * Install the synap skill into OpenClaw.
  */
-export function installSynapSkill(): void {
+const SKILL_URL =
+  "https://raw.githubusercontent.com/Synap-core/backend/main/skills/synap/SKILL.md";
+
+/**
+ * Install the synap skill into OpenClaw.
+ * Automatically chooses the right execution path:
+ *   - Local install: runs `openclaw skills install <url>` directly
+ *   - Docker container: runs `docker exec <container> openclaw skills install <url>`
+ */
+export function installSynapSkill(containerName?: string): void {
+  const cmd = containerName
+    ? `docker exec ${containerName} openclaw skills install ${SKILL_URL}`
+    : `openclaw skills install ${SKILL_URL}`;
+
   try {
-    execSync(
-      "openclaw skills install https://raw.githubusercontent.com/Synap-core/backend/main/skills/synap/SKILL.md",
-      { stdio: "inherit", timeout: 30000 }
-    );
+    execSync(cmd, { stdio: "inherit", timeout: 60000 });
   } catch {
-    // openclaw CLI might not be in PATH — provide manual command
-    throw new Error(
-      "Could not install skill automatically. Run manually:\n" +
-        "  openclaw skills install https://raw.githubusercontent.com/Synap-core/backend/main/skills/synap/SKILL.md"
+    if (containerName) {
+      throw new Error(
+        `Could not install skill via docker exec.\n` +
+          `Run manually: docker exec ${containerName} openclaw skills install ${SKILL_URL}`
+      );
+    } else {
+      throw new Error(
+        `openclaw not found in PATH.\n` +
+          `Run manually: openclaw skills install ${SKILL_URL}\n` +
+          `Or if OpenClaw is in Docker: docker exec openclaw openclaw skills install ${SKILL_URL}`
+      );
+    }
+  }
+}
+
+/**
+ * Check whether the synap skill is installed inside a Docker container.
+ */
+export function isSynapSkillInstalledInDocker(containerName: string): boolean {
+  try {
+    const out = execSync(
+      `docker exec ${containerName} openclaw skills list 2>/dev/null`,
+      { encoding: "utf-8", timeout: 10000 }
     );
+    return /synap/i.test(out);
+  } catch {
+    return false;
   }
 }

@@ -159,8 +159,10 @@ export async function status(): Promise<void> {
   const localConfig = getLocalPodConfig();
 
   if (oc.found) {
-    // Local process running
-    log.success(`Gateway: ${oc.gatewayRunning ? chalk.green("running") : chalk.yellow("stopped")} (port ${oc.gatewayPort ?? 18789})`);
+    const runtimeLabel = oc.runtime === "docker"
+      ? chalk.cyan(`Docker (${oc.containerName ?? "openclaw"})`)
+      : chalk.dim("local install");
+    log.success(`Gateway: ${oc.gatewayRunning ? chalk.green("running") : chalk.yellow("stopped")} (port ${oc.gatewayPort ?? 18789})  [${runtimeLabel}]`);
     if (oc.version) log.info(`Version: ${oc.version}`);
     const checks = runSecurityChecks(oc.version);
     const score = computeScore(checks);
@@ -296,14 +298,32 @@ export async function status(): Promise<void> {
 
   // Synap skill
   log.heading("Synap Skill");
-  if (oc.found && oc.skillsDir) {
-    const { existsSync } = await import("fs");
-    const skillPath = join(oc.skillsDir, "synap");
-    if (existsSync(skillPath)) {
-      skillInstalled = true;
-      log.success("Installed");
-    } else {
-      log.dim("Not installed. Run: openclaw skills install synap");
+  if (oc.found) {
+    if (oc.runtime === "docker") {
+      // Check inside the container
+      const { isSynapSkillInstalledInDocker } = await import("../lib/pod.js");
+      const container = oc.containerName ?? "openclaw";
+      try {
+        const installed = isSynapSkillInstalledInDocker(container);
+        if (installed) {
+          skillInstalled = true;
+          log.success(`Installed (inside ${container})`);
+        } else {
+          log.dim(`Not installed. Run: docker exec ${container} openclaw skills install synap`);
+          log.dim("Or: synap finish");
+        }
+      } catch {
+        log.dim(`Could not check — try: docker exec ${container} openclaw skills list`);
+      }
+    } else if (oc.skillsDir) {
+      const { existsSync } = await import("fs");
+      const skillPath = join(oc.skillsDir, "synap");
+      if (existsSync(skillPath)) {
+        skillInstalled = true;
+        log.success("Installed");
+      } else {
+        log.dim("Not installed. Run: openclaw skills install synap");
+      }
     }
   } else {
     log.dim("Cannot check — OpenClaw not detected");
@@ -316,10 +336,9 @@ export async function status(): Promise<void> {
   } else if (!localConfig) {
     log.info("Connect to a pod: synap init");
   } else if (!oc.found) {
-    log.info("OpenClaw not detected. Install:");
-    log.dim("  npm i -g openclaw  OR  enable addon via: synap init");
+    log.info("OpenClaw not running. Start it or run: synap init");
   } else if (!skillInstalled) {
-    log.info("Install skill: synap finish  OR  openclaw skills install synap");
+    log.info("Install skill: synap finish");
   } else {
     log.dim("All set. Use synap update to refresh the skill.");
   }

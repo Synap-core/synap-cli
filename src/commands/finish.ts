@@ -52,23 +52,37 @@ export async function finish(): Promise<void> {
   if (!oc.found) {
     log.warn("OpenClaw is not running yet.");
     log.blank();
-    log.dim("If you just ran `synap init`, it may still be starting (2-5 min).");
-    log.dim("Check with: `synap status`");
+    log.dim("If you just ran `synap init`, the container may still be initializing (1-2 min).");
+    log.dim("Check container status: synap status");
+    log.dim("Check container logs:   docker logs openclaw --tail 30");
     log.blank();
     log.info("Run `synap finish` again once it's up.");
     return;
   }
 
-  log.success(`Version: ${oc.version ?? "unknown"}`);
+  if (oc.runtime === "docker") {
+    log.success(`Running in Docker container: ${chalk.cyan(oc.containerName ?? "openclaw")}`);
+  } else {
+    log.success(`Local install — version: ${oc.version ?? "unknown"}`);
+  }
   log.info(
-    `Gateway: ${oc.gatewayRunning ? chalk.green("running") : chalk.dim("stopped")} (port ${oc.gatewayPort ?? 18789})`
+    `Gateway: ${oc.gatewayRunning ? chalk.green("running") : chalk.yellow("not responding")} (port ${oc.gatewayPort ?? 18789})`
   );
 
-  // ── Step 4: Security audit ─────────────────────────────────────────────────
-  await securityStep(oc.version);
+  if (!oc.gatewayRunning) {
+    log.warn("Gateway not responding on port 18789 — OpenClaw may still be starting.");
+    log.dim("Check: docker logs openclaw --tail 20");
+    log.dim("Retry in a minute: synap finish");
+    return;
+  }
+
+  // ── Step 4: Security audit (local only — can't inspect Docker config from host) ──
+  if (oc.runtime !== "docker") {
+    await securityStep(oc.version);
+  }
 
   // ── Step 5: Install skill ──────────────────────────────────────────────────
-  await skillStep(true);
+  await skillStep(true, oc);
 
   // ── Step 6: Seed workspace ─────────────────────────────────────────────────
   await seedStep(podUrl, hubApiKey, oc);
