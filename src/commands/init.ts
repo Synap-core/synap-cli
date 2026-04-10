@@ -30,6 +30,7 @@ import {
   saveLocalPodConfig,
   checkServerResources,
   startOpenClawOnServer,
+  findSynapDeployDir,
   getLocalPodConfig,
 } from "../lib/pod.js";
 import { seedAgentEntities } from "../lib/seed.js";
@@ -149,58 +150,35 @@ async function pathBExisting(opts: InitOptions, detectedUrl: string): Promise<vo
   const apiKey = await connectStep(podUrl, opts, false);
   if (!apiKey) return;
 
-  // OpenClaw
+  // OpenClaw — always Docker on a server with an existing compose stack
   log.heading("Step 2: OpenClaw");
-  log.info("No OpenClaw detected — choose how to add it:");
-  const { ocChoice } = await prompts({
-    type: "select",
-    name: "ocChoice",
-    message: "How would you like to run OpenClaw?",
-    choices: [
-      {
-        title: "Docker container on this server (recommended)",
-        description: "Adds openclaw profile to your existing docker-compose stack",
-        value: "docker",
-      },
-      {
-        title: "npm install -g openclaw (native process)",
-        description: "Runs as a Node.js process, no Docker needed",
-        value: "npm",
-      },
-      {
-        title: "Skip — I'll install OpenClaw separately",
-        value: "skip",
-      },
-    ],
-  });
 
-  if (ocChoice === "docker") {
-    const localConfig = getLocalPodConfig();
-    const startSpinner = ora("Starting OpenClaw container...").start();
-    try {
-      startOpenClawOnServer(
-        apiKey,
-        localConfig?.agentUserId ?? "",
-        localConfig?.workspaceId ?? "",
-        podUrl
-      );
-      startSpinner.succeed("OpenClaw container started");
-    } catch (err) {
-      startSpinner.fail(err instanceof Error ? err.message : String(err));
-      log.dim("Start manually: docker compose --profile openclaw up -d openclaw");
-      log.dim("Then run: synap finish");
-    }
-  } else if (ocChoice === "npm") {
-    log.blank();
-    log.info("Install OpenClaw:");
-    console.log(chalk.cyan("  npm install -g openclaw"));
-    console.log(chalk.cyan("  openclaw start"));
-    log.blank();
-    log.info("Then run: synap finish");
+  const deployDir = findSynapDeployDir();
+  if (!deployDir) {
+    log.warn("Could not find your Synap deploy directory automatically.");
+    log.dim("Start OpenClaw manually from your synap-backend dir:");
+    log.dim("  docker compose --profile openclaw up -d openclaw");
+    log.dim("Then run: synap finish");
     return;
-  } else {
-    log.info("Skipped. Run `synap finish` once OpenClaw is running.");
-    return;
+  }
+
+  log.info(`Deploy dir: ${deployDir}`);
+  log.info("Starting OpenClaw container (docker compose --profile openclaw)...");
+  log.blank();
+
+  const localConfig = getLocalPodConfig();
+  const startSpinner = ora("Starting OpenClaw...").start();
+  try {
+    startOpenClawOnServer(
+      apiKey,
+      localConfig?.agentUserId ?? "",
+      localConfig?.workspaceId ?? "",
+      podUrl
+    );
+    startSpinner.succeed("OpenClaw container started");
+  } catch (err) {
+    startSpinner.fail(err instanceof Error ? err.message : String(err));
+    log.dim("Then run: synap finish");
   }
 
   // Rest of setup

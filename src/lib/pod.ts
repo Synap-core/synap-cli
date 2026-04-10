@@ -295,29 +295,75 @@ export function checkServerResources(): {
  * Writes env vars to the pod's .env file and runs docker compose --profile openclaw.
  * Only works when the CLI is running ON the pod server.
  */
+/**
+ * Find the Synap deploy directory — where the .env and docker-compose files live.
+ * Searches standard locations plus parent dirs of cwd (handles ~/pkm_stacks/synap-backend etc.).
+ */
+export function findSynapDeployDir(): string | null {
+  const home = os.homedir();
+  const candidates = [
+    // Standard install locations
+    "/srv/synap",
+    "/opt/synap",
+    // Common dev/self-hosted layouts
+    path.join(home, "pkm_stacks", "synap-backend", "deploy"),
+    path.join(home, "pkm_stacks", "synap-backend"),
+    path.join(home, "synap-backend", "deploy"),
+    path.join(home, "synap-backend"),
+    path.join(home, "synap", "deploy"),
+    path.join(home, "synap"),
+  ];
+
+  // Also walk up from cwd — handles running from inside the repo
+  let dir = process.cwd();
+  for (let i = 0; i < 5; i++) {
+    candidates.push(dir);
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+
+  const hasSynapCompose = (d: string) => {
+    try {
+      const standalone = path.join(d, "docker-compose.standalone.yml");
+      const regular = path.join(d, "docker-compose.yml");
+      if (fs.existsSync(standalone)) {
+        const content = fs.readFileSync(standalone, "utf-8");
+        return /ghcr\.io\/synap-core\/backend|synap-backend/i.test(content);
+      }
+      if (fs.existsSync(regular)) {
+        const content = fs.readFileSync(regular, "utf-8");
+        return /ghcr\.io\/synap-core\/backend|synap-backend/i.test(content);
+      }
+      return false;
+    } catch {
+      return false;
+    }
+  };
+
+  // Deduplicate while preserving priority order
+  const seen = new Set<string>();
+  for (const candidate of candidates) {
+    if (seen.has(candidate)) continue;
+    seen.add(candidate);
+    if (hasSynapCompose(candidate)) return candidate;
+  }
+
+  return null;
+}
+
 export function startOpenClawOnServer(
   hubApiKey: string,
   agentUserId: string,
   workspaceId: string,
   podUrl: string
 ): void {
-  // Find the deploy directory — try standard locations
-  const deployDirs = ["/srv/synap", "/opt/synap", process.cwd()];
-  const deployDir = deployDirs.find((d) => {
-    try {
-      return (
-        fs.existsSync(path.join(d, "docker-compose.standalone.yml")) ||
-        fs.existsSync(path.join(d, "docker-compose.yml"))
-      );
-    } catch {
-      return false;
-    }
-  });
+  const deployDir = findSynapDeployDir();
 
   if (!deployDir) {
     throw new Error(
-      "Could not find Synap deploy directory. Expected at /srv/synap or /opt/synap.\n" +
-        "Run manually: docker compose --profile openclaw up -d openclaw"
+      "Could not find Synap deploy directory (looked in /srv/synap, /opt/synap, and parent dirs).\n" +
+        "Run manually from your synap-backend dir: docker compose --profile openclaw up -d openclaw"
     );
   }
 
