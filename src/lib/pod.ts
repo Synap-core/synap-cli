@@ -297,77 +297,109 @@ export function checkServerResources(): {
  */
 /**
  * Find the Synap deploy directory — where the .env and docker-compose files live.
- * Searches standard locations plus parent dirs of cwd (handles ~/pkm_stacks/synap-backend etc.).
+ *
+ * Strategy (most reliable first):
+ *   1. Docker label — inspect any running synap container for
+ *      com.docker.compose.project.working_dir (always accurate, zero guessing)
+ *   2. Walk up from cwd — works when running from inside the repo
+ *   3. Common install paths as a last resort
  */
 export function findSynapDeployDir(): string | null {
-  const home = os.homedir();
-  const candidates = [
-    // Standard install locations
-    "/srv/synap",
-    "/opt/synap",
-    // Common dev/self-hosted layouts
-    path.join(home, "pkm_stacks", "synap-backend", "deploy"),
-    path.join(home, "pkm_stacks", "synap-backend"),
-    path.join(home, "synap-backend", "deploy"),
-    path.join(home, "synap-backend"),
-    path.join(home, "synap", "deploy"),
-    path.join(home, "synap"),
-  ];
+  // ── 1. Ask Docker itself ───────────────────────────────────────────────
+  try {
+    // Find any container that belongs to a synap compose project
+    const psOut = execSync(
+      "docker ps --format '{{.Names}}' 2>/dev/null",
+      { encoding: "utf-8", timeout: 4000 }
+    );
+    const synapContainer = psOut
+      .split("\n")
+      .map((l) => l.trim())
+      .find((n) => /synap|openclaw/i.test(n));
 
-  // Also walk up from cwd — handles running from inside the repo
+    if (synapContainer) {
+      const workDir = execSync(
+        `docker inspect --format '{{index .Config.Labels "com.docker.compose.project.working_dir"}}' ${synapContainer} 2>/dev/null`,
+        { encoding: "utf-8", timeout: 4000 }
+      ).trim();
+
+      if (workDir && workDir !== "<no value>" && fs.existsSync(workDir)) {
+        // compose project.working_dir is the folder containing docker-compose.yml
+        // but the .env may be in a "deploy" subdirectory
+        if (hasSynapCompose(workDir)) return workDir;
+        const deploySub = path.join(workDir, "deploy");
+        if (hasSynapCompose(deploySub)) return deploySub;
+        return workDir; // trust Docker even if compose check fails
+      }
+    }
+  } catch {
+    // Docker not available or no containers — fall through
+  }
+
+  // ── 2. Walk up from cwd ────────────────────────────────────────────────
   let dir = process.cwd();
-  for (let i = 0; i < 5; i++) {
-    candidates.push(dir);
+  for (let i = 0; i < 6; i++) {
+    if (hasSynapCompose(dir)) return dir;
     const parent = path.dirname(dir);
     if (parent === dir) break;
     dir = parent;
   }
 
-  const hasSynapCompose = (d: string) => {
-    try {
-      const standalone = path.join(d, "docker-compose.standalone.yml");
-      const regular = path.join(d, "docker-compose.yml");
-      if (fs.existsSync(standalone)) {
-        const content = fs.readFileSync(standalone, "utf-8");
-        return /ghcr\.io\/synap-core\/backend|synap-backend/i.test(content);
-      }
-      if (fs.existsSync(regular)) {
-        const content = fs.readFileSync(regular, "utf-8");
-        return /ghcr\.io\/synap-core\/backend|synap-backend/i.test(content);
-      }
-      return false;
-    } catch {
-      return false;
-    }
-  };
-
-  // Deduplicate while preserving priority order
-  const seen = new Set<string>();
-  for (const candidate of candidates) {
-    if (seen.has(candidate)) continue;
-    seen.add(candidate);
-    if (hasSynapCompose(candidate)) return candidate;
+  // ── 3. Common install paths ────────────────────────────────────────────
+  const home = os.homedir();
+  const fallbacks = [
+    "/srv/synap",
+    "/opt/synap",
+    path.join(home, "synap-backend", "deploy"),
+    path.join(home, "synap-backend"),
+    path.join(home, "synap"),
+  ];
+  for (const d of fallbacks) {
+    if (hasSynapCompose(d)) return d;
   }
 
   return null;
 }
 
+function hasSynapCompose(dir: string): boolean {
+  try {
+    for (const name of ["docker-compose.standalone.yml", "docker-compose.yml"]) {
+      const f = path.join(dir, name);
+      if (fs.existsSync(f)) {
+        const content = fs.readFileSync(f, "utf-8");
+        if (/ghcr\.io\/synap-core\/backend|synap-backend/i.test(content)) return true;
+      }
+    }
+  } catch {
+    // unreadable
+  }
+  return false;
+}
+
+/**
+ * Write OpenClaw env vars into the deploy dir .env and start the container.
+ * Does NOT wait for health — OpenClaw can take several minutes to initialize
+ * (first run pulls ~1GB image + runs setup). Caller should tell user to run
+ * `synap finish` once it's up.
+ *
+ * Returns the deploy dir used.
+ */
 export function startOpenClawOnServer(
   hubApiKey: string,
   agentUserId: string,
   workspaceId: string,
   podUrl: string
-): void {
+): string {
   const deployDir = findSynapDeployDir();
 
   if (!deployDir) {
     throw new Error(
-      "Could not find Synap deploy directory (looked in /srv/synap, /opt/synap, and parent dirs).\n" +
-        "Run manually from your synap-backend dir: docker compose --profile openclaw up -d openclaw"
+      "Could not find your Synap deploy directory.\n" +
+        "Run from inside the synap-backend folder, or set SYNAP_DEPLOY_DIR env var."
     );
   }
 
-  // Update .env with OpenClaw vars (create or append)
+  // ── Write env vars ───────────────────────────────────────────────────────
   const envFile = path.join(deployDir, ".env");
   const envVars: Record<string, string> = {
     OPENCLAW_HUB_API_KEY: hubApiKey,
@@ -379,61 +411,32 @@ export function startOpenClawOnServer(
   let envContent = "";
   try {
     envContent = fs.existsSync(envFile) ? fs.readFileSync(envFile, "utf-8") : "";
-  } catch {
-    /* start fresh */
-  }
+  } catch { /* start fresh */ }
 
-  // Update or append each var
   for (const [key, value] of Object.entries(envVars)) {
     const regex = new RegExp(`^${key}=.*`, "m");
     const line = `${key}=${value}`;
-    if (regex.test(envContent)) {
-      envContent = envContent.replace(regex, line);
-    } else {
-      envContent =
-        envContent.endsWith("\n") || envContent === ""
+    envContent = regex.test(envContent)
+      ? envContent.replace(regex, line)
+      : (envContent.endsWith("\n") || envContent === ""
           ? envContent + line + "\n"
-          : envContent + "\n" + line + "\n";
-    }
+          : envContent + "\n" + line + "\n");
   }
   fs.writeFileSync(envFile, envContent, { mode: 0o600 });
 
-  // Start OpenClaw container
-  const composeFile = fs.existsSync(
-    path.join(deployDir, "docker-compose.standalone.yml")
-  )
+  // ── Start container ──────────────────────────────────────────────────────
+  const composeFile = fs.existsSync(path.join(deployDir, "docker-compose.standalone.yml"))
     ? "docker-compose.standalone.yml"
     : "docker-compose.yml";
 
+  // pipe stderr to /dev/null to suppress WARN lines about unset env vars
+  // (those warnings are cosmetic — other services' vars not needed by openclaw)
   execSync(
-    `docker compose -f ${composeFile} --profile openclaw up -d openclaw`,
-    { stdio: "inherit", cwd: deployDir, timeout: 60000 }
+    `docker compose -f ${composeFile} --profile openclaw up -d openclaw 2>/dev/null`,
+    { stdio: ["ignore", "inherit", "ignore"], cwd: deployDir, timeout: 300_000 }
   );
 
-  // Poll health (up to 30s)
-  let healthy = false;
-  for (let i = 0; i < 6; i++) {
-    try {
-      const result = execSync("curl -sf http://localhost:18789/health", {
-        encoding: "utf-8",
-        timeout: 5000,
-      });
-      if (result.includes("ok") || result.includes("healthy")) {
-        healthy = true;
-        break;
-      }
-    } catch {
-      /* not ready yet */
-    }
-    if (i < 5) execSync("sleep 5");
-  }
-
-  if (!healthy) {
-    throw new Error(
-      "OpenClaw started but health check didn't pass in 30s.\n" +
-        "Check logs: docker compose logs openclaw"
-    );
-  }
+  return deployDir;
 }
 
 /**

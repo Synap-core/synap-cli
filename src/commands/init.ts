@@ -163,11 +163,17 @@ async function pathBExisting(opts: InitOptions, detectedUrl: string): Promise<vo
   }
 
   log.info(`Deploy dir: ${deployDir}`);
-  log.info("Starting OpenClaw container (docker compose --profile openclaw)...");
   log.blank();
 
   const localConfig = getLocalPodConfig();
-  const startSpinner = ora("Starting OpenClaw...").start();
+
+  // Stop any spinner before running docker compose — its output goes to stdout
+  // and will conflict with ora. We print progress directly.
+  log.info("Running: docker compose --profile openclaw up -d openclaw");
+  log.dim("(This may take a few minutes on first run — pulling image ~1GB)");
+  log.blank();
+
+  let ocStarted = false;
   try {
     startOpenClawOnServer(
       apiKey,
@@ -175,20 +181,24 @@ async function pathBExisting(opts: InitOptions, detectedUrl: string): Promise<vo
       localConfig?.workspaceId ?? "",
       podUrl
     );
-    startSpinner.succeed("OpenClaw container started");
+    ocStarted = true;
+    log.success("OpenClaw container started");
   } catch (err) {
-    startSpinner.fail(err instanceof Error ? err.message : String(err));
-    log.dim("Then run: synap finish");
+    log.warn(err instanceof Error ? err.message : String(err));
   }
 
-  // Rest of setup
-  await skillStep(true);
-  const oc = detectOpenClaw();
-  await seedStep(podUrl, apiKey, oc);
-  if (!opts.skipIs) {
-    await isStep(podUrl, apiKey, oc.found);
+  log.blank();
+  if (ocStarted) {
+    log.info("OpenClaw is initializing (first boot takes 1-2 min).");
+    log.info("Once it's ready, run:");
+    console.log(chalk.cyan("\n  synap finish\n"));
+    log.dim("This will install the skill, seed your workspace, and configure AI routing.");
+    log.dim("Check progress at any time: synap status");
+  } else {
+    log.info("Start OpenClaw manually:");
+    console.log(chalk.cyan(`\n  cd ${deployDir} && docker compose --profile openclaw up -d openclaw\n`));
+    log.dim("Then run: synap finish");
   }
-  printSummary(podUrl, oc.found);
 }
 
 // =============================================================================
@@ -247,35 +257,26 @@ async function pathB(opts: InitOptions): Promise<void> {
   const apiKey = await connectStep(podUrl, opts, false);
   if (!apiKey) return;
 
-  // If bundle mode, start the OpenClaw Docker container using the key we just got
   if (installChoice === "bundle") {
-    const spinner = ora("Starting OpenClaw container...").start();
+    log.blank();
+    log.info("Running: docker compose --profile openclaw up -d openclaw");
+    log.dim("(First run pulls ~1GB image — this may take a few minutes)");
+    log.blank();
     try {
       const localConfig = getLocalPodConfig();
-      startOpenClawOnServer(
-        apiKey,
-        localConfig?.agentUserId ?? "",
-        localConfig?.workspaceId ?? "",
-        podUrl
-      );
-      spinner.succeed("OpenClaw started and healthy");
+      startOpenClawOnServer(apiKey, localConfig?.agentUserId ?? "", localConfig?.workspaceId ?? "", podUrl);
+      log.success("OpenClaw container started");
     } catch (err) {
-      spinner.fail(err instanceof Error ? err.message : String(err));
-      log.dim("Start manually: docker compose --profile openclaw up -d openclaw");
+      log.warn(err instanceof Error ? err.message : String(err));
     }
+    log.blank();
+    log.info("OpenClaw is initializing. Once it's ready, run:");
+    console.log(chalk.cyan("\n  synap finish\n"));
+    log.dim("Check progress: synap status");
+    return;
   }
 
-  await skillStep(installChoice === "bundle");
-
-  // Detect OpenClaw after potential install
-  const oc = detectOpenClaw();
-  await seedStep(podUrl, apiKey, oc);
-
-  if (!opts.skipIs) {
-    await isStep(podUrl, apiKey, oc.found);
-  }
-
-  printSummary(podUrl, installChoice === "bundle");
+  printSummary(podUrl, false);
 }
 
 // =============================================================================
