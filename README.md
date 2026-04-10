@@ -35,6 +35,8 @@ synap init
 
 **Requirements**: Node.js 20+
 
+> Detailed setup for Linux servers, Docker, SSH environments, and permission issues: [docs/INSTALL.md](docs/INSTALL.md)
+
 ---
 
 ## Commands
