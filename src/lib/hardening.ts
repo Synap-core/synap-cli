@@ -97,18 +97,30 @@ export function runSecurityChecks(version?: string): SecurityCheck[] {
 
   // 5. File permissions on ~/.openclaw
   const perms = getConfigPermissions();
+  const openclawDir = join(homedir(), ".openclaw");
   checks.push({
     id: "file-permissions",
     name: "Config directory permissions",
     severity: "high",
-    passed: perms.safe,
-    message: perms.safe
-      ? `~/.openclaw mode ${perms.mode} (owner-only)`
-      : `~/.openclaw mode ${perms.mode} — readable by others`,
-    fixable: true,
-    fix: () => {
-      chmodSync(join(homedir(), ".openclaw"), 0o700);
-    },
+    // If dir doesn't exist (Docker runtime), treat as N/A — not a failure
+    passed: perms.mode === "N/A" ? true : perms.safe,
+    message:
+      perms.mode === "N/A"
+        ? "~/.openclaw not present (Docker runtime — config lives in container)"
+        : perms.safe
+        ? `~/.openclaw mode ${perms.mode} (owner-only)`
+        : `~/.openclaw mode ${perms.mode} — readable by others`,
+    fixable: perms.mode !== "N/A" && !perms.safe,
+    fix:
+      perms.mode !== "N/A" && !perms.safe
+        ? () => {
+            try {
+              chmodSync(openclawDir, 0o700);
+            } catch {
+              // Dir may not exist or may be in Docker — skip silently
+            }
+          }
+        : undefined,
   });
 
   // 6. WebSocket origin validation

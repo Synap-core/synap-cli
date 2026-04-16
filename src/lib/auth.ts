@@ -28,6 +28,10 @@ export interface StoredCredentials {
   expiresAt: string;
   userId: string;
   email: string;
+  /** ID of the pod the user chose during the web auth flow (optional). */
+  podId?: string;
+  /** URL of the pod the user chose during the web auth flow (optional). */
+  podUrl?: string;
 }
 
 // ─── Credential Storage ────────────────────────────────────────────────────
@@ -173,6 +177,8 @@ export async function login(): Promise<StoredCredentials | null> {
         const email = url.searchParams.get("email");
         const userId = url.searchParams.get("userId");
         const expiresAt = url.searchParams.get("expiresAt");
+        const cbPodId = url.searchParams.get("podId") ?? undefined;
+        const cbPodUrl = url.searchParams.get("podUrl") ?? undefined;
 
         if (token && email && userId) {
           const creds: StoredCredentials = {
@@ -182,6 +188,8 @@ export async function login(): Promise<StoredCredentials | null> {
             expiresAt:
               expiresAt ||
               new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
+            ...(cbPodId ? { podId: cbPodId } : {}),
+            ...(cbPodUrl ? { podUrl: cbPodUrl } : {}),
           };
           writeCredentials(creds);
 

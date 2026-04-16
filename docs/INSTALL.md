@@ -180,18 +180,23 @@ If you use the Synap Docker Compose stack, OpenClaw runs as a container alongsid
 git clone https://github.com/synap-core/synap-backend
 cd synap-backend
 cp deploy/.env.example deploy/.env
-# edit deploy/.env — set ANTHROPIC_API_KEY, POSTGRES_PASSWORD, etc.
+# edit deploy/.env — set POSTGRES_PASSWORD, DOMAIN, etc. (no AI key needed here)
 
 docker compose --profile openclaw up -d
 ```
 
-Then connect the CLI:
+Then connect and finish the setup:
 
 ```bash
 synap init
 # → "I already have an existing pod"
 # → Pod URL: http://localhost:4000
+
+synap finish
+# → installs skill, prompts for AI key, offers public domain
 ```
+
+The AI provider key is set via OpenClaw's own config (`openclaw config set env.ANTHROPIC_API_KEY …`) — not via the `.env` file. `synap finish` handles this for you.
 
 ### macOS — running on a Mac Mini / always-on machine
 

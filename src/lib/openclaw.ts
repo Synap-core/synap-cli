@@ -27,24 +27,42 @@ const OPENCLAW_CONFIG = join(OPENCLAW_DIR, "openclaw.json");
 const OPENCLAW_SKILLS = join(OPENCLAW_DIR, "skills");
 
 export function detectOpenClaw(): OpenClawInfo {
-  // ── Path 1: Local install (npm -g or npx) ─────────────────────────────
-  if (existsSync(OPENCLAW_DIR)) {
+  // Detection priority:
+  //   1. Docker container (most reliable — actively running state)
+  //   2. Local install (openclaw binary in PATH + ~/.openclaw dir)
+  //
+  // Why Docker first: the presence of ~/.openclaw on the host doesn't prove
+  // OpenClaw is installed locally — it may be a stray directory, or the
+  // Synap deploy dir may live in the same home. A running Docker container
+  // is a much stronger signal.
+
+  // ── Path 1: Docker container ───────────────────────────────────────────
+  const dockerInfo = detectOpenClawDocker();
+  if (dockerInfo) return dockerInfo;
+
+  // ── Path 2: Local install (npm -g or npx) ─────────────────────────────
+  // Require BOTH ~/.openclaw AND an `openclaw` binary in PATH.
+  // ~/.openclaw alone is not enough (could be a leftover dir).
+  let localBinaryVersion: string | undefined;
+  try {
+    const out = execSync("openclaw --version 2>/dev/null", {
+      encoding: "utf-8",
+      timeout: 5000,
+    }).trim();
+    const match = out.match(/\d+\.\d+\.\d+/);
+    if (match) localBinaryVersion = match[0];
+  } catch {
+    // binary not in PATH — not a local install
+  }
+
+  if (existsSync(OPENCLAW_DIR) && localBinaryVersion) {
     const info: OpenClawInfo = {
       found: true,
       runtime: "local",
       configPath: OPENCLAW_CONFIG,
       skillsDir: OPENCLAW_SKILLS,
+      version: localBinaryVersion,
     };
-
-    // Version
-    try {
-      const out = execSync("openclaw --version 2>/dev/null", {
-        encoding: "utf-8",
-        timeout: 5000,
-      }).trim();
-      const match = out.match(/\d+\.\d+\.\d+/);
-      if (match) info.version = match[0];
-    } catch { /* binary not in PATH */ }
 
     // Config
     if (existsSync(OPENCLAW_CONFIG)) {
@@ -65,12 +83,6 @@ export function detectOpenClaw(): OpenClawInfo {
 
     return info;
   }
-
-  // ── Path 2: Docker container ───────────────────────────────────────────
-  // OpenClaw may be running in Docker (no host ~/.openclaw dir).
-  // Detect by: (a) docker ps, (b) gateway health probe on port 18789.
-  const dockerInfo = detectOpenClawDocker();
-  if (dockerInfo) return dockerInfo;
 
   return { found: false };
 }
@@ -137,7 +149,10 @@ export function getConfigPermissions(): { mode: string; safe: boolean } {
     const stat = statSync(OPENCLAW_DIR);
     const mode = (stat.mode & 0o777).toString(8);
     return { mode, safe: (stat.mode & 0o077) === 0 }; // safe = no group/world perms
-  } catch {
+  } catch (err: unknown) {
+    // ENOENT = dir doesn't exist (Docker runtime — config lives in container volume)
+    const code = (err as NodeJS.ErrnoException)?.code;
+    if (code === "ENOENT") return { mode: "N/A", safe: true };
     return { mode: "???", safe: false };
   }
 }
