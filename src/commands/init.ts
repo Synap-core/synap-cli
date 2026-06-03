@@ -46,6 +46,32 @@ interface InitOptions {
 export async function init(opts: InitOptions): Promise<void> {
   banner();
 
+  // ── Pre-flight: "no pod anywhere" gate ──────────────────────────────────
+  // Keep this CLI laptop/agent-focused. If the user ran `synap init` without
+  // any signal of an existing pod, point them at the two supported ways to
+  // get one (self-host via ./synap install on a server, or a managed pod on
+  // synap.live) and exit. This replaces silent failure / interactive
+  // provisioning when there's nothing to connect to.
+  //
+  // A --pod-url flag that's explicitly unreachable is a separate diagnostic
+  // (handled below once checkPodHealth has confirmed).
+  if (!opts.podUrl) {
+    if (await hasAnyPodSignal()) {
+      // fall through into the normal flow
+    } else {
+      printNoPodInstructions();
+      process.exit(2);
+    }
+  } else {
+    // Explicit URL was passed — probe it before letting downstream assume
+    // reachability. Fail loud with a helpful hint instead of silent 500s.
+    const probe = await checkPodHealth(opts.podUrl);
+    if (!probe.healthy) {
+      printUnreachablePodInstructions(opts.podUrl);
+      process.exit(2);
+    }
+  }
+
   // ── Auto-detect environment ─────────────────────────────────────────────
   const oc = detectOpenClaw();
   const isServer = detectServer();
@@ -1213,6 +1239,79 @@ function detectServer(): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * Does the environment carry ANY signal that a Synap pod exists somewhere?
+ * Used by `init` to decide whether to run the full flow or short-circuit
+ * with a "no pod detected" instruction message.
+ *
+ * Treat these as signals (in cheap-to-expensive order):
+ *   1. SYNAP_POD_URL env var
+ *   2. A stored ~/.synap/pod-config.json from a previous run
+ *   3. A running pod detected on this machine
+ *   4. An OpenClaw install that already has synap.podUrl configured
+ */
+async function hasAnyPodSignal(): Promise<boolean> {
+  if (process.env.SYNAP_POD_URL) return true;
+  if (getLocalPodConfig()?.podUrl) return true;
+
+  // OpenClaw may already carry a pod URL in its config — respect that.
+  try {
+    const oc = detectOpenClaw();
+    const ocSynap = (oc.config as Record<string, unknown> | undefined)?.synap as
+      | Record<string, unknown>
+      | undefined;
+    if (typeof ocSynap?.podUrl === "string" && ocSynap.podUrl.length > 0) return true;
+  } catch {
+    // ignore — detection is best-effort
+  }
+
+  // Last: probe the local machine. This is the expensive step.
+  const local = await detectLocalPod();
+  return Boolean(local);
+}
+
+function printNoPodInstructions(): void {
+  const line = "─".repeat(63);
+  console.log(`
+┌${line}┐
+│ No Synap pod detected.                                        │
+│                                                               │
+│ You need a running pod before using @synap/cli init.          │
+│                                                               │
+│ Options:                                                      │
+│                                                               │
+│   1. Self-host on a server (free):                            │
+│      On your server, run:                                     │
+│        curl -fsSL https://synap.live/install.sh | bash        │
+│      Then come back and run:                                  │
+│        npx @synap-core/cli init --pod-url https://your-pod... │
+│                                                               │
+│   2. Use a hosted pod ($):                                    │
+│      Sign up at https://synap.live                            │
+│      Then run:                                                │
+│        npx @synap-core/cli init --pod-url <your-pod-url>      │
+│                                                               │
+│   3. Already running locally? Pass --pod-url:                 │
+│        npx @synap-core/cli init --pod-url http://localhost:4000 │
+└${line}┘
+`);
+}
+
+function printUnreachablePodInstructions(podUrl: string): void {
+  console.log("");
+  log.error(`Pod at ${podUrl} is not reachable.`);
+  log.blank();
+  log.info("Checklist:");
+  log.dim("  - Is the pod URL correct? (scheme + host + port)");
+  log.dim("  - Is the pod container running? On the server: ./synap health");
+  log.dim("  - Is there a firewall or reverse proxy in the way?");
+  log.dim("  - For localhost setups, did you start the stack? ./synap start");
+  log.blank();
+  log.info("Once the pod is reachable, re-run:");
+  log.dim(`  npx @synap-core/cli init --pod-url ${podUrl}`);
+  log.blank();
 }
 
 /**

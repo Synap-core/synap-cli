@@ -1,0 +1,173 @@
+{
+  "version": "1.0.0",
+  "lastScanned": 1780511792933,
+  "projectRoot": "/Users/antoine/Documents/Code/synap/synap-cli",
+  "techStack": {
+    "languages": [
+      {
+        "name": "JavaScript/TypeScript",
+        "version": ">=20",
+        "confidence": "high",
+        "markers": [
+          "package.json"
+        ]
+      },
+      {
+        "name": "TypeScript",
+        "version": null,
+        "confidence": "high",
+        "markers": [
+          "tsconfig.json"
+        ]
+      }
+    ],
+    "frameworks": [],
+    "packageManager": "npm",
+    "runtime": "Node.js 20"
+  },
+  "build": {
+    "buildCommand": "npm run build",
+    "testCommand": null,
+    "lintCommand": null,
+    "devCommand": "npm run dev",
+    "scripts": {
+      "build": "tsc",
+      "dev": "tsx src/index.ts",
+      "sync-skills": "bash scripts/sync-skills.sh",
+      "prepublishOnly": "pnpm sync-skills && pnpm build"
+    }
+  },
+  "conventions": {
+    "namingStyle": null,
+    "importStyle": null,
+    "testPattern": null,
+    "fileOrganization": null
+  },
+  "structure": {
+    "isMonorepo": false,
+    "workspaces": [],
+    "mainDirectories": [
+      "docs",
+      "scripts",
+      "src"
+    ],
+    "gitBranches": null
+  },
+  "customNotes": [],
+  "directoryMap": {
+    "dist": {
+      "path": "dist",
+      "purpose": "Distribution/build output",
+      "fileCount": 4,
+      "lastAccessed": 1780511792912,
+      "keyFiles": [
+        "index.d.ts",
+        "index.js",
+        "index.js.map"
+      ]
+    },
+    "docs": {
+      "path": "docs",
+      "purpose": "Documentation",
+      "fileCount": 0,
+      "lastAccessed": 1780511792914,
+      "keyFiles": []
+    },
+    "scripts": {
+      "path": "scripts",
+      "purpose": "Build/utility scripts",
+      "fileCount": 1,
+      "lastAccessed": 1780511792915,
+      "keyFiles": [
+        "sync-skills.sh"
+      ]
+    },
+    "skills": {
+      "path": "skills",
+      "purpose": null,
+      "fileCount": 1,
+      "lastAccessed": 1780511792915,
+      "keyFiles": [
+        "README.md"
+      ]
+    },
+    "src": {
+      "path": "src",
+      "purpose": "Source code",
+      "fileCount": 2,
+      "lastAccessed": 1780511792915,
+      "keyFiles": [
+        "index.ts"
+      ]
+    },
+    "dist/lib": {
+      "path": "dist/lib",
+      "purpose": "Library code",
+      "fileCount": 33,
+      "lastAccessed": 1780511792916,
+      "keyFiles": [
+        "agents-config.d.ts",
+        "agents-config.js",
+        "agents-config.js.map"
+      ]
+    },
+    "dist/utils": {
+      "path": "dist/utils",
+      "purpose": "Utility functions",
+      "fileCount": 3,
+      "lastAccessed": 1780511792916,
+      "keyFiles": [
+        "logger.d.ts",
+        "logger.js",
+        "logger.js.map"
+      ]
+    },
+    "src/lib": {
+      "path": "src/lib",
+      "purpose": "Library code",
+      "fileCount": 10,
+      "lastAccessed": 1780511792917,
+      "keyFiles": [
+        "agents-config.ts",
+        "auth.ts",
+        "browser-auth.ts"
+      ]
+    },
+    "src/utils": {
+      "path": "src/utils",
+      "purpose": "Utility functions",
+      "fileCount": 1,
+      "lastAccessed": 1780511792917,
+      "keyFiles": [
+        "logger.ts"
+      ]
+    }
+  },
+  "hotPaths": [
+    {
+      "path": "src/commands/data.ts",
+      "accessCount": 4,
+      "lastAccessed": 1780020052006,
+      "type": "file"
+    },
+    {
+      "path": "src/commands/knowledge.ts",
+      "accessCount": 4,
+      "lastAccessed": 1780453085223,
+      "type": "file"
+    },
+    {
+      "path": "src/lib/targets.ts",
+      "accessCount": 2,
+      "lastAccessed": 1780437853096,
+      "type": "file"
+    },
+    {
+      "path": "src/commands/connect.ts",
+      "accessCount": 1,
+      "lastAccessed": 1780437757611,
+      "type": "file"
+    }
+  ],
+  "userDirectives": []
+}

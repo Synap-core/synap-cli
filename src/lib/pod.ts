@@ -9,33 +9,170 @@ import os from "node:os";
 
 const CP_URL = process.env.SYNAP_CP_URL ?? "https://api.synap.live";
 
-// ─── Local CLI config (persists pod connection even without OpenClaw) ─────────
+// ─── Local CLI config (persists pod connections) ──────────────────────────────
 const CONFIG_DIR = path.join(os.homedir(), ".synap");
-const CONFIG_FILE = path.join(CONFIG_DIR, "pod-config.json");
+const CONFIG_FILE = path.join(CONFIG_DIR, "config.json");
+const LEGACY_CONFIG_FILE = path.join(CONFIG_DIR, "pod-config.json");
 
 export interface LocalPodConfig {
   podUrl: string;
-  podId?: string;          // CP pod ID — used to query openclaw/status
+  podId?: string;
   workspaceId: string;
   agentUserId: string;
   hubApiKey: string;
+  label?: string;
   savedAt: string;
 }
 
-export function saveLocalPodConfig(config: LocalPodConfig): void {
+export type SurfaceName = "raycast" | "claude-code" | "claude-desktop" | "cursor" | "openclaw";
+
+export interface MultiPodConfig {
+  activePod: string;
+  /** Per-surface pod overrides. When set, takes priority over activePod for that surface. */
+  surfaces?: Partial<Record<SurfaceName, string>>;
+  pods: Record<string, LocalPodConfig>;
+  /** Active workspace override — set by `synap use <workspaceId>`. Takes priority over the pod's default workspaceId. */
+  activeWorkspaceId?: string;
+}
+
+function ensureConfigDir(): void {
   if (!fs.existsSync(CONFIG_DIR)) {
     fs.mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 });
   }
+}
+
+function readMultiConfig(): MultiPodConfig {
+  // Read new format
+  try {
+    if (fs.existsSync(CONFIG_FILE)) {
+      const parsed = JSON.parse(fs.readFileSync(CONFIG_FILE, "utf-8")) as Partial<MultiPodConfig>;
+      if (parsed.pods) return { activePod: parsed.activePod ?? "", pods: parsed.pods };
+      // File exists but has old/unrecognized shape — fall through to migration
+    }
+  } catch { /* fall through */ }
+
+  // Migrate from legacy flat format
+  try {
+    if (fs.existsSync(LEGACY_CONFIG_FILE)) {
+      const legacy = JSON.parse(fs.readFileSync(LEGACY_CONFIG_FILE, "utf-8")) as LocalPodConfig;
+      if (legacy.podUrl) {
+        const migrated: MultiPodConfig = { activePod: "default", pods: { default: legacy } };
+        writeMultiConfig(migrated);
+        return migrated;
+      }
+    }
+  } catch { /* fall through */ }
+
+  return { activePod: "", pods: {} };
+}
+
+function writeMultiConfig(config: MultiPodConfig): void {
+  ensureConfigDir();
   fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2), { mode: 0o600 });
 }
 
+// ─── Public API ───────────────────────────────────────────────────────────────
+
+/** Get the pod config for a specific surface, falling back to the global activePod. */
+export function getSurfacePod(surface: SurfaceName): LocalPodConfig | null {
+  const config = readMultiConfig();
+  const podName = config.surfaces?.[surface] ?? config.activePod;
+  if (!podName || !config.pods[podName]) return null;
+  return config.pods[podName];
+}
+
+/** Get the name of the pod assigned to a surface (or the global active pod name). */
+export function getSurfacePodName(surface: SurfaceName): string | null {
+  const config = readMultiConfig();
+  return config.surfaces?.[surface] ?? config.activePod ?? null;
+}
+
+/** Assign a pod to a specific surface without changing the global activePod. */
+export function setSurfacePod(surface: SurfaceName, podName: string): LocalPodConfig {
+  const config = readMultiConfig();
+  if (!config.pods[podName]) throw new Error(`Pod profile '${podName}' not found`);
+  config.surfaces = config.surfaces ?? {};
+  config.surfaces[surface] = podName;
+  writeMultiConfig(config);
+  return config.pods[podName];
+}
+
+export function getActivePodConfig(surface?: SurfaceName): LocalPodConfig | null {
+  if (surface) return getSurfacePod(surface);
+  const config = readMultiConfig();
+  if (!config.activePod || !config.pods[config.activePod]) return null;
+  return config.pods[config.activePod];
+}
+
+/** @deprecated Use getActivePodConfig() */
 export function getLocalPodConfig(): LocalPodConfig | null {
-  try {
-    if (!fs.existsSync(CONFIG_FILE)) return null;
-    return JSON.parse(fs.readFileSync(CONFIG_FILE, "utf-8")) as LocalPodConfig;
-  } catch {
-    return null;
+  return getActivePodConfig();
+}
+
+export function listPodProfiles(): Array<{ name: string; config: LocalPodConfig; active: boolean }> {
+  const config = readMultiConfig();
+  return Object.entries(config.pods).map(([name, podConfig]) => ({
+    name,
+    config: podConfig,
+    active: name === config.activePod,
+  }));
+}
+
+export function addPodProfile(name: string, podConfig: LocalPodConfig): void {
+  const config = readMultiConfig();
+  config.pods[name] = podConfig;
+  if (!config.activePod) config.activePod = name;
+  writeMultiConfig(config);
+}
+
+export function setActivePod(name: string): LocalPodConfig {
+  const config = readMultiConfig();
+  if (!config.pods[name]) throw new Error(`Pod profile '${name}' not found`);
+  config.activePod = name;
+  writeMultiConfig(config);
+  return config.pods[name];
+}
+
+/** Get the active workspace ID: explicit override first, then the pod default. */
+export function getActiveWorkspaceId(): string | undefined {
+  const config = readMultiConfig();
+  if (config.activeWorkspaceId) return config.activeWorkspaceId;
+  const pod = config.activePod ? config.pods[config.activePod] : undefined;
+  return pod?.workspaceId || undefined;
+}
+
+/** Persist a workspace as the active context for all subsequent commands. */
+export function setActiveWorkspaceId(workspaceId: string): void {
+  const config = readMultiConfig();
+  config.activeWorkspaceId = workspaceId;
+  writeMultiConfig(config);
+}
+
+/** Remove the active workspace override — subsequent commands see all workspaces. */
+export function clearActiveWorkspaceId(): void {
+  const config = readMultiConfig();
+  delete config.activeWorkspaceId;
+  writeMultiConfig(config);
+}
+
+export function removePodProfile(name: string): void {
+  const config = readMultiConfig();
+  if (!config.pods[name]) throw new Error(`Pod profile '${name}' not found`);
+  delete config.pods[name];
+  if (config.activePod === name) {
+    const remaining = Object.keys(config.pods);
+    config.activePod = remaining[0] ?? "";
   }
+  writeMultiConfig(config);
+}
+
+/** @deprecated Use addPodProfile("default", config) */
+export function saveLocalPodConfig(podConfig: LocalPodConfig): void {
+  const config = readMultiConfig();
+  const name = config.activePod || "default";
+  config.pods[name] = podConfig;
+  if (!config.activePod) config.activePod = name;
+  writeMultiConfig(config);
 }
 
 export interface PodStatus {

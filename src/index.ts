@@ -70,12 +70,64 @@ program
 
 program
   .command("connect")
-  .description("Connect OpenClaw to an existing Synap pod")
+  .description(
+    "Connect an AI surface (Claude Code, Claude Desktop, Cursor, Raycast, OpenClaw) to a Synap pod"
+  )
+  .option(
+    "--target <name>",
+    "AI surface: claude-code | claude-desktop | cursor | raycast | openclaw"
+  )
   .option("--pod-url <url>", "Synap pod URL")
   .option("--api-key <key>", "Hub Protocol API key")
+  .option("--name <name>", "Pod profile name to save credentials under (default: 'default')")
+  .option("--list", "List supported targets and exit")
+  .option(
+    "--manual-key",
+    "Skip the browser approval flow and paste a key (or provisioning token)"
+  )
   .action(async (opts) => {
     const { connect } = await import("./commands/connect.js");
     await connect(opts);
+  });
+
+// ─── pods ─────────────────────────────────────────────────────────────────────
+
+const pods = program
+  .command("pods")
+  .description("Manage multiple Synap pod profiles and switch between them");
+
+pods
+  .command("list", { isDefault: true })
+  .description("List all configured pod profiles")
+  .action(async () => {
+    const { podsList } = await import("./commands/pods.js");
+    await podsList();
+  });
+
+pods
+  .command("add [name] [url]")
+  .description("Connect a new pod and save as a named profile")
+  .action(async (name?: string, url?: string) => {
+    const { podsAdd } = await import("./commands/pods.js");
+    await podsAdd(name, url);
+  });
+
+pods
+  .command("use <name>")
+  .description("Switch active pod and propagate credentials to all agent surfaces")
+  .option("--surface <surface>", "Only switch this surface (raycast, claude-code, claude-desktop, cursor, openclaw)")
+  .action(async (name: string, opts: { surface?: string }) => {
+    const { podsUse } = await import("./commands/pods.js");
+    await podsUse(name, { surface: opts.surface as import("./commands/pods.js").SurfaceName | undefined });
+  });
+
+pods
+  .command("remove <name>")
+  .alias("rm")
+  .description("Remove a pod profile")
+  .action(async (name: string) => {
+    const { podsRemove } = await import("./commands/pods.js");
+    await podsRemove(name);
   });
 
 program
@@ -277,6 +329,23 @@ infra
   });
 
 program
+  .command("switch [name]")
+  .description("Switch active pod (interactive picker if no name given)")
+  .action(async (name?: string) => {
+    const { podsSwitch } = await import("./commands/pods.js");
+    await podsSwitch(name);
+  });
+
+program
+  .command("connections")
+  .alias("conn")
+  .description("Show which pod each agent surface (Claude Code, Desktop, Cursor, OpenClaw) is connected to")
+  .action(async () => {
+    const { connections } = await import("./commands/connections.js");
+    await connections();
+  });
+
+program
   .command("login")
   .description("Sign in to your Synap account via browser")
   .option("--token <token>", "Provide a Synap API token directly (for headless/server use)")
@@ -330,6 +399,301 @@ program
     } else {
       console.log(chalk.dim("  Not logged in"));
     }
+  });
+
+// ─── orient ───────────────────────────────────────────────────────────────────
+
+program
+  .command("orient")
+  .description("Show pod orientation: who you are, workspaces, profiles, and entity counts")
+  .option("--json", "Output as JSON")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (opts) => {
+    const { orient } = await import("./commands/data.js");
+    await orient(opts);
+  });
+
+// ─── use ──────────────────────────────────────────────────────────────────────
+
+program
+  .command("use <workspace>")
+  .description("Set the active workspace (by ID or name) — persisted to ~/.synap/config.json")
+  .option("--json", "Output as JSON")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (workspace: string, opts) => {
+    const { useWorkspace } = await import("./commands/data.js");
+    await useWorkspace(workspace, opts);
+  });
+
+// ─── search ───────────────────────────────────────────────────────────────────
+
+program
+  .command("search <query>")
+  .description("Search entities, documents, and views (Typesense-powered)")
+  .option("--workspace <id>", "Scope to a specific workspace")
+  .option("--type <type>", "Filter: entity | doc | view")
+  .option("--limit <n>", "Max results", "20")
+  .option("--json", "Output as JSON")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (query: string, opts) => {
+    const { searchData } = await import("./commands/data.js");
+    await searchData(query, opts);
+  });
+
+// ─── remember / recall ────────────────────────────────────────────────────────
+
+program
+  .command("remember <text>")
+  .description("Store a memory on the pod")
+  .option("--context <entity-id>", "Link memory to an entity")
+  .option("--json", "Output as JSON")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (text: string, opts) => {
+    const { rememberData } = await import("./commands/data.js");
+    await rememberData(text, opts);
+  });
+
+program
+  .command("recall <query>")
+  .description("Retrieve memories from the pod (add --structured for knowledge entities)")
+  .option("--structured", "Search structured knowledge entities instead of episodic memory")
+  .option("--type <type>", "Filter by entry type: gotcha|lesson|decision|reference (--structured only)")
+  .option("--tags <csv>", "Filter by tags e.g. repo:synap-backend (--structured only)")
+  .option("--workspace <id>", "Workspace to search (--structured only, defaults to active)")
+  .option("--limit <n>", "Max results", "10")
+  .option("--json", "Output as JSON")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (query: string, opts) => {
+    if (opts.structured) {
+      const { recallStructured } = await import("./commands/knowledge.js");
+      await recallStructured(query, opts);
+    } else {
+      const { recallData } = await import("./commands/data.js");
+      await recallData(query, opts);
+    }
+  });
+
+// ─── capture ──────────────────────────────────────────────────────────────────
+// Uses the active pod + workspace from config (set via `synap pods use` /
+// `synap use` / `synap workspace provision-agent`). No auth flags needed.
+
+program
+  .command("capture")
+  .description("Capture a structured knowledge entry into the active agent workspace")
+  .requiredOption("--type <type>", "Entry type: gotcha|lesson|decision|reference")
+  .requiredOption("--claim <text>", "One-line assertion")
+  .option("--why <text>", "Reasoning or context")
+  .option("--evidence <text>", "Supporting file path, URL, or code snippet")
+  .option("--tags <csv>", "Comma-separated tags e.g. repo:synap-backend,layer:migrations")
+  .option("--json", "Output as JSON")
+  .action(async (opts) => {
+    const { captureKnowledge } = await import("./commands/knowledge.js");
+    await captureKnowledge(opts);
+  });
+
+// ─── workspace ────────────────────────────────────────────────────────────────
+// Context setup commands. Run once to configure the session — all subsequent
+// commands (capture, recall, search, …) inherit the active pod + workspace.
+
+const workspace = program
+  .command("workspace")
+  .description("Set up and switch workspace context (run once — persisted to ~/.synap/config.json)");
+
+workspace
+  .command("provision-agent")
+  .description("Provision an agent-owned workspace and set it as active (idempotent)")
+  .option("--agent-user-id <uuid>", "Agent user ID (defaults to caller)")
+  .option("--name <name>", "Workspace display name override")
+  .option("--no-use", "Do not set as active workspace after provisioning")
+  .option("--json", "Output as JSON")
+  .action(async (opts) => {
+    const { provisionAgentWorkspace } = await import("./commands/knowledge.js");
+    await provisionAgentWorkspace({ ...opts, agentUserId: opts.agentUserId });
+  });
+
+// ─── list ─────────────────────────────────────────────────────────────────────
+
+const list = program
+  .command("list")
+  .description("List pod resources");
+
+list
+  .command("workspaces")
+  .description("List workspaces you belong to")
+  .option("--json", "Output as JSON")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (opts) => {
+    const { listWorkspaces } = await import("./commands/data.js");
+    await listWorkspaces(opts);
+  });
+
+list
+  .command("profiles")
+  .description("List entity profile types available in a workspace")
+  .option("--workspace <id>", "Workspace (defaults to active)")
+  .option("--json", "Output as JSON")
+  .action(async (opts) => {
+    const { listProfiles } = await import("./commands/data.js");
+    await listProfiles(opts);
+  });
+
+list
+  .command("entities")
+  .description("List entities on the pod")
+  .option("--workspace <id>", "Scope to a workspace (omit for pod-wide)")
+  .option("--profile <slug>", "Filter by profile slug (e.g. person, task, note)")
+  .option("--limit <n>", "Max results", "50")
+  .option("--json", "Output as JSON")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (opts) => {
+    const { listEntities } = await import("./commands/data.js");
+    await listEntities(opts);
+  });
+
+// ─── get ──────────────────────────────────────────────────────────────────────
+
+const get = program
+  .command("get")
+  .description("Get a single pod resource");
+
+get
+  .command("entity <id>")
+  .description("Get an entity by ID")
+  .option("--workspace <id>", "Workspace context")
+  .option("--json", "Output as JSON")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (id: string, opts) => {
+    const { getEntity } = await import("./commands/data.js");
+    await getEntity(id, opts);
+  });
+
+// ─── create ───────────────────────────────────────────────────────────────────
+
+const create = program
+  .command("create")
+  .description("Create pod resources");
+
+create
+  .command("entity")
+  .description("Create a new entity")
+  .requiredOption("--profile <slug>", "Profile slug (e.g. person, note, task)")
+  .requiredOption("--name <name>", "Entity name")
+  .option("--workspace <id>", "Create in this workspace")
+  .option("--props <json>", "Properties as JSON string", "{}")
+  .option("--json", "Output as JSON")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (opts) => {
+    const { createEntity } = await import("./commands/data.js");
+    await createEntity(opts);
+  });
+
+create
+  .command("relation")
+  .description("Create a typed relation between two entities")
+  .requiredOption("--source <id>", "Source entity ID")
+  .requiredOption("--target <id>", "Target entity ID")
+  .requiredOption("--type <type>", "Relation type (e.g. extends, part_of, implements, governs, related_to)")
+  .option("--workspace <id>", "Workspace context")
+  .option("--json", "Output as JSON")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (opts) => {
+    const { createRelation } = await import("./commands/data.js");
+    await createRelation(opts);
+  });
+
+// ─── set ──────────────────────────────────────────────────────────────────────
+
+const set = program
+  .command("set")
+  .description("Update pod resources");
+
+set
+  .command("entity <id>")
+  .description("Update entity properties")
+  .requiredOption("--props <json>", "Properties as JSON string")
+  .option("--json", "Output as JSON")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (id: string, opts) => {
+    const { updateEntity } = await import("./commands/data.js");
+    await updateEntity(id, opts);
+  });
+
+// ─── agents ───────────────────────────────────────────────────────────────────
+
+const agents = program
+  .command("agents")
+  .description("Manage named agent identities (different keys, different pod access)");
+
+agents
+  .command("list", { isDefault: true })
+  .description("List configured agent identities")
+  .option("--json", "Output as JSON")
+  .action(async (opts: { json?: boolean }) => {
+    const { agentsList } = await import("./commands/agents.js");
+    agentsList(opts);
+  });
+
+agents
+  .command("add")
+  .description("Register a pre-existing agent credential locally. Use `synap agents create` for new agents.")
+  .option("--name <name>", "Agent name (e.g. researcher, builder)")
+  .option("--api-key <key>", "Hub Protocol API key for this agent")
+  .option("--pod <name>", "Pod profile to link (default: active pod)")
+  .option("--workspace <id>", "Default workspace for this agent")
+  .option("--label <label>", "Human-readable description")
+  .action(async (opts) => {
+    const { agentsAdd } = await import("./commands/agents.js");
+    await agentsAdd(opts);
+  });
+
+agents
+  .command("create")
+  .description("Create a new agent on the pod (template-aware). Replaces `add` for new agents.")
+  .option("--template <tmpl>", "Agent template: twin | assistant | custom (default: custom)")
+  .option("--name <name>", "Agent name (not needed for twin — auto-generated)")
+  .option("--type <type>", "Agent type string for custom agents (default: matches template)")
+  .option("--role <role>", "Workspace role: admin | editor | viewer (default: editor; twin auto-inherits)")
+  .option("--workspace <id>", "Workspace ID to add the agent to (auto-detected if omitted)")
+  .option("--pod <name>", "Pod profile to use (default: active pod)")
+  .action(async (opts: { template?: string; name?: string; type?: string; role?: string; workspace?: string; pod?: string }) => {
+    const { agentsCreate } = await import("./commands/agents.js");
+    await agentsCreate(opts);
+  });
+
+agents
+  .command("rotate-key <name-or-id>")
+  .description("Rotate the Hub Protocol API key for an agent (invalidates the current key)")
+  .action(async (nameOrId: string) => {
+    const { agentsRotateKey } = await import("./commands/agents.js");
+    await agentsRotateKey(nameOrId);
+  });
+
+agents
+  .command("remove <name>")
+  .alias("rm")
+  .description("Remove a named agent identity")
+  .action(async (name: string) => {
+    const { agentsRemove } = await import("./commands/agents.js");
+    agentsRemove(name);
+  });
+
+agents
+  .command("info <name>")
+  .description("Show details for a named agent identity")
+  .action(async (name: string) => {
+    const { agentsInfo } = await import("./commands/agents.js");
+    agentsInfo(name);
   });
 
 program.parse();

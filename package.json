@@ -1,6 +1,6 @@
 {
   "name": "@synap-core/cli",
-  "version": "1.3.0",
+  "version": "1.5.0",
   "description": "Synap CLI — connect OpenClaw to sovereign knowledge infrastructure",
   "type": "module",
   "bin": {
@@ -9,7 +9,8 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsx src/index.ts",
-    "prepublishOnly": "pnpm build"
+    "sync-skills": "bash scripts/sync-skills.sh",
+    "prepublishOnly": "pnpm sync-skills && pnpm build"
   },
   "dependencies": {
     "chalk": "^5.4.0",
@@ -24,7 +25,8 @@
     "typescript": "^5.7.0"
   },
   "files": [
-    "dist"
+    "dist",
+    "skills"
   ],
   "engines": {
     "node": ">=20"
