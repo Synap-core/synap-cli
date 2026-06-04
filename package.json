@@ -1,6 +1,6 @@
 {
   "name": "@synap-core/cli",
-  "version": "1.6.0",
+  "version": "1.6.1",
   "description": "Synap CLI — connect OpenClaw to sovereign knowledge infrastructure",
   "type": "module",
   "bin": {
