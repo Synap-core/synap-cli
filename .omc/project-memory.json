@@ -26,7 +26,7 @@
     "runtime": "Node.js 20"
   },
   "build": {
-    "buildCommand": "npm run build",
+    "buildCommand": "cd /Users/antoine/Documents/Code/synap/synap-cli && npm run build 2>&1 | tail -5",
     "testCommand": null,
     "lintCommand": null,
     "devCommand": "npm run dev",
