@@ -177,7 +177,7 @@ export async function listEntities(
     }
     for (const entity of list) {
       const e = entity as Record<string, unknown>;
-      const name = String(e.name ?? e.id ?? "");
+      const name = String(e.title ?? e.id ?? "");
       const profile = e.profileSlug ?? e.profile ?? e.type ?? "";
       const id = String(e.id ?? "").slice(0, 8);
       log.info(`${name} ${chalk.dim(`(${profile})`)} — ${chalk.dim(id)}`);
@@ -205,7 +205,7 @@ export async function getEntity(
       return;
     }
 
-    log.heading(String(entity.name ?? id));
+    log.heading(String(entity.title ?? id));
     log.info(`Profile : ${String(entity.profileSlug ?? entity.profile ?? entity.type ?? "")}`);
     log.info(`ID      : ${String(entity.id ?? id)}`);
     const props = entity.properties as Record<string, unknown> | undefined;
@@ -288,9 +288,11 @@ export async function searchData(
     }
     for (const hit of rawHits) {
       const h = hit as Record<string, unknown>;
-      const name = String(h.name ?? h.title ?? h.id ?? "");
-      const type = String(h.profileSlug ?? h.type ?? h.collection ?? "");
-      const id = String(h.id ?? "").slice(0, 8);
+      // Search hits: { id, collection, document: { id, title, entityType, ... } }
+      const doc = (h.document ?? h) as Record<string, unknown>;
+      const name = String(doc.title ?? doc.id ?? h.id ?? "");
+      const type = String(doc.entityType ?? doc.profileSlug ?? h.collection ?? "");
+      const id = String(doc.id ?? h.id ?? "").slice(0, 8);
       log.info(`${name} ${chalk.dim(`[${type}]`)} ${chalk.dim(id)}`);
     }
   } catch (e) {
@@ -354,7 +356,7 @@ export async function recallData(
     }
     list.forEach((mem, i) => {
       const m = mem as Record<string, unknown>;
-      const content = String(m.content ?? m.text ?? "").slice(0, 120);
+      const content = String(m.fact ?? m.content ?? "").slice(0, 120);
       log.info(`${i + 1}. ${content}`);
     });
   } catch (e) {
@@ -388,7 +390,11 @@ export async function createEntity(
       return;
     }
 
-    log.success(`Created: ${String(entity.name ?? opts.name)} (${String(entity.id ?? "")})`);
+    if (entity.status === "proposed") {
+      log.info(`Proposed: ${opts.name} (proposal: ${String(entity.proposalId ?? "")})`);
+    } else {
+      log.success(`Created: ${opts.name} (${String(entity.id ?? "")})`);
+    }
   } catch (e) {
     console.error(chalk.red("Error: " + (e as Error).message));
     process.exit(1);
@@ -472,10 +478,10 @@ export async function updateEntity(
   try {
     const cfg = await resolveHubConfig(opts);
     // parse props as unknown then cast — user-supplied JSON
-    const properties = JSON.parse(opts.props) as Record<string, unknown>;
+    const metadata = JSON.parse(opts.props) as Record<string, unknown>;
     const res = await hubPatch(`/entities/${id}`, {
       userId: cfg.userId,
-      properties,
+      metadata,
     }, cfg);
 
     const entity = res as Record<string, unknown>;

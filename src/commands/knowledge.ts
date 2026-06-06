@@ -60,13 +60,13 @@ export async function captureKnowledge(opts: CaptureOpts): Promise<void> {
       ? opts.tags.split(",").map((t) => t.trim()).filter(Boolean)
       : [];
 
-    const name = opts.claim.slice(0, 120);
+    const title = opts.claim.slice(0, 120);
 
     const res = await hubPost("/entities", {
       userId,
       workspaceId,
       profileSlug: "engineering_knowledge",
-      name,
+      title,
       properties: {
         ek_type: opts.type,
         ek_claim: opts.claim,
@@ -105,11 +105,17 @@ export async function recallStructured(
 
     const workspaceId = opts.workspace ?? cfg.workspaceId;
     if (workspaceId) params.workspaceId = workspaceId;
-    if (opts.type) params.type = opts.type;
 
     const res = await hubGet("/entities", params, cfg) as Record<string, unknown>;
     const entities = (res.entities ?? res.items ?? res) as Record<string, unknown>[];
-    const list = Array.isArray(entities) ? entities : [];
+    let list = Array.isArray(entities) ? entities : [];
+
+    if (opts.type) {
+      list = list.filter((e) => {
+        const props = (e.properties ?? {}) as Record<string, unknown>;
+        return props.ek_type === opts.type;
+      });
+    }
 
     if (opts.json) {
       console.log(JSON.stringify(list, null, 2));

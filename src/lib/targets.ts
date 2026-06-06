@@ -13,6 +13,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import chalk from "chalk";
+import ora from "ora";
 import prompts from "prompts";
 import { log } from "../utils/logger.js";
 import { installSkills, SKILL_NAMES } from "./skills-installer.js";
@@ -257,6 +258,7 @@ async function installClaudeCode(
  */
 export async function resolveWorkspaceId(cfg: TargetConnectionConfig): Promise<string | undefined> {
   let workspaceList: Array<{ id: string; name: string }> = [];
+  const wsSpinner = ora("Fetching workspaces...").start();
   try {
     const res = await fetch(`${cfg.podUrl.replace(/\/$/, "")}/api/hub/workspaces`, {
       headers: { Authorization: `Bearer ${cfg.apiKey}` },
@@ -264,8 +266,13 @@ export async function resolveWorkspaceId(cfg: TargetConnectionConfig): Promise<s
     if (res.ok) {
       const body = await res.json() as { workspaces?: Array<{ id: string; name: string }> };
       workspaceList = body.workspaces ?? [];
+      wsSpinner.succeed(`Found ${workspaceList.length} workspace(s).`);
+    } else {
+      wsSpinner.warn(`Could not fetch workspaces (HTTP ${res.status}) — proceeding without scoping.`);
     }
-  } catch { /* pod unreachable — fall through */ }
+  } catch (err) {
+    wsSpinner.warn(`Could not reach pod to fetch workspaces: ${(err as Error).message}`);
+  }
 
   // Single workspace or no workspaces — no need to prompt
   if (workspaceList.length <= 1) {
@@ -467,9 +474,14 @@ async function enrollAgentIfNeeded(
       if (data.enrolled?.length) {
         log.dim(`  Agent enrolled in ${data.enrolled.length} workspace(s).`);
       }
+    } else {
+      const text = await res.text().catch(() => res.statusText);
+      log.warn(`  Workspace enrollment failed (HTTP ${res.status}): ${text}`);
+      log.dim("  Access can be added manually via pod settings.");
     }
-  } catch {
-    // Non-fatal — workspace access can be added manually if enrollment fails
+  } catch (err) {
+    log.warn(`  Workspace enrollment unreachable: ${(err as Error).message}`);
+    log.dim("  Access can be added manually via pod settings.");
   }
 }
 
@@ -574,16 +586,25 @@ async function installCursor(
 async function installRaycast(cfg: TargetConnectionConfig): Promise<boolean> {
   // Raycast reads credentials from ~/.synap/config.json (Tier 0 — highest priority).
   // Persist the workspace choice so Raycast immediately sees the right scope.
-  const { setActiveWorkspaceId, clearActiveWorkspaceId } = await import("./pod.js");
+  const { setActiveWorkspaceId, clearActiveWorkspaceId, setSurfaceAgentKey } = await import("./pod.js");
   if (cfg.workspaceId) {
     setActiveWorkspaceId(cfg.workspaceId);
   } else {
     clearActiveWorkspaceId();
   }
 
-  // Enroll the pod profile's agent user into the chosen workspace(s)
-  if (cfg.agentUserId) {
-    await enrollAgentIfNeeded(cfg.podUrl, cfg.apiKey, cfg.agentUserId, cfg.workspaceId);
+  // Provision a dedicated named agent key for Raycast so its AI tools run as
+  // "raycast" agent identity (separate from the human user key used by UI commands).
+  const provisionSpinner = ora("Provisioning Raycast agent identity...").start();
+  try {
+    const agentKey = await provisionAgentKey(cfg.podUrl, cfg.apiKey, "raycast");
+    setSurfaceAgentKey("raycast", agentKey);
+    provisionSpinner.text = "Enrolling agent in workspaces...";
+    await enrollAgentIfNeeded(cfg.podUrl, cfg.apiKey, agentKey.agentUserId, cfg.workspaceId);
+    provisionSpinner.succeed("Raycast agent identity provisioned.");
+  } catch (err) {
+    // Non-fatal: Raycast still works with the human key, agent provisioning is best-effort.
+    provisionSpinner.warn(`Could not provision dedicated Raycast agent key: ${(err as Error).message}`);
   }
 
   log.success("Credentials and workspace written to ~/.synap/config.json — Raycast picks them up automatically.");

@@ -496,6 +496,18 @@ program
     await captureKnowledge(opts);
   });
 
+program
+  .command("discover")
+  .description("Runtime discovery: entity profiles with property schemas + CLI command tree")
+  .option("--json", "Output as JSON (default: human-readable)")
+  .option("--profiles", "Show only profiles (use with --json for machine-readable schema)")
+  .option("--commands", "Show only the command tree")
+  .option("--workspace <id>", "Workspace to query (defaults to active workspace)")
+  .action(async (opts) => {
+    const { discover } = await import("./commands/discover.js");
+    await discover(opts);
+  });
+
 // ─── workspace ────────────────────────────────────────────────────────────────
 // Context setup commands. Run once to configure the session — all subsequent
 // commands (capture, recall, search, …) inherit the active pod + workspace.

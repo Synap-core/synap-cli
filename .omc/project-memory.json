@@ -1,6 +1,6 @@
 {
   "version": "1.0.0",
-  "lastScanned": 1780511792933,
+  "lastScanned": 1780770630986,
   "projectRoot": "/Users/antoine/Documents/Code/synap/synap-cli",
   "techStack": {
     "languages": [
@@ -26,7 +26,7 @@
     "runtime": "Node.js 20"
   },
   "build": {
-    "buildCommand": "cd /Users/antoine/Documents/Code/synap/synap-cli && npm run build 2>&1 | tail -5",
+    "buildCommand": "cd /Users/antoine/Documents/Code/synap/synap-cli && pnpm build 2>&1",
     "testCommand": null,
     "lintCommand": null,
     "devCommand": "npm run dev",
@@ -59,7 +59,7 @@
       "path": "dist",
       "purpose": "Distribution/build output",
       "fileCount": 4,
-      "lastAccessed": 1780511792912,
+      "lastAccessed": 1780770630961,
       "keyFiles": [
         "index.d.ts",
         "index.js",
@@ -70,14 +70,14 @@
       "path": "docs",
       "purpose": "Documentation",
       "fileCount": 0,
-      "lastAccessed": 1780511792914,
+      "lastAccessed": 1780770630962,
       "keyFiles": []
     },
     "scripts": {
       "path": "scripts",
       "purpose": "Build/utility scripts",
       "fileCount": 1,
-      "lastAccessed": 1780511792915,
+      "lastAccessed": 1780770630965,
       "keyFiles": [
         "sync-skills.sh"
       ]
@@ -86,7 +86,7 @@
       "path": "skills",
       "purpose": null,
       "fileCount": 1,
-      "lastAccessed": 1780511792915,
+      "lastAccessed": 1780770630966,
       "keyFiles": [
         "README.md"
       ]
@@ -95,7 +95,7 @@
       "path": "src",
       "purpose": "Source code",
       "fileCount": 2,
-      "lastAccessed": 1780511792915,
+      "lastAccessed": 1780770630966,
       "keyFiles": [
         "index.ts"
       ]
@@ -104,7 +104,7 @@
       "path": "dist/lib",
       "purpose": "Library code",
       "fileCount": 33,
-      "lastAccessed": 1780511792916,
+      "lastAccessed": 1780770630966,
       "keyFiles": [
         "agents-config.d.ts",
         "agents-config.js",
@@ -115,7 +115,7 @@
       "path": "dist/utils",
       "purpose": "Utility functions",
       "fileCount": 3,
-      "lastAccessed": 1780511792916,
+      "lastAccessed": 1780770630967,
       "keyFiles": [
         "logger.d.ts",
         "logger.js",
@@ -126,7 +126,7 @@
       "path": "src/lib",
       "purpose": "Library code",
       "fileCount": 10,
-      "lastAccessed": 1780511792917,
+      "lastAccessed": 1780770630968,
       "keyFiles": [
         "agents-config.ts",
         "auth.ts",
@@ -137,7 +137,7 @@
       "path": "src/utils",
       "purpose": "Utility functions",
       "fileCount": 1,
-      "lastAccessed": 1780511792917,
+      "lastAccessed": 1780770630968,
       "keyFiles": [
         "logger.ts"
       ]
@@ -145,27 +145,45 @@
   },
   "hotPaths": [
     {
+      "path": "src/lib/targets.ts",
+      "accessCount": 7,
+      "lastAccessed": 1780779409231,
+      "type": "file"
+    },
+    {
       "path": "src/commands/data.ts",
-      "accessCount": 4,
-      "lastAccessed": 1780020052006,
+      "accessCount": 5,
+      "lastAccessed": 1780770712640,
       "type": "file"
     },
     {
       "path": "src/commands/knowledge.ts",
-      "accessCount": 4,
-      "lastAccessed": 1780453085223,
+      "accessCount": 2,
+      "lastAccessed": 1780770696432,
       "type": "file"
     },
     {
-      "path": "src/lib/targets.ts",
+      "path": "src/index.ts",
       "accessCount": 2,
-      "lastAccessed": 1780437853096,
+      "lastAccessed": 1780771902944,
+      "type": "file"
+    },
+    {
+      "path": "src/commands/discover.ts",
+      "accessCount": 1,
+      "lastAccessed": 1780771883768,
+      "type": "file"
+    },
+    {
+      "path": "package.json",
+      "accessCount": 1,
+      "lastAccessed": 1780772968533,
       "type": "file"
     },
     {
       "path": "src/commands/connect.ts",
       "accessCount": 1,
-      "lastAccessed": 1780437757611,
+      "lastAccessed": 1780773306832,
       "type": "file"
     }
   ],

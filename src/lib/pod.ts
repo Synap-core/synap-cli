@@ -26,6 +26,11 @@ export interface LocalPodConfig {
 
 export type SurfaceName = "raycast" | "claude-code" | "claude-desktop" | "cursor" | "openclaw";
 
+export interface SurfaceAgentKey {
+  hubApiKey: string;
+  agentUserId: string;
+}
+
 export interface MultiPodConfig {
   activePod: string;
   /** Per-surface pod overrides. When set, takes priority over activePod for that surface. */
@@ -33,6 +38,8 @@ export interface MultiPodConfig {
   pods: Record<string, LocalPodConfig>;
   /** Active workspace override — set by `synap use <workspaceId>`. Takes priority over the pod's default workspaceId. */
   activeWorkspaceId?: string;
+  /** Per-surface dedicated agent keys (provisioned with named agentType). Separate from pod profile keys. */
+  agentKeys?: Partial<Record<SurfaceName, SurfaceAgentKey>>;
 }
 
 function ensureConfigDir(): void {
@@ -46,7 +53,7 @@ function readMultiConfig(): MultiPodConfig {
   try {
     if (fs.existsSync(CONFIG_FILE)) {
       const parsed = JSON.parse(fs.readFileSync(CONFIG_FILE, "utf-8")) as Partial<MultiPodConfig>;
-      if (parsed.pods) return { activePod: parsed.activePod ?? "", pods: parsed.pods, activeWorkspaceId: parsed.activeWorkspaceId, surfaces: parsed.surfaces };
+      if (parsed.pods) return { activePod: parsed.activePod ?? "", pods: parsed.pods, activeWorkspaceId: parsed.activeWorkspaceId, surfaces: parsed.surfaces, agentKeys: parsed.agentKeys };
       // File exists but has old/unrecognized shape — fall through to migration
     }
   } catch { /* fall through */ }
@@ -145,6 +152,16 @@ export function getActiveWorkspaceId(): string | undefined {
 export function setActiveWorkspaceId(workspaceId: string): void {
   const config = readMultiConfig();
   config.activeWorkspaceId = workspaceId;
+  writeMultiConfig(config);
+}
+
+// ─── Surface agent keys ───────────────────────────────────────────────────────
+
+/** Store a dedicated agent key for a specific surface (e.g. "raycast", "claude-code"). */
+export function setSurfaceAgentKey(surface: SurfaceName, key: SurfaceAgentKey): void {
+  const config = readMultiConfig();
+  config.agentKeys = config.agentKeys ?? {};
+  config.agentKeys[surface] = key;
   writeMultiConfig(config);
 }
 

@@ -1,5 +1,6 @@
 import { getActivePodConfig, getActiveWorkspaceId, listPodProfiles } from "./pod.js";
 import { resolveAgentOverride } from "./agents-config.js";
+import { HubRestClient } from "@synap/hub-rest-client";
 
 export interface HubConfig {
   podUrl: string;
@@ -129,3 +130,18 @@ export async function hubPatch(path: string, body: unknown, cfg: HubConfig): Pro
   }
   return res.json();
 }
+
+/**
+ * Create a typed HubRestClient from a resolved HubConfig.
+ * Use this in new code and shared surfaces (e.g. Raycast) to get full
+ * Hub Protocol coverage with a shared client contract — eliminating drift.
+ */
+export function makeHubClient(cfg: HubConfig): HubRestClient {
+  return new HubRestClient({
+    podUrl: cfg.podUrl,
+    apiKey: cfg.apiKey,
+    workspaceId: cfg.workspaceId,
+  });
+}
+
+export { HubRestClient } from "@synap/hub-rest-client";
