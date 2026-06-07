@@ -176,7 +176,7 @@ export async function agentRun(opts: RunOpts): Promise<void> {
   }
 
   const persona: Persona = (opts.persona as Persona | undefined) ?? "researcher";
-  const model = opts.model ?? "synap/advanced";
+  const model = opts.model ?? "synap/balanced";
   const maxTokens = opts.maxTokens ?? 4000;
 
   let cfg: HubCfg;
@@ -345,7 +345,7 @@ export async function agentSchedule(opts: ScheduleOpts): Promise<void> {
       properties: {
         goal: goal.trim(),
         persona: opts.persona ?? "researcher",
-        model: opts.model ?? "synap/advanced",
+        model: opts.model ?? "synap/balanced",
         interval: every,
         intervalMs: INTERVAL_MS[every],
         nextRunAt: now,
