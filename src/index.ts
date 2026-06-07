@@ -463,7 +463,8 @@ program
   .option("--structured", "Search structured knowledge entities instead of episodic memory")
   .option("--type <type>", "Filter by entry type: gotcha|lesson|decision|reference (--structured only)")
   .option("--tags <csv>", "Filter by tags e.g. repo:synap-backend (--structured only)")
-  .option("--workspace <id>", "Workspace to search (--structured only, defaults to active)")
+  .option("--team", "Search team/product workspace instead of memory workspace (--structured only)")
+  .option("--workspace <id>", "Explicit workspace override (--structured only)")
   .option("--limit <n>", "Max results", "10")
   .option("--json", "Output as JSON")
   .option("--pod-url <url>", "Pod URL override")
@@ -484,12 +485,14 @@ program
 
 program
   .command("capture")
-  .description("Capture a structured knowledge entry into the active agent workspace")
+  .description("Capture a structured knowledge entry (defaults to agent memory workspace)")
   .requiredOption("--type <type>", "Entry type: gotcha|lesson|decision|reference")
   .requiredOption("--claim <text>", "One-line assertion")
   .option("--why <text>", "Reasoning or context")
   .option("--evidence <text>", "Supporting file path, URL, or code snippet")
   .option("--tags <csv>", "Comma-separated tags e.g. repo:synap-backend,layer:migrations")
+  .option("--team", "Write to team/product workspace instead of memory workspace")
+  .option("--workspace <id>", "Explicit workspace override")
   .option("--json", "Output as JSON")
   .action(async (opts) => {
     const { captureKnowledge } = await import("./commands/knowledge.js");
@@ -706,6 +709,86 @@ agents
   .action(async (name: string) => {
     const { agentsInfo } = await import("./commands/agents.js");
     agentsInfo(name);
+  });
+
+// ─── agent (autonomous runner) ───────────────────────────────────────────────
+
+const agent = program
+  .command("agent")
+  .description("Run autonomous agent loops against the IS, or schedule recurring goals");
+
+agent
+  .command("run")
+  .description("Run an autonomous agent toward a goal using the Intelligence Service")
+  .requiredOption("--goal <text>", "What the agent should accomplish")
+  .option("--persona <type>", "researcher | assistant | developer (default: researcher)")
+  .option("--model <model>", "IS model alias, e.g. synap/advanced (default: synap/advanced)")
+  .option("--workspace <id>", "Workspace to store results in (uses active workspace if omitted)")
+  .option("--max-steps <n>", "Max reasoning steps before auto-saving (default: 12)", parseInt)
+  .option("--dry-run", "Print config without running")
+  .option("--pod-url <url>", "Override pod URL")
+  .option("--api-key <key>", "Override API key")
+  .action(async (opts: { goal: string; persona?: string; model?: string; workspace?: string; maxSteps?: number; dryRun?: boolean; podUrl?: string; apiKey?: string }) => {
+    const { agentRun } = await import("./commands/agent-run.js");
+    await agentRun(opts as Parameters<typeof agentRun>[0]);
+  });
+
+agent
+  .command("schedule")
+  .description("Add, list, or remove recurring agent schedules")
+  .option("--goal <text>", "Goal for the scheduled agent")
+  .option("--name <label>", "Name for this schedule (required when adding)")
+  .option("--every <interval>", "hourly | daily | weekly")
+  .option("--persona <type>", "researcher | assistant | developer (default: researcher)")
+  .option("--model <model>", "IS model alias (default: synap/advanced)")
+  .option("--workspace <id>", "Workspace to store results in")
+  .option("--run-now", "Also run immediately after creating the schedule")
+  .option("--list", "List all configured schedules")
+  .option("--remove <name>", "Remove a schedule by name")
+  .option("--pod-url <url>", "Override pod URL")
+  .option("--api-key <key>", "Override API key")
+  .action(async (opts: { goal?: string; name?: string; every?: string; persona?: string; model?: string; workspace?: string; runNow?: boolean; list?: boolean; remove?: string; podUrl?: string; apiKey?: string }) => {
+    const { agentSchedule } = await import("./commands/agent-run.js");
+    await agentSchedule(opts as Parameters<typeof agentSchedule>[0]);
+  });
+
+agent
+  .command("tick")
+  .description("Check due schedules and run them — wire this to crontab: `0 * * * * synap agent tick`")
+  .option("--dry-run", "Show what would run without executing")
+  .option("--pod-url <url>", "Override pod URL")
+  .option("--api-key <key>", "Override API key")
+  .action(async (opts: { dryRun?: boolean; podUrl?: string; apiKey?: string }) => {
+    const { agentTick } = await import("./commands/agent-run.js");
+    await agentTick(opts);
+  });
+
+// ─── providers ───────────────────────────────────────────────────────────────
+
+const providers = program
+  .command("providers")
+  .description("Discover AI providers from the pod and configure local tools");
+
+providers
+  .command("list", { isDefault: true })
+  .description("Show enabled AI providers and their models")
+  .option("--json", "Output as JSON")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (opts: { json?: boolean; podUrl?: string; apiKey?: string }) => {
+    const { providersList } = await import("./commands/providers.js");
+    await providersList(opts);
+  });
+
+providers
+  .command("pull")
+  .description("Write pod provider config to a local AI tool (opencode, aider)")
+  .option("--target <name>", "Target tool: opencode | aider")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (opts: { target?: string; podUrl?: string; apiKey?: string }) => {
+    const { providersPull } = await import("./commands/providers.js");
+    await providersPull(opts);
   });
 
 program.parse();

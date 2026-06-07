@@ -188,6 +188,13 @@ const SURFACE_LABELS: Record<SurfaceName, string> = {
   "claude-desktop": "Claude Desktop",
   cursor: "Cursor",
   openclaw: "OpenClaw",
+  codex: "Codex",
+  opencode: "opencode",
+  aider: "aider",
+  windsurf: "Windsurf",
+  goose: "Goose",
+  zed: "Zed",
+  vscode: "VS Code",
 };
 
 export async function podsUse(name: string, opts: { surface?: SurfaceName } = {}): Promise<void> {

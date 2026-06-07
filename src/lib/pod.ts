@@ -24,11 +24,31 @@ export interface LocalPodConfig {
   savedAt: string;
 }
 
-export type SurfaceName = "raycast" | "claude-code" | "claude-desktop" | "cursor" | "openclaw";
+export type SurfaceName =
+  | "raycast"
+  | "claude-code"
+  | "claude-desktop"
+  | "cursor"
+  | "openclaw"
+  | "codex"
+  | "opencode"
+  | "aider"
+  | "windsurf"
+  | "goose"
+  | "zed"
+  | "vscode";
 
 export interface SurfaceAgentKey {
   hubApiKey: string;
   agentUserId: string;
+}
+
+/** Agent workspace routing — persisted by `synap connect` wizard. */
+export interface AgentWorkspaceRouting {
+  /** Private workspace for agent-only captures (gotchas, lessons, patterns). Auto-approved. */
+  memoryWorkspaceId?: string;
+  /** Shared workspaces the agent writes team-visible data to. */
+  productWorkspaceIds?: string[];
 }
 
 export interface MultiPodConfig {
@@ -40,6 +60,8 @@ export interface MultiPodConfig {
   activeWorkspaceId?: string;
   /** Per-surface dedicated agent keys (provisioned with named agentType). Separate from pod profile keys. */
   agentKeys?: Partial<Record<SurfaceName, SurfaceAgentKey>>;
+  /** Workspace routing set by `synap connect` wizard — drives capture/recall defaults. */
+  agentWorkspaceRouting?: AgentWorkspaceRouting;
 }
 
 function ensureConfigDir(): void {
@@ -53,7 +75,7 @@ function readMultiConfig(): MultiPodConfig {
   try {
     if (fs.existsSync(CONFIG_FILE)) {
       const parsed = JSON.parse(fs.readFileSync(CONFIG_FILE, "utf-8")) as Partial<MultiPodConfig>;
-      if (parsed.pods) return { activePod: parsed.activePod ?? "", pods: parsed.pods, activeWorkspaceId: parsed.activeWorkspaceId, surfaces: parsed.surfaces, agentKeys: parsed.agentKeys };
+      if (parsed.pods) return { activePod: parsed.activePod ?? "", pods: parsed.pods, activeWorkspaceId: parsed.activeWorkspaceId, surfaces: parsed.surfaces, agentKeys: parsed.agentKeys, agentWorkspaceRouting: parsed.agentWorkspaceRouting };
       // File exists but has old/unrecognized shape — fall through to migration
     }
   } catch { /* fall through */ }
@@ -75,7 +97,15 @@ function readMultiConfig(): MultiPodConfig {
 
 function writeMultiConfig(config: MultiPodConfig): void {
   ensureConfigDir();
-  fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2), { mode: 0o600 });
+  // Merge with existing file so fields managed by other modules (e.g. `agents`)
+  // are preserved when pod.ts only updates its own subset.
+  let existing: Record<string, unknown> = {};
+  try {
+    if (fs.existsSync(CONFIG_FILE)) {
+      existing = JSON.parse(fs.readFileSync(CONFIG_FILE, "utf-8")) as Record<string, unknown>;
+    }
+  } catch { /* start fresh */ }
+  fs.writeFileSync(CONFIG_FILE, JSON.stringify({ ...existing, ...config }, null, 2), { mode: 0o600 });
 }
 
 // ─── Public API ───────────────────────────────────────────────────────────────
@@ -163,6 +193,22 @@ export function setSurfaceAgentKey(surface: SurfaceName, key: SurfaceAgentKey): 
   config.agentKeys = config.agentKeys ?? {};
   config.agentKeys[surface] = key;
   writeMultiConfig(config);
+}
+
+/** Read back the stored agent key for a surface. Returns null if not provisioned. */
+export function getSurfaceAgentKey(surface: SurfaceName): SurfaceAgentKey | null {
+  const config = readMultiConfig();
+  return config.agentKeys?.[surface] ?? null;
+}
+
+export function setAgentWorkspaceRouting(routing: AgentWorkspaceRouting): void {
+  const config = readMultiConfig();
+  config.agentWorkspaceRouting = routing;
+  writeMultiConfig(config);
+}
+
+export function getAgentWorkspaceRouting(): AgentWorkspaceRouting | undefined {
+  return readMultiConfig().agentWorkspaceRouting;
 }
 
 /** Remove the active workspace override — subsequent commands see all workspaces. */

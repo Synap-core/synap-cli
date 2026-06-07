@@ -12,6 +12,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { exec } from "node:child_process";
 import chalk from "chalk";
 import ora from "ora";
 import prompts from "prompts";
@@ -26,6 +27,12 @@ export type TargetName =
   | "openclaw"
   | "openwebui"
   | "codex"
+  | "opencode"
+  | "aider"
+  | "windsurf"
+  | "goose"
+  | "zed"
+  | "vscode"
   | "generic";
 
 export interface TargetConnectionConfig {
@@ -122,6 +129,43 @@ export const TARGETS: Record<TargetName, TargetInfo> = {
     mcpConfigPath: () => path.join(os.homedir(), ".codex", "config.yaml"),
     skillsDir: () => path.join(os.homedir(), ".codex"),
   },
+  opencode: {
+    name: "opencode",
+    label: "opencode",
+    description: "Synap IS as AI provider + Synap pod as MCP tools in ~/.config/opencode/opencode.json",
+    supports: { skills: false, mcp: true },
+  },
+  aider: {
+    name: "aider",
+    label: "aider",
+    description: "Write Synap IS as the OpenAI-compatible provider in ~/.aider.conf.yml",
+    supports: { skills: false, mcp: false },
+  },
+  windsurf: {
+    name: "windsurf",
+    label: "Windsurf",
+    description: "Codeium Windsurf editor — MCP config at ~/.codeium/windsurf/mcp_config.json",
+    supports: { skills: false, mcp: true },
+    mcpConfigPath: () => path.join(os.homedir(), ".codeium", "windsurf", "mcp_config.json"),
+  },
+  goose: {
+    name: "goose",
+    label: "Goose",
+    description: "Block's AI agent — MCP extension in ~/.config/goose/config.yaml",
+    supports: { skills: false, mcp: true },
+  },
+  zed: {
+    name: "zed",
+    label: "Zed",
+    description: "Zed editor — context_servers entry in Zed settings.json (via mcp-remote)",
+    supports: { skills: false, mcp: true },
+  },
+  vscode: {
+    name: "vscode",
+    label: "VS Code (Kilo Code / Cline / Continue / Copilot)",
+    description: "VS Code native MCP — one config read by Kilo Code, Cline, Continue, and Copilot",
+    supports: { skills: false, mcp: true },
+  },
   generic: {
     name: "generic",
     label: "Generic MCP Client",
@@ -132,6 +176,245 @@ export const TARGETS: Record<TargetName, TargetInfo> = {
 
 export function isTargetName(value: string): value is TargetName {
   return value in TARGETS;
+}
+
+// ─── Workspace helpers ────────────────────────────────────────────────────────
+
+interface WorkspaceItem { id: string; name: string; role?: string }
+
+async function fetchWorkspaces(podUrl: string, apiKey: string): Promise<WorkspaceItem[]> {
+  try {
+    const res = await fetch(`${podUrl.replace(/\/$/, "")}/api/hub/workspaces`, {
+      headers: { Authorization: `Bearer ${apiKey}` },
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!res.ok) return [];
+    const data = await res.json() as { workspaces?: WorkspaceItem[] } | WorkspaceItem[];
+    return Array.isArray(data) ? data : (data.workspaces ?? []);
+  } catch { return []; }
+}
+
+async function provisionAgentWorkspace(
+  podUrl: string,
+  apiKey: string,
+  agentUserId: string,
+  workspaceName: string
+): Promise<WorkspaceItem | null> {
+  try {
+    const res = await fetch(`${podUrl.replace(/\/$/, "")}/api/hub/workspaces/provision-agent`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+      body: JSON.stringify({ agentUserId, workspaceName }),
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!res.ok) return null;
+    const data = await res.json() as { workspaceId?: string; id?: string; workspace?: WorkspaceItem; name?: string };
+    const resolvedId = data.workspaceId ?? data.id ?? (data.workspace?.id);
+    if (data.workspace) return data.workspace;
+    return resolvedId ? { id: resolvedId, name: data.name ?? workspaceName } : null;
+  } catch { return null; }
+}
+
+/** Build the pod's /mcp URL, appending ?workspaceId= when a workspace is scoped. */
+function buildMcpUrl(podUrl: string, workspaceId?: string): string {
+  const podBase = podUrl.replace(/\/$/, "");
+  return workspaceId
+    ? `${podBase}/mcp?workspaceId=${encodeURIComponent(workspaceId)}`
+    : `${podBase}/mcp`;
+}
+
+/**
+ * Shared preamble for MCP surface installers: provision a dedicated agent key,
+ * enroll the agent into the caller's workspaces, and resolve the scoped MCP URL.
+ */
+async function prepareMcpSurface(
+  cfg: TargetConnectionConfig,
+  agentType: string
+): Promise<{ effectiveApiKey: string; agentUserId: string; mcpUrl: string }> {
+  const { hubApiKey: effectiveApiKey, agentUserId } = await provisionAgentKey(cfg.podUrl, cfg.apiKey, agentType);
+  await enrollAgentIfNeeded(cfg.podUrl, cfg.apiKey, agentUserId, cfg.workspaceId);
+  return { effectiveApiKey, agentUserId, mcpUrl: buildMcpUrl(cfg.podUrl, cfg.workspaceId) };
+}
+
+// ─── Agent context configuration ──────────────────────────────────────────────
+
+async function configureAgentContext(
+  podUrl: string,
+  apiKey: string,
+  agentType: string,
+  agentUserId: string,
+  info: TargetInfo
+): Promise<void> {
+  const { AGENT_TEMPLATES, getTemplate } = await import("./agent-templates.js");
+
+  log.blank();
+  log.heading("Configure your agent  (3 steps)");
+  log.dim("Set up where this agent keeps its own memory, which team workspaces it writes to, and its skill template.");
+
+  // Fetch workspaces once — reused by step 1 and step 2 (no duplicate network calls)
+  const wsSpinner = ora("Fetching workspaces…").start();
+  const allWorkspaces = await fetchWorkspaces(podUrl, apiKey);
+  wsSpinner.stop();
+
+  // ── Step 1 · Agent memory workspace ──────────────────────────────────────
+  log.blank();
+  log.info(chalk.bold("Step 1 of 3 — Agent memory"));
+  log.dim("A private workspace for this agent's own notes, learned patterns, and session context.");
+  log.blank();
+
+  let memoryWorkspace: WorkspaceItem | undefined;
+
+  const CREATE_SENTINEL = "__create__";
+  const SKIP_SENTINEL   = "__skip__";
+
+  // Score workspaces by name relevance to "agent memory" — higher = better suggestion
+  function memoryScore(w: WorkspaceItem): number {
+    const n = w.name.toLowerCase();
+    return ["memory", "agent", "assistant", agentType.toLowerCase()]
+      .reduce((s, kw) => s + (n.includes(kw) ? 1 : 0), 0);
+  }
+
+  const bestMemIdx = allWorkspaces.length > 0
+    ? allWorkspaces.reduce((bi, w, i) => memoryScore(w) > memoryScore(allWorkspaces[bi]) ? i : bi, 0)
+    : -1;
+  const hasSuggestion = bestMemIdx >= 0 && memoryScore(allWorkspaces[bestMemIdx]) > 0;
+
+  const memoryChoices = [
+    ...allWorkspaces.map((w, i) => {
+      const hint = (i === bestMemIdx && hasSuggestion) ? chalk.green("  ← suggested") : "";
+      return { title: `${chalk.bold(w.name)}  ${chalk.dim(w.id)}${hint}`, value: w.id };
+    }),
+    { title: chalk.cyan("Create a new workspace…"), value: CREATE_SENTINEL },
+    { title: chalk.dim("None — skip"), value: SKIP_SENTINEL },
+  ];
+
+  // Default: suggested workspace if one matches, otherwise "Create a new workspace"
+  const memoryDefaultIdx = hasSuggestion ? bestMemIdx : allWorkspaces.length;
+
+  const { memoryPickedId } = await prompts({
+    type: "select",
+    name: "memoryPickedId",
+    message: "Which workspace is this agent's private memory?",
+    choices: memoryChoices,
+    initial: memoryDefaultIdx,
+  });
+
+  if (memoryPickedId && memoryPickedId !== SKIP_SENTINEL) {
+    if (memoryPickedId === CREATE_SENTINEL) {
+      const defaultName = `${agentType} Memory`;
+      const { newName } = await prompts({
+        type: "text",
+        name: "newName",
+        message: "Workspace name:",
+        initial: defaultName,
+        validate: (v: string) => v.trim().length > 0 || "Name is required",
+      });
+      const finalName = ((newName as string | undefined) ?? "").trim() || defaultName;
+      if (!agentUserId) {
+        log.warn("Agent identity not available — cannot provision a workspace. Reconnect to try again.");
+      } else {
+        const createSpinner = ora(`Creating "${finalName}"…`).start();
+        const ws = await provisionAgentWorkspace(podUrl, apiKey, agentUserId, finalName);
+        if (ws) {
+          memoryWorkspace = ws;
+          createSpinner.succeed(`Created: ${chalk.bold(ws.name)}  ${chalk.dim(ws.id)}`);
+        } else {
+          createSpinner.fail("Could not create workspace — check pod logs. You can set one up manually later.");
+        }
+      }
+    } else {
+      memoryWorkspace = allWorkspaces.find((w) => w.id === memoryPickedId);
+    }
+  }
+
+  // ── Step 2 · Team / product workspaces ───────────────────────────────────
+  log.blank();
+  log.info(chalk.bold("Step 2 of 3 — Team workspaces"));
+  log.dim("Workspaces where the agent posts updates, tasks, and decisions for your team to see.");
+  log.blank();
+
+  // Reuse the already-fetched list — exclude whichever workspace was chosen as memory
+  const candidates = allWorkspaces.filter((w) => w.id !== memoryWorkspace?.id);
+  let productWorkspaces: WorkspaceItem[] = [];
+
+  if (candidates.length === 0) {
+    log.dim("No other workspaces found — you can configure this later by re-running connect.");
+  } else {
+    log.dim("Space to select/deselect, enter to confirm. Skip to leave unset.");
+    const { productIds } = await prompts({
+      type: "multiselect",
+      name: "productIds",
+      message: "Which workspace(s) should the agent write to?",
+      choices: candidates.map((w) => ({ title: `${w.name}  ${chalk.dim(w.id)}`, value: w.id })),
+    });
+    productWorkspaces = candidates.filter((w) => (productIds ?? [] as string[]).includes(w.id));
+  }
+
+  // ── Step 3 · Template ─────────────────────────────────────────────────────
+  log.blank();
+  log.info(chalk.bold("Step 3 of 3 — Agent template"));
+  log.dim("The template sets the agent's default behaviour and routing rules.");
+  log.blank();
+
+  const { templateId } = await prompts({
+    type: "select",
+    name: "templateId",
+    message: "Pick a template:",
+    choices: AGENT_TEMPLATES.map((t) => ({
+      title: `${t.label}  ${chalk.dim(t.description)}`,
+      value: t.id,
+    })),
+  });
+
+  const template = getTemplate(templateId as string);
+
+  // ── Generate and write CONTEXT.md ─────────────────────────────────────────
+  const content = template.generateContext({
+    agentType,
+    podUrl,
+    memoryWorkspace,
+    productWorkspaces,
+  });
+
+  // Persist workspace routing to config — drives capture/recall defaults
+  const { setAgentWorkspaceRouting } = await import("./pod.js");
+  setAgentWorkspaceRouting({
+    memoryWorkspaceId: memoryWorkspace?.id,
+    productWorkspaceIds: productWorkspaces.map((w) => w.id),
+  });
+
+  // Always write to ~/.synap/contexts/<surface>.md
+  const contextDir = path.join(os.homedir(), ".synap", "contexts");
+  if (!fs.existsSync(contextDir)) fs.mkdirSync(contextDir, { recursive: true });
+  const globalContextPath = path.join(contextDir, `${agentType}.md`);
+  fs.writeFileSync(globalContextPath, content, { mode: 0o600 });
+
+  // For skills-capable surfaces, also write alongside SKILL.md
+  const skillsDir = info.skillsDir?.();
+  if (skillsDir) {
+    const synapSkillDir = path.join(skillsDir, "synap");
+    if (!fs.existsSync(synapSkillDir)) fs.mkdirSync(synapSkillDir, { recursive: true });
+    fs.writeFileSync(path.join(synapSkillDir, "CONTEXT.md"), content, { mode: 0o600 });
+    log.success(`Agent context written to ${synapSkillDir}/CONTEXT.md`);
+  } else {
+    log.success(`Agent context written to ${globalContextPath}`);
+    log.dim("For MCP-only surfaces the context is available as a reference; load it manually if needed.");
+  }
+
+  // Summary
+  log.blank();
+  log.info(`  Template     ${chalk.bold(template.label)}`);
+  if (memoryWorkspace) {
+    log.info(`  Memory       ${chalk.bold(memoryWorkspace.name)}  ${chalk.dim(memoryWorkspace.id)}`);
+  } else {
+    log.info(`  Memory       ${chalk.dim("(none)")}`);
+  }
+  if (productWorkspaces.length > 0) {
+    log.info(`  Product      ${productWorkspaces.map((w) => chalk.bold(w.name)).join(", ")}`);
+  } else {
+    log.info(`  Product      ${chalk.dim("(none)")}`);
+  }
+  log.blank();
 }
 
 export function listTargets(): void {
@@ -160,24 +443,37 @@ export async function installForTarget(
 
   log.heading(`Installing for ${info.label}`);
 
+  let result: boolean;
   switch (target) {
-    case "claude-code":
-      return installClaudeCode(info, cfg);
-    case "claude-desktop":
-      return installClaudeDesktop(info, cfg);
-    case "cursor":
-      return installCursor(info, cfg);
-    case "raycast":
-      return installRaycast(cfg);
-    case "openclaw":
-      return installOpenclaw(cfg);
-    case "openwebui":
-      return installOpenWebUI(cfg);
-    case "codex":
-      return installCodex(info, cfg);
-    case "generic":
-      return installGeneric(cfg);
+    case "claude-code":   result = await installClaudeCode(info, cfg); break;
+    case "claude-desktop": result = await installClaudeDesktop(info, cfg); break;
+    case "cursor":        result = await installCursor(info, cfg); break;
+    case "raycast":       result = await installRaycast(cfg); break;
+    case "openclaw":      result = await installOpenclaw(cfg); break;
+    case "openwebui":     result = await installOpenWebUI(cfg); break;
+    case "codex":         result = await installCodex(info, cfg); break;
+    case "opencode":      result = await installOpencode(cfg); break;
+    case "aider":         result = await installAider(cfg); break;
+    case "windsurf":      result = await installWindsurf(info, cfg); break;
+    case "goose":         result = await installGoose(cfg); break;
+    case "zed":           result = await installZed(cfg); break;
+    case "vscode":        result = await installVSCode(cfg); break;
+    case "generic":       result = await installGeneric(cfg); break;
   }
+
+  // Post-install: configure agent workspace context for all successful MCP installs.
+  if (result && info.supports.mcp && target !== "generic") {
+    const { getSurfaceAgentKey } = await import("./pod.js");
+    const saved = getSurfaceAgentKey(target as import("./pod.js").SurfaceName);
+    const agentUserId = saved?.agentUserId ?? "";
+    try {
+      await configureAgentContext(cfg.podUrl, cfg.apiKey, target, agentUserId, info);
+    } catch (err) {
+      log.warn(`Agent context wizard failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  return result;
 }
 
 // ─── Claude Code ─────────────────────────────────────────────────────────────
@@ -187,29 +483,29 @@ async function installClaudeCode(
   cfg: TargetConnectionConfig
 ): Promise<boolean> {
   // ── What to install? ────────────────────────────────────────────────────
-  // Skills = CLAUDE.md context files (instructions, schema, UI patterns)
-  // MCP    = live tool server (read/write entities, search, memory, etc.)
-  // Both is the recommended default — skills give the model Synap knowledge,
-  // MCP gives it the actual tools to act on data.
+  // Claude Code is a CLI-first agent: it reads/writes Synap via `synap` shell
+  // commands (capture, recall, search, create, etc.) — not via MCP tool calls.
+  // Skills give it Synap knowledge; the agent key lets it call the CLI directly.
+  // MCP is available as an opt-in for users who prefer the tool-call interface.
   const { mode } = await prompts({
     type: "select",
     name: "mode",
     message: "What do you want to install?",
     choices: [
       {
-        title: "Both — Skills + MCP tools  (recommended)",
-        description: "Skills give Claude context about Synap; MCP tools let it read & write data",
+        title: "Skills + agent key  (recommended)",
+        description: "Claude Code reads/writes Synap via synap CLI commands — no MCP overhead",
+        value: "skills",
+      },
+      {
+        title: "Skills + agent key + MCP server",
+        description: "Also registers a live MCP tool server (for users who prefer tool-call access)",
         value: "both",
       },
       {
-        title: "MCP tools only",
-        description: "Live tool server — search, create, update entities, memory, channels",
+        title: "MCP server only",
+        description: "Tool-call interface only — skip skills and CLI setup",
         value: "mcp",
-      },
-      {
-        title: "Skills only",
-        description: "Context files (CLAUDE.md) — no live data access",
-        value: "skills",
       },
     ],
     initial: 0,
@@ -230,24 +526,21 @@ async function installClaudeCode(
     }
   }
 
-  // ── MCP ─────────────────────────────────────────────────────────────────
+  // ── Agent key + optional MCP ─────────────────────────────────────────────
+  // writeClaudeCodeEnv always provisions the agent key and writes env vars.
+  // writeMcp=true additionally registers the mcpServers entry.
   if (mode === "both" || mode === "mcp") {
     await writeClaudeCodeEnv(cfg);
-    log.success("MCP server 'synap' added to ~/.claude/settings.json");
-    if (cfg.workspaceId) {
-      log.dim(`Scoped to workspace: ${cfg.workspaceId}`);
-    } else {
-      log.dim("Not scoped — all workspaces accessible.");
-    }
+    log.success("Agent key provisioned and MCP server registered in ~/.claude/settings.json");
   } else {
-    // Skills-only: still write env vars (pod URL useful for skills referencing
-    // SYNAP_POD_URL) but don't add the mcpServers entry
-    await writeClaudeCodeEnv({ ...cfg, workspaceId: cfg.workspaceId }, { writeMcp: false });
+    await writeClaudeCodeEnv(cfg, { writeMcp: false });
+    log.success("Agent key provisioned and pod env vars written to ~/.claude/settings.json");
+    log.dim("Claude Code will use `synap` CLI commands to read/write the pod.");
   }
 
   log.blank();
-  log.success("Claude Code config updated.");
-  log.dim("Restart Claude Code (or open a new window) to pick up the MCP server and env vars.");
+  log.success("Claude Code configured.");
+  log.dim("Open a new Claude Code window to pick up the updated env vars.");
   return true;
 }
 
@@ -349,16 +642,74 @@ export async function writeClaudeCodeEnv(
   const agentSetupRes = await fetch(`${podBase}/api/hub/setup/agent`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${cfg.apiKey}` },
-    body: JSON.stringify({ agentType: "claude-code", idempotent: false }),
+    body: JSON.stringify({ agentType: "claude-code", idempotent: true }),
     signal: AbortSignal.timeout(10000),
   });
   if (!agentSetupRes.ok) {
     const text = await agentSetupRes.text().catch(() => agentSetupRes.statusText);
     throw new Error(`Failed to provision agent key for claude-code (HTTP ${agentSetupRes.status}): ${text}\nEnsure your API key has hub-protocol.write scope.`);
   }
-  const agentSetup = await agentSetupRes.json() as { hubApiKey?: string; agentUserId?: string };
-  if (!agentSetup.hubApiKey) throw new Error("setup/agent succeeded but returned no hubApiKey — check pod logs.");
-  effectiveApiKey = agentSetup.hubApiKey;
+  const agentSetup = await agentSetupRes.json() as { hubApiKey?: string; agentUserId?: string; alreadyValid?: boolean };
+  if (agentSetup.alreadyValid) {
+    // Idempotent path — pod says the agent key is still valid but doesn't re-transmit it.
+    // Resolution priority: stored agentKey config > settings.json env var.
+    // Self-heal: verify the candidate resolves to the expected agent user, not the human user.
+    const { getSurfaceAgentKey: readSurfaceKey } = await import("./pod.js");
+    const storedKey = readSurfaceKey("claude-code");
+    const candidate =
+      storedKey?.hubApiKey ??
+      (settings.env as Record<string, string>)?.["SYNAP_HUB_API_KEY"] ??
+      null;
+
+    const expectedAgentUserId = agentSetup.agentUserId ?? storedKey?.agentUserId;
+    let candidateIsValid = false;
+
+    if (candidate && expectedAgentUserId) {
+      try {
+        // Use auth/status — it returns the key's actual owner userId.
+        // For agent keys this is the agent userId, not the human userId.
+        // users/me always returns the human owner regardless of key type.
+        const verifyRes = await fetch(`${podBase}/api/hub/auth/status`, {
+          headers: { Authorization: `Bearer ${candidate}` },
+          signal: AbortSignal.timeout(5000),
+        });
+        if (verifyRes.ok) {
+          const verifyStatus = await verifyRes.json() as { userId?: string };
+          candidateIsValid = verifyStatus.userId === expectedAgentUserId;
+        }
+      } catch { /* reprovision below */ }
+    }
+
+    if (candidateIsValid && candidate) {
+      effectiveApiKey = candidate;
+    } else {
+      // Self-heal: stored key is stale, wrong identity, or never persisted.
+      // Reprovision without idempotent flag to get a fresh agent key.
+      const reproRes = await fetch(`${podBase}/api/hub/setup/agent`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${cfg.apiKey}` },
+        body: JSON.stringify({ agentType: "claude-code" }),
+        signal: AbortSignal.timeout(10000),
+      });
+      if (reproRes.ok) {
+        const repro = await reproRes.json() as { hubApiKey?: string; agentUserId?: string; alreadyValid?: boolean };
+        effectiveApiKey = repro.hubApiKey ?? candidate ?? cfg.apiKey;
+        if (repro.agentUserId) agentSetup.agentUserId = repro.agentUserId;
+      } else {
+        // Reprovision failed — fall back to whatever we have, warn clearly
+        effectiveApiKey = candidate ?? cfg.apiKey;
+        log.warn("Could not reprovision agent key — using fallback. Run `synap connect --target=claude-code` to fix.");
+      }
+    }
+  } else {
+    if (!agentSetup.hubApiKey) throw new Error("setup/agent succeeded but returned no hubApiKey — check pod logs.");
+    effectiveApiKey = agentSetup.hubApiKey;
+  }
+
+  // Persist the provisioned key to agentKeys["claude-code"] so SYNAP_AGENT=claude-code
+  // works in CLI sessions outside of this env (e.g. terminal, not just inside Claude Code).
+  const { setSurfaceAgentKey: saveSurfaceKey } = await import("./pod.js");
+  saveSurfaceKey("claude-code", { hubApiKey: effectiveApiKey, agentUserId: agentSetup.agentUserId ?? "" });
 
   // Enroll the new agent user into the caller's workspaces using the HUMAN key
   // (before switching to the agent key). Scoped to one workspace when chosen.
@@ -377,9 +728,7 @@ export async function writeClaudeCodeEnv(
   // ── MCP server entry (HTTP transport, native Claude Code format) ─────────
   if (writeMcp) {
     // Append ?workspaceId= when one is set so every tool call is pre-scoped.
-    const mcpUrl = cfg.workspaceId
-      ? `${podBase}/mcp?workspaceId=${encodeURIComponent(cfg.workspaceId)}`
-      : `${podBase}/mcp`;
+    const mcpUrl = buildMcpUrl(cfg.podUrl, cfg.workspaceId);
 
     const mcpServers = (settings.mcpServers ?? {}) as Record<string, unknown>;
     mcpServers["synap"] = {
@@ -397,15 +746,56 @@ export async function writeClaudeCodeEnv(
 
 // ─── Agent key provisioning helper ──────────────────────────────────────────
 
+function openBrowserUrl(url: string): void {
+  const safe = url.replace(/"/g, "%22");
+  const cmd =
+    process.platform === "darwin" ? `open "${safe}"` :
+    process.platform === "win32"  ? `start "" "${safe}"` :
+    `xdg-open "${safe}"`;
+  exec(cmd, () => { /* best-effort */ });
+}
+
+async function waitForKeyApproval(
+  podBase: string,
+  humanApiKey: string,
+  pendingToken: string,
+  agentType: string
+): Promise<void> {
+  const pollUrl = `${podBase}/api/hub/setup/agent/pending/${pendingToken}`;
+  const deadline = Date.now() + 120_000;
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 2000));
+    let poll: Response;
+    try {
+      poll = await fetch(pollUrl, {
+        headers: { Authorization: `Bearer ${humanApiKey}` },
+        signal: AbortSignal.timeout(5000),
+      });
+    } catch { continue; }
+    if (!poll.ok) continue;
+    const data = await poll.json() as { status?: string };
+    if (data.status === "active") return;
+    if (data.status === "rejected") {
+      throw new Error(`Agent key for ${agentType} was rejected in the browser. Run connect again to re-request.`);
+    }
+  }
+  throw new Error(
+    `Timed out waiting for approval of ${agentType} agent key (120s). ` +
+    `Open the review URL manually or run connect again.`
+  );
+}
+
 /**
  * Provision an agent-owned API key for the given surface via POST /api/hub/setup/agent.
- * Returns both the key and the new agent's userId so callers can enroll it in workspaces.
+ * When requireApproval is true the key is created inactive; the user must approve in the
+ * browser before this function returns.
  * Throws on failure — callers must not silently fall back to a human key.
  */
 async function provisionAgentKey(
   podUrl: string,
   humanApiKey: string,
-  agentType: string
+  agentType: string,
+  { requireApproval = true }: { requireApproval?: boolean } = {}
 ): Promise<{ hubApiKey: string; agentUserId: string }> {
   const podBase = podUrl.replace(/\/$/, "");
   let res: Response;
@@ -416,7 +806,7 @@ async function provisionAgentKey(
         "Content-Type": "application/json",
         Authorization: `Bearer ${humanApiKey}`,
       },
-      body: JSON.stringify({ agentType, idempotent: false }),
+      body: JSON.stringify({ agentType, idempotent: false, requireApproval }),
       signal: AbortSignal.timeout(10000),
     });
   } catch (err) {
@@ -432,12 +822,32 @@ async function provisionAgentKey(
       `Ensure your API key has hub-protocol.write scope.`
     );
   }
-  const body = await res.json() as { hubApiKey?: string; agentUserId?: string };
+  const body = await res.json() as {
+    hubApiKey?: string;
+    agentUserId?: string;
+    requiresApproval?: boolean;
+    pendingToken?: string;
+    reviewUrl?: string;
+  };
   if (!body.hubApiKey) {
     throw new Error(
       `setup/agent succeeded but returned no hubApiKey for ${agentType}. ` +
       `This is a server-side bug — check the pod logs.`
     );
+  }
+  if (body.requiresApproval && body.pendingToken && body.reviewUrl) {
+    log.info(`\n  Opening your pod to review this agent key request…`);
+    log.dim(`  ${body.reviewUrl}`);
+    openBrowserUrl(body.reviewUrl);
+    process.stdout.write(chalk.dim("  Waiting for approval"));
+    const ticker = setInterval(() => process.stdout.write(chalk.dim(".")), 2000);
+    try {
+      await waitForKeyApproval(podBase, humanApiKey, body.pendingToken, agentType);
+    } finally {
+      clearInterval(ticker);
+      process.stdout.write("\n");
+    }
+    log.success(`  Approved! Writing ${agentType} agent key.`);
   }
   return { hubApiKey: body.hubApiKey, agentUserId: body.agentUserId ?? "" };
 }
@@ -501,10 +911,10 @@ async function installClaudeDesktop(
   //
   // Reference: https://www.npmjs.com/package/mcp-remote
   const { hubApiKey: effectiveApiKey, agentUserId } = await provisionAgentKey(cfg.podUrl, cfg.apiKey, "claude-desktop");
+  const { setSurfaceAgentKey: saveDesktopKey } = await import("./pod.js");
+  saveDesktopKey("claude-desktop", { hubApiKey: effectiveApiKey, agentUserId });
   await enrollAgentIfNeeded(cfg.podUrl, cfg.apiKey, agentUserId, cfg.workspaceId);
-  const desktopMcpUrl = cfg.workspaceId
-    ? `${cfg.podUrl.replace(/\/$/, "")}/mcp?workspaceId=${encodeURIComponent(cfg.workspaceId)}`
-    : `${cfg.podUrl.replace(/\/$/, "")}/mcp`;
+  const desktopMcpUrl = buildMcpUrl(cfg.podUrl, cfg.workspaceId);
   writeMcpServerEntry(mcpPath, "synap", {
     command: "npx",
     args: ["-y", "mcp-remote", desktopMcpUrl, "--header", `Authorization: Bearer ${effectiveApiKey}`],
@@ -562,10 +972,10 @@ async function installCursor(
   if (!mcpPath) return false;
 
   const { hubApiKey: effectiveApiKey, agentUserId } = await provisionAgentKey(cfg.podUrl, cfg.apiKey, "cursor");
+  const { setSurfaceAgentKey: saveCursorKey } = await import("./pod.js");
+  saveCursorKey("cursor", { hubApiKey: effectiveApiKey, agentUserId });
   await enrollAgentIfNeeded(cfg.podUrl, cfg.apiKey, agentUserId, cfg.workspaceId);
-  const cursorMcpUrl = cfg.workspaceId
-    ? `${cfg.podUrl.replace(/\/$/, "")}/mcp?workspaceId=${encodeURIComponent(cfg.workspaceId)}`
-    : `${cfg.podUrl.replace(/\/$/, "")}/mcp`;
+  const cursorMcpUrl = buildMcpUrl(cfg.podUrl, cfg.workspaceId);
   writeMcpServerEntry(mcpPath, "synap", {
     url: cursorMcpUrl,
     headers: { Authorization: `Bearer ${effectiveApiKey}` },
@@ -675,10 +1085,7 @@ async function installOpenclaw(cfg: TargetConnectionConfig): Promise<boolean> {
 // ─── Open WebUI ──────────────────────────────────────────────────────────────
 
 async function installOpenWebUI(cfg: TargetConnectionConfig): Promise<boolean> {
-  const podBase = cfg.podUrl.replace(/\/$/, "");
-  const mcpUrl = cfg.workspaceId
-    ? `${podBase}/mcp?workspaceId=${encodeURIComponent(cfg.workspaceId)}`
-    : `${podBase}/mcp`;
+  const mcpUrl = buildMcpUrl(cfg.podUrl, cfg.workspaceId);
   const podHost = new URL(cfg.podUrl).host;
 
   log.info("Open WebUI connects to Synap in two ways:");
@@ -711,13 +1118,166 @@ async function installOpenWebUI(cfg: TargetConnectionConfig): Promise<boolean> {
   return true;
 }
 
-// ─── Generic MCP client ───────────────────────────────────────────────────────
+// ─── Windsurf ────────────────────────────────────────────────────────────────
+
+async function installWindsurf(
+  info: TargetInfo,
+  cfg: TargetConnectionConfig
+): Promise<boolean> {
+  const configPath = info.mcpConfigPath?.() ?? path.join(os.homedir(), ".codeium", "windsurf", "mcp_config.json");
+  const { effectiveApiKey, agentUserId, mcpUrl } = await prepareMcpSurface(cfg, "windsurf");
+
+  writeMcpServerEntry(configPath, "synap", { url: mcpUrl, headers: { Authorization: `Bearer ${effectiveApiKey}` } });
+
+  const { setSurfaceAgentKey: save } = await import("./pod.js");
+  save("windsurf", { hubApiKey: effectiveApiKey, agentUserId });
+
+  log.success(`Windsurf MCP config updated: ${configPath}`);
+  log.dim("Restart Windsurf to pick up the new MCP server.");
+  return true;
+}
+
+// ─── Goose ───────────────────────────────────────────────────────────────────
+
+async function installGoose(cfg: TargetConnectionConfig): Promise<boolean> {
+  const configDir = path.join(os.homedir(), ".config", "goose");
+  const configPath = path.join(configDir, "config.yaml");
+
+  if (!fs.existsSync(configDir)) fs.mkdirSync(configDir, { recursive: true });
+
+  const { effectiveApiKey, agentUserId, mcpUrl } = await prepareMcpSurface(cfg, "goose");
+
+  const marker = "  synap:";
+  const block = [
+    "  synap:",
+    "    name: synap",
+    "    type: streamable_http",
+    `    uri: "${mcpUrl}"`,
+    "    env_keys: []",
+    "    timeout: 300",
+    `    headers:`,
+    `      Authorization: "Bearer ${effectiveApiKey}"`,
+  ].join("\n");
+
+  let existing = "";
+  if (fs.existsSync(configPath)) {
+    try { existing = fs.readFileSync(configPath, "utf-8"); } catch { /* ignore */ }
+  }
+
+  let updated: string;
+  if (existing.includes(marker)) {
+    updated = existing.replace(/  synap:[\s\S]*?(?=\n  [a-zA-Z_]|\s*$)/, block);
+  } else if (/^extensions:/m.test(existing)) {
+    updated = existing.trimEnd() + "\n" + block + "\n";
+  } else {
+    updated = (existing ? existing.trimEnd() + "\n\n" : "") + "extensions:\n" + block + "\n";
+  }
+
+  fs.writeFileSync(configPath, updated, { mode: 0o600 });
+
+  const { setSurfaceAgentKey: save } = await import("./pod.js");
+  save("goose", { hubApiKey: effectiveApiKey, agentUserId });
+
+  log.success(`Goose config updated: ${configPath}`);
+  log.dim("Run `goose session` to pick up the new MCP extension.");
+  return true;
+}
+
+// ─── Zed ─────────────────────────────────────────────────────────────────────
+
+function zedSettingsPath(): string {
+  switch (process.platform) {
+    case "darwin": return path.join(os.homedir(), "Library", "Application Support", "Zed", "settings.json");
+    case "win32":  return path.join(process.env.APPDATA ?? os.homedir(), "Zed", "settings.json");
+    default:       return path.join(os.homedir(), ".config", "zed", "settings.json");
+  }
+}
+
+async function installZed(cfg: TargetConnectionConfig): Promise<boolean> {
+  const settingsPath = zedSettingsPath();
+  const settingsDir = path.dirname(settingsPath);
+  if (!fs.existsSync(settingsDir)) fs.mkdirSync(settingsDir, { recursive: true });
+
+  const { effectiveApiKey, agentUserId, mcpUrl } = await prepareMcpSurface(cfg, "zed");
+
+  let settings: Record<string, unknown> = {};
+  if (fs.existsSync(settingsPath)) {
+    try {
+      const raw = fs.readFileSync(settingsPath, "utf-8");
+      // Zed settings.json is JSONC — strip // line comments and /* block comments */
+      // before parsing. Comments will not be preserved in the rewritten file.
+      const stripped = raw
+        .replace(/\/\*[\s\S]*?\*\//g, "")
+        .replace(/\/\/[^\n]*/g, "");
+      settings = JSON.parse(stripped) as Record<string, unknown>;
+    } catch { /* malformed — start from scratch */ }
+  }
+
+  const contextServers = (settings.context_servers ?? {}) as Record<string, unknown>;
+  contextServers["synap"] = {
+    source: "custom",
+    command: {
+      path: "npx",
+      args: ["-y", "mcp-remote@latest", mcpUrl, "--header", `Authorization: Bearer ${effectiveApiKey}`],
+    },
+    settings: {},
+  };
+  settings.context_servers = contextServers;
+
+  fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + "\n", { mode: 0o600 });
+
+  const { setSurfaceAgentKey: save } = await import("./pod.js");
+  save("zed", { hubApiKey: effectiveApiKey, agentUserId });
+
+  log.success(`Zed settings updated: ${settingsPath}`);
+  log.dim("Note: Zed settings are JSONC — any existing // comments were removed during rewrite.");
+  log.dim("Reload Zed to pick up the new context server (mcp-remote bridge).");
+  return true;
+}
+
+// ─── VS Code (Kilo Code / Cline / Continue / Copilot) ────────────────────────
+
+function vsCodeUserDataDir(): string {
+  switch (process.platform) {
+    case "darwin": return path.join(os.homedir(), "Library", "Application Support", "Code", "User");
+    case "win32":  return path.join(process.env.APPDATA ?? os.homedir(), "Code", "User");
+    default:       return path.join(os.homedir(), ".config", "Code", "User");
+  }
+}
+
+async function installVSCode(cfg: TargetConnectionConfig): Promise<boolean> {
+  const mcpJsonPath = path.join(vsCodeUserDataDir(), "mcp.json");
+  const mcpDir = path.dirname(mcpJsonPath);
+  if (!fs.existsSync(mcpDir)) fs.mkdirSync(mcpDir, { recursive: true });
+
+  const { effectiveApiKey, agentUserId, mcpUrl } = await prepareMcpSurface(cfg, "vscode");
+
+  // VS Code 1.99+ global MCP format uses "servers" (not "mcpServers")
+  let existing: { servers?: Record<string, unknown> } = {};
+  if (fs.existsSync(mcpJsonPath)) {
+    try { existing = JSON.parse(fs.readFileSync(mcpJsonPath, "utf-8")) as typeof existing; } catch { /* ignore */ }
+  }
+
+  existing.servers = existing.servers ?? {};
+  existing.servers["synap"] = {
+    type: "http",
+    url: mcpUrl,
+    headers: { Authorization: `Bearer ${effectiveApiKey}` },
+  };
+
+  fs.writeFileSync(mcpJsonPath, JSON.stringify(existing, null, 2) + "\n", { mode: 0o600 });
+
+  const { setSurfaceAgentKey: save } = await import("./pod.js");
+  save("vscode", { hubApiKey: effectiveApiKey, agentUserId });
+
+  log.success(`VS Code MCP config updated: ${mcpJsonPath}`);
+  log.dim("Picked up automatically by Kilo Code, Cline, Continue, and GitHub Copilot.");
+  log.dim("Reload VS Code (or open the MCP panel) to activate.");
+  return true;
+}
 
 async function installGeneric(cfg: TargetConnectionConfig): Promise<boolean> {
-  const podBase = cfg.podUrl.replace(/\/$/, "");
-  const mcpUrl = cfg.workspaceId
-    ? `${podBase}/mcp?workspaceId=${encodeURIComponent(cfg.workspaceId)}`
-    : `${podBase}/mcp`;
+  const mcpUrl = buildMcpUrl(cfg.podUrl, cfg.workspaceId);
 
   const httpConfig = {
     synap: {
@@ -774,10 +1334,7 @@ async function installCodex(
   // Build MCP server entry
   const { hubApiKey: effectiveApiKey, agentUserId } = await provisionAgentKey(cfg.podUrl, cfg.apiKey, "codex");
   await enrollAgentIfNeeded(cfg.podUrl, cfg.apiKey, agentUserId, cfg.workspaceId);
-  const podBase = cfg.podUrl.replace(/\/$/, "");
-  const mcpUrl = cfg.workspaceId
-    ? `${podBase}/mcp?workspaceId=${encodeURIComponent(cfg.workspaceId)}`
-    : `${podBase}/mcp`;
+  const mcpUrl = buildMcpUrl(cfg.podUrl, cfg.workspaceId);
 
   // Inject/replace the synap mcpServers block using simple string manipulation
   // (avoid requiring a YAML parser dependency)
@@ -837,7 +1394,7 @@ async function installCodex(
   return true;
 }
 
-// ─── MCP config writer ───────────────────────────────────────────────────────
+// ─── Shared MCP config types ─────────────────────────────────────────────────
 
 interface McpServerConfig {
   url?: string;
@@ -846,6 +1403,178 @@ interface McpServerConfig {
   headers?: Record<string, string>;
   env?: Record<string, string>;
 }
+
+// ─── opencode ────────────────────────────────────────────────────────────────
+
+export interface ProviderInfo {
+  providerId: string;
+  name: string;
+  models: Array<{ id: string; contextWindow?: number }>;
+}
+
+export interface ProviderInstallConfig {
+  podUrl: string;
+  apiKey: string;
+}
+
+type ProviderWithKey = ProviderInfo & { apiKey: string | null; baseUrl: string };
+
+async function fetchCredentials(podUrl: string, apiKey: string): Promise<ProviderWithKey[]> {
+  const { fetchPodCredentials } = await import("../commands/providers.js");
+  return fetchPodCredentials(podUrl, apiKey) as Promise<ProviderWithKey[]>;
+}
+
+/** Prompt the user to pick a provider from the pod and return it with its resolved key. */
+async function pickProvider(
+  podUrl: string,
+  apiKey: string
+): Promise<ProviderWithKey | null> {
+  const spinner = ora("Fetching providers from pod vault...").start();
+  let providers: ProviderWithKey[];
+  try {
+    providers = await fetchCredentials(podUrl, apiKey);
+    spinner.stop();
+  } catch (err) {
+    spinner.fail(`Could not fetch providers: ${(err as Error).message}`);
+    return null;
+  }
+  const withKeys = providers.filter((p) => p.apiKey);
+
+  if (withKeys.length === 0) {
+    log.warn("No providers with API keys found on this pod.");
+    log.dim("Add providers and keys in pod admin → Intelligence → Providers.");
+    return null;
+  }
+
+  if (withKeys.length === 1) return withKeys[0];
+
+  const { choice } = await prompts({
+    type: "select",
+    name: "choice",
+    message: "Which AI provider do you want to use?",
+    choices: withKeys.map((p) => ({
+      title: `${p.name}  ${chalk.dim(p.providerId)}`,
+      value: p.providerId,
+    })),
+  });
+
+  return withKeys.find((p) => p.providerId === choice) ?? null;
+}
+
+export async function installOpencode(cfg: ProviderInstallConfig & { workspaceId?: string }): Promise<boolean> {
+  const provider = await pickProvider(cfg.podUrl, cfg.apiKey);
+  if (!provider || !provider.apiKey) return false;
+
+  // Build model map from the chosen provider
+  if (provider.models.length === 0) {
+    log.warn(`No model IDs found for ${provider.name} — configure models in pod admin → Intelligence → Providers`);
+    return false;
+  }
+
+  const models: Record<string, { name: string; contextLength?: number }> = {};
+  let defaultModel = "";
+  for (const m of provider.models) {
+    const key = `${provider.providerId}/${m.id}`;
+    models[key] = {
+      name: m.id,
+      ...(m.contextWindow ? { contextLength: m.contextWindow } : {}),
+    };
+    if (!defaultModel) defaultModel = key;
+  }
+
+  const configDir = path.join(os.homedir(), ".config", "opencode");
+  const configPath = path.join(configDir, "opencode.json");
+
+  if (!fs.existsSync(configDir)) {
+    fs.mkdirSync(configDir, { recursive: true });
+  }
+
+  let existing: Record<string, unknown> = {};
+  if (fs.existsSync(configPath)) {
+    try {
+      existing = JSON.parse(fs.readFileSync(configPath, "utf-8")) as Record<string, unknown>;
+    } catch {
+      fs.copyFileSync(configPath, `${configPath}.bak`);
+      log.warn("Existing opencode.json unreadable — backed up to opencode.json.bak");
+    }
+  }
+
+  const providerBlock = (existing.provider ?? {}) as Record<string, unknown>;
+  providerBlock[provider.providerId] = {
+    npm: "@ai-sdk/openai-compatible",
+    name: provider.name,
+    options: { baseURL: provider.baseUrl, apiKey: provider.apiKey },
+    models,
+  };
+
+  // Provision an agent key so the MCP server runs under its own identity
+  const { hubApiKey: agentKey, agentUserId } = await provisionAgentKey(cfg.podUrl, cfg.apiKey, "opencode");
+  await enrollAgentIfNeeded(cfg.podUrl, cfg.apiKey, agentUserId, cfg.workspaceId);
+  const podBase = cfg.podUrl.replace(/\/$/, "");
+  const mcpUrl = buildMcpUrl(cfg.podUrl, cfg.workspaceId);
+
+  const mcpBlock = (existing.mcp ?? {}) as Record<string, unknown>;
+  mcpBlock["synap"] = { type: "remote", url: mcpUrl, headers: { Authorization: `Bearer ${agentKey}` } };
+
+  const updated = {
+    $schema: "https://opencode.ai/config.json",
+    ...existing,
+    provider: providerBlock,
+    mcp: mcpBlock,
+    ...(existing.model ? {} : { model: defaultModel }),
+  };
+
+  fs.writeFileSync(configPath, JSON.stringify(updated, null, 2) + "\n", { mode: 0o600 });
+
+  const { setSurfaceAgentKey: save } = await import("./pod.js");
+  save("opencode", { hubApiKey: agentKey, agentUserId });
+
+  log.success(`opencode configured: ~/.config/opencode/opencode.json`);
+  log.dim(`  AI provider: ${provider.name}  (${Object.keys(models).length} model(s))`);
+  log.dim(`  MCP tools:   synap pod at ${podBase}`);
+  log.blank();
+  log.dim("Restart opencode to pick up the new provider and MCP server.");
+  return true;
+}
+
+// ─── aider ───────────────────────────────────────────────────────────────────
+
+export async function installAider(cfg: ProviderInstallConfig): Promise<boolean> {
+  const provider = await pickProvider(cfg.podUrl, cfg.apiKey);
+  if (!provider || !provider.apiKey) return false;
+
+  const defaultModel = provider.models[0]?.id ?? "default";
+  const confPath = path.join(os.homedir(), ".aider.conf.yml");
+
+  let existing = "";
+  if (fs.existsSync(confPath)) {
+    try { existing = fs.readFileSync(confPath, "utf-8"); } catch { /* ignore */ }
+  }
+
+  const marker = "# synap-provider";
+  const block = [
+    marker,
+    `openai-api-base: ${provider.baseUrl}`,
+    `openai-api-key: ${provider.apiKey}`,
+    `model: openai/${defaultModel}`,
+    "",
+  ].join("\n");
+
+  const updated = existing.includes(marker)
+    ? existing.replace(/# synap-provider[\s\S]*?(?=\n[a-zA-Z#]|\s*$)/, block.trimEnd())
+    : existing ? `${existing.trimEnd()}\n\n${block}` : block;
+
+  fs.writeFileSync(confPath, updated.trimEnd() + "\n", { mode: 0o600 });
+
+  log.success(`${provider.name} configured in ~/.aider.conf.yml`);
+  log.dim(`  Base URL: ${provider.baseUrl}`);
+  log.dim(`  Model:    openai/${defaultModel}`);
+  log.blank();
+  log.dim("Aider picks up ~/.aider.conf.yml automatically.");
+  return true;
+}
+
+// ─── MCP config writer ───────────────────────────────────────────────────────
 
 export function writeMcpServerEntry(
   configPath: string,

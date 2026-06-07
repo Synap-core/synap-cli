@@ -21,6 +21,7 @@ interface ConfigWithAgents {
   pods?: Record<string, unknown>;
   surfaces?: Record<string, unknown>;
   agents?: Record<string, AgentProfile>;
+  agentKeys?: Record<string, { hubApiKey: string; agentUserId?: string }>;
 }
 
 function readConfig(): ConfigWithAgents {
@@ -60,9 +61,28 @@ export function removeAgent(name: string): void {
   writeConfig(cfg);
 }
 
-/** Resolve agent config from SYNAP_AGENT env var. Returns null if not set. */
+/** Resolve agent config from SYNAP_AGENT env var. Returns null if not set.
+ * cfg.agents holds named agents (synap agents create). cfg.agentKeys holds
+ * surface-provisioned identities (synap connect --target=<surface>). Both represent
+ * the same concept — a named agent identity — so SYNAP_AGENT resolves across both. */
 export function resolveAgentOverride(): AgentProfile | null {
   const name = process.env.SYNAP_AGENT;
   if (!name) return null;
-  return getAgent(name);
+
+  const fromAgents = getAgent(name);
+  if (fromAgents) return fromAgents;
+
+  const cfg = readConfig();
+  const surfaceKey = cfg.agentKeys?.[name];
+  if (surfaceKey?.hubApiKey) {
+    return {
+      podName: cfg.activePod ?? "default",
+      apiKey: surfaceKey.hubApiKey,
+      agentUserId: surfaceKey.agentUserId,
+      label: name,
+      createdAt: "",
+    };
+  }
+
+  return null;
 }

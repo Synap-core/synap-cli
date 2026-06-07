@@ -1011,28 +1011,42 @@ export async function isStep(
   if (openclawFound && isActive) {
     const ocRuntime = detectOpenClaw();
 
-    if (ocRuntime.runtime === "docker") {
-      // Docker path: write via openclaw config set
-      const containerName = ocRuntime.containerName ?? "openclaw";
-      const { configureOc } = await prompts({
-        type: "confirm",
-        name: "configureOc",
-        message: "Configure Synap IS as OpenClaw AI provider?",
-        initial: true,
-      });
+    const { configureOc } = await prompts({
+      type: "confirm",
+      name: "configureOc",
+      message: "Configure Synap IS as OpenClaw AI provider?",
+      initial: true,
+    });
 
-      if (configureOc) {
-        const synapProvider = {
-          baseUrl: `${podUrl}/v1`,
-          api: "openai-completions",
-          apiKey,
-          models: [
-            { id: "synap/auto", name: "Synap Auto", contextWindow: 200000, maxTokens: 8192 },
-            { id: "synap/balanced", name: "Synap Balanced", contextWindow: 131072, maxTokens: 8192 },
-            { id: "synap/advanced", name: "Synap Advanced", contextWindow: 200000, maxTokens: 8192 },
-          ],
-        };
+    if (configureOc) {
+      // Fetch real model IDs from the pod so OpenClaw shows actual provider names
+      const { fetchPodProviders } = await import("./providers.js");
+      const podProviders = await fetchPodProviders(podUrl, apiKey);
 
+      const models: Array<{ id: string; name: string; contextWindow?: number }> =
+        podProviders.flatMap((p) =>
+          p.models.map((m) => ({
+            id: `${p.providerId}/${m.id}`,
+            name: `${p.name} — ${m.id}`,
+            ...(m.contextWindow ? { contextWindow: m.contextWindow } : {}),
+          }))
+        );
+
+      if (models.length === 0) {
+        log.warn("No model IDs found — configure models in pod admin → Intelligence → Providers.");
+        log.dim("Skipping OpenClaw AI provider setup. Re-run: synap finish");
+        return;
+      }
+
+      const synapProvider = {
+        baseUrl: `${podUrl}/v1`,
+        api: "openai-completions",
+        apiKey,
+        models,
+      };
+
+      if (ocRuntime.runtime === "docker") {
+        const containerName = ocRuntime.containerName ?? "openclaw";
         const spinner = ora("Writing Synap IS provider to OpenClaw config...").start();
         try {
           execSync(
@@ -1040,9 +1054,7 @@ export async function isStep(
             { stdio: "pipe", timeout: 15000 }
           );
           spinner.succeed("Synap IS registered as OpenClaw provider");
-          log.dim("Available models: synap/auto, synap/balanced, synap/advanced");
-
-          // Restart to apply (Docker has no hot reload)
+          log.dim(`Models: ${models.slice(0, 3).map((m) => m.id).join(", ")}${models.length > 3 ? ` +${models.length - 3} more` : ""}`);
           try {
             execSync(`docker restart ${containerName}`, { stdio: "pipe", timeout: 30000 });
             log.dim("Container restarted to pick up new config");
@@ -1053,34 +1065,14 @@ export async function isStep(
           const stderr = (err as { stderr?: Buffer }).stderr?.toString().trim();
           spinner.fail("Failed to set Synap IS provider");
           if (stderr) log.dim(stderr);
-          log.dim("Run manually:");
           log.dim(`  docker exec ${containerName} openclaw config set models.providers.synap.baseUrl ${podUrl}/v1`);
-          log.dim(`  docker exec ${containerName} openclaw config set models.providers.synap.api openai-completions`);
         }
-      }
-    } else {
-      // Local install path: write to config file directly
-      const { configureOc } = await prompts({
-        type: "confirm",
-        name: "configureOc",
-        message: "Configure Synap IS as OpenClaw AI provider?",
-        initial: true,
-      });
-
-      if (configureOc) {
+      } else {
         const config = readOpenClawConfig() ?? {};
-        setConfigValue(config, "models.providers.synap", {
-          baseUrl: `${podUrl}/v1`,
-          api: "openai-completions",
-          apiKey,
-          models: [
-            { id: "synap/auto", name: "Synap Auto", contextWindow: 200000, maxTokens: 8192 },
-            { id: "synap/balanced", name: "Synap Balanced", contextWindow: 131072, maxTokens: 8192 },
-            { id: "synap/advanced", name: "Synap Advanced", contextWindow: 200000, maxTokens: 8192 },
-          ],
-        });
+        setConfigValue(config, "models.providers.synap", synapProvider);
         writeOpenClawConfig(config);
         log.success("Synap IS configured as OpenClaw provider — restart OpenClaw to apply");
+        log.dim(`Models: ${models.slice(0, 3).map((m) => m.id).join(", ")}${models.length > 3 ? ` +${models.length - 3} more` : ""}`);
       }
     }
   }

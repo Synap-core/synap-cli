@@ -4,6 +4,12 @@
  * Structured knowledge capture and retrieval using the engineering_knowledge
  * entity profile. Backed by Hub Protocol entity endpoints — separate from the
  * episodic /memory endpoints used by `synap remember` / `synap recall`.
+ *
+ * Workspace routing:
+ *   capture   → memory workspace by default (auto-approved, agent-private)
+ *   recall    → memory workspace by default
+ *   --team    → first product workspace instead
+ *   --workspace <id>  → explicit override (highest priority)
  */
 
 import chalk from "chalk";
@@ -14,6 +20,7 @@ import {
   hubPost,
   hubGet,
 } from "../lib/hub-client.js";
+import { getAgentWorkspaceRouting } from "../lib/pod.js";
 
 interface BaseOpts {
   podUrl?: string;
@@ -28,6 +35,10 @@ export interface CaptureOpts {
   why?: string;
   evidence?: string;
   tags?: string;
+  /** Override to first product workspace instead of memory workspace */
+  team?: boolean;
+  /** Explicit workspace override — highest priority */
+  workspace?: string;
   json?: boolean;
 }
 
@@ -35,8 +46,31 @@ export interface RecallStructuredOpts extends BaseOpts {
   type?: KnowledgeType;
   tags?: string;
   limit?: string;
+  /** Override to first product workspace instead of memory workspace */
+  team?: boolean;
+  /** Explicit workspace override — highest priority */
   workspace?: string;
   json?: boolean;
+}
+
+/**
+ * Resolve the workspace to use for capture/recall based on routing config.
+ * Priority: --workspace > --team (first product ws) > memory ws > active ws.
+ */
+function resolveKnowledgeWorkspace(
+  opts: { team?: boolean; workspace?: string },
+  activeWorkspaceId: string | undefined
+): { workspaceId: string | undefined; source: string } {
+  if (opts.workspace) {
+    return { workspaceId: opts.workspace, source: "explicit" };
+  }
+  const routing = getAgentWorkspaceRouting();
+  if (opts.team) {
+    const teamWs = routing?.productWorkspaceIds?.[0];
+    return { workspaceId: teamWs ?? activeWorkspaceId, source: teamWs ? "team" : "active (no team workspace configured)" };
+  }
+  const memWs = routing?.memoryWorkspaceId;
+  return { workspaceId: memWs ?? activeWorkspaceId, source: memWs ? "memory" : "active (run `synap connect` to configure routing)" };
 }
 
 export async function captureKnowledge(opts: CaptureOpts): Promise<void> {
@@ -44,13 +78,14 @@ export async function captureKnowledge(opts: CaptureOpts): Promise<void> {
     const cfg = await resolveHubConfig();
     const userId = await resolveUserId(cfg);
 
-    const workspaceId = cfg.workspaceId;
+    const { workspaceId, source } = resolveKnowledgeWorkspace(opts, cfg.workspaceId);
+
     if (!workspaceId) {
       console.error(
         chalk.red(
           "No workspace set. Run:\n" +
-          "  synap workspace provision-agent   (create your agent workspace)\n" +
-          "  synap use <workspace-id>           (set it as active)"
+          "  synap connect   (sets up memory + team workspace routing)\n" +
+          "  synap use <workspace-id>   (manual override)"
         )
       );
       process.exit(1);
@@ -76,13 +111,33 @@ export async function captureKnowledge(opts: CaptureOpts): Promise<void> {
       },
     }, cfg) as Record<string, unknown>;
 
+    // Governance may queue the write as a proposal rather than creating directly
+    const isProposed = res.status === "proposed" || Boolean(res.proposalId);
+
     if (opts.json) {
-      console.log(JSON.stringify({ id: res.id, stored: true }, null, 2));
+      if (isProposed) {
+        console.log(JSON.stringify({
+          proposed: true,
+          proposalId: res.proposalId ?? res.id,
+          reviewUrl: res.reviewUrl ?? null,
+          message: "Write queued for approval — not yet stored.",
+        }, null, 2));
+      } else {
+        console.log(JSON.stringify({ id: res.id, stored: true, workspace: source }, null, 2));
+      }
       return;
     }
 
-    log.success(`[${opts.type}] ${opts.claim.slice(0, 80)}`);
-    if (res.id) log.dim(`  id: ${res.id}`);
+    if (isProposed) {
+      log.warn(`Queued for approval — not yet stored.`);
+      log.dim(`  The target workspace requires human review for agent writes.`);
+      if (res.reviewUrl) log.dim(`  Review: ${String(res.reviewUrl)}`);
+      else log.dim(`  Open Synap and approve the pending proposal to persist this entry.`);
+      log.dim(`  Tip: use the memory workspace (default) to capture without governance.`);
+    } else {
+      log.success(`[${opts.type}] ${opts.claim.slice(0, 80)}`);
+      log.dim(`  workspace: ${source}  id: ${String(res.id ?? "")}`);
+    }
   } catch (e) {
     console.error(chalk.red("Error: " + (e as Error).message));
     process.exit(1);
@@ -97,13 +152,14 @@ export async function recallStructured(
     const cfg = await resolveHubConfig(opts);
     const limit = parseInt(opts.limit ?? "10", 10);
 
+    const { workspaceId } = resolveKnowledgeWorkspace(opts, cfg.workspaceId);
+
     const params: Record<string, string | number> = {
       profileSlug: "engineering_knowledge",
       q: query,
       limit,
     };
 
-    const workspaceId = opts.workspace ?? cfg.workspaceId;
     if (workspaceId) params.workspaceId = workspaceId;
 
     const res = await hubGet("/entities", params, cfg) as Record<string, unknown>;

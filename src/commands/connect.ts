@@ -26,7 +26,6 @@ import {
   installForTarget,
   isTargetName,
   listTargets,
-  resolveWorkspaceId,
   TARGETS,
   type TargetName,
 } from "../lib/targets.js";
@@ -78,12 +77,7 @@ export async function connect(opts: ConnectOptions): Promise<void> {
   const target = await resolveTarget(opts.target);
   if (!target) return;
 
-  // ── Step 4: Workspace scope ─────────────────────────────────────────────
-  // Ask once — all targets go through this so the choice is consistent.
-  // Each installer then persists the choice in whatever way that surface expects.
-  workspaceId = await resolveWorkspaceId({ podUrl, apiKey, workspaceId });
-
-  // ── Step 5: Install ─────────────────────────────────────────────────────
+  // ── Step 4: Install ─────────────────────────────────────────────────────
   log.heading(`Connecting ${TARGETS[target].label} → ${podUrl}`);
 
   const ok = await installForTarget(target, { podUrl, apiKey, workspaceId, agentUserId });
@@ -91,6 +85,13 @@ export async function connect(opts: ConnectOptions): Promise<void> {
   log.blank();
   if (ok) {
     log.success(`${TARGETS[target].label} connected to ${podUrl}`);
+    // For MCP targets, surface the provider pull option — lets users get real
+    // AI provider credentials from the pod vault into their local tool config.
+    if (TARGETS[target].supports.mcp) {
+      log.blank();
+      log.dim("To also configure an AI provider (opencode, aider, etc.) from the pod:");
+      log.dim("  synap providers pull");
+    }
     log.dim("Run 'synap connections' to see all surface connections.");
   } else {
     log.warn(`${TARGETS[target].label} install did not complete — see above.`);
