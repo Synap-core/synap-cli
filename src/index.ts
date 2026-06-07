@@ -903,6 +903,64 @@ automation
     await automationSchema(opts);
   });
 
+// ─── connect (top-level shorthand) ───────────────────────────────────────────
+
+program
+  .command("connect-service [service]")
+  .description("Connect an external service (Google, GitHub, Notion, Linear, Slack, …)")
+  .option("--workspace <id>", "Workspace context")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (service: string | undefined, opts) => {
+    const { connectorsConnect } = await import("./commands/connectors.js");
+    await connectorsConnect(service, opts);
+  });
+
+// ─── connectors ──────────────────────────────────────────────────────────────
+
+const connectors = program
+  .command("connectors")
+  .description("Manage pod connector integrations (Nango-powered)");
+
+connectors
+  .command("list")
+  .description("List available connectors and connection status")
+  .option("--json", "Output as JSON")
+  .option("--workspace <id>", "Workspace context")
+  .action(async (opts) => {
+    const { connectorsList } = await import("./commands/connectors.js");
+    await connectorsList(opts);
+  });
+
+connectors
+  .command("sync <provider>")
+  .description("Trigger a manual sync for a connected provider")
+  .option("--workspace <id>", "Workspace context")
+  .action(async (provider: string, opts) => {
+    const { connectorsSync } = await import("./commands/connectors.js");
+    await connectorsSync(provider, opts);
+  });
+
+connectors
+  .command("disconnect <provider>")
+  .description("Revoke a connector connection")
+  .option("--workspace <id>", "Workspace context")
+  .option("--force", "Skip confirmation")
+  .action(async (provider: string, opts) => {
+    const { connectorsDisconnect } = await import("./commands/connectors.js");
+    await connectorsDisconnect(provider, opts);
+  });
+
+connectors
+  .command("schema")
+  .description("Fetch connector schema and supported providers (AI context)")
+  .option("--write-context [path]", "Write to .claude/CONNECTOR_CONTEXT.md")
+  .option("--json", "Output raw JSON instead of formatted markdown")
+  .action(async (opts) => {
+    const { connectorsSchema } = await import("./commands/connectors.js");
+    await connectorsSchema(opts);
+  });
+
 // ─── providers ───────────────────────────────────────────────────────────────
 
 const providers = program
