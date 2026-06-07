@@ -443,40 +443,49 @@ program
     await searchData(query, opts);
   });
 
-// ─── remember / recall ────────────────────────────────────────────────────────
+// ─── note ─────────────────────────────────────────────────────────────────────
+// Creates a `note` entity in the agent memory workspace.
+// Replaces `synap remember` (episodic /memory store) — notes are real entities.
 
 program
-  .command("remember <text>")
-  .description("Store a memory on the pod")
-  .option("--context <entity-id>", "Link memory to an entity")
+  .command("note <text>")
+  .description("Save a note to your memory workspace (creates a note entity, fully searchable)")
+  .option("--context <entity-id>", "Link this note to an entity")
   .option("--json", "Output as JSON")
   .option("--pod-url <url>", "Pod URL override")
   .option("--api-key <key>", "API key override")
   .action(async (text: string, opts) => {
-    const { rememberData } = await import("./commands/data.js");
-    await rememberData(text, opts);
+    const { noteData } = await import("./commands/data.js");
+    await noteData(text, opts);
   });
 
 program
+  .command("remember <text>")
+  .description("(Deprecated — use: synap note) Save a note to your memory workspace")
+  .option("--context <entity-id>", "Link note to an entity")
+  .option("--json", "Output as JSON")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (text: string, opts) => {
+    process.stderr.write("⚠️  `synap remember` is deprecated — use `synap note` instead.\n");
+    const { noteData } = await import("./commands/data.js");
+    await noteData(text, opts);
+  });
+
+// ─── recall ───────────────────────────────────────────────────────────────────
+// Unified entity + document search. No --structured split — one command, one store.
+
+program
   .command("recall <query>")
-  .description("Retrieve memories from the pod (add --structured for knowledge entities)")
-  .option("--structured", "Search structured knowledge entities instead of episodic memory")
-  .option("--type <type>", "Filter by entry type: gotcha|lesson|decision|reference (--structured only)")
-  .option("--tags <csv>", "Filter by tags e.g. repo:synap-backend (--structured only)")
-  .option("--team", "Search team/product workspace instead of memory workspace (--structured only)")
-  .option("--workspace <id>", "Explicit workspace override (--structured only)")
+  .description("Search your pod for entities and documents matching the query")
+  .option("--workspace <id>", "Scope to a specific workspace (omit for pod-wide)")
   .option("--limit <n>", "Max results", "10")
   .option("--json", "Output as JSON")
   .option("--pod-url <url>", "Pod URL override")
   .option("--api-key <key>", "API key override")
   .action(async (query: string, opts) => {
-    if (opts.structured) {
-      const { recallStructured } = await import("./commands/knowledge.js");
-      await recallStructured(query, opts);
-    } else {
-      const { recallData } = await import("./commands/data.js");
-      await recallData(query, opts);
-    }
+    const { recallData } = await import("./commands/data.js");
+    await recallData(query, opts);
   });
 
 // ─── capture ──────────────────────────────────────────────────────────────────
@@ -570,6 +579,52 @@ list
   .action(async (opts) => {
     const { listEntities } = await import("./commands/data.js");
     await listEntities(opts);
+  });
+
+// ─── show ─────────────────────────────────────────────────────────────────────
+// Entity detail + its relations — one command to understand any node in the graph.
+
+program
+  .command("show <id>")
+  .description("Show an entity with its properties and all linked relations")
+  .option("--json", "Output as JSON")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (id: string, opts) => {
+    const { showEntity } = await import("./commands/data-extra.js");
+    await showEntity(id, opts);
+  });
+
+// ─── proposals ────────────────────────────────────────────────────────────────
+// Governance inbox — pending proposals attributed to this agent.
+
+program
+  .command("proposals")
+  .description("List pending governance proposals for this agent")
+  .option("--workspace <id>", "Scope to a specific workspace")
+  .option("--limit <n>", "Max results", "20")
+  .option("--json", "Output as JSON")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (opts) => {
+    const { listProposals } = await import("./commands/data-extra.js");
+    await listProposals(opts);
+  });
+
+// ─── browse ───────────────────────────────────────────────────────────────────
+// Paginated entity list — cleaner than `list entities`.
+
+program
+  .command("browse [profile]")
+  .description("Browse entities in the active workspace, optionally filtered by profile type")
+  .option("--workspace <id>", "Scope to a specific workspace")
+  .option("--limit <n>", "Max results", "20")
+  .option("--json", "Output as JSON")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (profile: string | undefined, opts) => {
+    const { browseEntities } = await import("./commands/data-extra.js");
+    await browseEntities({ ...opts, profile });
   });
 
 // ─── get ──────────────────────────────────────────────────────────────────────
@@ -761,6 +816,91 @@ agent
   .action(async (opts: { dryRun?: boolean; podUrl?: string; apiKey?: string }) => {
     const { agentTick } = await import("./commands/agent-run.js");
     await agentTick(opts);
+  });
+
+// ─── automation ──────────────────────────────────────────────────────────────
+
+function collect(val: string, prev: string[]) { return [...prev, val]; }
+
+const automation = program
+  .command("automation")
+  .description("Create, manage, and inspect pod automations");
+
+automation
+  .command("list")
+  .description("List automations on the pod")
+  .option("--workspace <id>", "Filter by workspace")
+  .option("--status <status>", "Filter by status (active|draft|paused|error)")
+  .option("--json", "Output raw JSON")
+  .action(async (opts) => {
+    const { automationList } = await import("./commands/automation.js");
+    await automationList(opts);
+  });
+
+automation
+  .command("describe <id>")
+  .description("Show full details of an automation")
+  .option("--workspace <id>")
+  .option("--json")
+  .action(async (id: string, opts) => {
+    const { automationDescribe } = await import("./commands/automation.js");
+    await automationDescribe(id, opts);
+  });
+
+automation
+  .command("create")
+  .description("Create an automation (quick flags or --from file.yaml)")
+  .option("--name <name>", "Automation name (required in quick mode)")
+  .option("--trigger <spec>", "event:<pattern> | cron:<expr> | webhook | manual")
+  .option("--filter <kv>", "key=value filter (event triggers, repeatable)", collect, [])
+  .option("--action <type>", "notify | channel-message | none (default: none)")
+  .option("--message <text>", "Message content for notify/channel-message")
+  .option("--channel <id>", "Channel ID for channel-message action")
+  .option("--status <status>", "draft (default) | active")
+  .option("--description <text>", "Description")
+  .option("--workspace <id>", "Workspace ID")
+  .option("--from <file>", "Create from YAML/JSON file instead of flags")
+  .action(async (opts) => {
+    const { automationCreate } = await import("./commands/automation.js");
+    await automationCreate(opts);
+  });
+
+automation
+  .command("enable <id>")
+  .description("Activate an automation")
+  .option("--workspace <id>")
+  .action(async (id: string, opts) => {
+    const { automationEnable } = await import("./commands/automation.js");
+    await automationEnable(id, opts);
+  });
+
+automation
+  .command("disable <id>")
+  .description("Pause an automation")
+  .option("--workspace <id>")
+  .action(async (id: string, opts) => {
+    const { automationDisable } = await import("./commands/automation.js");
+    await automationDisable(id, opts);
+  });
+
+automation
+  .command("delete <id>")
+  .description("Delete an automation")
+  .option("--workspace <id>")
+  .option("--force", "Skip confirmation prompt")
+  .action(async (id: string, opts) => {
+    const { automationDelete } = await import("./commands/automation.js");
+    await automationDelete(id, opts);
+  });
+
+automation
+  .command("schema")
+  .description("Fetch the automation DSL schema from the pod (AI context)")
+  .option("--write-context [path]", "Write markdown context file for Claude Code")
+  .option("--json", "Output raw JSON instead of formatted markdown")
+  .action(async (opts) => {
+    const { automationSchema } = await import("./commands/automation.js");
+    await automationSchema(opts);
   });
 
 // ─── providers ───────────────────────────────────────────────────────────────
