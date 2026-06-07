@@ -989,4 +989,18 @@ providers
     await providersPull(opts);
   });
 
+// ─── keys ────────────────────────────────────────────────────────────────────
+
+const keys = program
+  .command("keys")
+  .description("Manage pod API keys");
+
+keys
+  .command("rotate")
+  .description("Rotate your CLI key to pick up the latest scope set")
+  .action(async () => {
+    const { keysRotate } = await import("./commands/keys.js");
+    await keysRotate({});
+  });
+
 program.parse();
