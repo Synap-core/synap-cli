@@ -22,7 +22,8 @@ import { readFileSync } from "fs";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
 import { log, banner } from "../utils/logger.js";
-import { checkPodHealth, getActivePodConfig, listPodProfiles } from "../lib/pod.js";
+import { checkPodHealth, getActivePodConfig, listPodProfiles, getAgentWorkspaceRouting } from "../lib/pod.js";
+import { resolveHubConfig, hubGet } from "../lib/hub-client.js";
 import {
   isLoggedIn,
   getStoredToken,
@@ -195,6 +196,45 @@ export async function status(): Promise<void> {
     } catch {
       log.dim("Could not check IS status");
     }
+  }
+
+  // ── Data Context ───────────────────────────────────────────────────────
+  // Show who the agent is, what workspace is active, and pending proposals.
+  log.heading("Data Context");
+  if (localConfig?.podUrl ?? podUrl) {
+    const routing = getAgentWorkspaceRouting();
+    const memWs = routing?.memoryWorkspaceId;
+    if (localConfig?.workspaceId) {
+      log.info(`Active ws  : ${localConfig.workspaceId}`);
+    }
+    if (localConfig?.agentUserId) {
+      log.info(`Agent user : ${localConfig.agentUserId}`);
+    }
+    if (memWs) {
+      log.info(`Memory ws  : ${memWs}`);
+    }
+    if (podHealthy) {
+      try {
+        const cfg = await resolveHubConfig();
+        const proposalsRes = await hubGet("/proposals", { status: "pending", limit: 1 }, cfg)
+          .catch(() => null);
+        if (proposalsRes) {
+          const total = Number(
+            (proposalsRes as Record<string, unknown>).total ??
+            ((proposalsRes as Record<string, unknown[]>).proposals?.length ?? 0)
+          );
+          if (total > 0) {
+            log.warn(`${total} pending proposal${total !== 1 ? "s" : ""} — run: synap proposals`);
+          } else {
+            log.dim("No pending proposals.");
+          }
+        }
+      } catch {
+        log.dim("Could not check proposals.");
+      }
+    }
+  } else {
+    log.dim("No pod connected — run: synap init");
   }
 
   // ── Next Steps ─────────────────────────────────────────────────────────

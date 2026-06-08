@@ -598,8 +598,12 @@ program
 // ─── proposals ────────────────────────────────────────────────────────────────
 // Governance inbox — pending proposals attributed to this agent.
 
-program
+const proposals = program
   .command("proposals")
+  .description("Review and act on governance proposals");
+
+proposals
+  .command("list", { isDefault: true })
   .description("List pending governance proposals for this agent")
   .option("--workspace <id>", "Scope to a specific workspace")
   .option("--limit <n>", "Max results", "20")
@@ -609,6 +613,30 @@ program
   .action(async (opts) => {
     const { listProposals } = await import("./commands/data-extra.js");
     await listProposals(opts);
+  });
+
+proposals
+  .command("approve <id>")
+  .description("Approve a pending proposal")
+  .option("--reason <text>", "Optional approval note")
+  .option("--json", "Output as JSON")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (id: string, opts) => {
+    const { approveProposal } = await import("./commands/proposals-actions.js");
+    await approveProposal(id, opts);
+  });
+
+proposals
+  .command("reject <id>")
+  .description("Reject a pending proposal")
+  .option("--reason <text>", "Rejection reason")
+  .option("--json", "Output as JSON")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (id: string, opts) => {
+    const { rejectProposal } = await import("./commands/proposals-actions.js");
+    await rejectProposal(id, opts);
   });
 
 // ─── browse ───────────────────────────────────────────────────────────────────
@@ -625,6 +653,39 @@ program
   .action(async (profile: string | undefined, opts) => {
     const { browseEntities } = await import("./commands/data-extra.js");
     await browseEntities({ ...opts, profile });
+  });
+
+// ─── observe ──────────────────────────────────────────────────────────────────
+// AI-maintained user model — write and query pod-scoped user observations.
+
+const observe = program
+  .command("observe")
+  .description("Write and recall pod-wide user observations (AI-maintained user model)");
+
+observe
+  .command("write <text>", { isDefault: true })
+  .description("Record an observation about the user (pod-scoped, AI-maintained)")
+  .option("--category <cat>", "working_style | communication | focus | technical | preference", "preference")
+  .option("--confidence <n>", "Confidence score 0-1", "0.5")
+  .option("--json", "Output as JSON")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (text: string, opts) => {
+    const { observeWrite } = await import("./commands/observe.js");
+    await observeWrite(text, opts);
+  });
+
+observe
+  .command("recall <query>")
+  .description("Search recorded user observations")
+  .option("--category <cat>", "Filter by category")
+  .option("--limit <n>", "Max results", "10")
+  .option("--json", "Output as JSON")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (query: string, opts) => {
+    const { observeRecall } = await import("./commands/observe.js");
+    await observeRecall(query, opts);
   });
 
 // ─── get ──────────────────────────────────────────────────────────────────────

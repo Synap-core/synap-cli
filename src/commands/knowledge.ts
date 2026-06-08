@@ -1,7 +1,7 @@
 /**
  * synap capture / synap recall --structured
  *
- * Structured knowledge capture and retrieval using the engineering_knowledge
+ * Structured knowledge capture and retrieval using the knowledge
  * entity profile. Backed by Hub Protocol entity endpoints — separate from the
  * episodic /memory endpoints used by `synap remember` / `synap recall`.
  *
@@ -19,6 +19,7 @@ import {
   resolveUserId,
   hubPost,
   hubGet,
+  type HubConfig,
 } from "../lib/hub-client.js";
 import { getAgentWorkspaceRouting } from "../lib/pod.js";
 
@@ -54,13 +55,29 @@ export interface RecallStructuredOpts extends BaseOpts {
 }
 
 /**
- * Resolve the workspace to use for capture/recall based on routing config.
- * Priority: --workspace > --team (first product ws) > memory ws > active ws.
+ * Live-detect an agent workspace (workspaceType: "agent") from the pod.
+ * Falls back silently if the request fails or none exists.
  */
-function resolveKnowledgeWorkspace(
+async function detectAgentWorkspace(cfg: HubConfig): Promise<string | undefined> {
+  try {
+    const res = await hubGet("/workspaces", {}, cfg) as Record<string, unknown>;
+    const list = ((res.workspaces as unknown[]) ?? (Array.isArray(res) ? (res as unknown[]) : [])) as Record<string, unknown>[];
+    const agentWs = list.find((w) => w.workspaceType === "agent");
+    if (agentWs?.id) return String(agentWs.id);
+  } catch { /* best-effort */ }
+  return undefined;
+}
+
+/**
+ * Resolve the workspace to use for capture/recall based on routing config.
+ * Priority: --workspace > --team (first product ws) > persisted memory ws
+ *           > live-detected agent workspace > active ws.
+ */
+async function resolveKnowledgeWorkspace(
   opts: { team?: boolean; workspace?: string },
+  cfg: HubConfig,
   activeWorkspaceId: string | undefined
-): { workspaceId: string | undefined; source: string } {
+): Promise<{ workspaceId: string | undefined; source: string }> {
   if (opts.workspace) {
     return { workspaceId: opts.workspace, source: "explicit" };
   }
@@ -69,8 +86,12 @@ function resolveKnowledgeWorkspace(
     const teamWs = routing?.productWorkspaceIds?.[0];
     return { workspaceId: teamWs ?? activeWorkspaceId, source: teamWs ? "team" : "active (no team workspace configured)" };
   }
-  const memWs = routing?.memoryWorkspaceId;
-  return { workspaceId: memWs ?? activeWorkspaceId, source: memWs ? "memory" : "active (run `synap connect` to configure routing)" };
+  // Persisted routing first; if absent, live-detect agent workspace from pod
+  const memWs = routing?.memoryWorkspaceId ?? await detectAgentWorkspace(cfg);
+  return {
+    workspaceId: memWs ?? activeWorkspaceId,
+    source: memWs ? "agent-workspace" : "active (run `synap connect` to configure routing)",
+  };
 }
 
 export async function captureKnowledge(opts: CaptureOpts): Promise<void> {
@@ -78,7 +99,7 @@ export async function captureKnowledge(opts: CaptureOpts): Promise<void> {
     const cfg = await resolveHubConfig();
     const userId = await resolveUserId(cfg);
 
-    const { workspaceId, source } = resolveKnowledgeWorkspace(opts, cfg.workspaceId);
+    const { workspaceId, source } = await resolveKnowledgeWorkspace(opts, cfg, cfg.workspaceId);
 
     if (!workspaceId) {
       console.error(
@@ -100,7 +121,7 @@ export async function captureKnowledge(opts: CaptureOpts): Promise<void> {
     const res = await hubPost("/entities", {
       userId,
       workspaceId,
-      profileSlug: "engineering_knowledge",
+      profileSlug: "knowledge",
       title,
       properties: {
         ek_type: opts.type,
@@ -152,10 +173,10 @@ export async function recallStructured(
     const cfg = await resolveHubConfig(opts);
     const limit = parseInt(opts.limit ?? "10", 10);
 
-    const { workspaceId } = resolveKnowledgeWorkspace(opts, cfg.workspaceId);
+    const { workspaceId } = await resolveKnowledgeWorkspace(opts, cfg, cfg.workspaceId);
 
     const params: Record<string, string | number> = {
-      profileSlug: "engineering_knowledge",
+      profileSlug: "knowledge",
       q: query,
       limit,
     };

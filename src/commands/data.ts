@@ -1,11 +1,24 @@
 import chalk from "chalk";
 import { log } from "../utils/logger.js";
 import { resolveHubConfig, resolveUserId, hubGet, hubPost, hubPatch } from "../lib/hub-client.js";
+import { getAgentWorkspaceRouting } from "../lib/pod.js";
 
-interface BaseOpts {
+export interface BaseOpts {
   json?: boolean;
   podUrl?: string;
   apiKey?: string;
+}
+
+export const parseLimit = (s: string | undefined, def: number): number =>
+  s ? parseInt(s, 10) : def;
+
+export function formatHit(hit: Record<string, unknown>): { title: string; type: string; id: string } {
+  const doc = (hit.document ?? hit) as Record<string, unknown>;
+  return {
+    title: String(doc.title ?? doc.id ?? hit.id ?? ""),
+    type: String(doc.entityType ?? doc.profileSlug ?? hit.collection ?? ""),
+    id: String(doc.id ?? hit.id ?? "").slice(0, 8),
+  };
 }
 
 // ─── orient ───────────────────────────────────────────────────────────────────
@@ -113,7 +126,6 @@ export async function useWorkspace(
       return;
     }
     log.success(`Now in workspace: ${chalk.bold(String(match.name ?? match.id))} ${chalk.dim(String(match.id ?? ""))}`);
-    void userId; // consumed by resolveUserId side-effect
   } catch (e) {
     console.error(chalk.red("Error: " + (e as Error).message));
     process.exit(1);
@@ -156,7 +168,7 @@ export async function listEntities(
   try {
     const cfg = await resolveHubConfig(opts);
     const userId = await resolveUserId(cfg);
-    const limit = parseInt(opts.limit ?? "20", 10);
+    const limit = parseLimit(opts.limit, 20);
     const res = await hubGet("/entities", {
       userId,
       workspaceId: opts.workspace ?? cfg.workspaceId,
@@ -231,7 +243,7 @@ export async function searchData(
   try {
     const cfg = await resolveHubConfig(opts);
     const userId = await resolveUserId(cfg);
-    const limit = parseInt(opts.limit ?? "20", 10);
+    const limit = parseLimit(opts.limit, 20);
 
     let collections: string | undefined;
     if (opts.type === "entity") collections = "entities";
@@ -287,13 +299,8 @@ export async function searchData(
       return;
     }
     for (const hit of rawHits) {
-      const h = hit as Record<string, unknown>;
-      // Search hits: { id, collection, document: { id, title, entityType, ... } }
-      const doc = (h.document ?? h) as Record<string, unknown>;
-      const name = String(doc.title ?? doc.id ?? h.id ?? "");
-      const type = String(doc.entityType ?? doc.profileSlug ?? h.collection ?? "");
-      const id = String(doc.id ?? h.id ?? "").slice(0, 8);
-      log.info(`${name} ${chalk.dim(`[${type}]`)} ${chalk.dim(id)}`);
+      const { title, type, id } = formatHit(hit as Record<string, unknown>);
+      log.info(`${title} ${chalk.dim(`[${type}]`)} ${chalk.dim(id)}`);
     }
   } catch (e) {
     console.error(chalk.red("Error: " + (e as Error).message));
@@ -301,30 +308,48 @@ export async function searchData(
   }
 }
 
-// ─── rememberData ─────────────────────────────────────────────────────────────
+// ─── noteData ─────────────────────────────────────────────────────────────────
 
-export async function rememberData(
+export async function noteData(
   text: string,
-  opts: BaseOpts & { context?: string }
+  opts: BaseOpts & { context?: string; json?: boolean }
 ): Promise<void> {
   try {
     const cfg = await resolveHubConfig(opts);
     const userId = await resolveUserId(cfg);
-    const res = await hubPost("/memory", {
-      userId,
-      fact: text,
-      sourceEntityId: opts.context,
-    }, cfg);
 
-    const data = res as Record<string, unknown>;
-    const id = String(data.id ?? "");
+    const routing = getAgentWorkspaceRouting();
+    const workspaceId = routing?.memoryWorkspaceId ?? cfg.workspaceId;
+    if (!workspaceId) {
+      console.error(chalk.red("No workspace set. Run: synap workspace provision-agent"));
+      process.exit(1);
+    }
+
+    const res = await hubPost("/entities", {
+      userId,
+      profileSlug: "note",
+      title: text.slice(0, 200),
+      workspaceId,
+      properties: opts.context ? { sourceEntityId: opts.context } : {},
+    }, cfg) as Record<string, unknown>;
+
+    const isProposed = res.status === "proposed" || Boolean(res.proposalId);
 
     if (opts.json) {
-      console.log(JSON.stringify({ id, stored: true }, null, 2));
+      if (isProposed) {
+        console.log(JSON.stringify({ proposed: true, proposalId: res.proposalId ?? res.id }, null, 2));
+      } else {
+        console.log(JSON.stringify({ id: res.id, stored: true }, null, 2));
+      }
       return;
     }
 
-    log.success(`Stored: "${text.slice(0, 80)}"`);
+    if (isProposed) {
+      log.warn(`Queued for approval (proposal: ${String(res.proposalId ?? "")})`);
+      if (res.reviewUrl) log.dim(`  Review: ${String(res.reviewUrl)}`);
+    } else {
+      log.success(`Note saved: "${text.slice(0, 80)}" ${chalk.dim(String(res.id ?? "").slice(0, 8))}`);
+    }
   } catch (e) {
     console.error(chalk.red("Error: " + (e as Error).message));
     process.exit(1);
@@ -332,33 +357,49 @@ export async function rememberData(
 }
 
 // ─── recallData ───────────────────────────────────────────────────────────────
+// Unified search: entities + documents via Typesense.
+// Replaces the old episodic /memory recall — one command, one store.
 
 export async function recallData(
   query: string,
-  opts: BaseOpts & { limit?: string }
+  opts: BaseOpts & { workspace?: string; limit?: string; json?: boolean }
 ): Promise<void> {
   try {
     const cfg = await resolveHubConfig(opts);
     const userId = await resolveUserId(cfg);
-    const limit = parseInt(opts.limit ?? "20", 10);
-    const res = await hubGet("/memory", { userId, q: query, limit }, cfg);
-    const memories = (res as { memories?: unknown[] }).memories ?? (res as unknown[]);
-    const list = Array.isArray(memories) ? memories : [];
+    const limit = parseLimit(opts.limit, 10);
+    const workspaceId = opts.workspace ?? cfg.workspaceId;
+
+    const res = await hubGet("/search", {
+      userId,
+      query,
+      ...(workspaceId ? { workspaceId } : {}),
+      limit,
+    }, cfg) as Record<string, unknown>;
+
+    const rawHits =
+      (res.hits as unknown[]) ??
+      (res.results as unknown[]) ??
+      (Array.isArray(res) ? (res as unknown[]) : []);
 
     if (opts.json) {
-      console.log(JSON.stringify({ memories: list }, null, 2));
+      console.log(JSON.stringify({ query, total: rawHits.length, results: rawHits }, null, 2));
       return;
     }
 
-    if (list.length === 0) {
-      log.dim("No memories found.");
+    const scope = workspaceId ? chalk.dim(` in workspace ${workspaceId.slice(0, 8)}…`) : chalk.dim(" pod-wide");
+    if (rawHits.length === 0) {
+      log.dim(`No results for "${query}"${scope}.`);
+      log.dim(`  Try broader terms, or: synap browse [profile] to see all entities.`);
       return;
     }
-    list.forEach((mem, i) => {
-      const m = mem as Record<string, unknown>;
-      const content = String(m.fact ?? m.content ?? "").slice(0, 120);
-      log.info(`${i + 1}. ${content}`);
-    });
+
+    log.dim(`${rawHits.length} result${rawHits.length !== 1 ? "s" : ""} for "${query}"${scope}:`);
+    log.blank();
+    for (const hit of rawHits) {
+      const { title, type, id } = formatHit(hit as Record<string, unknown>);
+      log.info(`${title} ${chalk.dim(`[${type}]`)} ${chalk.dim(id)}`);
+    }
   } catch (e) {
     console.error(chalk.red("Error: " + (e as Error).message));
     process.exit(1);
@@ -373,7 +414,6 @@ export async function createEntity(
   try {
     const cfg = await resolveHubConfig(opts);
     const userId = await resolveUserId(cfg);
-    // parse props as unknown then cast — user-supplied JSON
     const properties = JSON.parse(opts.props ?? "{}") as Record<string, unknown>;
     const res = await hubPost("/entities", {
       userId,
@@ -391,9 +431,12 @@ export async function createEntity(
     }
 
     if (entity.status === "proposed") {
-      log.info(`Proposed: ${opts.name} (proposal: ${String(entity.proposalId ?? "")})`);
+      log.warn(`Queued for approval — not yet created.`);
+      log.dim(`  proposal: ${String(entity.proposalId ?? entity.id ?? "")}`);
+      if (entity.reviewUrl) log.dim(`  Review: ${String(entity.reviewUrl)}`);
+      else log.dim(`  Open Synap to approve the pending proposal.`);
     } else {
-      log.success(`Created: ${opts.name} (${String(entity.id ?? "")})`);
+      log.success(`Created: ${opts.name} ${chalk.dim(String(entity.id ?? "").slice(0, 8))}`);
     }
   } catch (e) {
     console.error(chalk.red("Error: " + (e as Error).message));
