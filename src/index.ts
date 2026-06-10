@@ -1,12 +1,11 @@
 #!/usr/bin/env node
 /**
- * @synap/cli — Connect OpenClaw to sovereign knowledge infrastructure
+ * @synap/cli — Connect AI agents to your Synap data pod
  *
  * Usage:
  *   npx @synap/cli init              Full setup: detect, harden, connect, install
- *   npx @synap/cli connect           Connect OpenClaw to an existing Synap pod
- *   npx @synap/cli security-audit    Check OpenClaw for known vulnerabilities
- *   npx @synap/cli status            Show pod + OpenClaw health
+ *   npx @synap/cli connect           Connect an AI surface to a Synap pod
+ *   npx @synap/cli status            Show pod health and API status
  *   npx @synap/cli update            Update skill + check for CLI updates
  *
  * Or install globally:
@@ -37,18 +36,17 @@ const program = new Command();
 program
   .name("synap")
   .description(
-    "Synap CLI — connect OpenClaw to sovereign knowledge infrastructure"
+    "Synap CLI — connect AI agents to your data pod"
   )
   .version(version);
 
 program
   .command("init")
   .description(
-    "Full setup: detect OpenClaw, harden security, connect to Synap pod, install skill"
+    "Full setup: connect to a Synap pod and install the skill"
   )
   .option("--pod-url <url>", "Synap pod URL (skip pod choice prompt)")
   .option("--api-key <key>", "Hub Protocol API key (skip key generation)")
-  .option("--skip-security", "Skip security hardening step")
   .option("--skip-is", "Skip Intelligence Service provider setup")
   .action(async (opts) => {
     const { init } = await import("./commands/init.js");
@@ -56,26 +54,13 @@ program
   });
 
 program
-  .command("finish")
-  .description("One-shot post-install: skill, AI key, public domain, IS")
-  .option("--skip-is", "Skip Intelligence Service provider setup")
-  .option("--skip-ai-key", "Skip AI provider key setup")
-  .option("--skip-domain", "Skip public domain exposure")
-  .action(
-    async (opts: { skipIs?: boolean; skipAiKey?: boolean; skipDomain?: boolean }) => {
-      const { finish } = await import("./commands/finish.js");
-      await finish(opts);
-    }
-  );
-
-program
   .command("connect")
   .description(
-    "Connect an AI surface (Claude Code, Claude Desktop, Cursor, Raycast, OpenClaw) to a Synap pod"
+    "Connect an AI surface (Claude Code, Claude Desktop, Cursor, Raycast) to a Synap pod"
   )
   .option(
     "--target <name>",
-    "AI surface: claude-code | claude-desktop | cursor | raycast | openclaw"
+    "AI surface: claude-code | claude-desktop | cursor | raycast | custom"
   )
   .option("--pod-url <url>", "Synap pod URL")
   .option("--api-key <key>", "Hub Protocol API key")
@@ -115,7 +100,7 @@ pods
 pods
   .command("use <name>")
   .description("Switch active pod and propagate credentials to all agent surfaces")
-  .option("--surface <surface>", "Only switch this surface (raycast, claude-code, claude-desktop, cursor, openclaw)")
+  .option("--surface <surface>", "Only switch this surface (raycast, claude-code, claude-desktop, cursor)")
   .action(async (name: string, opts: { surface?: string }) => {
     const { podsUse } = await import("./commands/pods.js");
     await podsUse(name, { surface: opts.surface as import("./commands/pods.js").SurfaceName | undefined });
@@ -130,20 +115,17 @@ pods
     await podsRemove(name);
   });
 
-program
-  .command("security-audit")
-  .alias("audit")
-  .description("Check OpenClaw configuration for known vulnerabilities")
-  .option("--fix", "Auto-fix issues where possible")
-  .option("--json", "Output results as JSON")
-  .action(async (opts) => {
-    const { securityAudit } = await import("./commands/security-audit.js");
-    await securityAudit(opts);
+pods
+  .command("reconnect [name]")
+  .description("Re-authenticate a saved pod (refresh API key without re-entering the URL)")
+  .action(async (name?: string) => {
+    const { podsReconnect } = await import("./commands/pods.js");
+    await podsReconnect(name);
   });
 
 program
   .command("status")
-  .description("Show Synap pod and OpenClaw health status")
+  .description("Show Synap pod health and API status")
   .action(async () => {
     const { status } = await import("./commands/status.js");
     await status();
@@ -157,121 +139,6 @@ program
   .action(async (opts: { server?: boolean; all?: boolean }) => {
     const { update } = await import("./commands/update.js");
     await update(opts);
-  });
-
-const oc = program
-  .command("openclaw")
-  .alias("oc")
-  .description("Access, configure, and connect OpenClaw");
-
-oc
-  .command("status", { isDefault: true })
-  .description("Overview: gateway status, AI key, skill, how to connect")
-  .action(async () => {
-    const { openclawOverview } = await import("./commands/openclaw.js");
-    await openclawOverview();
-  });
-
-oc
-  .command("dashboard")
-  .alias("dash")
-  .description("Open the OpenClaw web UI (or print SSH tunnel instructions for remote servers)")
-  .action(async () => {
-    const { openclawDashboard } = await import("./commands/openclaw.js");
-    openclawDashboard();
-  });
-
-oc
-  .command("connect")
-  .description("Show MCP client configs for Claude Desktop, Cursor, Windsurf")
-  .option("--client <name>", "Specific client: claude, cursor, windsurf")
-  .action(async (opts: { client?: string }) => {
-    const { openclawConnect } = await import("./commands/openclaw.js");
-    await openclawConnect(opts);
-  });
-
-oc
-  .command("configure")
-  .alias("config")
-  .description("Set AI provider API key via OpenClaw's own config system")
-  .option("-i, --interactive", "Run OpenClaw's own interactive wizard")
-  .option("--provider <name>", "Provider: anthropic | openai | google")
-  .option("--key <key>", "API key (non-interactive)")
-  .option("--model <id>", "Model id (e.g. anthropic/claude-sonnet-4-6)")
-  .option("--show", "Print the current config")
-  .action(
-    async (opts: {
-      interactive?: boolean;
-      provider?: "anthropic" | "openai" | "google";
-      key?: string;
-      model?: string;
-      show?: boolean;
-    }) => {
-      const { openclawConfigure } = await import("./commands/openclaw.js");
-      await openclawConfigure(opts);
-    }
-  );
-
-oc
-  .command("token")
-  .description("Print the OpenClaw gateway token (for MCP clients)")
-  .option("--copy", "Copy to clipboard instead of printing")
-  .option("--for <client>", "Print a pre-filled MCP config (claude, cursor, windsurf)")
-  .action(async (opts: { copy?: boolean; for?: string }) => {
-    const { openclawToken } = await import("./commands/openclaw.js");
-    openclawToken(opts);
-  });
-
-oc
-  .command("doctor")
-  .description("Run OpenClaw's diagnostic (openclaw doctor)")
-  .option("--fix", "Auto-fix detected issues")
-  .action(async (opts: { fix?: boolean }) => {
-    const { openclawDoctor } = await import("./commands/openclaw.js");
-    openclawDoctor(opts);
-  });
-
-oc
-  .command("logs")
-  .description("Tail OpenClaw container logs")
-  .option("-n, --lines <n>", "Number of log lines", "50")
-  .option("-f, --follow", "Follow log output")
-  .action(async (opts: { lines?: string; follow?: boolean }) => {
-    const { openclawLogs } = await import("./commands/openclaw.js");
-    openclawLogs({ lines: opts.lines ? parseInt(opts.lines, 10) : 50, follow: opts.follow });
-  });
-
-oc
-  .command("restart")
-  .description("Restart the OpenClaw container")
-  .action(async () => {
-    const { openclawRestart } = await import("./commands/openclaw.js");
-    await openclawRestart();
-  });
-
-oc
-  .command("setup-domain")
-  .description("Expose the OpenClaw dashboard via a public HTTPS subdomain (Caddy)")
-  .action(async () => {
-    const { openclawSetupDomain } = await import("./commands/openclaw.js");
-    openclawSetupDomain();
-  });
-
-oc
-  .command("connections")
-  .alias("conn")
-  .description("Unified view: AI providers, skills, channels, MCP clients")
-  .action(async () => {
-    const { openclawConnections } = await import("./commands/openclaw.js");
-    openclawConnections();
-  });
-
-oc
-  .command("open [section]")
-  .description("Open the OpenClaw dashboard (optionally at a section: channels, skills, config, chat, sessions, logs)")
-  .action(async (section?: string) => {
-    const { openclawOpen } = await import("./commands/openclaw.js");
-    openclawOpen(section);
   });
 
 // ─── infra ────────────────────────────────────────────────────────────────────
@@ -339,7 +206,7 @@ program
 program
   .command("connections")
   .alias("conn")
-  .description("Show which pod each agent surface (Claude Code, Desktop, Cursor, OpenClaw) is connected to")
+  .description("Show which pod each agent surface (Claude Code, Desktop, Cursor, Raycast) is connected to")
   .action(async () => {
     const { connections } = await import("./commands/connections.js");
     await connections();
@@ -347,59 +214,68 @@ program
 
 program
   .command("login")
-  .description("Sign in to your Synap account via browser")
-  .option("--token <token>", "Provide a Synap API token directly (for headless/server use)")
-  .action(async (opts: { token?: string }) => {
+  .description("Connect to a Synap pod (self-hosted or managed)")
+  .option("--reconnect [name]", "Re-authenticate a saved pod without re-entering its URL")
+  .action(async (opts: { reconnect?: string | boolean }) => {
     const chalk = (await import("chalk")).default;
+    const { listPodProfiles } = await import("./lib/pod.js");
+
+    // --reconnect: delegate to reconnect flow
+    if (opts.reconnect !== undefined) {
+      const name = typeof opts.reconnect === "string" ? opts.reconnect : undefined;
+      const { podsReconnect } = await import("./commands/pods.js");
+      await podsReconnect(name);
+      return;
+    }
+
+    const profiles = listPodProfiles();
+
+    if (profiles.length === 0) {
+      // No pod saved — guide to pods add
+      console.log(chalk.dim("  No pod configured yet."));
+      console.log(chalk.blue("  Adding a new pod...\n"));
+      const { podsAdd } = await import("./commands/pods.js");
+      await podsAdd();
+      return;
+    }
+
+    // Already have pods — show status and offer reconnect if any are unreachable
+    const { checkPodHealth } = await import("./lib/pod.js");
     const ora = (await import("ora")).default;
-    const { login, loginWithToken, isLoggedIn } = await import("./lib/auth.js");
+    const spinner = ora("Checking pod health...").start();
+    const checks = await Promise.all(
+      profiles.map(async (p) => {
+        const h = await checkPodHealth(p.config.podUrl).catch(() => ({ healthy: false }));
+        return { ...p, healthy: h.healthy };
+      })
+    );
+    spinner.stop();
 
-    // Headless path: token provided directly
-    if (opts.token) {
-      const spinner = ora("Validating token...").start();
-      const creds = await loginWithToken(opts.token);
-      if (creds) {
-        spinner.succeed(`Authenticated as ${creds.email}`);
-      } else {
-        spinner.fail("Token is invalid or expired. Get a token at https://synap.live/account/tokens");
+    console.log("\n  Configured pods:\n");
+    for (const p of checks) {
+      const active = p.active ? chalk.green(" ● ") : "   ";
+      const status = p.healthy ? chalk.green("ok") : chalk.red("unreachable");
+      console.log(`  ${active}${chalk.bold(p.name.padEnd(14))} ${status}  ${chalk.dim(p.config.podUrl)}`);
+    }
+    console.log();
+
+    const unreachable = checks.filter((p) => !p.healthy);
+    if (unreachable.length > 0) {
+      console.log(chalk.yellow(`  ${unreachable.length} pod(s) unreachable. To refresh credentials:`));
+      for (const p of unreachable) {
+        console.log(chalk.dim(`    synap login --reconnect ${p.name}`));
       }
-      return;
-    }
-
-    const status = await isLoggedIn();
-    if (status.valid) {
-      console.log(chalk.green(`  Already logged in as ${status.email}`));
-      return;
-    }
-
-    console.log(chalk.blue("  Opening browser to sign in..."));
-    const spinner = ora("Waiting for authentication...").start();
-
-    const creds = await login();
-    if (creds) {
-      spinner.succeed(`Authenticated as ${creds.email}`);
+      console.log();
     } else {
-      spinner.fail("Authentication timed out. Try: synap login --token <token>");
-      console.log(chalk.dim("  Get a token at: https://synap.live/account/tokens"));
+      console.log(chalk.green("  All pods healthy."));
+      const active = checks.find((p) => p.active);
+      if (active) console.log(chalk.dim(`  Active: ${active.name} (${active.config.podUrl})`));
+      console.log();
+      console.log(chalk.dim("  synap pods use <name>    — switch active pod"));
+      console.log(chalk.dim("  synap pods add           — connect another pod"));
     }
   });
 
-program
-  .command("logout")
-  .description("Sign out and remove stored credentials")
-  .action(async () => {
-    const chalk = (await import("chalk")).default;
-    const { logout, getStoredToken } = await import("./lib/auth.js");
-
-    const creds = getStoredToken();
-    logout();
-
-    if (creds) {
-      console.log(chalk.green(`  Logged out (was: ${creds.email})`));
-    } else {
-      console.log(chalk.dim("  Not logged in"));
-    }
-  });
 
 // ─── orient ───────────────────────────────────────────────────────────────────
 
@@ -506,6 +382,45 @@ program
   .action(async (opts) => {
     const { captureKnowledge } = await import("./commands/knowledge.js");
     await captureKnowledge(opts);
+  });
+
+program
+  .command("subscribe")
+  .description("Stream pod events as NDJSON (long-poll)")
+  .option("--event <pattern>", "Filter by event type pattern (e.g. proposal.*)")
+  .option("--limit <n>", "Events per poll", "20")
+  .option("--json", "NDJSON output")
+  .option("--pod-url <url>")
+  .option("--api-key <key>")
+  .action(async (opts) => {
+    const { subscribeEvents } = await import("./commands/subscribe.js");
+    await subscribeEvents(opts);
+  });
+
+program
+  .command("home")
+  .description("Show the active workspace's home bento layout (what cells are on screen)")
+  .option("--workspace <id>", "Workspace to read (defaults to active workspace)")
+  .option("--json", "Output as JSON")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (opts) => {
+    const { showHome } = await import("./commands/home.js");
+    await showHome(opts);
+  });
+
+program
+  .command("context")
+  .description("Session-start context: knowledge, proposals, tasks, active sessions")
+  .option("--repo <name>", "Filter knowledge by repo tag")
+  .option("--limit <n>", "Entries per section", "5")
+  .option("--json", "NDJSON output")
+  .option("--workspace <id>", "Override workspace")
+  .option("--pod-url <url>")
+  .option("--api-key <key>")
+  .action(async (opts) => {
+    const { contextSummary } = await import("./commands/context.js");
+    await contextSummary(opts);
   });
 
 program
@@ -637,6 +552,152 @@ proposals
   .action(async (id: string, opts) => {
     const { rejectProposal } = await import("./commands/proposals-actions.js");
     await rejectProposal(id, opts);
+  });
+
+// ─── session ──────────────────────────────────────────────────────────────────
+// Focus sessions — goal-bound work rooms proposed via the governance system.
+// AI agents: use `create_proposal` with targetType:"focus_session" to start one;
+// then `synap session update <id>` to report progress and `close` when done.
+
+const session = program
+  .command("session")
+  .description("Manage focus sessions (goal-bound AI work rooms)");
+
+session
+  .command("start")
+  .description("Start a new focus session and return its ID")
+  .requiredOption("--goal <text>", "What this session is working toward")
+  .option("--workspace <id>", "Workspace that owns the session")
+  .option("--task-id <id>", "Link session to an existing task entity")
+  .option("--json", "Output as JSON")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (opts) => {
+    const { startSession } = await import("./commands/sessions.js");
+    await startSession(opts);
+  });
+
+session
+  .command("list", { isDefault: true })
+  .description("List focus sessions in the active workspace")
+  .option("--workspace <id>", "Scope to a specific workspace")
+  .option("--status <status>", "Filter by status: active | paused | closed")
+  .option("--limit <n>", "Max results", "20")
+  .option("--json", "Output as JSON")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (opts) => {
+    const { listSessions } = await import("./commands/sessions.js");
+    await listSessions(opts);
+  });
+
+session
+  .command("get <id>")
+  .description("Show details for a specific focus session")
+  .option("--workspace <id>", "Workspace that owns the session (required for scoped fetch)")
+  .option("--json", "Output as JSON")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (id: string, opts) => {
+    const { getSession } = await import("./commands/sessions.js");
+    await getSession(id, opts);
+  });
+
+session
+  .command("update <id>")
+  .description("Update progress or status of a focus session")
+  .requiredOption("--workspace <id>", "Workspace that owns the session")
+  .option("--progress <0-100>", "Progress percentage")
+  .option("--status <status>", "New status: active | paused")
+  .option("--goal <text>", "Revised goal")
+  .option("--json", "Output as JSON")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (id: string, opts) => {
+    const { updateSession } = await import("./commands/sessions.js");
+    await updateSession(id, opts);
+  });
+
+session
+  .command("close <id>")
+  .description("Close a focus session and optionally attach a recap")
+  .requiredOption("--workspace <id>", "Workspace that owns the session")
+  .option("--recap <text>", "Short summary of what was accomplished")
+  .option("--json", "Output as JSON")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (id: string, opts) => {
+    const { closeSession } = await import("./commands/sessions.js");
+    await closeSession(id, opts);
+  });
+
+// ─── skill ────────────────────────────────────────────────────────────────────
+// Autonomous workspace session skills — context gathering, task planning, etc.
+
+const skillCmd = program
+  .command("skill")
+  .description("Execute a skill in an autonomous workspace session")
+  .action(() => {
+    skillCmd.help();
+  });
+
+skillCmd
+  .command("gather-context")
+  .description("Gather pod KG + local context (CLAUDE.md, .claude/kg-verify) for a session")
+  .option("--session <id>", "Focus session ID (required)")
+  .option("--workspace <id>", "Workspace ID (defaults to active workspace)")
+  .option("--json", "Output as JSON")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .allowUnknownOption()
+  .action(async (opts) => {
+    const { gatherContext } = await import("./commands/skills.js");
+    await gatherContext(opts);
+  });
+
+skillCmd
+  .command("suggest <topic>")
+  .description("Search the skill knowledge base by topic or keyword")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (topic: string, opts) => {
+    const { suggestSkills } = await import("./commands/skills-commands.js");
+    await suggestSkills(topic, opts);
+  });
+
+skillCmd
+  .command("get <slug>")
+  .description("Fetch a skill from the knowledge base by slug and print its body")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (slug: string, opts) => {
+    const { getSkill } = await import("./commands/skills-commands.js");
+    await getSkill(slug, opts);
+  });
+
+skillCmd
+  .command("sync")
+  .description("Bulk-import local skills from ~/.claude/skills/ into the pod")
+  .option("--from <path>", "Skills directory path (default: ~/.claude/skills)")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (opts) => {
+    const { syncSkills } = await import("./commands/skills-commands.js");
+    await syncSkills(opts);
+  });
+
+skillCmd
+  .command("verify-code")
+  .description("Run the project's type-check/test gate and store the result on the session")
+  .requiredOption("--session <id>", "Focus session ID")
+  .requiredOption("--workspace <id>", "Workspace that owns the session")
+  .requiredOption("--cmd <command>", "Gate command to run (e.g. 'pnpm type-check')")
+  .option("--json", "Output as JSON")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (opts) => {
+    const { verifyCode } = await import("./commands/skills.js");
+    await verifyCode(opts);
   });
 
 // ─── browse ───────────────────────────────────────────────────────────────────
@@ -962,6 +1023,247 @@ automation
   .action(async (opts) => {
     const { automationSchema } = await import("./commands/automation.js");
     await automationSchema(opts);
+  });
+
+// ─── graph ────────────────────────────────────────────────────────────────────
+
+program
+  .command("graph")
+  .description("BFS graph traversal from an entity (nodes + edges)")
+  .requiredOption("--entity <id>", "Start entity ID")
+  .option("--depth <n>", "Traversal depth (max 3)", "2")
+  .option("--json", "Raw JSON output")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (opts) => {
+    const { graphTraverse } = await import("./commands/graph.js");
+    await graphTraverse(opts);
+  });
+
+// ─── events ───────────────────────────────────────────────────────────────────
+
+program
+  .command("events")
+  .description("Show event chain for an entity or recent pod events")
+  .option("--entity <id>", "Filter by entity ID (subjectId)")
+  .option("--limit <n>", "Number of events", "20")
+  .option("--json", "Raw JSON output")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (opts) => {
+    const { listEvents } = await import("./commands/events.js");
+    await listEvents(opts);
+  });
+
+// ─── view ─────────────────────────────────────────────────────────────────────
+
+const view = program
+  .command("view")
+  .description("Manage views");
+
+view
+  .command("create")
+  .description("Create a view (table, kanban, bento, …)")
+  .requiredOption("--type <type>", "View type: table|kanban|bento|list|grid|gallery|calendar|masonry|flow|matrix|branch_tree|whiteboard")
+  .option("--profile <slug>", "Entity profile to display (passed as profileId)")
+  .option("--name <name>", "View name")
+  .option("--workspace <id>", "Workspace ID")
+  .option("--json", "JSON output")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (opts) => {
+    const { viewCreate } = await import("./commands/view.js");
+    await viewCreate(opts);
+  });
+
+view
+  .command("list", { isDefault: true })
+  .description("List views in the active workspace")
+  .option("--workspace <id>", "Workspace ID")
+  .option("--json", "JSON output")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (opts) => {
+    const { viewList } = await import("./commands/view.js");
+    await viewList(opts);
+  });
+
+view
+  .command("arrange <viewId>")
+  .description("Replace the widget arrangement of a bento view")
+  .option("--file <path>", "JSON file containing widget layout (array or { widgets: [...] })")
+  .option("--workspace <id>", "Workspace ID")
+  .option("--json", "JSON output")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .addHelpText("after", `
+Examples:
+  synap view arrange <viewId> --file layout.json
+  echo '[{"id":"w1","kind":"widget","x":0,"y":0,"w":6,"h":4}]' | synap view arrange <viewId>
+
+Layout format (array of BentoWidget):
+  [{ "id": "<widgetId>", "kind": "widget|view|entity", "x": 0, "y": 0, "w": 6, "h": 4, "config": {} }]
+  `)
+  .action(async (viewId: string, opts) => {
+    const { viewArrange } = await import("./commands/view.js");
+    await viewArrange(viewId, opts);
+  });
+
+// ─── explain ──────────────────────────────────────────────────────────────────
+
+program
+  .command("explain [topic]")
+  .description("Full capability map — what Synap can do and how (no network required)")
+  .action(async (topic?: string) => {
+    const { explain } = await import("./commands/explain.js");
+    await explain({ topic });
+  });
+
+// ─── open ─────────────────────────────────────────────────────────────────────
+
+program
+  .command("open <kind> <id>")
+  .description("Open an entity, view, cell, or document in the Synap desktop app")
+  .action(async (kind: string, id: string) => {
+    if (kind !== "entity" && kind !== "view" && kind !== "cell" && kind !== "document") {
+      console.error(`Unknown kind: "${kind}". Use: entity | view | cell | document`);
+      process.exit(1);
+    }
+    const { openInBrowser } = await import("./commands/open.js");
+    await openInBrowser({ kind: kind as "entity" | "view" | "cell" | "document", id });
+  });
+
+// ─── doc ──────────────────────────────────────────────────────────────────────
+
+const doc = program
+  .command("doc")
+  .description("Create and update markdown documents on the pod");
+
+doc
+  .command("create")
+  .description("Create a new markdown document")
+  .requiredOption("--title <title>", "Document title")
+  .option("--content <text>", "Markdown content (inline)")
+  .option("--file <path>", "Read content from a file")
+  .option("--workspace <id>", "Workspace to create the document in")
+  .option("--open", "Open in the Synap desktop app after creation")
+  .option("--json", "JSON output")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .addHelpText("after", `
+Examples:
+  synap doc create --title "My Notes" --content "# Hello"
+  synap doc create --title "My Notes" --file ./notes.md --open
+  echo "# Draft" | synap doc create --title "Draft"
+  `)
+  .action(async (opts) => {
+    const { docCreate } = await import("./commands/doc.js");
+    await docCreate(opts);
+  });
+
+doc
+  .command("update <documentId>")
+  .description("Update a document's content (full replacement, proposal-gated)")
+  .option("--content <text>", "New markdown content (inline)")
+  .option("--file <path>", "Read new content from a file")
+  .option("--title <title>", "Update document title (requires --content too)")
+  .option("--open", "Open in the Synap desktop app after update")
+  .option("--json", "JSON output")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .addHelpText("after", `
+Examples:
+  synap doc update <id> --content "# Updated"
+  synap doc update <id> --file ./notes.md
+  cat notes.md | synap doc update <id>
+  `)
+  .action(async (documentId: string, opts) => {
+    const { docUpdate } = await import("./commands/doc.js");
+    await docUpdate(documentId, opts);
+  });
+
+// ─── cell ─────────────────────────────────────────────────────────────────────
+
+const cell = program
+  .command("cell")
+  .description("Define and bundle frame cells for the Synap runtime");
+
+cell
+  .command("define")
+  .description("Create or update a frame cell on the pod from ESM source")
+  .requiredOption("--name <name>", "Cell display name")
+  .option("--file <path>", "ESM source file (or pipe stdin)")
+  .option("--type-key <key>", "Explicit typeKey (default: generated:<slug>)")
+  .option(
+    "--deps <json>",
+    'Dependency map JSON, e.g. \'{"recharts":"2.12.0"}\' (sent in payload; backend support pending)'
+  )
+  .option("--workspace <id>", "Workspace to scope the cell to (omit for pod-global)")
+  .option("--description <text>", "Short description")
+  .option("--open", "Open in the Synap desktop app after define")
+  .option("--json", "JSON output")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .addHelpText("after", `
+Examples:
+  synap cell define --name "Revenue Chart" --file ./chart.js
+  synap cell define --name "Revenue Chart" --file ./chart.js --deps '{"recharts":"2.12.0"}'
+  cat chart.js | synap cell define --name "Revenue Chart"
+  `)
+  .action(async (opts) => {
+    const { cellDefine } = await import("./commands/cell.js");
+    await cellDefine(opts);
+  });
+
+cell
+  .command("build <entry>")
+  .description("Bundle a multi-file cell/app into a single ESM module the runtime expects")
+  .option("--out <file>", "Output file path (default: <entry>.bundle.js)")
+  .option("--define", "Chain into cell define after bundling (requires --name)")
+  .option("--name <name>", "Cell name (required with --define)")
+  .option("--type-key <key>", "Explicit typeKey (used with --define)")
+  .option(
+    "--deps <json>",
+    "Override dependency versions as JSON, e.g. '{\"react\":\"18.3.0\"}'"
+  )
+  .option("--workspace <id>", "Workspace (used with --define)")
+  .option("--description <text>", "Description (used with --define)")
+  .option("--open", "Open in browser after define (used with --define)")
+  .option("--json", "JSON output")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .addHelpText("after", `
+Output: a single ESM file. Bare imports (react, recharts, …) are externalized
+and emitted as a deps map. At runtime Synap resolves them via esm.sh importmap.
+
+Examples:
+  synap cell build ./src/chart.tsx --out ./dist/chart.js
+  synap cell build ./src/chart.tsx --out ./dist/chart.js --define --name "Revenue Chart"
+  `)
+  .action(async (entry: string, opts) => {
+    const { cellBuild } = await import("./commands/cell.js");
+    await cellBuild(entry, opts);
+  });
+
+// ─── artifact ─────────────────────────────────────────────────────────────────
+
+const artifact = program
+  .command("artifact")
+  .description("Create and manage HTML artifacts as Synap documents");
+
+artifact
+  .command("create")
+  .description("Create an HTML artifact from a local file")
+  .requiredOption("--html <file>", "HTML file to upload")
+  .option("--name <name>", "Document title (default: filename)")
+  .option("--workspace <id>", "Workspace context")
+  .option("--open", "Open in the Synap desktop app after creation")
+  .option("--json", "JSON output")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (opts) => {
+    const { artifactCreate } = await import("./commands/artifact.js");
+    await artifactCreate(opts);
   });
 
 // ─── connect (top-level shorthand) ───────────────────────────────────────────
