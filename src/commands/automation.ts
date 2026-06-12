@@ -297,7 +297,7 @@ export async function automationList(opts: ListOpts): Promise<void> {
 
   if (automations.length === 0) {
     log.warn("No automations found.");
-    log.dim('Create one: synap automation create --name "My automation" --trigger event:entity.create.validated');
+    log.dim('Create one: synap automation create --name "My automation" --trigger event:entity.create.completed');
     return;
   }
 
@@ -454,7 +454,7 @@ export async function automationCreate(opts: CreateOpts): Promise<void> {
     }
     if (!opts.trigger) {
       spinner.fail(chalk.red("--trigger is required in quick mode"));
-      log.dim("Example: --trigger event:entity.create.validated  or  --trigger cron:0 9 * * MON");
+      log.dim("Example: --trigger event:entity.create.completed  or  --trigger cron:0 9 * * MON");
       process.exit(1);
     }
 
@@ -512,7 +512,10 @@ export async function automationCreate(opts: CreateOpts): Promise<void> {
   let result: Automation;
   try {
     const data = await trpcMutation("automations.createAutomation", payload, cfg);
-    result = data as Automation;
+    // Response shape may be: { automation: {...} } | { id, name, ... } | raw Automation
+    const raw = data as Record<string, unknown>;
+    const inner = (raw.automation ?? raw) as Record<string, unknown>;
+    result = inner as unknown as Automation;
   } catch (err) {
     spinner.fail(chalk.red("Failed to create automation"));
     log.error((err as Error).message);
@@ -521,11 +524,11 @@ export async function automationCreate(opts: CreateOpts): Promise<void> {
 
   spinner.succeed(chalk.green(`Automation created`));
   console.log();
-  console.log(`  ${chalk.dim("id")}      ${chalk.dim(result.id)}`);
-  console.log(`  ${chalk.dim("name")}    ${chalk.bold(result.name)}`);
-  console.log(`  ${chalk.dim("status")}  ${statusBadge(result.status)} ${result.status}`);
+  console.log(`  ${chalk.dim("id")}      ${chalk.dim(result.id ?? "—")}`);
+  console.log(`  ${chalk.dim("name")}    ${chalk.bold(result.name ?? "—")}`);
+  console.log(`  ${chalk.dim("status")}  ${statusBadge((result.status ?? "draft") as AutomationStatus)} ${result.status ?? "draft"}`);
   console.log();
-  log.dim(`Enable it: synap automation enable ${result.id}`);
+  log.dim(`Enable it: synap automation enable ${result.id ?? "<id>"}`);
 }
 
 // ── Public: automationEnable ──────────────────────────────────────────────────
@@ -756,8 +759,9 @@ function buildSchemaMarkdown(schema: Record<string, unknown>, podUrl: string): s
       `- \`filters\` — dot-notation key-value equality checks on event.data`,
       ``,
       `**Common patterns:**`,
-      `- \`entity.create.validated\` — new entity created`,
-      `- \`entity.update.*\` — any entity update`,
+      `- \`entity.create.completed\` — new entity created (use this; .validated only fires on proposal-approval path)`,
+      `- \`entity.update.completed\` — entity updated`,
+      `- \`entity.update.*\` — any entity update event`,
       `- \`import.complete\` — import finished`,
       ``,
       `### cron`,
@@ -829,7 +833,7 @@ function buildSchemaMarkdown(schema: Record<string, unknown>, podUrl: string): s
     ``,
     `\`\`\`bash`,
     `# Notify when a note is created`,
-    `synap automation create --name "Note alert" --trigger "event:entity.create.validated" --filter "profileSlug=note" --action notify --message "New note: {{trigger.payload.entity.title}}"`,
+    `synap automation create --name "Note alert" --trigger "event:entity.create.completed" --filter "profileSlug=note" --action notify --message "New note: {{trigger.payload.entity.title}}"`,
     ``,
     `# Weekly digest every Monday at 9am`,
     `synap automation create --name "Weekly digest" --trigger "cron:0 9 * * MON" --action channel-message --channel "#general" --message "Weekly digest ready."`,
@@ -859,7 +863,7 @@ function buildSchemaMarkdown(schema: Record<string, unknown>, podUrl: string): s
     `        triggerType: event`,
     `        label: Trigger`,
     `        config:`,
-    `          eventPattern: entity.create.validated`,
+    `          eventPattern: entity.create.completed`,
     `  edges: []`,
     `\`\`\``,
     ``,

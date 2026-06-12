@@ -857,6 +857,7 @@ set
   .command("entity <id>")
   .description("Update entity properties")
   .requiredOption("--props <json>", "Properties as JSON string")
+  .option("--workspace <id>", "Workspace ID (sent in PATCH body so workspace-scoped automations fire)")
   .option("--json", "Output as JSON")
   .option("--pod-url <url>", "Pod URL override")
   .option("--api-key <key>", "API key override")

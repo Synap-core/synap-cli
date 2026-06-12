@@ -581,16 +581,18 @@ export async function createRelation(
 
 export async function updateEntity(
   id: string,
-  opts: BaseOpts & { props: string }
+  opts: BaseOpts & { props: string; workspace?: string }
 ): Promise<void> {
   try {
     const cfg = await resolveHubConfig(opts);
+    const workspaceId = opts.workspace ?? cfg.workspaceId;
     // parse props as unknown then cast — user-supplied JSON
     const metadata = JSON.parse(opts.props) as Record<string, unknown>;
-    const res = await hubPatch(`/entities/${id}`, {
-      userId: cfg.userId,
-      metadata,
-    }, cfg);
+    const body: Record<string, unknown> = { userId: cfg.userId, metadata };
+    // backend reads body.workspaceId to scope automation matching — without it
+    // the update lands pod-wide and workspace-gated automations never fire
+    if (workspaceId) body.workspaceId = workspaceId;
+    const res = await hubPatch(`/entities/${id}`, body, cfg);
 
     const entity = res as Record<string, unknown>;
 
