@@ -28,7 +28,6 @@ import {
   isLoggedIn,
   getStoredToken,
   isTokenLocallyExpired,
-  getOpenClawRemoteStatus,
 } from "../lib/auth.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -131,30 +130,31 @@ export async function status(): Promise<void> {
     log.dim("No local config — run: synap init");
   }
 
-  // ── OpenClaw (remote state via CP, not local Docker) ───────────────────
-  log.heading("OpenClaw (remote)");
-  if (!localConfig?.podId) {  // localConfig is the active pod config
-    log.dim("No pod ID on file — cannot query managed-pod OpenClaw state.");
-    log.dim("If self-hosted: run `./synap services status openclaw` on the pod host.");
-  } else if (!creds) {
-    log.dim("Not logged in — cannot query CP for OpenClaw state.");
-    log.dim("Run: synap login");
+  // ── API Key ────────────────────────────────────────────────────────────
+  // Probe the Hub API to verify the stored key is still valid. A 401 here
+  // means the key was rotated or revoked — surface the exact reconnect command
+  // so the user doesn't have to diagnose it themselves.
+  log.heading("API Key");
+  if (!localConfig) {
+    log.dim("No pod configured.");
+  } else if (!podHealthy) {
+    log.dim("Pod unreachable — cannot verify key.");
   } else {
-    const remote = await getOpenClawRemoteStatus(creds.token, localConfig.podId).catch(() => null);
-    if (remote === null) {
-      log.dim("CP unreachable — cannot check remote OpenClaw state");
-      log.dim("If self-hosted: run `./synap services status openclaw` on the pod host.");
-    } else if (remote.status === "not_provisioned") {
-      log.dim("Not provisioned on pod server. Run: synap init");
-    } else if (remote.status === "provisioning") {
-      log.info(`Pod server: ${chalk.yellow("provisioning")} — still starting up`);
-      log.dim("Check progress again in a minute.");
-    } else if (remote.status === "running") {
-      log.success(`Pod server: ${chalk.green("running")}`);
-      if (remote.url) log.dim(`URL: ${remote.url}`);
-    } else if (remote.status === "error") {
-      log.warn(`Pod server: ${chalk.red("error")} — provisioning failed`);
-      log.dim("Re-run: synap init");
+    try {
+      const cfg = await resolveHubConfig();
+      await hubGet("/users/me", {}, cfg);
+      log.success("Valid");
+      log.dim(`Key saved: ${timeAgo(localConfig.savedAt)}`);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      const is401 = msg.includes("401") || msg.toLowerCase().includes("unauthorized");
+      if (is401) {
+        const activeName = allProfiles.find((p) => p.active)?.name ?? "default";
+        log.warn(chalk.red("Invalid or expired — credentials must be refreshed."));
+        log.info(`Run: ${chalk.cyan(`synap login --reconnect ${activeName}`)}`);
+      } else {
+        log.dim(`Could not verify key: ${msg}`);
+      }
     }
   }
 
@@ -246,7 +246,7 @@ export async function status(): Promise<void> {
   } else if (!podHealthy) {
     log.info("Pod unreachable — check it with: ./synap health on the pod host");
   } else {
-    log.dim("All set. To install/update the OpenClaw skill on your laptop: synap update");
+    log.dim("All set. Run: synap context   to load workspace context for an agent session.");
   }
 
   log.blank();

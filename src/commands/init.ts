@@ -19,7 +19,7 @@ import {
   writeOpenClawConfig,
   setConfigValue,
 } from "../lib/openclaw.js";
-import { runSecurityChecks, computeScore } from "../lib/hardening.js";
+
 import {
   checkPodHealth,
   setupAgent,
@@ -39,7 +39,6 @@ import { login, isLoggedIn, listPods, getStoredToken, waitForPodCallback } from 
 interface InitOptions {
   podUrl?: string;
   apiKey?: string;
-  skipSecurity?: boolean;
   skipIs?: boolean;
 }
 
@@ -73,15 +72,16 @@ export async function init(opts: InitOptions): Promise<void> {
   }
 
   // ── Auto-detect environment ─────────────────────────────────────────────
+  // Pod URL is always the primary decision axis. OpenClaw, if present, is an
+  // optional enhancement that gets wired after the pod connection is set up —
+  // it is no longer the gating condition for which path runs.
   const oc = detectOpenClaw();
   const isServer = detectServer();
 
   if (oc.found) {
     log.info(
-      `OpenClaw detected${oc.version ? ` v${oc.version}` : ""} — connect mode`
+      `OpenClaw detected${oc.version ? ` v${oc.version}` : ""} — will wire it after pod setup`
     );
-    await pathA(opts, oc);
-    return;
   }
 
   if (isServer) {
@@ -92,12 +92,23 @@ export async function init(opts: InitOptions): Promise<void> {
 
     if (existingPodUrl) {
       log.success(`Found existing pod at ${existingPodUrl}`);
-      log.info("Server detected, no OpenClaw — connecting to existing pod");
-      await pathBExisting(opts, existingPodUrl);
+      if (oc.found) {
+        log.info("Server + OpenClaw — connecting pod then wiring OpenClaw");
+        await pathA(opts, oc);
+      } else {
+        log.info("Server detected — connecting to existing pod");
+        await pathBExisting(opts, existingPodUrl);
+      }
     } else {
-      log.info("Server detected, no OpenClaw — fresh setup mode");
+      log.info("Server detected — fresh setup mode");
       await pathB(opts);
     }
+    return;
+  }
+
+  if (oc.found) {
+    // Desktop with OpenClaw — use pathA (OpenClaw connect mode)
+    await pathA(opts, oc);
     return;
   }
 
@@ -120,10 +131,7 @@ async function pathA(
     `Gateway: ${oc.gatewayRunning ? "running" : "stopped"} (port ${oc.gatewayPort ?? 18789})`
   );
 
-  // ── Security ────────────────────────────────────────────────────────────
-  if (!opts.skipSecurity) {
-    await securityStep(oc.version);
-  }
+
 
   // ── Pod ─────────────────────────────────────────────────────────────────
   const podUrl = await podChoiceStep(opts);
@@ -184,7 +192,7 @@ async function pathBExisting(opts: InitOptions, detectedUrl: string): Promise<vo
     log.warn("Could not find your Synap deploy directory automatically.");
     log.dim("Start OpenClaw manually from your synap-backend dir:");
     log.dim("  docker compose --profile openclaw up -d openclaw");
-    log.dim("Then run: synap finish");
+    log.dim("Then run: synap update");
     return;
   }
 
@@ -217,13 +225,13 @@ async function pathBExisting(opts: InitOptions, detectedUrl: string): Promise<vo
   if (ocStarted) {
     log.info("OpenClaw is initializing (first boot takes 1-2 min).");
     log.info("Once it's ready, run:");
-    console.log(chalk.cyan("\n  synap finish\n"));
+    console.log(chalk.cyan("\n  synap update\n"));
     log.dim("This will install the skill, seed your workspace, and configure AI routing.");
     log.dim("Check progress at any time: synap status");
   } else {
     log.info("Start OpenClaw manually:");
     console.log(chalk.cyan(`\n  cd ${deployDir} && docker compose --profile openclaw up -d openclaw\n`));
-    log.dim("Then run: synap finish");
+    log.dim("Then run: synap update");
   }
 }
 
@@ -297,7 +305,7 @@ async function pathB(opts: InitOptions): Promise<void> {
     }
     log.blank();
     log.info("OpenClaw is initializing. Once it's ready, run:");
-    console.log(chalk.cyan("\n  synap finish\n"));
+    console.log(chalk.cyan("\n  synap update\n"));
     log.dim("Check progress: synap status");
     return;
   }
@@ -426,7 +434,7 @@ async function connectExistingPod(
   const oc = detectOpenClaw();
   if (oc.found) {
     log.success(`OpenClaw detected${oc.version ? ` v${oc.version}` : ""}`);
-    if (!opts.skipSecurity) await securityStep(oc.version);
+    // Security audit removed — no longer OpenClaw-specific
   }
 
   // Get API key
@@ -508,50 +516,10 @@ async function connectExistingPod(
     log.info("Pod connected. Once OpenClaw is running:");
     log.dim("  Local:  openclaw skills install synap");
     log.dim("  Docker: docker exec openclaw openclaw skills install synap");
-    log.dim("  Or run: synap finish");
+    log.dim("  Or run: synap update");
   }
 
   printSummary(podUrl, ocAfter.found);
-}
-
-// =============================================================================
-// SHARED STEPS
-// =============================================================================
-
-export async function securityStep(version?: string): Promise<void> {
-  log.heading("Security Audit");
-
-  const checks = runSecurityChecks(version);
-  const failed = checks.filter((c) => !c.passed);
-  const score = computeScore(checks);
-  const passed = checks.filter((c) => c.passed).length;
-
-  console.log(
-    `  ${passed}/${checks.length} passed — Score: ${score === "A" ? chalk.green.bold("A") : score === "B" ? chalk.yellow.bold("B") : chalk.red.bold(score)}`
-  );
-
-  if (failed.length > 0) {
-    const fixable = failed.filter((c) => c.fixable && c.fix);
-    if (fixable.length > 0) {
-      const { doFix } = await prompts({
-        type: "confirm",
-        name: "doFix",
-        message: `Auto-fix ${fixable.length} issue(s)?`,
-        initial: true,
-      });
-      if (doFix) {
-        for (const check of fixable) {
-          check.fix!();
-          log.success(`Fixed: ${check.name}`);
-        }
-      }
-    }
-    for (const check of failed.filter((c) => !c.fixable)) {
-      log.warn(`${check.name} — ${check.message}`);
-    }
-  } else {
-    log.success("All checks passed");
-  }
 }
 
 async function podChoiceStep(opts: InitOptions): Promise<string | null> {
@@ -981,10 +949,10 @@ export async function isStep(
             }
           } else if (!provData?.subscribed) {
             log.dim("No AI subscription — subscribe at https://synap.live/pricing");
-            log.dim("Skip this step with: synap finish --skip-is");
+            log.dim("Skip this step with: synap update --skip-is");
           } else if (provData?.cpProvisioned) {
             log.dim("IS provisioned on CP but not yet confirmed on pod.");
-            log.dim("Re-run 'synap finish' in a minute, or reprovision from Browser Settings.");
+            log.dim("Re-run 'synap update' in a minute, or reprovision from Browser Settings.");
           }
         } else {
           // Logged in but pod not found on CP account — self-hosted pod
@@ -1001,9 +969,9 @@ export async function isStep(
       log.blank();
       log.dim("To enable AI routing via Synap:");
       log.dim("  1. Log in:  synap login --token <token>  (get token at synap.live/account/tokens)");
-      log.dim("  2. Re-run:  synap finish");
+      log.dim("  2. Re-run:  synap update");
       log.blank();
-      log.dim("Or skip AI for now: synap finish --skip-is");
+      log.dim("Or skip AI for now: synap update --skip-is");
     }
   }
 
@@ -1034,7 +1002,7 @@ export async function isStep(
 
       if (models.length === 0) {
         log.warn("No model IDs found — configure models in pod admin → Intelligence → Providers.");
-        log.dim("Skipping OpenClaw AI provider setup. Re-run: synap finish");
+        log.dim("Skipping OpenClaw AI provider setup. Re-run: synap update");
         return;
       }
 
@@ -1094,13 +1062,13 @@ function printSummary(podUrl: string, openclawConnected: boolean): void {
   }
   log.blank();
   log.dim("  synap status         — health check");
-  log.dim("  synap security-audit — verify security");
+  log.dim("  synap status          — verify security");
   log.blank();
   if (!openclawConnected) {
     log.info("OpenClaw is provisioning on your pod server (2-5 min).");
     log.info("Once it's ready, run:");
     log.blank();
-    console.log(chalk.cyan("  synap finish"));
+    console.log(chalk.cyan("  synap update"));
     log.blank();
     log.dim("This will install the skill, seed your workspace, and configure AI routing.");
     log.dim("Check progress: synap status");

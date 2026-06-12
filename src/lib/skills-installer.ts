@@ -15,7 +15,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { log } from "../utils/logger.js";
 
-export const SKILL_NAMES = ["synap", "synap-schema", "synap-ui"] as const;
+export const SKILL_NAMES = ["synap", "synap-schema", "synap-ui", "autonomous-dev"] as const;
 export type SkillName = (typeof SKILL_NAMES)[number];
 
 const __filename = fileURLToPath(import.meta.url);

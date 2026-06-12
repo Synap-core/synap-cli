@@ -35,27 +35,51 @@ export async function orient(opts: BaseOpts): Promise<void> {
     const userId = String(me.id ?? cfg.userId);
     const wsList = Array.isArray(workspaces) ? workspaces as Record<string, unknown>[] : [];
 
-    // For each workspace, fetch profiles + entity count in parallel
+    // For each workspace, fetch profiles + entity count in parallel.
+    // Newer pods return `entityCount` directly on GET /workspaces; for older
+    // pods fall back to counting a real page of entities (GET /entities
+    // returns a bare array — there is no `total` field on the wire).
+    const FALLBACK_PAGE = 100;
     const wsDetails = await Promise.all(
       wsList.map(async (ws) => {
         const wsId = String(ws.id ?? "");
+        const declaredCount =
+          typeof ws.entityCount === "number" ? ws.entityCount : undefined;
         const [profilesRes, entitiesRes] = await Promise.allSettled([
           hubGet("/profiles", { userId, workspaceId: wsId }, cfg),
-          hubGet("/entities", { userId, workspaceId: wsId, limit: 1 }, cfg),
+          declaredCount === undefined
+            ? hubGet("/entities", { userId, workspaceId: wsId, limit: FALLBACK_PAGE }, cfg)
+            : Promise.resolve(null),
         ]);
         const profiles = profilesRes.status === "fulfilled"
           ? ((profilesRes.value as { profiles?: unknown[] }).profiles ?? (profilesRes.value as unknown[]))
           : [];
         const profileList = Array.isArray(profiles) ? profiles as Record<string, unknown>[] : [];
-        const entityTotal = entitiesRes.status === "fulfilled"
-          ? Number((entitiesRes.value as Record<string, unknown>).total ?? 0)
-          : 0;
-        return { ws, profileList, entityTotal };
+        let entityTotal = declaredCount ?? 0;
+        let countIsLowerBound = false;
+        if (declaredCount === undefined && entitiesRes.status === "fulfilled" && entitiesRes.value) {
+          const v = entitiesRes.value as Record<string, unknown> | unknown[];
+          const arr = Array.isArray(v) ? v : ((v as Record<string, unknown>).entities as unknown[] ?? []);
+          entityTotal = Array.isArray(arr) ? arr.length : 0;
+          countIsLowerBound = entityTotal === FALLBACK_PAGE;
+        }
+        return { ws, profileList, entityTotal, countIsLowerBound };
       })
     );
 
     if (opts.json) {
-      console.log(JSON.stringify({ userId, podUrl: cfg.podUrl, workspaceId: cfg.workspaceId, workspaces: wsDetails, me }, null, 2));
+      const capabilities = [
+        "synap graph --entity <id> --depth 2",
+        "synap events --entity <id>",
+        "synap subscribe --event entity.*",
+        "synap context",
+        "synap automation list",
+        "synap list views --type whiteboard",
+        "synap view create --type kanban --profile task",
+        "synap proposals list",
+        "synap explain",
+      ];
+      console.log(JSON.stringify({ userId, podUrl: cfg.podUrl, workspaceId: cfg.workspaceId, workspaces: wsDetails, me, capabilities }, null, 2));
       return;
     }
 
@@ -68,12 +92,14 @@ export async function orient(opts: BaseOpts): Promise<void> {
     if (wsDetails.length === 0) {
       log.dim("No workspaces found.");
     } else {
-      for (const { ws, profileList, entityTotal } of wsDetails) {
+      for (const { ws, profileList, entityTotal, countIsLowerBound } of wsDetails) {
         const isActive = ws.id === cfg.workspaceId;
         const marker = isActive ? chalk.green("▶ ") : "  ";
         const name = chalk.bold(String(ws.name ?? ws.id));
         const id = chalk.dim(String(ws.id ?? "").slice(0, 8) + "…");
-        const count = entityTotal > 0 ? chalk.dim(`${entityTotal} entities`) : chalk.dim("empty");
+        const count = entityTotal > 0
+          ? chalk.dim(`${entityTotal}${countIsLowerBound ? "+" : ""} entities`)
+          : chalk.dim("empty");
         log.info(`${marker}${name}  ${id}  ${count}`);
         if (ws.description) log.dim(`     ${String(ws.description)}`);
         if (profileList.length > 0) {
@@ -90,6 +116,19 @@ export async function orient(opts: BaseOpts): Promise<void> {
         log.dim("Tip: run 'synap use <workspaceId>' to set a default workspace.");
       }
     }
+
+    // ── Capabilities block ─────────────────────────────────────────────────
+    log.blank();
+    log.heading("Capabilities");
+    console.log(`  ${chalk.cyan("Graph traversal")}   synap graph --entity <id> --depth 2`);
+    console.log(`  ${chalk.cyan("Event chain")}       synap events --entity <id>`);
+    console.log(`  ${chalk.cyan("Subscribe")}         synap subscribe --event entity.*`);
+    console.log(`  ${chalk.cyan("Session context")}   synap context`);
+    console.log(`  ${chalk.cyan("Automations")}       synap automation list`);
+    console.log(`  ${chalk.cyan("Views")}             synap list views --type whiteboard · synap view create --type kanban --profile task`);
+    console.log(`  ${chalk.cyan("Governance")}        synap proposals list`);
+    log.blank();
+    log.dim("For full capability map: synap explain");
   } catch (e) {
     console.error(chalk.red("Error: " + (e as Error).message));
     process.exit(1);
@@ -179,12 +218,35 @@ export async function listEntities(
     const list = Array.isArray(entities) ? entities : [];
 
     if (opts.json) {
-      console.log(JSON.stringify({ entities: list }, null, 2));
+      console.log(JSON.stringify({ entities: list, count: list.length, limit, truncated: list.length === limit }, null, 2));
       return;
     }
 
     if (list.length === 0) {
       log.dim("No entities found.");
+      // Whiteboards, kanbans, calendars… are VIEWS, not entity profiles.
+      // If the requested profile is actually a view type, point there.
+      if (opts.profile) {
+        try {
+          const viewsRes = await hubGet("/views", {
+            userId,
+            workspaceId: opts.workspace ?? cfg.workspaceId,
+            type: opts.profile,
+          }, cfg);
+          const views = ((viewsRes as Record<string, unknown>).views as unknown[])
+            ?? (Array.isArray(viewsRes) ? viewsRes as unknown[] : []);
+          if (views.length > 0) {
+            log.blank();
+            log.info(`'${opts.profile}' is a ${chalk.bold("view type")}, not an entity profile — found ${views.length} view${views.length !== 1 ? "s" : ""}.`);
+            log.dim(`  Run: synap list views --type ${opts.profile}`);
+            return;
+          }
+        } catch {
+          // best-effort hint only — never fail the empty-result path
+        }
+        log.dim(`  Profiles in this workspace: synap list profiles`);
+        log.dim(`  Views (whiteboard, kanban, …): synap list views`);
+      }
       return;
     }
     for (const entity of list) {
@@ -193,6 +255,9 @@ export async function listEntities(
       const profile = e.profileSlug ?? e.profile ?? e.type ?? "";
       const id = String(e.id ?? "").slice(0, 8);
       log.info(`${name} ${chalk.dim(`(${profile})`)} — ${chalk.dim(id)}`);
+    }
+    if (list.length === limit) {
+      log.dim(`${list.length} shown (hit --limit ${limit}; more may exist — raise --limit or filter with --profile)`);
     }
   } catch (e) {
     console.error(chalk.red("Error: " + (e as Error).message));

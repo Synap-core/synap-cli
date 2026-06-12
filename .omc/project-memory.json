@@ -1,6 +1,6 @@
 {
   "version": "1.0.0",
-  "lastScanned": 1780770630986,
+  "lastScanned": 1781053266511,
   "projectRoot": "/Users/antoine/Documents/Code/synap/synap-cli",
   "techStack": {
     "languages": [
@@ -26,7 +26,7 @@
     "runtime": "Node.js 20"
   },
   "build": {
-    "buildCommand": "cd /Users/antoine/Documents/Code/synap/synap-cli && pnpm build 2>&1",
+    "buildCommand": "pnpm build 2>&1 | tail -10",
     "testCommand": null,
     "lintCommand": null,
     "devCommand": "npm run dev",
@@ -34,11 +34,13 @@
       "build": "tsc",
       "dev": "tsx src/index.ts",
       "sync-skills": "bash scripts/sync-skills.sh",
-      "prepublishOnly": "pnpm sync-skills && pnpm build"
+      "prepublishOnly": "pnpm sync-skills && pnpm build",
+      "prepack": "rm -rf node_modules/@synap/hub-rest-client && cp -r ../synap-backend/packages/hub-rest-client node_modules/@synap/",
+      "postpack": "rm -rf node_modules/@synap/hub-rest-client && ln -s ../../../synap-backend/packages/hub-rest-client node_modules/@synap/hub-rest-client"
     }
   },
   "conventions": {
-    "namingStyle": null,
+    "namingStyle": "camelCase",
     "importStyle": null,
     "testPattern": null,
     "fileOrganization": null
@@ -58,8 +60,8 @@
     "dist": {
       "path": "dist",
       "purpose": "Distribution/build output",
-      "fileCount": 4,
-      "lastAccessed": 1780770630961,
+      "fileCount": 3,
+      "lastAccessed": 1781053266482,
       "keyFiles": [
         "index.d.ts",
         "index.js",
@@ -70,14 +72,14 @@
       "path": "docs",
       "purpose": "Documentation",
       "fileCount": 0,
-      "lastAccessed": 1780770630962,
+      "lastAccessed": 1781053266485,
       "keyFiles": []
     },
     "scripts": {
       "path": "scripts",
       "purpose": "Build/utility scripts",
       "fileCount": 1,
-      "lastAccessed": 1780770630965,
+      "lastAccessed": 1781053266485,
       "keyFiles": [
         "sync-skills.sh"
       ]
@@ -86,7 +88,7 @@
       "path": "skills",
       "purpose": null,
       "fileCount": 1,
-      "lastAccessed": 1780770630966,
+      "lastAccessed": 1781053266485,
       "keyFiles": [
         "README.md"
       ]
@@ -95,7 +97,7 @@
       "path": "src",
       "purpose": "Source code",
       "fileCount": 2,
-      "lastAccessed": 1780770630966,
+      "lastAccessed": 1781053266485,
       "keyFiles": [
         "index.ts"
       ]
@@ -104,18 +106,18 @@
       "path": "dist/lib",
       "purpose": "Library code",
       "fileCount": 33,
-      "lastAccessed": 1780770630966,
+      "lastAccessed": 1781053266486,
       "keyFiles": [
-        "agents-config.d.ts",
-        "agents-config.js",
-        "agents-config.js.map"
+        "agent-templates.d.ts",
+        "agent-templates.js",
+        "agent-templates.js.map"
       ]
     },
     "dist/utils": {
       "path": "dist/utils",
       "purpose": "Utility functions",
       "fileCount": 3,
-      "lastAccessed": 1780770630967,
+      "lastAccessed": 1781053266486,
       "keyFiles": [
         "logger.d.ts",
         "logger.js",
@@ -125,19 +127,19 @@
     "src/lib": {
       "path": "src/lib",
       "purpose": "Library code",
-      "fileCount": 10,
-      "lastAccessed": 1780770630968,
+      "fileCount": 11,
+      "lastAccessed": 1781053266486,
       "keyFiles": [
+        "agent-templates.ts",
         "agents-config.ts",
-        "auth.ts",
-        "browser-auth.ts"
+        "auth.ts"
       ]
     },
     "src/utils": {
       "path": "src/utils",
       "purpose": "Utility functions",
       "fileCount": 1,
-      "lastAccessed": 1780770630968,
+      "lastAccessed": 1781053266487,
       "keyFiles": [
         "logger.ts"
       ]
@@ -145,45 +147,219 @@
   },
   "hotPaths": [
     {
+      "path": "src/index.ts",
+      "accessCount": 43,
+      "lastAccessed": 1781083282247,
+      "type": "file"
+    },
+    {
+      "path": "src/commands/init.ts",
+      "accessCount": 41,
+      "lastAccessed": 1781077812888,
+      "type": "file"
+    },
+    {
+      "path": "src/commands/context.ts",
+      "accessCount": 20,
+      "lastAccessed": 1781083100837,
+      "type": "file"
+    },
+    {
+      "path": "src/lib/pod.ts",
+      "accessCount": 14,
+      "lastAccessed": 1781081345001,
+      "type": "file"
+    },
+    {
+      "path": "src/commands/pods.ts",
+      "accessCount": 13,
+      "lastAccessed": 1781079320307,
+      "type": "file"
+    },
+    {
+      "path": "src/commands/connect.ts",
+      "accessCount": 12,
+      "lastAccessed": 1781081351319,
+      "type": "file"
+    },
+    {
+      "path": "src/lib/hub-client.ts",
+      "accessCount": 12,
+      "lastAccessed": 1781083250156,
+      "type": "file"
+    },
+    {
+      "path": "src/commands/subscribe.ts",
+      "accessCount": 11,
+      "lastAccessed": 1780933863689,
+      "type": "file"
+    },
+    {
+      "path": "src/commands/events.ts",
+      "accessCount": 9,
+      "lastAccessed": 1780934660801,
+      "type": "file"
+    },
+    {
+      "path": "src/commands/view.ts",
+      "accessCount": 8,
+      "lastAccessed": 1780935176003,
+      "type": "file"
+    },
+    {
+      "path": "src/commands/explain.ts",
+      "accessCount": 8,
+      "lastAccessed": 1780937614609,
+      "type": "file"
+    },
+    {
       "path": "src/lib/targets.ts",
+      "accessCount": 8,
+      "lastAccessed": 1781081360191,
+      "type": "file"
+    },
+    {
+      "path": "src/commands/graph.ts",
       "accessCount": 7,
-      "lastAccessed": 1780779409231,
+      "lastAccessed": 1780934015465,
       "type": "file"
     },
     {
       "path": "src/commands/data.ts",
+      "accessCount": 6,
+      "lastAccessed": 1781081413392,
+      "type": "file"
+    },
+    {
+      "path": "src/commands/skills.ts",
+      "accessCount": 6,
+      "lastAccessed": 1781083106279,
+      "type": "file"
+    },
+    {
+      "path": "src/commands/connections.ts",
       "accessCount": 5,
-      "lastAccessed": 1780770712640,
+      "lastAccessed": 1781077555799,
+      "type": "file"
+    },
+    {
+      "path": "src/commands/automation.ts",
+      "accessCount": 4,
+      "lastAccessed": 1780930214998,
+      "type": "file"
+    },
+    {
+      "path": "src/utils/logger.ts",
+      "accessCount": 4,
+      "lastAccessed": 1780933678219,
+      "type": "file"
+    },
+    {
+      "path": "src/commands/open.ts",
+      "accessCount": 4,
+      "lastAccessed": 1780938109566,
       "type": "file"
     },
     {
       "path": "src/commands/knowledge.ts",
-      "accessCount": 2,
-      "lastAccessed": 1780770696432,
+      "accessCount": 4,
+      "lastAccessed": 1781081349334,
       "type": "file"
     },
     {
-      "path": "src/index.ts",
-      "accessCount": 2,
-      "lastAccessed": 1780771902944,
+      "path": "src/commands/skills-commands.ts",
+      "accessCount": 4,
+      "lastAccessed": 1781095587171,
       "type": "file"
     },
     {
-      "path": "src/commands/discover.ts",
-      "accessCount": 1,
-      "lastAccessed": 1780771883768,
+      "path": "src/commands/sessions.ts",
+      "accessCount": 3,
+      "lastAccessed": 1781031533658,
+      "type": "file"
+    },
+    {
+      "path": "src/lib/agents-config.ts",
+      "accessCount": 2,
+      "lastAccessed": 1780887502785,
+      "type": "file"
+    },
+    {
+      "path": "src/lib/skills-installer.ts",
+      "accessCount": 2,
+      "lastAccessed": 1781051833110,
+      "type": "file"
+    },
+    {
+      "path": "src/commands/security-audit.ts",
+      "accessCount": 2,
+      "lastAccessed": 1781077346143,
+      "type": "file"
+    },
+    {
+      "path": "src/commands/finish.ts",
+      "accessCount": 2,
+      "lastAccessed": 1781077719598,
+      "type": "file"
+    },
+    {
+      "path": "src/commands/home.ts",
+      "accessCount": 2,
+      "lastAccessed": 1781081426592,
       "type": "file"
     },
     {
       "path": "package.json",
       "accessCount": 1,
-      "lastAccessed": 1780772968533,
+      "lastAccessed": 1780886175031,
       "type": "file"
     },
     {
-      "path": "src/commands/connect.ts",
+      "path": "src/commands/agents.ts",
       "accessCount": 1,
-      "lastAccessed": 1780773306832,
+      "lastAccessed": 1780887502061,
+      "type": "file"
+    },
+    {
+      "path": "src/commands/agent-run.ts",
+      "accessCount": 1,
+      "lastAccessed": 1780887502475,
+      "type": "file"
+    },
+    {
+      "path": "src/commands/observe.ts",
+      "accessCount": 1,
+      "lastAccessed": 1780887670726,
+      "type": "file"
+    },
+    {
+      "path": "src/commands/artifact.ts",
+      "accessCount": 1,
+      "lastAccessed": 1780937579887,
+      "type": "file"
+    },
+    {
+      "path": "skills/autonomous-dev/SKILL.md",
+      "accessCount": 1,
+      "lastAccessed": 1781051905176,
+      "type": "file"
+    },
+    {
+      "path": "src/lib/hardening.ts",
+      "accessCount": 1,
+      "lastAccessed": 1781077346477,
+      "type": "file"
+    },
+    {
+      "path": "src/lib/seed.ts",
+      "accessCount": 1,
+      "lastAccessed": 1781077358904,
+      "type": "file"
+    },
+    {
+      "path": "src/commands/status.ts",
+      "accessCount": 1,
+      "lastAccessed": 1781081429326,
       "type": "file"
     }
   ],

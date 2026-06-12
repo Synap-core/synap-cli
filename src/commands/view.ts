@@ -35,6 +35,7 @@ export interface ViewCreateOpts {
 
 export interface ViewListOpts {
   workspace?: string;
+  type?: string;
   json?: boolean;
   podUrl?: string;
   apiKey?: string;
@@ -99,6 +100,7 @@ export async function viewList(opts: ViewListOpts): Promise<void> {
 
     const params: Record<string, string | number | undefined> = { userId };
     if (workspaceId) params.workspaceId = workspaceId;
+    if (opts.type) params.type = opts.type;
 
     const res = await hubGet("/views", params, cfg) as Record<string, unknown>;
     const views = (res.views ?? res.items ?? (Array.isArray(res) ? res : [])) as Record<string, unknown>[];
@@ -109,11 +111,12 @@ export async function viewList(opts: ViewListOpts): Promise<void> {
     }
 
     if (views.length === 0) {
-      log.dim("No views found.");
+      log.dim(`No views found${opts.type ? ` of type '${opts.type}'` : ""}.`);
+      if (opts.type) log.dim("  Drop --type to list all views in the workspace.");
       return;
     }
 
-    log.heading(`Views${workspaceId ? ` in workspace ${workspaceId.slice(0, 8)}…` : ""}`);
+    log.heading(`Views${opts.type ? ` (${opts.type})` : ""}${workspaceId ? ` in workspace ${workspaceId.slice(0, 8)}…` : ""}`);
     console.log("");
     for (const v of views) {
       const type = String(v.type ?? "").padEnd(14);

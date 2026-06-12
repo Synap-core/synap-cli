@@ -1,11 +1,19 @@
 /**
  * synap capture / synap recall --structured
  *
- * Structured knowledge capture and retrieval using the knowledge
- * entity profile. Backed by Hub Protocol entity endpoints — separate from the
- * episodic /memory endpoints used by `synap remember` / `synap recall`.
+ * Two modes:
  *
- * Workspace routing:
+ * SMART MODE (no --type):
+ *   synap capture "free text"
+ *   → POST /capture/structure  (AI pipeline: proposals + relations + followUp)
+ *   → Renders a compact table of proposals, then prompts y/N before writing.
+ *   → On yes (or --yes): POST /capture/execute to materialize.
+ *
+ * LEGACY / ENGINEERING-MEMORY MODE (--type required):
+ *   synap capture --type gotcha --claim "..." [--why ...] [--evidence ...] [--tags ...]
+ *   → POST /entities with profileSlug=knowledge (unchanged behaviour).
+ *
+ * Workspace routing (both modes):
  *   capture   → memory workspace by default (auto-approved, agent-private)
  *   recall    → memory workspace by default
  *   --team    → first product workspace instead
@@ -13,6 +21,8 @@
  */
 
 import chalk from "chalk";
+import * as readline from "node:readline/promises";
+import { stdin as input, stdout as output } from "node:process";
 import { log } from "../utils/logger.js";
 import {
   resolveHubConfig,
@@ -31,8 +41,11 @@ interface BaseOpts {
 export type KnowledgeType = "gotcha" | "lesson" | "decision" | "reference";
 
 export interface CaptureOpts {
-  type: KnowledgeType;
-  claim: string;
+  /** Smart mode: positional free-text (no --type). When present, uses AI /capture/structure pipeline. */
+  text?: string;
+  /** Legacy engineering-memory mode: one of gotcha|lesson|decision|reference */
+  type?: KnowledgeType;
+  claim?: string;
   why?: string;
   evidence?: string;
   tags?: string;
@@ -41,6 +54,8 @@ export interface CaptureOpts {
   /** Explicit workspace override — highest priority */
   workspace?: string;
   json?: boolean;
+  /** Skip the y/N confirmation prompt (smart mode only) */
+  yes?: boolean;
 }
 
 export interface RecallStructuredOpts extends BaseOpts {
@@ -94,8 +109,191 @@ async function resolveKnowledgeWorkspace(
   };
 }
 
+// ─── Smart capture mode (no --type) ──────────────────────────────────────────
+
+interface StructureProposal {
+  tempId: string;
+  profileSlug: string;
+  title: string;
+  description?: string;
+  properties?: Record<string, unknown>;
+  content?: string;
+  existingEntityId?: string;
+}
+
+interface StructureRelation {
+  sourceTempId: string;
+  targetTempId: string;
+  relationType: string;
+}
+
+interface FollowUp {
+  question: string;
+  suggestions?: string[];
+}
+
+interface StructureResult {
+  proposals: StructureProposal[];
+  relations: StructureRelation[];
+  followUp?: FollowUp | null;
+  targetWorkspaceId?: string | null;
+  degraded?: boolean;
+}
+
+/** Render the /capture/structure result as a compact human-readable summary. */
+function renderStructureResult(result: StructureResult): void {
+  const { proposals, relations, followUp, degraded } = result;
+
+  if (degraded) {
+    log.warn("AI structuring unavailable — degraded fallback.");
+  }
+
+  if (proposals.length === 0) {
+    log.dim("No entity proposals extracted.");
+    return;
+  }
+
+  log.heading("Proposed entities");
+  // Column widths
+  const typeW = Math.min(18, Math.max(6, ...proposals.map((p) => p.profileSlug.length)));
+  const titleW = Math.min(48, Math.max(10, ...proposals.map((p) => p.title.length)));
+  const header = [
+    chalk.bold("#".padEnd(3)),
+    chalk.bold("Type".padEnd(typeW)),
+    chalk.bold("Title".padEnd(titleW)),
+  ].join("  ");
+  console.log("  " + header);
+  console.log("  " + chalk.dim("-".repeat(3 + 2 + typeW + 2 + titleW)));
+  for (let i = 0; i < proposals.length; i++) {
+    const p = proposals[i];
+    const row = [
+      chalk.dim(String(i + 1).padEnd(3)),
+      chalk.cyan(p.profileSlug.slice(0, typeW).padEnd(typeW)),
+      p.title.slice(0, titleW).padEnd(titleW),
+    ].join("  ");
+    console.log("  " + row);
+    if (p.description) {
+      log.dim(`     ${p.description.slice(0, 80)}`);
+    }
+  }
+
+  if (relations.length > 0) {
+    log.blank();
+    log.dim(`  ${relations.length} relation${relations.length !== 1 ? "s" : ""} will be created.`);
+  }
+
+  if (followUp?.question) {
+    log.blank();
+    log.info(`Follow-up: ${followUp.question}`);
+    if (followUp.suggestions && followUp.suggestions.length > 0) {
+      for (const s of followUp.suggestions) {
+        log.dim(`  · ${s}`);
+      }
+    }
+  }
+}
+
+async function runSmartCapture(text: string, opts: CaptureOpts): Promise<void> {
+  const cfg = await resolveHubConfig();
+  const userId = await resolveUserId(cfg);
+  const { workspaceId } = await resolveKnowledgeWorkspace(opts, cfg, cfg.workspaceId);
+
+  if (!workspaceId) {
+    console.error(
+      chalk.red(
+        "No workspace set. Run:\n" +
+        "  synap connect   (sets up memory + team workspace routing)\n" +
+        "  synap use <workspace-id>   (manual override)"
+      )
+    );
+    process.exit(1);
+  }
+
+  // 1. Structure
+  const structureBody: Record<string, unknown> = { userId, text, workspaceId };
+  const structureRes = await hubPost("/capture/structure", structureBody, cfg) as StructureResult;
+
+  if (opts.json) {
+    // --json without --yes: print structure result and exit
+    if (!opts.yes) {
+      console.log(JSON.stringify(structureRes, null, 2));
+      return;
+    }
+    // --json + --yes: also execute and print combined result
+    const executeRes = await hubPost("/capture/execute", {
+      userId,
+      workspaceId,
+      entities: structureRes.proposals,
+      relations: structureRes.relations ?? [],
+    }, cfg);
+    console.log(JSON.stringify({ structure: structureRes, execute: executeRes }, null, 2));
+    return;
+  }
+
+  // 2. Render proposals
+  renderStructureResult(structureRes);
+
+  const count = structureRes.proposals?.length ?? 0;
+  if (count === 0) return;
+
+  // 3. Confirm
+  let confirmed = opts.yes ?? false;
+  if (!confirmed) {
+    log.blank();
+    const rl = readline.createInterface({ input, output });
+    try {
+      const answer = await rl.question(
+        chalk.bold(`  Create ${count} entr${count !== 1 ? "ies" : "y"}? [y/N] `)
+      );
+      confirmed = answer.trim().toLowerCase() === "y";
+    } finally {
+      rl.close();
+    }
+  }
+
+  if (!confirmed) {
+    log.dim("Aborted.");
+    return;
+  }
+
+  // 4. Execute
+  const executeRes = await hubPost("/capture/execute", {
+    userId,
+    workspaceId,
+    entities: structureRes.proposals,
+    relations: structureRes.relations ?? [],
+  }, cfg) as Record<string, unknown>;
+
+  const created = (executeRes.entitiesCreated as number | undefined)
+    ?? (executeRes.created as number | undefined)
+    ?? count;
+  log.success(`${created} entr${created !== 1 ? "ies" : "y"} created.`);
+  if (executeRes.relationsCreated) {
+    log.dim(`  ${executeRes.relationsCreated} relation${Number(executeRes.relationsCreated) !== 1 ? "s" : ""} created.`);
+  }
+}
+
+// ─── Legacy engineering-memory capture ────────────────────────────────────────
+
 export async function captureKnowledge(opts: CaptureOpts): Promise<void> {
   try {
+    // Smart mode: positional text with no --type
+    if (opts.text !== undefined && opts.type === undefined) {
+      await runSmartCapture(opts.text, opts);
+      return;
+    }
+
+    // Legacy mode: --type is required
+    if (!opts.type) {
+      console.error(chalk.red("Missing required option: --type <gotcha|lesson|decision|reference>"));
+      console.error(chalk.dim("  Or pass free text as a positional arg for smart capture: synap capture \"your text\""));
+      process.exit(1);
+    }
+    if (!opts.claim) {
+      console.error(chalk.red("Missing required option: --claim <text>"));
+      process.exit(1);
+    }
+
     const cfg = await resolveHubConfig();
     const userId = await resolveUserId(cfg);
 
@@ -175,17 +373,30 @@ export async function recallStructured(
 
     const { workspaceId } = await resolveKnowledgeWorkspace(opts, cfg, cfg.workspaceId);
 
-    const params: Record<string, string | number> = {
-      profileSlug: "knowledge",
-      q: query,
-      limit,
-    };
+    let list: Record<string, unknown>[] = [];
 
-    if (workspaceId) params.workspaceId = workspaceId;
-
-    const res = await hubGet("/entities", params, cfg) as Record<string, unknown>;
-    const entities = (res.entities ?? res.items ?? res) as Record<string, unknown>[];
-    let list = Array.isArray(entities) ? entities : [];
+    // Try the semantic recall endpoint first; fall back to a plain entity search
+    try {
+      const recallRes = await hubPost("/entities/recall", {
+        query,
+        profileSlug: "knowledge",
+        ...(workspaceId ? { workspaceId } : {}),
+        limit,
+      }, cfg) as Record<string, unknown>;
+      const items = (recallRes.entities ?? recallRes.items ?? recallRes) as Record<string, unknown>[];
+      list = Array.isArray(items) ? items : [];
+    } catch {
+      // Fall back to GET /entities with q= param
+      const params: Record<string, string | number> = {
+        profileSlug: "knowledge",
+        q: query,
+        limit,
+      };
+      if (workspaceId) params.workspaceId = workspaceId;
+      const res = await hubGet("/entities", params, cfg) as Record<string, unknown>;
+      const items = (res.entities ?? res.items ?? res) as Record<string, unknown>[];
+      list = Array.isArray(items) ? items : [];
+    }
 
     if (opts.type) {
       list = list.filter((e) => {

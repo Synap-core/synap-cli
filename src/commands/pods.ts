@@ -30,7 +30,7 @@ import {
   writeClaudeCodeEnv,
 } from "../lib/targets.js";
 import { runBrowserAuth } from "../lib/browser-auth.js";
-import { readOpenClawConfig, writeOpenClawConfig, setConfigValue } from "../lib/openclaw.js";
+
 
 // ─── list ─────────────────────────────────────────────────────────────────────
 
@@ -182,19 +182,13 @@ export async function podsAdd(name?: string, podUrlArg?: string): Promise<void> 
 
 export type { SurfaceName };
 
-const SURFACE_LABELS: Record<SurfaceName, string> = {
+const SURFACE_LABELS: Record<string, string> = {
   raycast: "Raycast",
   "claude-code": "Claude Code",
   "claude-desktop": "Claude Desktop",
   cursor: "Cursor",
-  openclaw: "OpenClaw",
-  codex: "Codex",
   opencode: "opencode",
-  aider: "aider",
-  windsurf: "Windsurf",
   goose: "Goose",
-  zed: "Zed",
-  vscode: "VS Code",
 };
 
 export async function podsUse(name: string, opts: { surface?: SurfaceName } = {}): Promise<void> {
@@ -256,19 +250,6 @@ export async function podsUse(name: string, opts: { surface?: SurfaceName } = {}
     updated.push("Claude Code");
   }
 
-  // OpenClaw
-  try {
-    const ocConfig = readOpenClawConfig();
-    if (ocConfig) {
-      setConfigValue(ocConfig, "synap.podUrl", podConfig.podUrl);
-      setConfigValue(ocConfig, "synap.hubApiKey", podConfig.hubApiKey);
-      if (podConfig.workspaceId) setConfigValue(ocConfig, "synap.workspaceId", podConfig.workspaceId);
-      if (podConfig.agentUserId) setConfigValue(ocConfig, "synap.agentUserId", podConfig.agentUserId);
-      writeOpenClawConfig(ocConfig);
-      updated.push("OpenClaw");
-    }
-  } catch { /* OpenClaw not installed — skip */ }
-
   // Raycast reads ~/.synap/config.json directly — activePod update is sufficient.
   updated.push("Raycast");
 
@@ -316,21 +297,6 @@ async function applySurfaceConfig(surface: SurfaceName, podConfig: import("../li
       } else {
         log.dim("Claude Code settings not found — run `synap connect --target=claude-code` first.");
       }
-      break;
-    }
-    case "openclaw": {
-      try {
-        const ocConfig = readOpenClawConfig();
-        if (ocConfig) {
-          setConfigValue(ocConfig, "synap.podUrl", podConfig.podUrl);
-          setConfigValue(ocConfig, "synap.hubApiKey", podConfig.hubApiKey);
-          if (podConfig.workspaceId) setConfigValue(ocConfig, "synap.workspaceId", podConfig.workspaceId);
-          writeOpenClawConfig(ocConfig);
-          log.success("OpenClaw config updated.");
-        } else {
-          log.dim("OpenClaw config not found.");
-        }
-      } catch { log.dim("OpenClaw not installed."); }
       break;
     }
     case "raycast":
@@ -411,4 +377,98 @@ export async function podsRemove(name: string): Promise<void> {
   if (after.length > 0 && profile.active) {
     log.dim(`Active pod is now '${after[0].name}'.`);
   }
+}
+
+// ─── reconnect ────────────────────────────────────────────────────────────────
+
+/**
+ * Re-run the browser auth flow against an already-saved pod URL.
+ * Lets users refresh a broken/expired API key without re-entering the pod URL.
+ */
+export async function podsReconnect(name?: string): Promise<void> {
+  const profiles = listPodProfiles();
+
+  if (profiles.length === 0) {
+    log.info("No pods configured. Run: synap pods add");
+    return;
+  }
+
+  let targetName = name;
+
+  if (!targetName) {
+    if (profiles.length === 1) {
+      targetName = profiles[0].name;
+    } else {
+      const active = profiles.find((p) => p.active);
+      const { picked } = await prompts({
+        type: "select",
+        name: "picked",
+        message: "Which pod do you want to reconnect?",
+        choices: profiles.map((p) => ({
+          title: `${chalk.bold(p.name)}${p.active ? chalk.green("  ← active") : ""}  ${chalk.dim(p.config.podUrl)}`,
+          value: p.name,
+        })),
+        initial: active ? profiles.indexOf(active) : 0,
+      });
+      if (!picked) return;
+      targetName = picked as string;
+    }
+  }
+
+  const profile = profiles.find((p) => p.name === targetName);
+  if (!profile) {
+    log.error(`Pod profile '${targetName}' not found.`);
+    return;
+  }
+
+  const podUrl = profile.config.podUrl;
+  log.info(`Reconnecting to ${chalk.cyan(podUrl)}`);
+
+  const spinner = ora("Checking pod health...").start();
+  const health = await checkPodHealth(podUrl);
+  if (!health.healthy) {
+    spinner.fail(`Pod not reachable at ${podUrl}. Check that it is running.`);
+    return;
+  }
+  spinner.succeed("Pod is reachable");
+
+  let apiKey: string | undefined;
+  let workspaceId: string | undefined;
+
+  const browserSpinner = ora("Opening browser to approve new credentials...").start();
+  try {
+    const result = await runBrowserAuth({
+      podUrl,
+      integration: "cli",
+      onUrlReady: (authUrl) => {
+        browserSpinner.stop();
+        log.info(`Opening ${chalk.cyan(authUrl)}`);
+        log.dim("Sign in and click Generate & connect.");
+      },
+    });
+    apiKey = result.apiKey;
+    workspaceId = result.workspaceId;
+  } catch (err) {
+    browserSpinner.stop();
+    log.error(err instanceof Error ? err.message : "Browser flow failed");
+    return;
+  }
+
+  if (!apiKey) {
+    log.error("No API key received. Reconnect cancelled.");
+    return;
+  }
+
+  // Update the saved profile in place — preserve everything except credentials
+  addPodProfile(targetName, {
+    ...profile.config,
+    hubApiKey: apiKey,
+    ...(workspaceId ? { workspaceId } : {}),
+    savedAt: new Date().toISOString(),
+  });
+
+  log.success(`Pod '${targetName}' credentials refreshed.`);
+
+  // Propagate the new key to connected surfaces (same as podsUse)
+  await podsUse(targetName);
 }

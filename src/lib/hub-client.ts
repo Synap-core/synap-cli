@@ -1,3 +1,5 @@
+import { existsSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
+import { join } from "node:path";
 import { getActivePodConfig, getActiveWorkspaceId, listPodProfiles } from "./pod.js";
 import { resolveAgentOverride } from "./agents-config.js";
 import { HubRestClient } from "@synap/hub-rest-client";
@@ -83,6 +85,35 @@ export async function resolveHubConfig(opts?: { podUrl?: string; apiKey?: string
   };
 }
 
+const SESSION_FILE = ".synap-session";
+
+/** Read the active session ID for this terminal from CWD or env var. */
+export function readActiveSessionId(): string | undefined {
+  const fromEnv = process.env.SYNAP_SESSION_ID;
+  if (fromEnv) return fromEnv;
+  const filePath = join(process.cwd(), SESSION_FILE);
+  if (existsSync(filePath)) {
+    return readFileSync(filePath, "utf8").trim() || undefined;
+  }
+  return undefined;
+}
+
+/** Attach a session to this terminal — writes .synap-session in CWD. */
+export function writeActiveSessionId(sessionId: string): void {
+  writeFileSync(join(process.cwd(), SESSION_FILE), sessionId, "utf8");
+}
+
+/** Detach the active session from this terminal — removes .synap-session. */
+export function clearActiveSessionId(): void {
+  const filePath = join(process.cwd(), SESSION_FILE);
+  if (existsSync(filePath)) unlinkSync(filePath);
+}
+
+function sessionHeaders(): Record<string, string> {
+  const id = readActiveSessionId();
+  return id ? { "X-Session-Id": id } : {};
+}
+
 export async function hubGet(
   path: string,
   params: Record<string, string | number | undefined>,
@@ -93,7 +124,7 @@ export async function hubGet(
     if (v !== undefined) url.searchParams.set(k, String(v));
   }
   const res = await fetch(url.toString(), {
-    headers: { Authorization: `Bearer ${cfg.apiKey}` },
+    headers: { Authorization: `Bearer ${cfg.apiKey}`, ...sessionHeaders() },
     signal: AbortSignal.timeout(15_000),
   });
   if (!res.ok) {
@@ -106,7 +137,7 @@ export async function hubGet(
 export async function hubPost(path: string, body: unknown, cfg: HubConfig): Promise<unknown> {
   const res = await fetch(`${cfg.podUrl}/api/hub${path}`, {
     method: "POST",
-    headers: { Authorization: `Bearer ${cfg.apiKey}`, "Content-Type": "application/json" },
+    headers: { Authorization: `Bearer ${cfg.apiKey}`, "Content-Type": "application/json", ...sessionHeaders() },
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(15_000),
   });
@@ -120,7 +151,7 @@ export async function hubPost(path: string, body: unknown, cfg: HubConfig): Prom
 export async function hubPatch(path: string, body: unknown, cfg: HubConfig): Promise<unknown> {
   const res = await fetch(`${cfg.podUrl}/api/hub${path}`, {
     method: "PATCH",
-    headers: { Authorization: `Bearer ${cfg.apiKey}`, "Content-Type": "application/json" },
+    headers: { Authorization: `Bearer ${cfg.apiKey}`, "Content-Type": "application/json", ...sessionHeaders() },
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(15_000),
   });

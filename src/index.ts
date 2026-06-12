@@ -38,7 +38,8 @@ program
   .description(
     "Synap CLI — connect AI agents to your data pod"
   )
-  .version(version);
+  .version(version)
+  .showSuggestionAfterError(true);
 
 program
   .command("init")
@@ -483,6 +484,19 @@ list
   });
 
 list
+  .command("views")
+  .description("List views in a workspace (whiteboard, kanban, bento, …)")
+  .option("--type <type>", "Filter by view type (e.g. whiteboard, kanban, calendar)")
+  .option("--workspace <id>", "Workspace (defaults to active)")
+  .option("--json", "Output as JSON")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (opts) => {
+    const { viewList } = await import("./commands/view.js");
+    await viewList(opts);
+  });
+
+list
   .command("entities")
   .description("List entities on the pod")
   .option("--workspace <id>", "Scope to a workspace (omit for pod-wide)")
@@ -555,9 +569,10 @@ proposals
   });
 
 // ─── session ──────────────────────────────────────────────────────────────────
-// Focus sessions — goal-bound work rooms proposed via the governance system.
-// AI agents: use `create_proposal` with targetType:"focus_session" to start one;
-// then `synap session update <id>` to report progress and `close` when done.
+// Focus sessions — goal-bound work rooms tracked on the pod.
+// AI agents: use start_session to begin, update_session to report progress,
+// update_session({status:"closed"}) to finish. Sessions link goals, context,
+// plans, execution logs, and verification reports together.
 
 const session = program
   .command("session")
@@ -629,6 +644,35 @@ session
   .action(async (id: string, opts) => {
     const { closeSession } = await import("./commands/sessions.js");
     await closeSession(id, opts);
+  });
+
+session
+  .command("attach <id>")
+  .description("Attach a session to this terminal — all hub calls tag X-Session-Id until detached")
+  .option("--json", "Output as JSON")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (id: string, opts) => {
+    const { attachSession } = await import("./commands/sessions.js");
+    await attachSession(id, opts);
+  });
+
+session
+  .command("detach")
+  .description("Remove the active session from this terminal")
+  .option("--json", "Output as JSON")
+  .action(async (opts) => {
+    const { detachSession } = await import("./commands/sessions.js");
+    detachSession(opts);
+  });
+
+session
+  .command("current")
+  .description("Show the active session for this terminal (from .synap-session or SYNAP_SESSION_ID)")
+  .option("--json", "Output as JSON")
+  .action(async (opts) => {
+    const { sessionStatus } = await import("./commands/sessions.js");
+    sessionStatus(opts);
   });
 
 // ─── skill ────────────────────────────────────────────────────────────────────
@@ -1079,6 +1123,7 @@ view
 view
   .command("list", { isDefault: true })
   .description("List views in the active workspace")
+  .option("--type <type>", "Filter by view type (e.g. whiteboard, kanban, calendar)")
   .option("--workspace <id>", "Workspace ID")
   .option("--json", "JSON output")
   .option("--pod-url <url>", "Pod URL override")

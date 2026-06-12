@@ -14,7 +14,8 @@ import os from "node:os";
 import { log } from "../utils/logger.js";
 import { listPodProfiles } from "../lib/pod.js";
 import { TARGETS } from "../lib/targets.js";
-import { readOpenClawConfig } from "../lib/openclaw.js";
+
+
 
 interface SurfaceStatus {
   label: string;
@@ -37,7 +38,6 @@ export async function connections(): Promise<void> {
     detectClaudeCode(urlToProfile),
     detectClaudeDesktop(urlToProfile),
     detectCursor(urlToProfile),
-    detectOpenClaw(urlToProfile),
     detectRaycast(urlToProfile),
   ];
 
@@ -134,19 +134,6 @@ function detectCursor(urlToProfile: Record<string, string>): SurfaceStatus {
     return { label: "Cursor", configured: true, podUrl, profile, configPath };
   } catch {
     return { label: "Cursor", configured: false, configPath };
-  }
-}
-
-function detectOpenClaw(urlToProfile: Record<string, string>): SurfaceStatus {
-  try {
-    const ocConfig = readOpenClawConfig();
-    const podUrl = (ocConfig as Record<string, unknown> | null)?.["synap"] as Record<string, unknown> | undefined;
-    const url = podUrl?.["podUrl"] as string | undefined;
-    if (!url) return { label: "OpenClaw", configured: false };
-    const profile = urlToProfile[url.replace(/\/$/, "")];
-    return { label: "OpenClaw", configured: true, podUrl: url, profile };
-  } catch {
-    return { label: "OpenClaw", configured: false };
   }
 }
 

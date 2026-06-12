@@ -29,7 +29,6 @@ export type SurfaceName =
   | "claude-code"
   | "claude-desktop"
   | "cursor"
-  | "openclaw"
   | "codex"
   | "opencode"
   | "aider"

@@ -1,0 +1,4 @@
+{"t":0,"agent":"a6108c5","agent_type":"unknown","event":"agent_stop","success":true}
+{"t":0,"agent":"system","event":"skill_invoked","skill_name":"autonomous-dev"}
+{"t":0,"agent":"a644939","agent_type":"unknown","event":"agent_stop","success":true}
+{"t":0,"agent":"a402ba4","agent_type":"general-purpose","event":"agent_start","parent_mode":"none"}
