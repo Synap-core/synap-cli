@@ -8,7 +8,7 @@ import chalk from "chalk";
 import ora from "ora";
 import prompts from "prompts";
 import { readFileSync, mkdirSync, writeFileSync, existsSync } from "fs";
-import { resolveHubConfig, hubGet, hubPost } from "../lib/hub-client.js";
+import { resolveHubConfig, resolveUserId, hubGet, hubPost } from "../lib/hub-client.js";
 import { log } from "../utils/logger.js";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -93,9 +93,13 @@ async function trpcQuery(
   input: Record<string, unknown>,
   cfg: HubCfg
 ): Promise<unknown> {
+  // Hub-protocol procedures require the acting userId in their input.
+  if (input.userId === undefined) input.userId = await resolveUserId(cfg);
+  // Backend tRPC uses the superjson transformer: GET input must be wrapped
+  // in the { json: ... } envelope (mirrors the POST body shape below).
   const res = await hubGet(
     `/trpc/${procedure}`,
-    { input: JSON.stringify(input) },
+    { input: JSON.stringify({ json: input }) },
     cfg
   );
   return extractResult(res);
@@ -106,6 +110,7 @@ async function trpcMutation(
   input: Record<string, unknown>,
   cfg: HubCfg
 ): Promise<unknown> {
+  if (input.userId === undefined) input.userId = await resolveUserId(cfg);
   const res = await hubPost(`/trpc/${procedure}`, { json: input }, cfg);
   return extractResult(res);
 }
@@ -270,7 +275,7 @@ export async function automationList(opts: ListOpts): Promise<void> {
     const input: Record<string, unknown> = {};
     if (workspaceId) input.workspaceId = workspaceId;
     if (opts.status) input.status = opts.status;
-    const data = await trpcQuery("automations.list", input, cfg);
+    const data = await trpcQuery("automations.listAutomations", input, cfg);
     console.log(JSON.stringify(data, null, 2));
     return;
   }
@@ -281,7 +286,7 @@ export async function automationList(opts: ListOpts): Promise<void> {
     const input: Record<string, unknown> = {};
     if (workspaceId) input.workspaceId = workspaceId;
     if (opts.status) input.status = opts.status;
-    const data = await trpcQuery("automations.list", input, cfg);
+    const data = await trpcQuery("automations.listAutomations", input, cfg);
     automations = (Array.isArray(data) ? data : (data as Record<string, unknown>).automations ?? []) as Automation[];
     spinner.stop();
   } catch (err) {
@@ -330,7 +335,7 @@ export async function automationDescribe(id: string, opts: DescribeOpts): Promis
   if (workspaceId) input.workspaceId = workspaceId;
 
   if (opts.json) {
-    const data = await trpcQuery("automations.getById", input, cfg);
+    const data = await trpcQuery("automations.getAutomation", input, cfg);
     console.log(JSON.stringify(data, null, 2));
     return;
   }
@@ -338,7 +343,7 @@ export async function automationDescribe(id: string, opts: DescribeOpts): Promis
   const spinner = ora({ text: "Fetching automation…", color: "cyan" }).start();
   let automation: Automation;
   try {
-    const data = await trpcQuery("automations.getById", input, cfg);
+    const data = await trpcQuery("automations.getAutomation", input, cfg);
     automation = data as Automation;
     spinner.stop();
   } catch (err) {
@@ -506,7 +511,7 @@ export async function automationCreate(opts: CreateOpts): Promise<void> {
 
   let result: Automation;
   try {
-    const data = await trpcMutation("automations.create", payload, cfg);
+    const data = await trpcMutation("automations.createAutomation", payload, cfg);
     result = data as Automation;
   } catch (err) {
     spinner.fail(chalk.red("Failed to create automation"));
@@ -546,7 +551,7 @@ export async function automationEnable(id: string, opts: EnableOpts): Promise<vo
 
   let result: Automation;
   try {
-    const data = await trpcMutation("automations.activate", input, cfg);
+    const data = await trpcMutation("automations.activateAutomation", input, cfg);
     result = data as Automation;
   } catch (err) {
     spinner.fail(chalk.red("Failed to activate automation"));
@@ -581,7 +586,7 @@ export async function automationDisable(id: string, opts: DisableOpts): Promise<
 
   let result: Automation;
   try {
-    const data = await trpcMutation("automations.pause", input, cfg);
+    const data = await trpcMutation("automations.pauseAutomation", input, cfg);
     result = data as Automation;
   } catch (err) {
     spinner.fail(chalk.red("Failed to pause automation"));
@@ -617,7 +622,7 @@ export async function automationDelete(id: string, opts: DeleteOpts): Promise<vo
     try {
       const input: Record<string, unknown> = { id };
       if (workspaceId) input.workspaceId = workspaceId;
-      const data = await trpcQuery("automations.getById", input, cfg);
+      const data = await trpcQuery("automations.getAutomation", input, cfg);
       automationName = (data as Automation).name ?? id;
     } catch {
       // Fall back to ID in prompt
@@ -642,7 +647,7 @@ export async function automationDelete(id: string, opts: DeleteOpts): Promise<vo
   if (workspaceId) input.workspaceId = workspaceId;
 
   try {
-    await trpcMutation("automations.delete", input, cfg);
+    await trpcMutation("automations.deleteAutomation", input, cfg);
   } catch (err) {
     spinner.fail(chalk.red("Failed to delete automation"));
     log.error((err as Error).message);
@@ -672,7 +677,8 @@ export async function automationSchema(opts: SchemaOpts): Promise<void> {
 
   let schema: unknown;
   try {
-    schema = await hubGet("/api/hub/automations/schema", {}, cfg);
+    // hubGet already prefixes ${podUrl}/api/hub — pass only the sub-path.
+    schema = await hubGet("/automations/schema", {}, cfg);
     spinner?.stop();
   } catch (err) {
     spinner?.fail(chalk.red("Failed to fetch schema"));
