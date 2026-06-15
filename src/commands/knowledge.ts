@@ -1,23 +1,19 @@
 /**
- * synap capture / synap recall --structured
+ * synap capture — the one canonical structured-WRITE verb.
  *
- * Two modes:
+ * SMART MODE (no --type): `synap capture "free text"`
+ *   → POST /capture/structure (AI pipeline: proposals + relations + followUp)
+ *   → renders a proposal table, prompts y/N, then POST /capture/execute.
  *
- * SMART MODE (no --type):
- *   synap capture "free text"
- *   → POST /capture/structure  (AI pipeline: proposals + relations + followUp)
- *   → Renders a compact table of proposals, then prompts y/N before writing.
- *   → On yes (or --yes): POST /capture/execute to materialize.
+ * TYPED MODE (--type): `synap capture --type gotcha --claim "…" [--why] [--evidence] [--tags]`
+ *   → POST /entities as a typed `knowledge` entity; `ek_type` (gotcha|lesson|decision|
+ *     reference) discriminates the kind — ONE store, type tags (the canonical pattern,
+ *     NOT a residual dump). The workspace lens supplies the domain (no
+ *     `engineering_knowledge`). A formal decision RECORD (rationale/alternatives/status
+ *     lifecycle) comes from smart `capture "<text>"` or `create entity --profile=decision`.
  *
- * LEGACY / ENGINEERING-MEMORY MODE (--type required):
- *   synap capture --type gotcha --claim "..." [--why ...] [--evidence ...] [--tags ...]
- *   → POST /entities with profileSlug=knowledge (unchanged behaviour).
- *
- * Workspace routing (both modes):
- *   capture   → memory workspace by default (auto-approved, agent-private)
- *   recall    → memory workspace by default
- *   --team    → first product workspace instead
- *   --workspace <id>  → explicit override (highest priority)
+ * Workspace routing: --workspace > --team (first product ws) > memory ws (default,
+ * auto-approved, agent-private) > active ws.
  */
 
 import chalk from "chalk";
@@ -28,85 +24,134 @@ import {
   resolveHubConfig,
   resolveUserId,
   hubPost,
-  hubGet,
   type HubConfig,
 } from "../lib/hub-client.js";
 import { getAgentWorkspaceRouting } from "../lib/pod.js";
-
-interface BaseOpts {
-  podUrl?: string;
-  apiKey?: string;
-}
+import {
+  laneFromSource,
+  resolveWorkspaceName,
+  formatLaneLine,
+  laneJsonFields,
+  type LaneReport,
+} from "../lib/capture-lane.js";
 
 export type KnowledgeType = "gotcha" | "lesson" | "decision" | "reference";
 
 export interface CaptureOpts {
   /** Smart mode: positional free-text (no --type). When present, uses AI /capture/structure pipeline. */
   text?: string;
-  /** Legacy engineering-memory mode: one of gotcha|lesson|decision|reference */
+  /** Typed mode: one of gotcha|lesson|decision|reference */
   type?: KnowledgeType;
   claim?: string;
   why?: string;
   evidence?: string;
   tags?: string;
-  /** Override to first product workspace instead of memory workspace */
+  /** Override to first product workspace instead of the active workspace */
   team?: boolean;
   /** Explicit workspace override — highest priority */
   workspace?: string;
+  /**
+   * GLOBAL lane: write a pod-wide procedural runbook to `knowledge_keys`
+   * (cross-cutting best-practice/how-to, visible in every workspace) instead of
+   * a domain `knowledge` entity in the active workspace.
+   */
+  global?: boolean;
+  /** Optional stable key (namespace:slug) for a --global runbook; derived if absent. */
+  key?: string;
   json?: boolean;
   /** Skip the y/N confirmation prompt (smart mode only) */
   yes?: boolean;
 }
 
-export interface RecallStructuredOpts extends BaseOpts {
-  type?: KnowledgeType;
-  tags?: string;
-  limit?: string;
-  /** Override to first product workspace instead of memory workspace */
-  team?: boolean;
-  /** Explicit workspace override — highest priority */
-  workspace?: string;
-  json?: boolean;
-}
-
 /**
- * Live-detect an agent workspace (workspaceType: "agent") from the pod.
- * Falls back silently if the request fails or none exists.
- */
-async function detectAgentWorkspace(cfg: HubConfig): Promise<string | undefined> {
-  try {
-    const res = await hubGet("/workspaces", {}, cfg) as Record<string, unknown>;
-    const list = ((res.workspaces as unknown[]) ?? (Array.isArray(res) ? (res as unknown[]) : [])) as Record<string, unknown>[];
-    const agentWs = list.find((w) => w.workspaceType === "agent");
-    if (agentWs?.id) return String(agentWs.id);
-  } catch { /* best-effort */ }
-  return undefined;
-}
-
-/**
- * Resolve the workspace to use for capture/recall based on routing config.
- * Priority: --workspace > --team (first product ws) > persisted memory ws
- *           > live-detected agent workspace > active ws.
+ * Resolve the workspace for a DOMAIN capture (the `knowledge` entity, the Work
+ * lane). Knowledge is workspace-scoped, so the destination IS the separation:
+ * a Builder lesson stays in Builder, a marketing one in marketing.
+ *
+ * Priority: --workspace > --team (first product ws) > active ws.
+ *
+ * NOTE: the agent-memory ("AI-self") lane was removed — the AI no longer dumps
+ * captures into a private agent workspace. Everything it learns routes to a real
+ * lane: Work (here), Global (`--global` → knowledge_keys), or User
+ * (`record_observation` → user_observation). The per-adjunct memory workspace is
+ * being decommissioned.
  */
 async function resolveKnowledgeWorkspace(
   opts: { team?: boolean; workspace?: string },
-  cfg: HubConfig,
+  _cfg: HubConfig,
   activeWorkspaceId: string | undefined
 ): Promise<{ workspaceId: string | undefined; source: string }> {
   if (opts.workspace) {
     return { workspaceId: opts.workspace, source: "explicit" };
   }
-  const routing = getAgentWorkspaceRouting();
   if (opts.team) {
+    const routing = getAgentWorkspaceRouting();
     const teamWs = routing?.productWorkspaceIds?.[0];
     return { workspaceId: teamWs ?? activeWorkspaceId, source: teamWs ? "team" : "active (no team workspace configured)" };
   }
-  // Persisted routing first; if absent, live-detect agent workspace from pod
-  const memWs = routing?.memoryWorkspaceId ?? await detectAgentWorkspace(cfg);
   return {
-    workspaceId: memWs ?? activeWorkspaceId,
-    source: memWs ? "agent-workspace" : "active (run `synap connect` to configure routing)",
+    workspaceId: activeWorkspaceId,
+    source: activeWorkspaceId ? "active" : "active (run `synap use <id>` to set a workspace)",
   };
+}
+
+/** Slugify free text into a knowledge_keys slug fragment. */
+function slugify(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 80) || "entry";
+}
+
+/**
+ * GLOBAL lane: write a pod-wide procedural runbook to `knowledge_keys`.
+ * Cross-cutting best-practice/how-to, addressed by a stable `namespace:slug` key
+ * and visible in every workspace (pod-wide). The kind (gotcha/lesson/decision/
+ * reference) becomes the namespace; the claim derives the slug unless --key given.
+ */
+async function captureGlobalRunbook(
+  opts: CaptureOpts,
+  cfg: HubConfig,
+  authorUserId: string
+): Promise<void> {
+  const type = opts.type ?? "reference";
+  const claim = opts.claim ?? opts.text ?? "";
+  const key = opts.key ?? `${type}:${slugify(claim)}`;
+  const [namespace, ...slugParts] = key.split(":");
+  const slug = slugParts.join(":") || slugify(claim);
+
+  const valueParts = [claim];
+  if (opts.why) valueParts.push(`\n**Why:** ${opts.why}`);
+  if (opts.evidence) valueParts.push(`\n**Evidence:** ${opts.evidence}`);
+  if (opts.tags) valueParts.push(`\n_tags: ${opts.tags}_`);
+
+  const res = await hubPost("/knowledge", {
+    key,
+    namespace,
+    slug,
+    value: valueParts.join("\n"),
+    author: authorUserId,
+    // workspaceId omitted → pod-wide (null). The Global lane is, by definition,
+    // cross-workspace. (Workspace-scoped knowledge_keys await a backend fix —
+    // POST /knowledge currently drops workspaceId; domain knowledge uses the
+    // `knowledge` entity instead, which IS workspace-scoped.)
+  }, cfg) as Record<string, unknown>;
+
+  const report: LaneReport = {
+    lane: "global",
+    workspaceId: undefined,
+    workspaceName: "pod-wide",
+    governance: "auto",
+  };
+
+  if (opts.json) {
+    console.log(JSON.stringify({ key, id: res.id, stored: true, ...laneJsonFields(report) }, null, 2));
+    return;
+  }
+  log.success(`[${type}] ${claim.slice(0, 80)}`);
+  log.dim(`  key: ${key}`);
+  console.log("  " + formatLaneLine(report));
 }
 
 // ─── Smart capture mode (no --type) ──────────────────────────────────────────
@@ -196,7 +241,7 @@ function renderStructureResult(result: StructureResult): void {
 async function runSmartCapture(text: string, opts: CaptureOpts): Promise<void> {
   const cfg = await resolveHubConfig();
   const userId = await resolveUserId(cfg);
-  const { workspaceId } = await resolveKnowledgeWorkspace(opts, cfg, cfg.workspaceId);
+  const { workspaceId, source } = await resolveKnowledgeWorkspace(opts, cfg, cfg.workspaceId);
 
   if (!workspaceId) {
     console.error(
@@ -225,8 +270,9 @@ async function runSmartCapture(text: string, opts: CaptureOpts): Promise<void> {
       workspaceId,
       entities: structureRes.proposals,
       relations: structureRes.relations ?? [],
-    }, cfg);
-    console.log(JSON.stringify({ structure: structureRes, execute: executeRes }, null, 2));
+    }, cfg) as Record<string, unknown>;
+    const report = await buildSmartLaneReport(executeRes, workspaceId, source, cfg);
+    console.log(JSON.stringify({ structure: structureRes, execute: executeRes, ...laneJsonFields(report) }, null, 2));
     return;
   }
 
@@ -271,12 +317,46 @@ async function runSmartCapture(text: string, opts: CaptureOpts): Promise<void> {
   if (executeRes.relationsCreated) {
     log.dim(`  ${executeRes.relationsCreated} relation${Number(executeRes.relationsCreated) !== 1 ? "s" : ""} created.`);
   }
+
+  const report = await buildSmartLaneReport(executeRes, workspaceId, source, cfg);
+  console.log("  " + formatLaneLine(report));
+}
+
+/**
+ * Build the lane report for a smart-capture execute response. Smart capture may
+ * land directly or be queued as proposals — detect the latter from the execute
+ * payload (proposed/proposalsCreated/status) and fall back to auto otherwise.
+ */
+async function buildSmartLaneReport(
+  executeRes: Record<string, unknown>,
+  workspaceId: string,
+  source: string,
+  cfg: HubConfig
+): Promise<LaneReport> {
+  const isProposed =
+    executeRes.status === "proposed" ||
+    Boolean(executeRes.proposalId) ||
+    Number(executeRes.proposalsCreated ?? 0) > 0;
+  return {
+    lane: laneFromSource(source),
+    workspaceId,
+    workspaceName: await resolveWorkspaceName(workspaceId, cfg),
+    governance: isProposed ? "proposed" : "auto",
+  };
 }
 
 // ─── Legacy engineering-memory capture ────────────────────────────────────────
 
 export async function captureKnowledge(opts: CaptureOpts): Promise<void> {
   try {
+    // Mutual exclusion: smart mode (positional text) and typed mode (--type/--claim)
+    // are two distinct flows. Mixing them silently drops one — fail loud instead.
+    if (opts.text !== undefined && opts.type !== undefined) {
+      console.error(chalk.red("Cannot mix smart mode (positional text) with typed mode (--type/--claim)."));
+      console.error(chalk.dim("  Use one: `synap capture \"free text\"`  OR  `synap capture --type gotcha --claim \"…\"`"));
+      process.exit(1);
+    }
+
     // Smart mode: positional text with no --type
     if (opts.text !== undefined && opts.type === undefined) {
       await runSmartCapture(opts.text, opts);
@@ -297,6 +377,12 @@ export async function captureKnowledge(opts: CaptureOpts): Promise<void> {
     const cfg = await resolveHubConfig();
     const userId = await resolveUserId(cfg);
 
+    // GLOBAL lane: pod-wide procedural runbook → knowledge_keys.
+    if (opts.global) {
+      await captureGlobalRunbook(opts, cfg, userId);
+      return;
+    }
+
     const { workspaceId, source } = await resolveKnowledgeWorkspace(opts, cfg, cfg.workspaceId);
 
     if (!workspaceId) {
@@ -316,6 +402,12 @@ export async function captureKnowledge(opts: CaptureOpts): Promise<void> {
 
     const title = opts.claim.slice(0, 120);
 
+    // Every --type entry is a typed `knowledge` entity; ek_type discriminates the
+    // kind. This is "one store, type tags" (the research-canonical pattern) — NOT a
+    // residual catch-all: each row is typed by ek_type and lives in the workspace
+    // lens that supplies its domain (so no `engineering_knowledge`). A structured
+    // decision RECORD (rationale/alternatives/status) is a different artifact, reached
+    // via smart `capture "<text>"` or `create entity --profile=decision`.
     const res = await hubPost("/entities", {
       userId,
       workspaceId,
@@ -333,6 +425,15 @@ export async function captureKnowledge(opts: CaptureOpts): Promise<void> {
     // Governance may queue the write as a proposal rather than creating directly
     const isProposed = res.status === "proposed" || Boolean(res.proposalId);
 
+    // Declare which lane + workspace + governance this capture took, so the
+    // caller always knows where its knowledge landed.
+    const report: LaneReport = {
+      lane: laneFromSource(source),
+      workspaceId,
+      workspaceName: await resolveWorkspaceName(workspaceId, cfg),
+      governance: isProposed ? "proposed" : "auto",
+    };
+
     if (opts.json) {
       if (isProposed) {
         console.log(JSON.stringify({
@@ -340,9 +441,10 @@ export async function captureKnowledge(opts: CaptureOpts): Promise<void> {
           proposalId: res.proposalId ?? res.id,
           reviewUrl: res.reviewUrl ?? null,
           message: "Write queued for approval — not yet stored.",
+          ...laneJsonFields(report),
         }, null, 2));
       } else {
-        console.log(JSON.stringify({ id: res.id, stored: true, workspace: source }, null, 2));
+        console.log(JSON.stringify({ id: res.id, stored: true, workspace: source, ...laneJsonFields(report) }, null, 2));
       }
       return;
     }
@@ -352,78 +454,11 @@ export async function captureKnowledge(opts: CaptureOpts): Promise<void> {
       log.dim(`  The target workspace requires human review for agent writes.`);
       if (res.reviewUrl) log.dim(`  Review: ${String(res.reviewUrl)}`);
       else log.dim(`  Open Synap and approve the pending proposal to persist this entry.`);
-      log.dim(`  Tip: use the memory workspace (default) to capture without governance.`);
+      console.log("  " + formatLaneLine(report));
     } else {
       log.success(`[${opts.type}] ${opts.claim.slice(0, 80)}`);
       log.dim(`  workspace: ${source}  id: ${String(res.id ?? "")}`);
-    }
-  } catch (e) {
-    console.error(chalk.red("Error: " + (e as Error).message));
-    process.exit(1);
-  }
-}
-
-export async function recallStructured(
-  query: string,
-  opts: RecallStructuredOpts
-): Promise<void> {
-  try {
-    const cfg = await resolveHubConfig(opts);
-    const limit = parseInt(opts.limit ?? "10", 10);
-
-    const { workspaceId } = await resolveKnowledgeWorkspace(opts, cfg, cfg.workspaceId);
-
-    let list: Record<string, unknown>[] = [];
-
-    // Try the semantic recall endpoint first; fall back to a plain entity search
-    try {
-      const recallRes = await hubPost("/entities/recall", {
-        query,
-        profileSlug: "knowledge",
-        ...(workspaceId ? { workspaceId } : {}),
-        limit,
-      }, cfg) as Record<string, unknown>;
-      const items = (recallRes.entities ?? recallRes.items ?? recallRes) as Record<string, unknown>[];
-      list = Array.isArray(items) ? items : [];
-    } catch {
-      // Fall back to GET /entities with q= param
-      const params: Record<string, string | number> = {
-        profileSlug: "knowledge",
-        q: query,
-        limit,
-      };
-      if (workspaceId) params.workspaceId = workspaceId;
-      const res = await hubGet("/entities", params, cfg) as Record<string, unknown>;
-      const items = (res.entities ?? res.items ?? res) as Record<string, unknown>[];
-      list = Array.isArray(items) ? items : [];
-    }
-
-    if (opts.type) {
-      list = list.filter((e) => {
-        const props = (e.properties ?? {}) as Record<string, unknown>;
-        return props.ek_type === opts.type;
-      });
-    }
-
-    if (opts.json) {
-      console.log(JSON.stringify(list, null, 2));
-      return;
-    }
-
-    if (list.length === 0) {
-      log.dim(`No knowledge entries found for "${query}"`);
-      return;
-    }
-
-    for (const item of list) {
-      const props = (item.properties ?? {}) as Record<string, unknown>;
-      const type = String(props.ek_type ?? "–");
-      const claim = String(props.ek_claim ?? item.name ?? "–");
-      const why = props.ek_why ? `\n    why: ${props.ek_why}` : "";
-      const tags = Array.isArray(props.ek_tags) && props.ek_tags.length > 0
-        ? chalk.dim(`  [${props.ek_tags.join(", ")}]`)
-        : "";
-      console.log(`  ${chalk.cyan(type.padEnd(10))} ${claim}${tags}${chalk.dim(why)}`);
+      console.log("  " + formatLaneLine(report));
     }
   } catch (e) {
     console.error(chalk.red("Error: " + (e as Error).message));

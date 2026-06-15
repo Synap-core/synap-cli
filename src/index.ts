@@ -304,29 +304,14 @@ program
     await useWorkspace(workspace, opts);
   });
 
-// ─── search ───────────────────────────────────────────────────────────────────
-
-program
-  .command("search <query>")
-  .description("Search entities, documents, and views (Typesense-powered)")
-  .option("--workspace <id>", "Scope to a specific workspace")
-  .option("--type <type>", "Filter: entity | doc | view")
-  .option("--limit <n>", "Max results", "20")
-  .option("--json", "Output as JSON")
-  .option("--pod-url <url>", "Pod URL override")
-  .option("--api-key <key>", "API key override")
-  .action(async (query: string, opts) => {
-    const { searchData } = await import("./commands/data.js");
-    await searchData(query, opts);
-  });
-
 // ─── note ─────────────────────────────────────────────────────────────────────
-// Creates a `note` entity in the agent memory workspace.
-// Replaces `synap remember` (episodic /memory store) — notes are real entities.
+// Quick `note` entity. The one canonical READ verb is `ask`; the one canonical
+// structured-WRITE verb is `capture`. (search / recall / remember removed — they
+// were redundant doors `ask`/`capture`/`note` already cover.)
 
 program
   .command("note <text>")
-  .description("Save a note to your memory workspace (creates a note entity, fully searchable)")
+  .description("Quick freeform note → note entity (for structured learnings use `synap capture`)")
   .option("--context <entity-id>", "Link this note to an entity")
   .option("--json", "Output as JSON")
   .option("--pod-url <url>", "Pod URL override")
@@ -336,33 +321,21 @@ program
     await noteData(text, opts);
   });
 
-program
-  .command("remember <text>")
-  .description("(Deprecated — use: synap note) Save a note to your memory workspace")
-  .option("--context <entity-id>", "Link note to an entity")
-  .option("--json", "Output as JSON")
-  .option("--pod-url <url>", "Pod URL override")
-  .option("--api-key <key>", "API key override")
-  .action(async (text: string, opts) => {
-    process.stderr.write("⚠️  `synap remember` is deprecated — use `synap note` instead.\n");
-    const { noteData } = await import("./commands/data.js");
-    await noteData(text, opts);
-  });
-
-// ─── recall ───────────────────────────────────────────────────────────────────
-// Unified entity + document search. No --structured split — one command, one store.
+// ─── ask (unified knowledge access) ─────────────────────────────────────────────
+// The ONE read verb. Routes to the right substrate(s) — semantic (entities),
+// procedural (how-to docs), episodic (captures) — and returns a glass-box answer.
 
 program
-  .command("recall <query>")
-  .description("Search your pod for entities and documents matching the query")
+  .command("ask <query>")
+  .description("Ask your pod anything — routes to the right knowledge substrate(s) and shows which answered")
   .option("--workspace <id>", "Scope to a specific workspace (omit for pod-wide)")
-  .option("--limit <n>", "Max results", "10")
+  .option("--limit <n>", "Max results per substrate", "10")
   .option("--json", "Output as JSON")
   .option("--pod-url <url>", "Pod URL override")
   .option("--api-key <key>", "API key override")
   .action(async (query: string, opts) => {
-    const { recallData } = await import("./commands/data.js");
-    await recallData(query, opts);
+    const { askKnowledge } = await import("./commands/data.js");
+    await askKnowledge(query, opts);
   });
 
 // ─── capture ──────────────────────────────────────────────────────────────────
@@ -370,19 +343,22 @@ program
 // `synap use` / `synap workspace provision-agent`). No auth flags needed.
 
 program
-  .command("capture")
-  .description("Capture a structured knowledge entry (defaults to agent memory workspace)")
-  .requiredOption("--type <type>", "Entry type: gotcha|lesson|decision|reference")
-  .requiredOption("--claim <text>", "One-line assertion")
+  .command("capture [text]")
+  .description("Capture knowledge: smart `capture \"<free text>\"` (AI structures it) OR typed `capture --type gotcha --claim \"…\"`")
+  .option("--type <type>", "Typed mode: gotcha|lesson|decision|reference")
+  .option("--claim <text>", "Typed mode: one-line assertion (required with --type)")
   .option("--why <text>", "Reasoning or context")
   .option("--evidence <text>", "Supporting file path, URL, or code snippet")
   .option("--tags <csv>", "Comma-separated tags e.g. repo:synap-backend,layer:migrations")
-  .option("--team", "Write to team/product workspace instead of memory workspace")
+  .option("--global", "GLOBAL lane: pod-wide cross-cutting runbook (→ knowledge_keys), visible in every workspace")
+  .option("--key <ns:slug>", "Stable key for a --global runbook (derived from --type + --claim if omitted)")
+  .option("--team", "Write to the first product workspace instead of the active workspace")
   .option("--workspace <id>", "Explicit workspace override")
+  .option("--yes", "Skip the y/N confirmation prompt (smart mode)")
   .option("--json", "Output as JSON")
-  .action(async (opts) => {
+  .action(async (text, opts) => {
     const { captureKnowledge } = await import("./commands/knowledge.js");
-    await captureKnowledge(opts);
+    await captureKnowledge({ ...opts, text });
   });
 
 program
@@ -1074,7 +1050,7 @@ automation
 
 program
   .command("graph")
-  .description("BFS graph traversal from an entity (nodes + edges)")
+  .description("Low-level BFS graph traversal from an entity (prefer `synap ask` — graph is one of its signals)")
   .requiredOption("--entity <id>", "Start entity ID")
   .option("--depth <n>", "Traversal depth (max 3)", "2")
   .option("--json", "Raw JSON output")

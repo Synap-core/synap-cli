@@ -1,7 +1,7 @@
 {
   "tool_name": "Bash",
-  "tool_input_preview": "{\"command\":\"grep -n 'StatusFeatureItem\\\\|featureItems\\\\|onFeaturePress\\\\|expandedFeatureId' /Users/antoine/Documents/Code/synap/synap-app/packages/core/spatial-shell/src/components/TopIslands.tsx\",\"de...",
-  "error": "Exit code 2\nugrep: warning: /Users/antoine/Documents/Code/synap/synap-app/packages/core/spatial-shell/src/components/TopIslands.tsx: No such file or directory",
-  "timestamp": "2026-06-10T16:06:19.400Z",
+  "tool_input_preview": "{\"command\":\"cd /Users/antoine/Documents/Code/synap\\nUID=\\\"e418d146-e495-4b8a-8e8b-985f9f885431\\\"\\necho \\\"═══ user_observation entities (pod-wide) — dead? ═══\\\"\\ncurl -s \\\"https://pod.perso.thearchitec...",
+  "error": "Exit code 1\n(eval):2: bad math expression: operator expected at `b8a-8e8b-9...'",
+  "timestamp": "2026-06-13T14:27:21.393Z",
   "retry_count": 1
 }

@@ -1,7 +1,12 @@
 import chalk from "chalk";
 import { log } from "../utils/logger.js";
 import { resolveHubConfig, resolveUserId, hubGet, hubPost, hubPatch } from "../lib/hub-client.js";
-import { getAgentWorkspaceRouting } from "../lib/pod.js";
+import {
+  resolveWorkspaceName,
+  formatLaneLine,
+  laneJsonFields,
+  type LaneReport,
+} from "../lib/capture-lane.js";
 
 export interface BaseOpts {
   json?: boolean;
@@ -16,7 +21,11 @@ export function formatHit(hit: Record<string, unknown>): { title: string; type: 
   const doc = (hit.document ?? hit) as Record<string, unknown>;
   return {
     title: String(doc.title ?? doc.id ?? hit.id ?? ""),
-    type: String(doc.entityType ?? doc.profileSlug ?? hit.collection ?? ""),
+    // `type` is the entity's profile (entities carry `type`; search hits carry
+    // `entityType`/`collection`). Include `doc.type` or the badge renders blank.
+    type: String(
+      doc.entityType ?? doc.profileSlug ?? doc.type ?? hit.collection ?? ""
+    ),
     id: String(doc.id ?? hit.id ?? "").slice(0, 8),
   };
 }
@@ -299,80 +308,6 @@ export async function getEntity(
   }
 }
 
-// ─── searchData ───────────────────────────────────────────────────────────────
-
-export async function searchData(
-  query: string,
-  opts: BaseOpts & { workspace?: string; type?: string; limit?: string }
-): Promise<void> {
-  try {
-    const cfg = await resolveHubConfig(opts);
-    const userId = await resolveUserId(cfg);
-    const limit = parseLimit(opts.limit, 20);
-
-    let collections: string | undefined;
-    if (opts.type === "entity") collections = "entities";
-    else if (opts.type === "doc") collections = "documents";
-
-    const res = await hubGet("/search", {
-      userId,
-      query,
-      workspaceId: opts.workspace ?? cfg.workspaceId,
-      limit,
-      collections,
-    }, cfg);
-
-    if (opts.json) {
-      console.log(JSON.stringify(res, null, 2));
-      return;
-    }
-
-    const data = res as Record<string, unknown>;
-    // hits may live at .hits, .results, or top-level array
-    const rawHits =
-      (data.hits as unknown[]) ??
-      (data.results as unknown[]) ??
-      (Array.isArray(res) ? (res as unknown[]) : []);
-
-    if (rawHits.length === 0) {
-      const workspaceId = opts.workspace ?? cfg.workspaceId;
-      log.dim(`No results for "${query}".`);
-      if (workspaceId) {
-        // Show what IS in the workspace so the user isn't left with a blank wall
-        const [profilesRes, entitiesRes] = await Promise.allSettled([
-          hubGet("/profiles", { userId, workspaceId }, cfg),
-          hubGet("/entities", { userId, workspaceId, limit: 5 }, cfg),
-        ]);
-        if (profilesRes.status === "fulfilled") {
-          const profiles = (profilesRes.value as { profiles?: unknown[] }).profiles ?? (profilesRes.value as unknown[]);
-          const pList = Array.isArray(profiles) ? profiles as Record<string, unknown>[] : [];
-          if (pList.length > 0) {
-            const total = (entitiesRes.status === "fulfilled")
-              ? Number((entitiesRes.value as Record<string, unknown>).total ?? 0)
-              : 0;
-            log.blank();
-            log.dim(`This workspace has ${total > 0 ? `${total} entities` : "no entities yet"} across ${pList.length} profile${pList.length !== 1 ? "s" : ""}:`);
-            for (const p of pList.slice(0, 6)) {
-              log.dim(`  · ${String(p.name ?? p.slug ?? "")} ${chalk.dim(`--profile=${String(p.slug ?? "")}`)}`);
-            }
-            log.blank();
-            log.dim(`Try: synap search <term> --workspace ${workspaceId}`);
-            log.dim(`  or synap list --workspace ${workspaceId} --profile <slug>`);
-          }
-        }
-      }
-      return;
-    }
-    for (const hit of rawHits) {
-      const { title, type, id } = formatHit(hit as Record<string, unknown>);
-      log.info(`${title} ${chalk.dim(`[${type}]`)} ${chalk.dim(id)}`);
-    }
-  } catch (e) {
-    console.error(chalk.red("Error: " + (e as Error).message));
-    process.exit(1);
-  }
-}
-
 // ─── noteData ─────────────────────────────────────────────────────────────────
 
 export async function noteData(
@@ -383,10 +318,13 @@ export async function noteData(
     const cfg = await resolveHubConfig(opts);
     const userId = await resolveUserId(cfg);
 
-    const routing = getAgentWorkspaceRouting();
-    const workspaceId = routing?.memoryWorkspaceId ?? cfg.workspaceId;
+    // A `note` is the human raw-inbox primitive ("dump now, structure later") —
+    // it lands in the active workspace, NOT a private agent-memory ws (that lane
+    // was removed). The AI should never write a note: structuring is its job, so
+    // it uses `synap capture` (structured) instead.
+    const workspaceId = cfg.workspaceId;
     if (!workspaceId) {
-      console.error(chalk.red("No workspace set. Run: synap workspace provision-agent"));
+      console.error(chalk.red("No workspace set. Run: synap use <workspace-id>"));
       process.exit(1);
     }
 
@@ -395,16 +333,28 @@ export async function noteData(
       profileSlug: "note",
       title: text.slice(0, 200),
       workspaceId,
-      properties: opts.context ? { sourceEntityId: opts.context } : {},
+      // The `note` profile requires a `content` property — carry the full text
+      // (title is truncated). Without this the hub rejects the write (HTTP 500).
+      properties: {
+        content: text,
+        ...(opts.context ? { sourceEntityId: opts.context } : {}),
+      },
     }, cfg) as Record<string, unknown>;
 
     const isProposed = res.status === "proposed" || Boolean(res.proposalId);
 
+    const report: LaneReport = {
+      lane: "work",
+      workspaceId,
+      workspaceName: await resolveWorkspaceName(workspaceId, cfg),
+      governance: isProposed ? "proposed" : "auto",
+    };
+
     if (opts.json) {
       if (isProposed) {
-        console.log(JSON.stringify({ proposed: true, proposalId: res.proposalId ?? res.id }, null, 2));
+        console.log(JSON.stringify({ proposed: true, proposalId: res.proposalId ?? res.id, ...laneJsonFields(report) }, null, 2));
       } else {
-        console.log(JSON.stringify({ id: res.id, stored: true }, null, 2));
+        console.log(JSON.stringify({ id: res.id, stored: true, ...laneJsonFields(report) }, null, 2));
       }
       return;
     }
@@ -415,55 +365,132 @@ export async function noteData(
     } else {
       log.success(`Note saved: "${text.slice(0, 80)}" ${chalk.dim(String(res.id ?? "").slice(0, 8))}`);
     }
+    console.log("  " + formatLaneLine(report));
   } catch (e) {
     console.error(chalk.red("Error: " + (e as Error).message));
     process.exit(1);
   }
 }
 
-// ─── recallData ───────────────────────────────────────────────────────────────
-// Unified search: entities + documents via Typesense.
-// Replaces the old episodic /memory recall — one command, one store.
+// ─── ask (unified knowledge access) ────────────────────────────────────────────
+// The ONE read door. Routes a natural-language query to the right substrate(s)
+// — semantic (entities), procedural (how-to docs), episodic (captures) — and
+// prints a glass-box answer that shows WHICH substrate(s) answered.
 
-export async function recallData(
+interface AskAnswer {
+  substrate: string;
+  items: Record<string, unknown>[];
+  status?: "ok" | "error";
+}
+interface AskResponse {
+  query: string;
+  routedTo: string[];
+  intent?: string;
+  primary: string;
+  answers: AskAnswer[];
+  degraded?: string[];
+  verdict?: string;
+}
+
+/** Render one item according to its substrate. */
+function formatAskItem(substrate: string, item: Record<string, unknown>): string {
+  if (substrate === "procedural") {
+    // knowledge_keys rows: addressed by `key`, body in `value`.
+    const key = (item.key ?? item.slug ?? item.namespace) as string | undefined;
+    const value = (item.value ?? "") as string;
+    const snippet = value
+      ? " — " + (value.length > 80 ? value.slice(0, 77) + "…" : value).replace(/\s+/g, " ")
+      : "";
+    return `${key ?? "(untitled)"}${chalk.dim(snippet)}`;
+  }
+  if (substrate === "episodic") {
+    // knowledge_facts rows: text is in `fact` (content/text are wire fallbacks).
+    const content = (item.fact ?? item.content ?? item.text ?? "") as string;
+    return content.length > 120 ? content.slice(0, 117) + "…" : content || "(empty)";
+  }
+  // semantic — an entity. Surface a body snippet (not just a pointer): the
+  // entity carries its content in `preview` or a description-ish property, so a
+  // "how do I…" answer shows the gist inline instead of only an entity title.
+  const { title, type, id } = formatHit(item);
+  const props = (item.properties ?? {}) as Record<string, unknown>;
+  const desc = String(
+    item.preview ??
+      props.description ??
+      props.recipeDescription ??
+      props.summary ??
+      props.body ??
+      props.content ??
+      ""
+  );
+  const snippet = desc
+    ? chalk.dim(
+        " — " +
+          (desc.length > 90 ? desc.slice(0, 87) + "…" : desc).replace(/\s+/g, " ")
+      )
+    : "";
+  return `${title} ${chalk.dim(`[${type}]`)} ${chalk.dim(id)}${snippet}`;
+}
+
+export async function askKnowledge(
   query: string,
   opts: BaseOpts & { workspace?: string; limit?: string; json?: boolean }
 ): Promise<void> {
   try {
     const cfg = await resolveHubConfig(opts);
-    const userId = await resolveUserId(cfg);
     const limit = parseLimit(opts.limit, 10);
     const workspaceId = opts.workspace ?? cfg.workspaceId;
 
-    const res = await hubGet("/search", {
-      userId,
-      query,
-      ...(workspaceId ? { workspaceId } : {}),
-      limit,
-    }, cfg) as Record<string, unknown>;
-
-    const rawHits =
-      (res.hits as unknown[]) ??
-      (res.results as unknown[]) ??
-      (Array.isArray(res) ? (res as unknown[]) : []);
+    const res = (await hubPost(
+      "/knowledge/ask",
+      { query, ...(workspaceId ? { workspaceId } : {}), limit },
+      cfg
+    )) as AskResponse;
 
     if (opts.json) {
-      console.log(JSON.stringify({ query, total: rawHits.length, results: rawHits }, null, 2));
+      console.log(JSON.stringify(res, null, 2));
       return;
     }
 
-    const scope = workspaceId ? chalk.dim(` in workspace ${workspaceId.slice(0, 8)}…`) : chalk.dim(" pod-wide");
-    if (rawHits.length === 0) {
-      log.dim(`No results for "${query}"${scope}.`);
-      log.dim(`  Try broader terms, or: synap browse [profile] to see all entities.`);
-      return;
-    }
-
-    log.dim(`${rawHits.length} result${rawHits.length !== 1 ? "s" : ""} for "${query}"${scope}:`);
+    const routed = (res.routedTo ?? []).join(", ");
+    const verdict = res.verdict ? chalk.dim(` · ${res.verdict}`) : "";
+    // Honest routing: if the query's cue suggested one substrate but another
+    // actually answered (e.g. "how to…" cued procedural but the runbook is an
+    // entity), say so instead of dangling a "primary" that returned nothing.
+    const routeNote =
+      res.intent && res.intent !== res.primary
+        ? `${chalk.bold(routed)} · asked-for ${res.intent}, answered by ${chalk.bold(res.primary)}`
+        : `${chalk.bold(routed)} (primary: ${chalk.bold(res.primary)})`;
+    log.dim(`"${query}" → routed to ${routeNote}${verdict}`);
     log.blank();
-    for (const hit of rawHits) {
-      const { title, type, id } = formatHit(hit as Record<string, unknown>);
-      log.info(`${title} ${chalk.dim(`[${type}]`)} ${chalk.dim(id)}`);
+
+    const answers = res.answers ?? [];
+    const total = answers.reduce((n, a) => n + (a.items?.length ?? 0), 0);
+    const anyErrored = (res.degraded?.length ?? 0) > 0;
+    // Only claim a clean "no results" when every store actually answered. If one
+    // errored, fall through to the per-substrate loop so the outage is shown.
+    if (total === 0 && !anyErrored) {
+      log.dim(`No results across ${routed || "any substrate"}.`);
+      log.dim(`  Try broader terms, or capture knowledge with: synap capture`);
+      return;
+    }
+
+    for (const answer of answers) {
+      const items = answer.items ?? [];
+      // Glass-box: an errored store is NOT "found nothing" — say so, never hide it.
+      if (answer.status === "error") {
+        log.info(
+          chalk.bold(answer.substrate.toUpperCase()) +
+            chalk.yellow(" — store unavailable (not searched)")
+        );
+        log.blank();
+        continue;
+      }
+      if (items.length === 0) continue;
+      log.info(chalk.bold(answer.substrate.toUpperCase()) + chalk.dim(` (${items.length})`));
+      for (const item of items) {
+        log.info("  " + formatAskItem(answer.substrate, item));
+      }
+      log.blank();
     }
   } catch (e) {
     console.error(chalk.red("Error: " + (e as Error).message));

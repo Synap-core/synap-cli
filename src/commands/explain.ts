@@ -36,8 +36,7 @@ function sectionEntities(): void {
   console.log(`  ${chalk.cyan("synap create entity")}        ${chalk.dim("→ --profile task --name 'Fix bug' --props '{}'")}`);
   console.log(`  ${chalk.cyan("synap set entity <id>")}      ${chalk.dim("→ --props '{\"status\":\"done\"}'")}`);
   console.log(`  ${chalk.cyan("synap browse [profile]")}     ${chalk.dim("→ paginated entity list (cleanest UX)")}`);
-  console.log(`  ${chalk.cyan("synap search <query>")}       ${chalk.dim("→ Typesense full-text (--type entity|doc|view)")}`);
-  console.log(`  ${chalk.cyan("synap recall <query>")}       ${chalk.dim("→ semantic search across entities + docs")}`);
+  console.log(`  ${chalk.cyan("synap ask <query>")}          ${chalk.dim("→ the one read verb — routes across all substrates")}`);
 }
 
 function sectionGraph(): void {
@@ -54,12 +53,11 @@ function sectionGraph(): void {
 
 function sectionMemory(): void {
   console.log(chalk.bold("\n## Memory & Knowledge"));
-  console.log(chalk.dim("  Two stores: episodic notes (entity-backed) + engineering knowledge (structured)."));
+  console.log(chalk.dim("  Canonical verbs: ask (read) · capture (structured write) · note (quick)."));
   console.log("");
-  console.log(`  ${chalk.cyan("synap note <text>")}          ${chalk.dim("→ save a note (creates note entity, fully searchable)")}`);
-  console.log(`  ${chalk.cyan("synap recall <query>")}       ${chalk.dim("→ semantic search across all entities + docs")}`);
-  console.log(`  ${chalk.cyan("synap search <query>")}       ${chalk.dim("→ Typesense full-text search")}`);
-  console.log(`  ${chalk.cyan("synap capture")}              ${chalk.dim("→ structured: --type gotcha|lesson|decision|reference")}`);
+  console.log(`  ${chalk.cyan("synap note <text>")}          ${chalk.dim("→ save a quick note (creates a note entity)")}`);
+  console.log(`  ${chalk.cyan("synap ask <query>")}          ${chalk.dim("→ the one read verb — routes semantic/procedural/episodic")}`);
+  console.log(`  ${chalk.cyan("synap capture")}              ${chalk.dim("→ structured knowledge: --type gotcha|lesson|decision|reference")}`);
   console.log(`                              ${chalk.dim("     --claim 'text' --why 'context' --tags 'repo:x'")}`);
   console.log(`  ${chalk.cyan("synap context")}              ${chalk.dim("→ session-start: knowledge + proposals + tasks")}`);
   console.log(`  ${chalk.cyan("synap observe write <text>")} ${chalk.dim("→ record user observation (AI-maintained model)")}`);
@@ -155,9 +153,9 @@ function sectionQuickRef(): void {
   console.log(`  ${chalk.cyan("synap orient")}               ${chalk.dim("→ who am I, what workspaces, capabilities")}`);
   console.log("");
   console.log(chalk.dim("  Data"));
-  console.log(`  ${chalk.cyan("synap browse [profile]")}  ${chalk.cyan("synap show <id>")}  ${chalk.cyan("synap search <q>")}`);
+  console.log(`  ${chalk.cyan("synap browse [profile]")}  ${chalk.cyan("synap show <id>")}  ${chalk.cyan("synap ask <q>")}`);
   console.log(`  ${chalk.cyan("synap create entity")}  ${chalk.cyan("synap set entity <id>")}`);
-  console.log(`  ${chalk.cyan("synap note <text>")}  ${chalk.cyan("synap recall <query>")}`);
+  console.log(`  ${chalk.cyan("synap note <text>")}  ${chalk.cyan("synap capture --type lesson")}`);
   console.log("");
   console.log(chalk.dim("  Graph"));
   console.log(`  ${chalk.cyan("synap graph --entity <id> [--depth 2]")}`);

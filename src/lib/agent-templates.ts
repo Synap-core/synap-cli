@@ -68,7 +68,7 @@ Store here:
 - Decisions you made and why (even small ones)
 - Things to check next session before starting
 
-Run \`synap recall "topic" --structured\` at the start of each session to surface prior knowledge.
+Run \`synap ask "topic"\` at the start of each session to surface prior knowledge.
 
 ### Product workspace(s) (shared with the team)
 ${productBlock}
@@ -83,7 +83,7 @@ Use \`synap capture --type decision\` or \`synap capture --type lesson\` for the
 
 ## Operating discipline
 1. Always call \`synap orient\` first to discover available workspace IDs.
-2. Search before creating: \`synap recall "topic"\` and \`synap search "query"\`.
+2. Ask before creating: \`synap ask "topic"\` (the one read verb — routes across all substrates).
 3. Link every entity you create to at least one related entity.
 4. Never leave a session without persisting something useful.
 `;

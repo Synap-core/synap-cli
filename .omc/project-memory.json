@@ -26,8 +26,8 @@
     "runtime": "Node.js 20"
   },
   "build": {
-    "buildCommand": "pnpm build 2>&1 | tail -10",
-    "testCommand": null,
+    "buildCommand": "cd /Users/antoine/Documents/Code/synap/synap-cli\nnpm run build 2>&1 | tail -3; echo \"─ build exit: $? ─\"\necho \"\"\necho \"═══ TEST 1: domain capture (default) → should land in ACTIVE ws (Builder), NOT agent-mem ═══\"\nnode dist/index.js capture --type lesson --claim \"Dogfood 2026-06-15: domain lessons route to the active workspace now, not agent-mem\" 2>&1 | head -6\necho \"\"\necho \"═══ TEST 2: GLOBAL runbook → knowledge_keys, pod-wide ═══\"\nnode dist/index.js capture --global --type reference --claim \"Synap deploy flow: edit local, push to GitHub, server git-pulls and rebuilds (never edit servers directly)\" --key \"principle:deploy-flow\" 2>&1 | head -6\necho \"\"\necho \"═══ TEST 3: note → active ws (human inbox), content present ═══\"\nnode dist/index.js note \"Dogfood 2026-06-15: note now lands in active ws with content\" 2>&1 | head -4",
+    "testCommand": "cd /Users/antoine/Documents/Code/synap/synap-backend/packages/api\necho \"═══ FINAL deploy-prep verification ═══\"\necho -n \"backend typecheck errors: \"; npx tsc --noEmit 2>&1 | grep -c \"error TS\"\necho \"knowledge tests:\"; npx vitest run src/services/knowledge/ 2>&1 | grep -iE \"Tests \"\ncd /Users/antoine/Documents/Code/synap/synap-cli\necho -n \"CLI typecheck errors: \"; npx tsc --noEmit 2>&1 | grep -c \"error TS\"\necho \"═══ what changed in synap-backend that needs deploying ═══\"\necho \"  services/knowledge/{classify,ask,index}.ts (+tests) · POST /knowledge/ask + intent · search.ts deprecations · _register.ts deprecated field\"",
     "lintCommand": null,
     "devCommand": "npm run dev",
     "scripts": {
@@ -148,8 +148,8 @@
   "hotPaths": [
     {
       "path": "src/index.ts",
-      "accessCount": 43,
-      "lastAccessed": 1781083282247,
+      "accessCount": 48,
+      "lastAccessed": 1781363488452,
       "type": "file"
     },
     {
@@ -159,9 +159,21 @@
       "type": "file"
     },
     {
+      "path": "src/commands/data.ts",
+      "accessCount": 23,
+      "lastAccessed": 1781486101188,
+      "type": "file"
+    },
+    {
       "path": "src/commands/context.ts",
       "accessCount": 20,
       "lastAccessed": 1781083100837,
+      "type": "file"
+    },
+    {
+      "path": "src/commands/knowledge.ts",
+      "accessCount": 16,
+      "lastAccessed": 1781486121640,
       "type": "file"
     },
     {
@@ -174,6 +186,12 @@
       "path": "src/commands/pods.ts",
       "accessCount": 13,
       "lastAccessed": 1781079320307,
+      "type": "file"
+    },
+    {
+      "path": "src/commands/explain.ts",
+      "accessCount": 13,
+      "lastAccessed": 1781365062615,
       "type": "file"
     },
     {
@@ -207,12 +225,6 @@
       "type": "file"
     },
     {
-      "path": "src/commands/explain.ts",
-      "accessCount": 8,
-      "lastAccessed": 1780937614609,
-      "type": "file"
-    },
-    {
       "path": "src/lib/targets.ts",
       "accessCount": 8,
       "lastAccessed": 1781081360191,
@@ -222,12 +234,6 @@
       "path": "src/commands/graph.ts",
       "accessCount": 7,
       "lastAccessed": 1780934015465,
-      "type": "file"
-    },
-    {
-      "path": "src/commands/data.ts",
-      "accessCount": 6,
-      "lastAccessed": 1781081413392,
       "type": "file"
     },
     {
@@ -261,12 +267,6 @@
       "type": "file"
     },
     {
-      "path": "src/commands/knowledge.ts",
-      "accessCount": 4,
-      "lastAccessed": 1781081349334,
-      "type": "file"
-    },
-    {
       "path": "src/commands/skills-commands.ts",
       "accessCount": 4,
       "lastAccessed": 1781095587171,
@@ -276,6 +276,12 @@
       "path": "src/commands/sessions.ts",
       "accessCount": 3,
       "lastAccessed": 1781031533658,
+      "type": "file"
+    },
+    {
+      "path": "src/lib/agent-templates.ts",
+      "accessCount": 3,
+      "lastAccessed": 1781365002935,
       "type": "file"
     },
     {
@@ -309,6 +315,18 @@
       "type": "file"
     },
     {
+      "path": "src/commands/observe.ts",
+      "accessCount": 2,
+      "lastAccessed": 1781360533827,
+      "type": "file"
+    },
+    {
+      "path": "src/commands/connectors.ts",
+      "accessCount": 2,
+      "lastAccessed": 1781365018922,
+      "type": "file"
+    },
+    {
       "path": "package.json",
       "accessCount": 1,
       "lastAccessed": 1780886175031,
@@ -324,12 +342,6 @@
       "path": "src/commands/agent-run.ts",
       "accessCount": 1,
       "lastAccessed": 1780887502475,
-      "type": "file"
-    },
-    {
-      "path": "src/commands/observe.ts",
-      "accessCount": 1,
-      "lastAccessed": 1780887670726,
       "type": "file"
     },
     {

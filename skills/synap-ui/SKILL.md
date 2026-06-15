@@ -54,22 +54,25 @@ Widget definitions are the source of truth for which cells are installed and how
 1. **Views** — named queries + rendering config over entities of a given profile. Kanban of tasks, gallery of articles, calendar of events.
 2. **Bento dashboards** — 12-col grid compositions of cells (view-cards, entity-cards, widgets). The Home dashboard is a bento. Workspace landing pages are bentos.
 3. **Workspaces** — full lenses with profiles, views, a bento, and seed entities. The biggest building block.
-4. **New cell types** (Capability B) — AI can define entirely new rendering cells when no existing widget covers the need. Cells run in an iframe sandbox and are always proposal-gated — the user reviews before they appear in the registry.
+4. **New cell types** (Capability B) — AI can define entirely new rendering cells when no existing widget covers the need. Cells run in a sandboxed iframe. Pod-global cells (no `workspaceId`) are available immediately in all workspaces without a proposal step.
 
    ```json
    POST /api/hub/cells/define
    {
-     "userId":      "{userId}",
-     "workspaceId": "{workspaceId}",
-     "kind":        "burndown-chart",
-     "displayName": "Burndown Chart",
-     "description": "Sprint burndown over task completions",
-     "configSchema": { "sprintId": { "type": "string" } },
-     "sandboxCode": "<!-- self-contained HTML/JS -->"
+     "name":           "Burndown Chart",
+     "rendererSource": "<!DOCTYPE html>…</html>",
+     "typeKey":        "burndown-chart",
+     "description":    "Sprint burndown over task completions",
+     "defaultSize":    { "w": 8, "h": 6 },
+     "deps": {
+       "recharts": "2.12.0"
+     }
    }
    ```
 
-   Always `GET /api/hub/widget-definitions` first — if a cell already covers the need, use it. New cell definitions are permanent; only create when genuinely novel.
+   - `deps` pins npm packages for the esm.sh import map. Keys are npm package names; values are version strings. Max 30 entries. React 19 is always available — never put it in `deps`.
+   - Always `GET /api/hub/widget-definitions` first — if a cell already covers the need, use it. New cell definitions are permanent; only create when genuinely novel.
+   - For the full in-frame query/mutate/shell-actions API see the `synap` skill's **ViewFrame Cells** section (or load `synap-ui:SKILL` via `GET /api/hub/skills/system?sections=synap-ui:SKILL`).
 
 ## View types (16 total, 12 implemented)
 
@@ -168,79 +171,40 @@ The canonical flow:
 1. **Assemble a proposal** (no API call yet):
 
    ```js
-   // This is the body for POST /api/hub/workspaces/from-definition
-   const body = {
-     proposalId:    "content-creation-2026",   // stable idempotency key
-     workspaceName: "Content Creation",
-     workspaceType: "project",                  // personal | agent | project | operational
-     ownerUserId:   "{userId}",                 // REQUIRED — else API key owns the workspace
-     profiles: [
+   const proposal = {
+     name: "Content Creation",
+     description: "Draft, review, and publish articles",
+     icon: "pen-tool",
+     color: "purple",
+     profiles: [                 // reuse system profiles by slug OR include custom ones
        { slug: "article", reuse: true },
        { slug: "draft",   displayName: "Draft", parentSlug: "article",
          properties: [
-           { slug: "status",      valueType: "string", enumValues: ["idea","writing","review","published"] },
-           { slug: "wordCount",   valueType: "number" },
+           { slug: "status", valueType: "string", constraints: { enum: ["idea","writing","review","published"] }, uiHints: { displayAs: "status" } },
+           { slug: "wordCount", valueType: "number" },
            { slug: "publishDate", valueType: "date" }
          ]
        }
      ],
      views: [
-       // scopeProfileSlug (NOT profileSlug); groupBy is a flat field (NOT config.groupBy.property)
-       { name: "Pipeline",  type: "kanban",  scopeProfileSlug: "draft",    groupBy: "status" },
-       { name: "Published", type: "gallery", scopeProfileSlug: "article",
-         defaultView: true }
+       { name: "Pipeline", type: "kanban", profileSlug: "draft",
+         config: { groupBy: { property: "status" } } },
+       { name: "Published", type: "gallery", profileSlug: "article",
+         config: { filters: [{ property: "status", op: "eq", value: "published" }] } }
      ],
-     seedEntities: [
-       // title (NOT name) + profileSlug + properties + optional content
-       { title: "Welcome article", profileSlug: "article", properties: { status: "published" } }
-     ],
-     suggestedRelations: [
-       // sourceRef / targetRef MUST be "<profileSlug>:<title>" — bare titles are silently skipped
-       { sourceRef: "draft:My first draft", targetRef: "article:Welcome article", type: "derived_from" }
-     ],
-     layoutConfig: {
-       // sidebarItems: viewName is resolved to viewId server-side
-       sidebarItems: [{ viewName: "Pipeline" }, { viewName: "Published" }]
-     }
+     bento: { blocks: [ … ] },
+     seedEntities: []            // optional
    }
    ```
 
 2. **Show it to the user**. Compact, readable. "Here's what I'd create — 2 profiles, 2 views, a bento. Ship it?"
 
-3. **On yes**, commit through `/api/hub/workspaces/from-definition`:
+3. **On yes**, commit through `/api/hub/workspaces`:
 
    ```json
-   POST /api/hub/workspaces/from-definition
-   {
-     "proposalId":     "{stableIdempotencyKey}",
-     "workspaceName":  "Content Creation",
-     "workspaceType":  "project",
-     "ownerUserId":    "{userId}",
-     "profiles": [ … ],
-     "views": [ … ],
-     "seedEntities": [ … ],
-     "suggestedRelations": [ … ],
-     "layoutConfig": { … }
-   }
+   POST /api/hub/workspaces
+   { "userId": "{userId}", "proposal": { /* the object above */ } }
    ```
-
-   **Critical field names** (wrong names are silently ignored or cause step errors):
-   - `workspaceName` / `workspaceType` / `ownerUserId` — top-level meta; always pass `ownerUserId` or the API-key identity owns the workspace instead of the user.
-   - `views[].scopeProfileSlug` (NOT `profileSlug`) — which profile this view scopes to; also accepts `scopeProfileSlugs[]` for multi-profile views.
-   - `views[].groupBy` / `views[].sortBy` / `views[].defaultView` — flat fields, NOT `config.groupBy.property`.
-   - `seedEntities[].title` (NOT `name`) + `profileSlug` + `properties` + optional `content`.
-   - `suggestedRelations[].sourceRef` and `.targetRef` MUST be `"<profileSlug>:<title>"` — bare titles are silently skipped.
-   - `profiles[].properties[].slug` / `.valueType` / `.enumValues?` / `.constraints?` / `.targetProfileSlug?`.
-   - `layoutConfig.sidebarItems` — resolved from `viewName` to `viewId` server-side; lands in `settings.layout`.
-
-   **Idempotency and error recovery:** `proposalId` is a stable key — retrying with the same value resumes from where it failed. Errors are step-precise (`"failed at step 'views[Library]'"`) so you can fix only that step and retry. Always generate a stable `proposalId` (e.g. a slug of the workspace name + a timestamp) at the start of the flow.
-
-   **Agent membership:** the calling agent is NOT auto-enrolled in the workspace it creates. After creation, call:
-   ```json
-   POST /api/hub/workspaces/enroll-agent
-   { "agentUserId": "{agentUserId}", "workspaceId": "{newWorkspaceId}", "role": "member" }
-   ```
-   Without enrollment, any entity write by the agent will be hard-`FORBIDDEN`.
 
    This goes through governance — `workspace.create` is **always** proposal-gated even for agents (see `../synap/governance.md`). Expect `status: "proposed"` and tell the user they'll see it in Proposals.
 
@@ -275,7 +239,7 @@ Otherwise: add a view, add a bento block, add properties — don't multiply work
      - Side: `stat-card` — "Meetings this week: N" (4 cols × 2 rows)
      - Bottom: `recent-activity` widget (12 cols × 3 rows)
 4. Show to user. Confirm.
-5. Commit via `POST /api/hub/workspaces/from-definition` (see above for field names). Then enroll the agent.
+5. Commit via `POST /workspaces`.
 
 ## Arranging a bento after creation
 

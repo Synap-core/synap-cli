@@ -262,8 +262,6 @@ export async function connectorsDisconnect(provider: string, opts: DisconnectOpt
   const spinner = ora({ text: `Disconnecting ${provider}…`, color: "cyan" }).start();
 
   try {
-    // hubDelete is not available — use POST fallback endpoint
-    // Backend should support POST /api/hub/connectors/disconnect as an alternative to DELETE
     await hubPost("/connectors/disconnect", { connectionId, provider }, cfg);
     spinner.succeed(chalk.green(`Disconnected ${chalk.bold(provider)}. Your imported entities remain intact.`));
   } catch (err) {
@@ -405,7 +403,7 @@ function buildConnectorSchemaMarkdown(schema: Record<string, unknown>, podUrl: s
     `2. Connect a new service: \`synap connect <provider>\` — opens OAuth in browser`,
     `3. Once connected, records import automatically on Nango's schedule`,
     `4. Trigger immediate import: \`synap connectors sync <provider>\``,
-    `5. Query imported entities: \`synap recall "meeting notes from Google Calendar"\``,
+    `5. Query imported entities: \`synap ask "meeting notes from Google Calendar"\``,
   );
 
   return lines.join("\n");

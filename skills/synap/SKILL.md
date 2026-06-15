@@ -37,16 +37,42 @@ Your job is to turn unstructured input into a **connected** knowledge graph. Iso
 
 ## Mental model
 
-Synap is a typed knowledge graph. Six layers you need:
+Synap is a typed knowledge graph. **Reading is one verb (`synap ask`) — it routes for you.** Writing is where you must pick the right lane: the destination is decided by the **KIND** of knowledge, not by whichever workspace happens to be active.
+
+### Where to write what — the three lanes (decide by KIND)
+
+Ask yourself: _who does this knowledge serve?_ **There is no private AI scratchpad** — structuring knowledge into a real lane IS your job. Never write a `note` (that's the human's raw inbox); always `capture` into a lane.
+
+| If it…                                                                                | Lane       | Where it goes                                                                  | Governance                                                                                                 |
+| ------------------------------------------------------------------------------------- | ---------- | ----------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| **is about the CURRENT WORK** — domain know-how for the project/task you're on (incl. a domain-specific gotcha/lesson/decision) | **Work** _(default)_ | a `knowledge` entity in the **active workspace** (`synap capture --type …`)    | proposal-gated (it's the user's real data; the workspace IS the domain — Builder ≠ marketing)              |
+| **is GLOBAL truth** — a best-practice / runbook / how-to that holds across ALL projects | **Global** | pod-wide procedural `knowledge_keys` (`synap capture --global --type … [--key ns:slug]`) | reviewed for shared truth                                                                                  |
+| **is about the USER** — how they work/talk/decide, their preferences, their life       | **User**   | pod-wide `user_observation` (`synap observe write` / `record_observation` tool) | inferences are **proposed** (you review); explicit "I always X" auto-saves — never model the user silently |
+
+> **Why this matters:** writing to the wrong lane degrades the graph. A gotcha you learned about the **current project** is **Work** (the active workspace — its domain). A best-practice that holds **everywhere** is **Global** (`--global`, pod-wide). A fact about **how the user works** is **User** (pod-wide, inferences proposed). `synap capture` echoes which lane + governance it used; check it.
+
+> **Substrate names (tables under the hood):** _semantic_ = `entities` (the `knowledge` profile, workspace-scoped = domain separation), _episodic_ = `knowledge_facts`, _procedural_ = `knowledge_keys` (pod-wide runbooks). `ask` queries across them so you never pick on read.
+
+### Data layers — the graph itself
 
 | Layer         | What it is                                     | When to use                                              |
 | ------------- | ---------------------------------------------- | -------------------------------------------------------- |
 | **Entities**  | Typed structured nodes (task, person, …)       | Anything worth filtering, sorting, or linking            |
 | **Relations** | Typed edges between entities                   | Making the graph traversable                             |
 | **Documents** | Long-form markdown attached to an entity       | Meeting notes, research writeups, articles               |
-| **Memory**    | Atomic facts, no structure                     | Preferences, context, ephemeral notes                    |
 | **Threads**   | Channel conversations, optional entity context | Posting to the user's personal AI channel                |
 | **Proposals** | Writes queued for human approval               | Governance for some mutations (not an error — see below) |
+
+### Key profiles for AI use
+
+| Profile slug       | Scope     | Who writes | Purpose                                                                                                                                                                                 |
+| ------------------ | --------- | ---------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `note`             | pod       | **human only** | The human's raw "dump now, structure later" inbox. **The AI never writes a note** — structuring into a lane is its job; use `capture` instead.                                      |
+| `knowledge`        | workspace | AI         | Validated gotchas/lessons/decisions — the **Work lane** (default `synap capture --type`; ek_type/ek_claim/ek_why). DOMAIN = the workspace (a Builder gotcha ≠ a marketing one). Cross-project runbooks go to `knowledge_keys` via `--global`. |
+| `user_observation` | pod       | AI only    | Durable user model — habits, communication style, preferences                                                                                                                           |
+| `decision`         | pod       | human + AI | Architectural decisions with rationale                                                                                                                                                  |
+| `research`         | pod       | AI         | Investigation with sources + conclusion                                                                                                                                                 |
+| `question`         | pod       | human + AI | Open inquiry, closed when a decision answers it                                                                                                                                         |
 
 ## Quick reference — 90% of tasks in 30 lines
 
@@ -56,10 +82,22 @@ synap orient --json                                    # discover userId + works
 synap use <workspace-name-or-id>                       # set active workspace
 synap create entity --profile=task --name="…" --props='{"status":"todo","priority":"high"}' --json
 synap set entity <id> --props='{"status":"done"}' --json  # merge-patch (only changed keys)
-synap search "query" --json
-synap remember "fact about the user" --json
-synap recall "query" --json
+synap ask "your question" --json                       # THE read verb — routes to the right store(s) + shows which answered
+synap capture --type=lesson --claim="…" --json         # Work lane (default) — domain knowledge → active workspace
+synap capture --global --type=reference --claim="…" --json  # Global lane — pod-wide cross-cutting runbook (knowledge_keys)
+synap observe write "…" --json                          # User lane — durable user model (inferences proposed)
 ```
+
+**The canonical verbs:** `ask` (read) · `capture` (structured write — pick a lane:
+Work default / `--global` / `observe` for User) · `orient` (bootstrap). `note` exists
+for the HUMAN's raw "dump now, structure later" inbox — **the AI always `capture`s
+instead.** **Reading is one verb: `ask`** — it classifies your
+question and routes across the three memory substrates (semantic = the typed entity
+graph, procedural = how-to docs, episodic = raw captures), returning one answer
+tagged with which substrate(s) answered (and which, if any, were unavailable). Don't
+pick a store; `ask` picks for you and tells you what it did. (`graph` for an explicit
+traversal and `get`/`show`/`browse` for direct lookups remain; there is no `search`
+or `recall` — `ask` is the door.)
 
 ```bash
 # REST (when no Bash access)
@@ -70,6 +108,7 @@ PATCH  /api/hub/documents/{id}    body: { userId, title?, content? }   ← full 
 POST   /api/hub/relations         body: { userId, sourceEntityId, targetEntityId, type }
 GET    /api/hub/entities?q=…&profileSlug=task&workspaceId=…
 GET    /api/hub/entities/{id}/connections?userId=…
+POST   /api/hub/knowledge/ask     body: { query, workspaceId?, limit? }   ← ONE read door, routes across substrates
 POST   /api/hub/memory            body: { userId, fact }
 GET    /api/hub/memory?userId=…&query=…
 ```
@@ -128,8 +167,8 @@ GET /api/hub/discover?userId={userId}&workspaceId={workspaceId}
 `scope: "workspace"` = scoped to one workspace (deal, file, capture, custom profiles).  
 Each profile includes its full property schema. Use `createCommand` as a template.
 
-**2. Search before answering**  
-Before answering any question about the user's projects, tasks, contacts, decisions, or anything they might have captured — search Synap first. Do not answer from your training or context window when Synap may have the authoritative answer.
+**2. Ask before answering**  
+Before answering any question about the user's projects, tasks, contacts, decisions, or anything they might have captured — `ask` Synap first (`synap ask "…"` / `POST /api/hub/knowledge/ask`). It routes across all three memory substrates in one call. Do not answer from your training or context window when Synap may have the authoritative answer.
 
 **3. Save proactively — without waiting to be asked**  
 When the user shares a decision, task, meeting outcome, contact, or any durable information: save it. Don't ask "should I save this?" for obviously important information. Use:
@@ -156,8 +195,7 @@ The CLI reads the active pod and workspace from `~/.synap/config.json`. Set cont
 
 ```bash
 synap pods use <profile-name>          # switch active pod
-synap use <workspace-id>               # switch active workspace
-synap workspace provision-agent --json # provision your agent workspace + auto-sets it active
+synap use <workspace-id>               # switch active workspace (captures land here — it IS the domain)
 ```
 
 **Always orient first:**
@@ -168,14 +206,14 @@ synap orient --json
 # Never hardcode workspace IDs — discover them here.
 ```
 
-**Search (Typesense-powered, cross-collection):**
+**Ask (the one read verb — routes across all substrates):**
 
 ```bash
-synap search "project ideas" --json
-synap search "Antoine" --type=entity --workspace=<id> --json
-synap search "meeting notes" --type=doc --limit=5 --json
-# Omit --workspace to search pod-wide. Include it to scope to one workspace.
-# Use search for name/keyword queries. For semantic/conceptual search, use Hub Protocol memory endpoints.
+synap ask "project ideas" --json
+synap ask "what did Antoine decide about auth" --workspace=<id> --json
+synap ask "how do I deploy the backend" --json   # routes to procedural how-to docs
+# Omit --workspace for pod-wide; include it to scope to one workspace.
+# `ask` classifies intent and unions the right substrate(s) — it replaces search/recall.
 ```
 
 **Read entities:**
@@ -187,17 +225,19 @@ synap list entities --profile=task --workspace=<id> --json
 synap get entity <id> --json
 ```
 
-**Episodic memory (session facts, loose context):**
+**Capturing a decision (the AI structures — it never `note`s):**
 
 ```bash
-synap remember "Key decision: use Typesense for search" --json
-synap recall "Typesense" --limit=5 --json
+synap capture --type decision --claim "Use Typesense for entity search" --json
+# Retrieve later with the one read verb: synap ask "Typesense decision"
 ```
+
+> `synap note` is the HUMAN's raw "dump now, structure later" inbox. As the AI, always `capture` into a lane — structuring is your job.
 
 **Structured knowledge (durable, typed, searchable — preferred for engineering learnings):**
 
 ```bash
-# Capture a gotcha, lesson, decision, or reference into your agent workspace
+# Work lane (default): a domain gotcha/lesson/decision → knowledge entity in the ACTIVE workspace
 synap capture --type gotcha --claim "Hono static routes must come before /:id" \
   --why "First-match routing; dynamic routes eat static ones" \
   --tags "repo:synap-backend,layer:routing" --json
@@ -205,17 +245,20 @@ synap capture --type gotcha --claim "Hono static routes must come before /:id" \
 synap capture --type lesson --claim "code-read ≠ runtime-true for library APIs" \
   --evidence "tldraw 2.4.6 binding API changed silently from props.start.boundShapeId"
 
-# Recall across your knowledge base with full-text search
-synap recall "hono routing" --structured --json
-synap recall "tldraw" --structured --type gotcha --json
+# A quick decision-note is a typed knowledge entry (ek_type=decision):
+synap capture --type decision --claim "Use Typesense for entity search" \
+  --why "pgvector deferred to V1; Typesense ships now" --json
 
-# Prerequisite (run once): provision your agent workspace and set it active
-synap workspace provision-agent --json
+# Global lane: a runbook/best-practice that holds across ALL projects → pod-wide knowledge_keys
+synap capture --global --type reference --claim "Always fix the canonical path, never a workaround" \
+  --key "principle:root-cause" --json
+
+# Retrieve any of it later with the one read verb (it spans every lane):
+synap ask "hono routing gotcha" --json
 ```
 
-`synap capture` / `synap recall --structured` uses the `engineering_knowledge` entity profile.
-`synap remember` / `synap recall` (without `--structured`) uses the ephemeral `/memory` store.
-Use structured knowledge for anything worth remembering across sessions and projects.
+`synap capture --type` writes a typed **`knowledge`** entity in the **active workspace** (the Work lane); `ek_type` (gotcha|lesson|decision|reference) discriminates the kind — **one store, type tags, not a residual dump**. It's workspace-scoped, so the active workspace supplies the domain — a Builder gotcha ≠ a marketing one (there is no `engineering_knowledge`). Add **`--global`** to write a pod-wide cross-cutting runbook to `knowledge_keys` instead. A formal **decision RECORD** (rationale, alternatives, superseded-by lifecycle) is a different artifact — use smart `synap capture "<free text>"` or `synap create entity --profile=decision`. Retrieve everything with `synap ask`.
+Use `capture` for anything worth remembering across sessions and projects.
 
 **Write:**
 
@@ -231,7 +274,7 @@ synap set entity <id> --props='{"status":"done"}' --json
 - Always use `--json` when calling from code — clean stdout, no spinners, machine-parseable
 - Run `synap orient` first to discover workspace IDs — never hardcode them
 - Omit `--workspace` to operate pod-wide; include it to scope to a specific workspace
-- `synap search` is Typesense (fast keyword/name search). Semantic search → Hub Protocol `GET /api/hub/memory?query=…`
+- `synap ask` is the one read verb — it routes keyword + semantic + procedural automatically; you never choose a search backend.
 
 ---
 
@@ -417,6 +460,47 @@ Every write returns a `status` field:
 2. Give them the link to review — `reviewUrl` opens the proposal in Synap Studio. Show the link as-is.
 3. Move on with the conversation. Don't wait or poll.
 
+### The `reasoning` field — required, structured, contextual
+
+Every write call (create, update, delete) must include a `reasoning` field. This is what the governance reviewer reads to understand your decision. It is **not optional**.
+
+Use this exact structure:
+
+```
+Context: [what the user said or what event triggered this write — one sentence]
+Intent:  [what this entity or change accomplishes — one sentence]
+Links:   [actual entity IDs or slugs this relates to, e.g. "ent_abc, ent_xyz"]
+```
+
+For updates, add:
+
+```
+Changed: [field] [old value] → [new value]
+```
+
+**Example (create):**
+
+```
+Context: User asked to track the Acme deal they mentioned in today's call.
+Intent:  Creates a deal entity for Acme at lead stage linked to Alice Johnson.
+Links:   ent_person_alice_johnson, ent_company_acme
+```
+
+**Example (update):**
+
+```
+Context: User confirmed the Acme deal moved to proposal stage.
+Intent:  Advances the deal through the pipeline so it appears in the proposal view.
+Links:   ent_deal_acme, ent_person_alice_johnson
+Changed: dealStage lead → proposal
+```
+
+Rules:
+
+- One sentence per field. No padding.
+- `Links` must reference real entity IDs or slugs visible in the current context — not descriptions like "the related project".
+- **"Agent requires proposal for all write operations."** is never acceptable as a `reasoning` value. That is an internal governance message, not agent reasoning. Write it and the proposal is meaningless to the reviewer.
+
 Example response to the user:
 
 > I queued **Delete task "Q2 plan review"** for your review. Destructive actions need your approval. Open it: https://studio.synap.live/proposals/prp_abc
@@ -565,7 +649,20 @@ POST /api/hub/threads/{threadId}/messages
 
 ## Reading
 
-Graph-based, not semantic. Type filter → relations → neighborhood.
+**Start with `ask` — the one routed read door.** It classifies the question and
+queries the right substrate(s) for you, returning a glass-box answer (which
+substrates answered, which were unavailable, plus the engine's verdict). Reach for
+the low-level doors below only when you deliberately want a single substrate or a
+specific shape (a graph traversal, a typed-entity filter, an entity's neighborhood).
+
+```
+# THE read door — routes across semantic / procedural / episodic, tells you which answered
+POST /api/hub/knowledge/ask   body: { query, workspaceId?, limit? }
+  → { query, routedTo: [...], primary, answers: [{ substrate, items, status }], degraded, understanding, verdict }
+```
+
+Low-level doors (`ask` routes to these — graph-based, not semantic; type filter →
+relations → neighborhood):
 
 ```
 # Keyword search across everything (entities, documents, views, threads)
@@ -798,6 +895,52 @@ When the user is interacting with Synap's AI Companion (the in-browser chat pane
 - **Only in Companion replies.** These patterns are silently ignored in non-companion channels, documents, and memory. Do not use them there.
 - **Combine with prose.** Don't lead with a chip — embed it naturally: `"Here are your open deals → [[view:xyz|Deals Pipeline]] · [[open:side|view:xyz]]"`
 
+## Focus Sessions — Goal-Bound Work Rooms
+
+A **focus session** is a named, multi-step work room where you and AI agents collaborate on a specific goal. Use one whenever the work has a clear end state, will take more than one exchange, or involves multiple agents.
+
+**When to propose a session** (via the proposal system — always ask first):
+
+- Research with 5+ sources → decision memo
+- Lead generation sprint → qualified list + outreach drafts
+- Incident investigation → postmortem doc
+- Data import → structured knowledge base
+- Any task you'd naturally call "a project" rather than "a question"
+
+**How the AI proposes a session:**
+
+```
+create_proposal with targetType: "focus_session"
+→ user reviews goal + rationale + expected outputs in ProposalReviewBoard
+→ on approval, session is created in focus_sessions table
+→ AI updates progress (0→100) via PATCH /api/hub/focus-sessions/:id { workspaceId, progress: N }
+→ session auto-surfaces in the Active Sessions bento widget on the user's home
+```
+
+**Session templates** (pass as `templateId`):
+`research-room` · `lead-sprint` · `decision-memo` · `import-cleanup` · `incident-room` · `campaign-intel`
+
+**Hub Protocol REST** (for IS → backend; always include `workspaceId`):
+
+- `POST /api/hub/focus-sessions` — create (include `correlationId` for idempotency)
+- `GET /api/hub/focus-sessions/:id?workspaceId=<id>` — read
+- `PATCH /api/hub/focus-sessions/:id` — update `{ workspaceId, progress, status, goal, agentIds }`
+
+**CLI** (use when running as Claude Code / OpenClaw agent):
+
+```bash
+synap session start --goal "<goal>" [--workspace <id>]                 # create + start a session
+synap session list [--workspace <id>] [--status active|paused|closed]  # list sessions
+synap session get <id> [--workspace <id>]                               # read a session
+synap session update <id> --workspace <id> --progress 50               # report progress
+synap session update <id> --workspace <id> --status paused             # pause
+synap session close <id> --workspace <id> [--recap "what was done"]    # close + recap
+```
+
+Note: `synap session start` creates a session directly (the agent-facing path). All hub-protocol writes are governance-gated server-side; the in-browser AI companion surfaces session creation through the proposal flow.
+
+**Discoverability**: the `active-sessions` bento widget is on the default home dashboard. Sessions group their related proposals under a shared `correlationId` in the Proposal Review Board.
+
 ## When you need more
 
 - Linking conventions, auto-sync table, relation types → **`linking.md`**
@@ -820,87 +963,225 @@ ViewFrame is the standard way to create custom data visualizations in Synap. Use
 
 ### What ViewFrame Is
 
-- A sandboxed iframe that renders any ES module (React component or plain JS module)
-- Dependencies resolved at runtime via **esm.sh import maps** — no build step
-- The host injects a `SynapWidget` bridge for data access (same postMessage protocol as iframe widgets)
+- A sandboxed iframe that renders **one ES module** that default-exports a React component (or plain JS)
+- Dependencies resolved at runtime via **esm.sh import maps** built from the `deps` map — no build step required
+- The host injects a `SynapWidget` bridge for data access and shell actions
 - Security: `sandbox="allow-scripts allow-modals allow-popups"`, no `allow-same-origin`, no cookies, no pod token
 
-### Register a Widget via the Hub Protocol
+### Authoring contract
 
-List installed widgets:
+A ViewFrame cell is **one self-contained ES module** (inline in `rendererSource`):
+
+- The module **default-exports a React component** (or calls `SynapWidget.onInit()` for plain JS).
+- Bare imports (`"react"`, `"recharts"`, etc.) are resolved via the esm.sh import map generated from `deps`.
+- **No bundler, no `import` of local files** — everything is either inlined or declared in `deps`.
+- External CSS is not supported; inline `<style>` tags or CSS-in-JS only.
+
+### Register a Cell via the Hub Protocol (canonical path)
+
+**Use `POST /api/hub/cells/define` — this is the canonical Hub Protocol path for AI-generated cells.**
+
+It is idempotent (upserts on typeKey), pod-global by default (no workspaceId needed), and immediately available across all of the user's workspaces without any proposal step.
 
 ```
-GET /api/hub/widget-definitions?workspaceId={workspaceId}
-Authorization: Bearer {SYNAP_HUB_API_KEY}
-```
-
-Install a new ViewFrame widget (creates a proposal for user review):
-
-```
-POST /api/hub/widget-definitions
+POST /api/hub/cells/define
 Authorization: Bearer {SYNAP_HUB_API_KEY}
 Content-Type: application/json
 
 {
-  "userId": "{SYNAP_USER_ID}",
-  "workspaceId": "{workspaceId}",
-  "typeKey": "deal-stage-funnel",
   "name": "Deal Stage Funnel",
-  "description": "Funnel chart of deal pipeline stages",
-  "rendererType": "iframe",
-  "rendererSource": "<full HTML document — see template below>",
-  "defaultSize": { "w": 8, "h": 6 },
-  "category": "visualization"
+  "rendererSource": "<!DOCTYPE html>…</html>",
+  "typeKey": "deal-stage-funnel",        // optional — derived from name if omitted
+  "description": "Funnel chart of deal pipeline stages",  // optional
+  "defaultSize": { "w": 8, "h": 6 },    // optional
+  "deps": {                              // optional — npm packages pinned for the import map
+    "recharts": "2.12.0",
+    "@tanstack/react-table": "8"
+  }
 }
 ```
 
-`typeKey` must be kebab-case matching `/^[a-z][a-z0-9-]+$/`. Use a descriptive name specific to the widget's content.
+**`deps` rules:**
 
-The response carries `status: "ok"` (installed immediately) or `status: "proposed"` (queued for user review — surface `reviewUrl` to the user).
+- Keys are npm package names (`pkg` or `@scope/pkg`). URLs and protocols are rejected.
+- Values are version strings or `"latest"` — used verbatim in the esm.sh import map URL.
+- Maximum 30 entries. Omit `deps` (or pass `{}`) for React-only cells (React is always available).
+
+**`workspaceId` is intentionally omitted** — cells defined without it are pod-global (`workspaceId IS NULL`), visible in every workspace the user owns. Pass `workspaceId` only when you explicitly want a cell scoped to a single workspace.
+
+Response: `{ "success": true, "typeKey": "generated:deal-stage-funnel" }`
+
+The typeKey is auto-prefixed `generated:` when not explicitly provided.
+
+**List cells (all pod-global + optionally workspace-specific):**
+
+```
+GET /api/hub/cells                         — pod-global only
+GET /api/hub/cells?workspaceId={id}        — pod-global + workspace-scoped
+Authorization: Bearer {SYNAP_HUB_API_KEY}
+```
+
+**Delete a cell:**
+
+```
+DELETE /api/hub/cells/{typeKey}            — pod-global row
+DELETE /api/hub/cells/{typeKey}?workspaceId={id}  — workspace-scoped row
+Authorization: Bearer {SYNAP_HUB_API_KEY}
+```
+
+**Open the cell in the browser (deep link):**
+
+```
+synap://open/cell/{typeKey}
+```
+
+The browser receives this deep link, looks the typeKey up in the cell registry (which polls `widget_definitions` every 10s), and opens it as a side panel tab with the cell's registered `meta.name` as the tab title.
+
+**Full AI artifact workflow:**
+
+```
+// 1. Generate the HTML/React cell
+POST /api/hub/cells/define
+{ "name": "Q2 Revenue Report", "rendererSource": "<!DOCTYPE html>…</html>",
+  "deps": { "recharts": "2.12.0" } }
+// → { "success": true, "typeKey": "generated:q2-revenue-report" }
+
+// 2. Open it in the user's browser
+synap://open/cell/generated:q2-revenue-report
+```
+
+The cell appears immediately in the side panel with "Q2 Revenue Report" as the tab title. It persists across sessions and is available from any workspace.
+
+> **Note:** `POST /api/hub/widget-definitions` (tRPC path) still works but is the internal/admin path. Use `POST /api/hub/cells/define` for all agent-generated cells.
+
+### CLI commands (when running as Claude Code / OpenClaw agent)
+
+```bash
+# Build a multi-file cell source into a single ES module bundle + emit deps map
+synap cell build <entry>           # e.g. synap cell build ./src/my-chart.tsx
+# → prints bundled source to stdout and writes deps.json alongside the entry
+
+# Push a built cell (source + deps) to the pod
+synap cell define \
+  --name "My Chart" \
+  --source ./dist/my-chart.js \
+  --deps ./deps.json \
+  [--typeKey my-chart] \
+  [--workspace <id>]
+
+# Document operations (attach prose or reports to entities)
+synap doc create --title "Q2 Report" --content ./report.md --entity <entityId>
+synap doc update <docId> --content ./updated-report.md
+
+# Arrange widgets on an existing bento view
+synap view arrange <viewId> --blocks '[{"id":"b1","kind":"widget","widgetKind":"generated:my-chart","layout":{"x":0,"y":0,"w":8,"h":6}}]'
+```
 
 ### The SynapWidget Bridge (inside the iframe)
 
 `window.SynapWidget` is injected automatically — do NOT import or `<script>` it.
 
+#### Queries (read-only, always approved)
+
 ```js
 SynapWidget.onInit(async ({ config, context }) => {
   // context: { workspaceId, viewId?, entityId?, sdkVersion }
-  const items = await SynapWidget.query("list_entities", {
-    profileSlug: "deal", // or 'task', 'person', 'company', any custom slug
+
+  // List entities
+  const deals = await SynapWidget.query("entities.list", {
+    profileSlug: "deal",
     limit: 200,
   });
-  render(items ?? []);
+
+  // Get a single entity
+  const entity = await SynapWidget.query("entities.get", { id: "uuid" });
+
+  // List views
+  const views = await SynapWidget.query("views.list", {
+    workspaceId: context.workspaceId,
+  });
+
+  // List profiles
+  const profiles = await SynapWidget.query("profiles.list", {});
+
+  render(deals ?? []);
   SynapWidget.resize(document.body.scrollHeight);
 });
 ```
 
 All `query()` calls return a Promise. Entity shape: `{ id, title, profileSlug, properties, createdAt, … }`.
 
-Navigation and notifications:
+#### Mutations (governance-gated — return `{ status: "approved" | "proposed" | "denied" }`)
 
 ```js
-SynapWidget.navigate({ entityId: "entity-uuid" }); // opens entity detail
-SynapWidget.toast("Done!", "success"); // 'success' | 'error' | 'info'
+// Create an entity
+const result = await SynapWidget.mutate("create_entity", {
+  profileSlug: "task",
+  title: "Follow up",
+  properties: { status: "todo" },
+});
+// result.status === "approved" → result.id is the new entity id
+// result.status === "proposed" → result.proposalId, result.reviewUrl
+
+// Update an entity
+await SynapWidget.mutate("update_entity", {
+  id: "uuid",
+  properties: { status: "done" },
+});
+
+// Delete an entity (always proposed for agent-generated cells)
+await SynapWidget.mutate("delete_entity", { id: "uuid" });
+
+// Create a relation
+await SynapWidget.mutate("create_relation", {
+  sourceEntityId: "uuid-a",
+  targetEntityId: "uuid-b",
+  type: "related_to",
+});
+```
+
+**Always check `result.status`.** `"proposed"` is not an error — surface `result.reviewUrl` to the user.
+
+#### Shell actions
+
+```js
+SynapWidget.navigate({ entityId: "entity-uuid" }); // open entity detail in side panel
+SynapWidget.openPanel("entity-detail", { entityId: "uuid" }); // explicit panel open
+SynapWidget.toast("Saved!", "success"); // 'success' | 'error' | 'info'
+SynapWidget.resize(document.body.scrollHeight); // resize the iframe to content height
+SynapWidget.updateContext({ viewId: "uuid" }); // update ambient context
+
+// Subscribe to live entity changes
+SynapWidget.subscribe("entity:changed", ({ entityId }) => {
+  // re-fetch and re-render when any entity in the pod changes
+});
 ```
 
 ### Common Dependency Patterns (esm.sh import map)
 
-```html
-<script type="importmap">
-  {
-    "imports": {
-      "react": "https://esm.sh/react@19",
-      "react-dom/client": "https://esm.sh/react-dom@19/client",
-      "react/jsx-runtime": "https://esm.sh/react@19/jsx-runtime",
-      "recharts": "https://esm.sh/recharts@2.12.0"
-    }
+The `deps` map in `/cells/define` drives the import map. Each key becomes a bare specifier in the `<script type="importmap">`, resolved to `https://esm.sh/<pkg>@<version>`.
+
+```json
+// deps in the define call:
+{ "recharts": "2.12.0", "d3": "7" }
+
+// → generates this importmap inside the frame:
+{
+  "imports": {
+    "react": "https://esm.sh/react@19",
+    "react-dom/client": "https://esm.sh/react-dom@19/client",
+    "react/jsx-runtime": "https://esm.sh/react@19/jsx-runtime",
+    "recharts": "https://esm.sh/recharts@2.12.0",
+    "d3": "https://esm.sh/d3@7"
   }
-</script>
+}
 ```
+
+React 19 core entries are always injected by the host — never put them in `deps`.
 
 Common library choices:
 
-| Category | Packages                                                       |
+| Category | Packages (put in `deps`)                                       |
 | -------- | -------------------------------------------------------------- |
 | Data viz | `recharts@2.12.0`, `d3@7`, `chart.js@4`, `observable-plot@0.6` |
 | Tables   | `@tanstack/react-table@8`                                      |
@@ -925,30 +1206,23 @@ Common library choices:
         background: transparent;
       }
     </style>
-    <script type="importmap">
-      {
-        "imports": {
-          "react": "https://esm.sh/react@19",
-          "react-dom/client": "https://esm.sh/react-dom@19/client",
-          "react/jsx-runtime": "https://esm.sh/react@19/jsx-runtime"
-        }
-      }
-    </script>
+    <!-- importmap is injected by the host from deps — do not write one manually -->
   </head>
   <body>
     <div id="root"></div>
     <script type="module">
       import { createRoot } from "react-dom/client";
+      import { createElement as h, useState } from "react";
 
       SynapWidget.onInit(async ({ context }) => {
-        const items = await SynapWidget.query("list_entities", {
+        const items = await SynapWidget.query("entities.list", {
           profileSlug: "deal",
           limit: 200,
         }).catch(() => []);
 
-        // Build your UI here. Plain DOM or React both work.
-        document.getElementById("root").textContent =
-          `Loaded ${(items ?? []).length} deals`;
+        createRoot(document.getElementById("root")).render(
+          h("p", null, `Loaded ${(items ?? []).length} deals`)
+        );
 
         SynapWidget.resize(document.body.scrollHeight);
       });
@@ -961,10 +1235,11 @@ Common library choices:
 
 - **Always call `SynapWidget.onInit()`** — the host will not send data until you register this handler.
 - **Call `SynapWidget.resize()`** after rendering to prevent clipping.
-- **Handle errors** — `query()` can fail; always `.catch()`.
+- **Handle errors** — `query()` and `mutate()` can fail; always `.catch()`.
+- **Check `result.status` on mutations** — `"proposed"` is governance, not an error; surface `reviewUrl`.
 - **Transparent background** — `background: transparent` on `body` inherits the host surface color.
 - **No external fetch** — the sandbox has no cross-origin access; all data must go through `SynapWidget`.
-- **Inline all styles** — no external CSS imports; CDN JS via import map is fine.
+- **Declare all non-React imports in `deps`** — the host generates the import map from that field.
 
 ---
 
