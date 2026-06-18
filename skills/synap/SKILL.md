@@ -35,6 +35,8 @@ You are connected to a **Synap Data Pod** at `{SYNAP_POD_URL}`. All requests use
 
 Your job is to turn unstructured input into a **connected** knowledge graph. Isolated entities are anti-value. Every entity you create should link to at least one other entity.
 
+---
+
 ## Mental model
 
 Synap is a typed knowledge graph. **Reading is one verb (`synap ask`) — it routes for you.** Writing is where you must pick the right lane: the destination is decided by the **KIND** of knowledge, not by whichever workspace happens to be active.
@@ -43,13 +45,18 @@ Synap is a typed knowledge graph. **Reading is one verb (`synap ask`) — it rou
 
 Ask yourself: _who does this knowledge serve?_ **There is no private AI scratchpad** — structuring knowledge into a real lane IS your job. Never write a `note` (that's the human's raw inbox); always `capture` into a lane.
 
-| If it…                                                                                | Lane       | Where it goes                                                                  | Governance                                                                                                 |
-| ------------------------------------------------------------------------------------- | ---------- | ----------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
-| **is about the CURRENT WORK** — domain know-how for the project/task you're on (incl. a domain-specific gotcha/lesson/decision) | **Work** _(default)_ | a `knowledge` entity in the **active workspace** (`synap capture --type …`)    | proposal-gated (it's the user's real data; the workspace IS the domain — Builder ≠ marketing)              |
-| **is GLOBAL truth** — a best-practice / runbook / how-to that holds across ALL projects | **Global** | pod-wide procedural `knowledge_keys` (`synap capture --global --type … [--key ns:slug]`) | reviewed for shared truth                                                                                  |
-| **is about the USER** — how they work/talk/decide, their preferences, their life       | **User**   | pod-wide `user_observation` (`synap observe write` / `record_observation` tool) | inferences are **proposed** (you review); explicit "I always X" auto-saves — never model the user silently |
+| If it…                                                                                                                          | Lane                 | Where it goes                                                                            | Governance                                                                                                 |
+| ------------------------------------------------------------------------------------------------------------------------------- | -------------------- | ---------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| **is about the CURRENT WORK** — domain know-how for the project/task you're on (incl. a domain-specific gotcha/lesson/decision) | **Work** _(default)_ | a `knowledge` entity in the **active workspace** (`synap capture --type …`)              | proposal-gated (it's the user's real data; the workspace IS the domain — Builder ≠ marketing)              |
+| **is GLOBAL truth** — a best-practice / runbook / how-to that holds across ALL projects                                         | **Global**           | pod-wide procedural `knowledge_keys` (`synap capture --global --type … [--key ns:slug]`) | reviewed for shared truth                                                                                  |
+| **is about the USER** — how they work/talk/decide, their preferences, their life                                                | **User**             | pod-wide `user_observation` (`synap observe write` / `record_observation` tool)          | inferences are **proposed** (you review); explicit "I always X" auto-saves — never model the user silently |
 
 > **Why this matters:** writing to the wrong lane degrades the graph. A gotcha you learned about the **current project** is **Work** (the active workspace — its domain). A best-practice that holds **everywhere** is **Global** (`--global`, pod-wide). A fact about **how the user works** is **User** (pod-wide, inferences proposed). `synap capture` echoes which lane + governance it used; check it.
+
+> **Read the write outcome — it guides your next move (it never blocks you).** Every write (`capture`, `observe`, `create entity`, `create relation`, `note`) reports one of two outcomes (and `--json` carries `"outcome"`):
+>
+> - **`stored`** → it's **live now**, recallable via `synap ask`.
+> - **`proposed`** → queued for the human's review, **like a git PR — not a failure, not a block.** Keep working: compose a whole graph of proposed changes in one session (reference the proposed entities, link them, add more) — they're staged together and go live when the human approves the batch. The only thing to remember: it's _under review_, so don't tell the user it's already applied. (Inferences about the user and writes to real workspaces are gated by design — expected, normal.)
 
 > **Substrate names (tables under the hood):** _semantic_ = `entities` (the `knowledge` profile, workspace-scoped = domain separation), _episodic_ = `knowledge_facts`, _procedural_ = `knowledge_keys` (pod-wide runbooks). `ask` queries across them so you never pick on read.
 
@@ -65,14 +72,16 @@ Ask yourself: _who does this knowledge serve?_ **There is no private AI scratchp
 
 ### Key profiles for AI use
 
-| Profile slug       | Scope     | Who writes | Purpose                                                                                                                                                                                 |
-| ------------------ | --------- | ---------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `note`             | pod       | **human only** | The human's raw "dump now, structure later" inbox. **The AI never writes a note** — structuring into a lane is its job; use `capture` instead.                                      |
-| `knowledge`        | workspace | AI         | Validated gotchas/lessons/decisions — the **Work lane** (default `synap capture --type`; ek_type/ek_claim/ek_why). DOMAIN = the workspace (a Builder gotcha ≠ a marketing one). Cross-project runbooks go to `knowledge_keys` via `--global`. |
-| `user_observation` | pod       | AI only    | Durable user model — habits, communication style, preferences                                                                                                                           |
-| `decision`         | pod       | human + AI | Architectural decisions with rationale                                                                                                                                                  |
-| `research`         | pod       | AI         | Investigation with sources + conclusion                                                                                                                                                 |
-| `question`         | pod       | human + AI | Open inquiry, closed when a decision answers it                                                                                                                                         |
+| Profile slug       | Scope     | Who writes     | Purpose                                                                                                                                                                                                                                       |
+| ------------------ | --------- | -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `note`             | pod       | **human only** | The human's raw "dump now, structure later" inbox. **The AI never writes a note** — structuring into a lane is its job; use `capture` instead.                                                                                                |
+| `knowledge`        | workspace | AI             | Validated gotchas/lessons/decisions — the **Work lane** (default `synap capture --type`; ek_type/ek_claim/ek_why). DOMAIN = the workspace (a Builder gotcha ≠ a marketing one). Cross-project runbooks go to `knowledge_keys` via `--global`. |
+| `user_observation` | pod       | AI only        | Durable user model — habits, communication style, preferences                                                                                                                                                                                 |
+| `decision`         | pod       | human + AI     | Architectural decisions with rationale                                                                                                                                                                                                        |
+| `research`         | pod       | AI             | Investigation with sources + conclusion                                                                                                                                                                                                       |
+| `question`         | pod       | human + AI     | Open inquiry, closed when a decision answers it                                                                                                                                                                                               |
+
+---
 
 ## Quick reference — 90% of tasks in 30 lines
 
@@ -139,6 +148,8 @@ Call this once at session start. The response includes every system profile and 
 | `synap-ui:widget-catalog` | Available widget kinds and their configSchema          |
 | `synap-schema:SKILL`      | Creating custom profiles or property definitions       |
 
+---
+
 ## Synap-first operating mode
 
 > **MCP clients** (Claude Desktop, Raycast, OpenClaw with MCP): use `synap_*` tool names — they wrap auth and governance automatically. **REST / HTTP clients**: use the endpoints below.
@@ -184,6 +195,8 @@ An isolated entity has no value in a knowledge graph. When creating entities, im
 Facts about the user — preferences, team, working style, recurring context — belong in Synap memory, not in your context window. Memory survives sessions and is accessible across all AI surfaces. Context does not.
 
 Properties with `valueType: "entity_id"` are typed links to other entities — see **Linking** below.
+
+---
 
 ## CLI Data Operations (Bash tool)
 
@@ -260,6 +273,19 @@ synap ask "hono routing gotcha" --json
 `synap capture --type` writes a typed **`knowledge`** entity in the **active workspace** (the Work lane); `ek_type` (gotcha|lesson|decision|reference) discriminates the kind — **one store, type tags, not a residual dump**. It's workspace-scoped, so the active workspace supplies the domain — a Builder gotcha ≠ a marketing one (there is no `engineering_knowledge`). Add **`--global`** to write a pod-wide cross-cutting runbook to `knowledge_keys` instead. A formal **decision RECORD** (rationale, alternatives, superseded-by lifecycle) is a different artifact — use smart `synap capture "<free text>"` or `synap create entity --profile=decision`. Retrieve everything with `synap ask`.
 Use `capture` for anything worth remembering across sessions and projects.
 
+**Open (the one display door):**
+
+```bash
+synap open <id>                               # resolves type automatically, opens in browser
+synap open entity <id>                        # open entity detail
+synap open proposal <id>                      # open proposal review
+synap open view <id>                          # open a view
+synap open cell <typeKey>                     # open a registered cell by typeKey
+synap open document <id>                      # open a document
+```
+
+The bare-ID form calls `GET /api/hub/resolve/:id` to determine the type before dispatching. Use this when you don't know what type a UUID is — `synap open <id>` always works.
+
 **Write:**
 
 ```bash
@@ -278,6 +304,8 @@ synap set entity <id> --props='{"status":"done"}' --json
 
 ---
 
+---
+
 ## Scope — default pod-wide
 
 **Default: pod-wide.** 13 of 17 system profiles (`note`, `task`, `project`, `event`, `person`, `contact`, `company`, `bookmark`, `article`, `website`, `decision`, `question`, `research`) are pod-scoped — entities you create show up in _every_ workspace the user owns. The backend handles this automatically when the profile is pod-scoped: you don't need to pass `workspaceId`.
@@ -291,6 +319,8 @@ synap set entity <id> --props='{"status":"done"}' --json
 **Rule of thumb:** don't pass `workspaceId` unless the user's intent specifically narrows to one workspace. A task the user dictates "from the couch" belongs to the whole pod, not to whichever workspace was last open.
 
 When you do scope to a workspace, pass `workspaceId` in the create body — the backend respects it. Never pass `workspaceId: null` explicitly to force pod-wide; the profile's `entityScope` decides.
+
+---
 
 ## The work flow — question → research → decision → action
 
@@ -400,11 +430,13 @@ User: _"I'm trying to figure out whether we should build our own orchestrator or
 
 Don't interrupt the conversation to ask "should I log this as a question?" — just do it and add a one-line trailer at the end of your response:
 
-> (Logged as question on Project Eve. Review: https://studio.synap.live/proposals/…)
+> (Logged as question on Project Eve. Review: synap://open/proposal/…)
 
 If the creation was auto-approved (entity.create is on the whitelist), there's no proposal; just show a link to the entity:
 
-> (Logged as question → https://studio.synap.live/entities/ent_question_1)
+> (Logged as question → synap://open/entity/ent_question_1)
+
+---
 
 ## Linking — the core principle
 
@@ -443,6 +475,8 @@ POST /api/hub/relations
 ```
 
 For auto-sync mapping, conventional relation types, and edge cases, read **`linking.md`**.
+
+---
 
 ## Writing — governance in one paragraph
 
@@ -503,11 +537,13 @@ Rules:
 
 Example response to the user:
 
-> I queued **Delete task "Q2 plan review"** for your review. Destructive actions need your approval. Open it: https://studio.synap.live/proposals/prp_abc
+> I queued **Delete task "Q2 plan review"** for your review. Destructive actions need your approval. Open it: synap://open/proposal/prp_abc
 
 Auto-approved by default (for agent API keys): `entity.create`, `entity.update`, `document.create`, `relation.create`, `view.create`, `profile.create`, `property_def.create`, `channel.create`, `memory.*`, all reads. Destructive actions (`delete`, `archive`, `purge`) always propose in agent-owned workspaces.
 
 For the full whitelist, agent-user semantics, and workspace overrides, read **`governance.md`**.
+
+---
 
 ## Core writes
 
@@ -647,6 +683,72 @@ POST /api/hub/threads/{threadId}/messages
        { "userId": "{userId}", "role": "user", "content": "…" }
 ```
 
+---
+
+## Garden the graph — writes tell you their impact (the circling of action)
+
+A write is no longer blind. When you create or update an entity, the response tells you what it did to the graph — **READ it and act**, so the graph stays connected instead of accumulating isolated, duplicated nodes.
+
+**On create**, the response carries a `resolution` block:
+
+- `existingSameProfile` — an entity with this exact name ALREADY exists as the same profile. Prefer **updating** it (`synap set entity <id>` · `PATCH /api/hub/entities/:id` · `update_entity`) over creating a duplicate.
+- `autoConnected` — same-name entities of a DIFFERENT profile are facets of one real thing, and the system has already woven them together with a `same_subject` relation. Acknowledge it; add a more specific relation if the real relationship is narrower than "same subject".
+- `suggestions` — entities worth linking. Create the relations that genuinely apply (`synap create relation` · `POST /api/hub/relations` · `create_relation`).
+
+**On update**, the response carries an `impact` block — the entity's immediate relation neighbors. Read it and resolve secondary effects: supersede a now-stale entity, update its dependents, re-link.
+
+**The circling of action** for any structural write (updating the vision, the architecture, a decision record, a codebase map):
+
+1. **Write** — the response shows collisions + connections; don't ignore it.
+2. **If it already exists** (`existingSameProfile`) → update it, don't duplicate.
+3. **The same-name facets are auto-woven** (`autoConnected`) → extend the links where the relationship is more specific than `same_subject`.
+4. **Act on `suggestions`** → link what genuinely relates.
+5. **On update** → resolve the `impact` neighbors (supersede / update / re-link).
+
+The principle: **more data is better when it is structured.** The graph now helps you keep it structured — never leave an entity isolated, never blindly overwrite. (Matching is exact-name today; it will deepen over time — so still link deliberately when you know two things relate but their names differ.)
+
+---
+
+## Decide the next action — advance the goal, don't just answer
+
+You are an adjunct, not a reply box. A good assistant doesn't wait to be told the next step — after you answer, you ask **what is the highest-leverage next move toward the goal, and should I make it now?** — then you make it. Proactivity is this habit, run every turn; it is not a tone.
+
+### The session is the spine of real work
+
+A **focus session** is a goal-bound work room. It holds the goal, the promised outputs (deliverables), the tools/skills in play, and what's been produced so far — so it answers both _"where am I"_ and _"what am I working toward"_. Operate it with the triplet:
+
+| Move                      | CLI                                      | REST                                        | IS tool          |
+| ------------------------- | ---------------------------------------- | ------------------------------------------- | ---------------- |
+| open a session            | `synap session start --goal "…"`         | `POST /api/hub/focus-sessions`              | `start_session`  |
+| read it                   | `synap session get <id>`                 | `GET /api/hub/focus-sessions/:id`           | `get_session`    |
+| see active ones           | `synap session list`                     | `GET /api/hub/focus-sessions?status=active` | `list_sessions`  |
+| record progress / outputs | `synap session update <id> --progress N` | `PATCH /api/hub/focus-sessions/:id`         | `update_session` |
+
+- If you're already in a session (or a `## Active Session` block is in your context) → that's your frame. Read its goal and the gap between _promised outputs_ and _what's produced_, and pursue that gap.
+- If the user's intent is a **unit of work with a deliverable** (research, a plan, a build, an investigation) and no session is active → **open one** with a clear goal + expected outputs, so the work has a spine that accrues results. Don't open a session for a one-shot lookup or a casual reply.
+
+### Decide ONE move, then make it
+
+Pick the single highest-leverage next action toward the goal — not a checklist: answer · capture/structure what was said · create a task · link entities · advance or produce a promised deliverable · update the session's progress · propose an automation for a repeating pattern.
+
+**Spin off a branch / sub-agent** when there's side-work that advances the goal but would **bloat the main channel** — e.g. "go find best practices for X", a deep research dive, a parallel investigation. Keep the main thread clean and let the branch do the heavy lifting and report back. Judge by complexity + channel hygiene, not by a fixed category.
+
+**Land it through governance — act, don't just suggest.** When the move is clear, _make_ it: create the task, the research entity, the branch, the link, the session update. Every write passes through governance — it either auto-applies (safe, whitelisted writes) or becomes a one-click review. Either way, making the move is the safe path. Don't downgrade a clear next action into "you might want to…". Say _why_ in one line, then act.
+
+**Reflect back into the session.** When work lands, update the session's progress and link what you produced — so the next turn reads a richer state and the loop compounds.
+
+**Know when to stop.** When the promised outputs are produced and verified, the goal is done — say so and stop. Surface a _real_ next move when there is one; stay quiet when there isn't. Never manufacture busywork to seem active.
+
+### The nudge vs. propose line
+
+A concrete next action toward a _known_ goal → propose it (gated). A _speculative_ restructuring the user hasn't asked for (a new profile, a new view, splitting a workspace) → raise it as a question and let them decide.
+
+### If you are a coding / terminal agent working _in_ a repo
+
+Same habit, one addition: before you finish a piece of work, ask **"what's the next action, and what belongs in Synap?"** A decision you made, a gotcha you hit, a follow-up the work revealed, a task it spun off — capture it (`synap capture` / `synap note` / a task) and, when the work is a real unit, track it in a session. The point of the second brain is that the _next_ agent (or you, tomorrow) starts from what this turn learned instead of re-deriving it.
+
+---
+
 ## Reading
 
 **Start with `ask` — the one routed read door.** It classifies the question and
@@ -689,6 +791,8 @@ GET /api/hub/memory?userId={userId}&query={keywords}
 
 No SQL joins. The graph is the join.
 
+---
+
 ## Multi-entity capture from free-form text
 
 When the user pastes a block of unstructured content (a meeting transcript, an email, a LinkedIn bio), use the capture pipeline instead of chaining manual creates:
@@ -699,6 +803,8 @@ POST /api/hub/capture/execute     → commits (after user confirms)
 ```
 
 The pipeline extracts multiple entities with their relations in one LLM call. Read **`capture.md`** for the full flow.
+
+---
 
 ## Worked examples
 
@@ -753,6 +859,8 @@ The pipeline extracts multiple entities with their relations in one LLM call. Re
    ```
 
 3. If the user said why ("interesting for the onboarding project"), also create a relation to that project — never drop the reason as a plain comment, turn it into a link.
+
+---
 
 ## CRM Workspaces — 4-Entity Model
 
@@ -860,6 +968,8 @@ POST /api/hub/relations
 
 This model enables renewals (new deal linking to existing client), multi-stakeholder deals (multiple `linked_to_deal` relations per deal), campaigns with mixed entity types (persons + companies + deals as members), and clean churn tracking. It matches Synap's core pattern: entities + relations = graph.
 
+---
+
 ## Common mistakes
 
 1. **Creating orphan entities.** Always connect to at least one other entity on creation. Search first; if nothing links, reconsider whether this should be memory.
@@ -870,6 +980,8 @@ This model enables renewals (new deal linking to existing client), multi-stakeho
 6. **Not knowing your userId.** Use `{SYNAP_USER_ID}` from the env (set by `synap connect`). Or call `GET /api/hub/users/me` → `.id` once and cache it. Never hardcode or guess.
 7. **Skipping the search step.** Duplicates degrade the graph more than missing data.
 8. **Forgetting that `GET /channels/personal` needs `hub-protocol.write`** scope — it's get-or-create, not a pure read.
+
+---
 
 ## AI Inline Patterns — reference entities in your replies
 
@@ -894,6 +1006,8 @@ When the user is interacting with Synap's AI Companion (the in-browser chat pane
 - **Prefer side panel.** Use `[[open:side|view:UUID]]` so the user keeps their current context.
 - **Only in Companion replies.** These patterns are silently ignored in non-companion channels, documents, and memory. Do not use them there.
 - **Combine with prose.** Don't lead with a chip — embed it naturally: `"Here are your open deals → [[view:xyz|Deals Pipeline]] · [[open:side|view:xyz]]"`
+
+---
 
 ## Focus Sessions — Goal-Bound Work Rooms
 
@@ -941,6 +1055,275 @@ Note: `synap session start` creates a session directly (the agent-facing path). 
 
 **Discoverability**: the `active-sessions` bento widget is on the default home dashboard. Sessions group their related proposals under a shared `correlationId` in the Proposal Review Board.
 
+---
+
+# Automations
+
+Create workflow automations that trigger automatically based on events, schedules, or webhooks.
+
+## Automation Structure
+
+Every automation has:
+
+1. **Trigger** (exactly one) — what starts the automation
+2. **Steps** (one or more) — commands, conditions, delays, outputs connected in a flow
+
+## Trigger Types
+
+| Type      | Config                       | Example                              |
+| --------- | ---------------------------- | ------------------------------------ |
+| `event`   | `{ eventPattern, filters? }` | Entity created with specific profile |
+| `cron`    | `{ expression }`             | Daily at 9am: `"0 9 * * *"`          |
+| `webhook` | `{ webhookSubscriptionId }`  | External service sends data          |
+| `manual`  | `{}`                         | User-triggered from UI               |
+
+### Event Patterns
+
+Format: `{subjectType}.{action}.completed`
+
+Common patterns:
+
+- `entity.create.completed` — entity created and persisted
+- `entity.update.completed` — entity updated
+- `entity.delete.completed` — entity deleted
+- `document.create.completed` — document created
+- `document.update.completed` — document updated
+
+Filters narrow the event to specific conditions:
+
+```json
+{
+  "eventPattern": "entity.create.completed",
+  "filters": { "profileSlug": "task", "metadata.priority": "high" }
+}
+```
+
+### Cron Expressions
+
+Standard 5-field cron (minute hour day month weekday):
+
+- `"0 9 * * *"` — daily at 9am
+- `"0 9 * * MON"` — every Monday at 9am
+- `"*/30 * * * *"` — every 30 minutes
+- `"0 0 1 * *"` — first day of month at midnight
+
+## Step Types
+
+### command
+
+Execute an intelligence command. Reference by `commandId` or describe inline.
+
+```json
+{
+  "id": "extract",
+  "type": "command",
+  "data": {
+    "commandTitle": "Extract key entities",
+    "inputMapping": {
+      "content": "{{trigger.payload.entity.content}}",
+      "context": "{{trigger.payload.entity.name}}"
+    }
+  }
+}
+```
+
+**Input mapping** uses template syntax:
+
+- `{{trigger.payload.*}}` — data from the triggering event
+- `{{steps.<stepId>.output.*}}` — output from a prior step
+- `{{loop.item}}` — current item in a loop
+
+### condition
+
+Branch the flow based on a boolean expression.
+
+```json
+{
+  "id": "check-priority",
+  "type": "condition",
+  "data": {
+    "label": "High priority?",
+    "expression": "trigger.payload.entity.metadata.priority === 'high'",
+    "trueLabel": "Yes",
+    "falseLabel": "No"
+  }
+}
+```
+
+Conditions have two output handles: `yes` and `no`. Connect subsequent steps to the appropriate handle.
+
+### delay
+
+Wait before continuing.
+
+```json
+{
+  "id": "wait",
+  "type": "delay",
+  "data": { "duration": "5m", "label": "Cool down" }
+}
+```
+
+Supported durations: `30s`, `5m`, `1h`, `1d`, `1w`.
+
+### output
+
+Terminal action — the end result of the automation.
+
+```json
+{
+  "id": "notify",
+  "type": "output",
+  "data": {
+    "label": "Send notification",
+    "outputType": "notification",
+    "config": {
+      "message": "New high-priority task: {{trigger.payload.entity.name}}"
+    }
+  }
+}
+```
+
+Output types:
+
+- `notification` — in-app notification to the user
+- `entity_create` — create a new entity (config: `{ profileSlug, title, properties }`)
+- `entity_update` — update an existing entity (config: `{ entityId, properties }`)
+- `webhook` — POST to external URL (config: `{ url, headers?, body }`)
+- `channel_message` — post a message to a channel (config: `{ channelId, content }`)
+
+### loop
+
+Iterate over a collection from a prior step.
+
+```json
+{
+  "id": "for-each-result",
+  "type": "loop",
+  "data": {
+    "label": "For each search result",
+    "iteratorExpression": "steps.search.output.results",
+    "itemVariable": "item"
+  }
+}
+```
+
+Inside the loop, reference `{{loop.item}}` for the current element.
+
+## Connecting Steps
+
+Steps are connected via `dependsOn` (which step must complete first) and optional `conditionBranch` (which branch to follow from a condition).
+
+```json
+{
+  "steps": [
+    { "id": "check", "type": "condition", "data": {...} },
+    { "id": "notify-high", "type": "output", "data": {...}, "dependsOn": ["check"], "conditionBranch": "yes" },
+    { "id": "log-normal", "type": "output", "data": {...}, "dependsOn": ["check"], "conditionBranch": "no" }
+  ]
+}
+```
+
+## Discovering Commands
+
+Before creating automations with command steps, call `list_commands` to discover available intelligence commands in the workspace. Use the command `id` in the step's `commandId` field.
+
+If no suitable command exists, you can leave `commandId` empty and set `commandTitle` + `inputMapping` — the execution engine will use the title as a prompt template.
+
+## Vault References
+
+Automation configs that need secrets (API keys, auth tokens) should use vault references instead of hardcoded values:
+
+- `vault://secret-uuid` — resolves to the full secret value at runtime
+- `vault://secret-uuid/field-name` — resolves a specific field from a JSON secret
+
+Only server-encrypted secrets can be resolved by the automation engine. The user must store the credential in the vault first.
+
+## Best Practices
+
+1. **Keep it simple** — Start with trigger → command → output. Add complexity only when needed.
+2. **Name clearly** — Use descriptive labels: "When task created with high priority" not "Trigger 1".
+3. **One purpose** — Each automation should do one thing well. Compose multiple automations rather than building one complex flow.
+4. **Filter early** — Use trigger filters to avoid unnecessary execution. Don't use a condition step when a trigger filter suffices.
+5. **Test first** — Create automations as `draft` status. Let the user review the flow visualization before activating.
+
+## Example: Auto-archive completed tasks
+
+```json
+{
+  "name": "Auto-archive completed tasks",
+  "description": "When a task status changes to 'done', archive it after 24 hours",
+  "trigger": {
+    "type": "event",
+    "config": {
+      "eventPattern": "entity.update.completed",
+      "filters": { "profileSlug": "task", "metadata.status": "done" }
+    }
+  },
+  "steps": [
+    {
+      "id": "wait-24h",
+      "type": "delay",
+      "data": { "duration": "1d", "label": "Wait 24h" }
+    },
+    {
+      "id": "archive",
+      "type": "output",
+      "data": {
+        "label": "Archive task",
+        "outputType": "entity_update",
+        "config": {
+          "entityId": "{{trigger.payload.entity.id}}",
+          "properties": { "archived": true }
+        }
+      },
+      "dependsOn": ["wait-24h"]
+    }
+  ]
+}
+```
+
+## Example: Notify on high-priority tasks
+
+```json
+{
+  "name": "High-priority task alerts",
+  "description": "Send a notification when a high-priority task is created",
+  "trigger": {
+    "type": "event",
+    "config": {
+      "eventPattern": "entity.create.completed",
+      "filters": { "profileSlug": "task" }
+    }
+  },
+  "steps": [
+    {
+      "id": "check-priority",
+      "type": "condition",
+      "data": {
+        "label": "High priority?",
+        "expression": "trigger.payload.entity.metadata.priority === 'high'"
+      }
+    },
+    {
+      "id": "notify",
+      "type": "output",
+      "data": {
+        "label": "Alert: high-priority task",
+        "outputType": "notification",
+        "config": {
+          "message": "New urgent task: {{trigger.payload.entity.name}}"
+        }
+      },
+      "dependsOn": ["check-priority"],
+      "conditionBranch": "yes"
+    }
+  ]
+}
+```
+
+---
+
 ## When you need more
 
 - Linking conventions, auto-sync table, relation types → **`linking.md`**
@@ -948,6 +1331,8 @@ Note: `synap session start` creates a session directly (the agent-facing path). 
 - Unstructured capture pipeline → **`capture.md`**
 - Extending the data model (new profiles, new properties) → install the **`synap-schema`** skill
 - Building views, dashboards, and bento layouts → install the **`synap-ui`** skill
+
+---
 
 ## ViewFrame Cells — Custom View Generation
 
@@ -1240,6 +1625,8 @@ Common library choices:
 - **Transparent background** — `background: transparent` on `body` inherits the host surface color.
 - **No external fetch** — the sandbox has no cross-origin access; all data must go through `SynapWidget`.
 - **Declare all non-React imports in `deps`** — the host generates the import map from that field.
+
+---
 
 ---
 

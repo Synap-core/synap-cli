@@ -1,12 +1,7 @@
 import chalk from "chalk";
 import { log } from "../utils/logger.js";
 import { resolveHubConfig, resolveUserId, hubGet, hubPost, hubPatch } from "../lib/hub-client.js";
-import {
-  resolveWorkspaceName,
-  formatLaneLine,
-  laneJsonFields,
-  type LaneReport,
-} from "../lib/capture-lane.js";
+import { reportWrite } from "../lib/capture-lane.js";
 
 export interface BaseOpts {
   json?: boolean;
@@ -341,31 +336,13 @@ export async function noteData(
       },
     }, cfg) as Record<string, unknown>;
 
-    const isProposed = res.status === "proposed" || Boolean(res.proposalId);
-
-    const report: LaneReport = {
+    await reportWrite(res, {
+      label: `Note saved: "${text.slice(0, 80)}"`,
       lane: "work",
       workspaceId,
-      workspaceName: await resolveWorkspaceName(workspaceId, cfg),
-      governance: isProposed ? "proposed" : "auto",
-    };
-
-    if (opts.json) {
-      if (isProposed) {
-        console.log(JSON.stringify({ proposed: true, proposalId: res.proposalId ?? res.id, ...laneJsonFields(report) }, null, 2));
-      } else {
-        console.log(JSON.stringify({ id: res.id, stored: true, ...laneJsonFields(report) }, null, 2));
-      }
-      return;
-    }
-
-    if (isProposed) {
-      log.warn(`Queued for approval (proposal: ${String(res.proposalId ?? "")})`);
-      if (res.reviewUrl) log.dim(`  Review: ${String(res.reviewUrl)}`);
-    } else {
-      log.success(`Note saved: "${text.slice(0, 80)}" ${chalk.dim(String(res.id ?? "").slice(0, 8))}`);
-    }
-    console.log("  " + formatLaneLine(report));
+      cfg,
+      json: opts.json,
+    });
   } catch (e) {
     console.error(chalk.red("Error: " + (e as Error).message));
     process.exit(1);
@@ -498,6 +475,52 @@ export async function askKnowledge(
   }
 }
 
+// ─── graph-impact feedback (impact-aware writes) ───────────────────────────────
+// The backend now returns ADDITIVE `resolution` (on create) / `impact` (on
+// update) blocks so external agents get the same graph-impact feedback the IS
+// agent already gets. SHALLOW (exact-name only) and graceful when absent.
+
+interface ResolutionRef {
+  id?: string;
+  name?: string;
+  profileSlug?: string;
+  relation?: string;
+}
+interface ResolutionBlock {
+  existingSameProfile?: ResolutionRef;
+  autoConnected?: ResolutionRef[];
+  suggestions?: ResolutionRef[];
+}
+
+const refLabel = (r: ResolutionRef): string =>
+  `${String(r.name ?? r.id ?? "?")}${r.profileSlug ? ` [${r.profileSlug}]` : ""}`;
+
+/** Print 1-3 dim graph-impact lines for a create response. No-op if absent. */
+function reportResolution(res: Record<string, unknown>): void {
+  const resolution = res.resolution as ResolutionBlock | undefined;
+  if (!resolution) return;
+
+  const existing = resolution.existingSameProfile;
+  if (existing) {
+    log.dim(
+      `⚠ an entity named "${String(existing.name ?? "?")}" already exists as profile ${String(existing.profileSlug ?? "?")} (${String(existing.id ?? "?").slice(0, 8)}) — consider updating it instead of duplicating`
+    );
+  }
+
+  const autoConnected = resolution.autoConnected ?? [];
+  if (autoConnected.length > 0) {
+    const names = autoConnected.map(refLabel).join(", ");
+    log.dim(`→ auto-linked to ${autoConnected.length} existing same-name entit${autoConnected.length === 1 ? "y" : "ies"}: ${names}`);
+  }
+
+  // suggestions beyond what was already auto-connected
+  const autoIds = new Set(autoConnected.map((r) => r.id).filter(Boolean));
+  const suggestions = (resolution.suggestions ?? []).filter((s) => !autoIds.has(s.id));
+  if (suggestions.length > 0) {
+    log.dim(`· you may want to link: ${suggestions.map(refLabel).join(", ")}`);
+  }
+}
+
 // ─── createEntity ─────────────────────────────────────────────────────────────
 
 export async function createEntity(
@@ -517,19 +540,17 @@ export async function createEntity(
 
     const entity = res as Record<string, unknown>;
 
-    if (opts.json) {
-      console.log(JSON.stringify(entity, null, 2));
-      return;
-    }
+    await reportWrite(entity, {
+      label: `Created: ${opts.name}`,
+      lane: "work",
+      workspaceId: opts.workspace ?? cfg.workspaceId,
+      cfg,
+      json: opts.json,
+    });
 
-    if (entity.status === "proposed") {
-      log.warn(`Queued for approval — not yet created.`);
-      log.dim(`  proposal: ${String(entity.proposalId ?? entity.id ?? "")}`);
-      if (entity.reviewUrl) log.dim(`  Review: ${String(entity.reviewUrl)}`);
-      else log.dim(`  Open Synap to approve the pending proposal.`);
-    } else {
-      log.success(`Created: ${opts.name} ${chalk.dim(String(entity.id ?? "").slice(0, 8))}`);
-    }
+    // Graph-impact feedback — human output only (the `--json` path already
+    // passed the raw response, including `resolution`, through reportWrite).
+    if (!opts.json) reportResolution(entity);
   } catch (e) {
     console.error(chalk.red("Error: " + (e as Error).message));
     process.exit(1);
@@ -592,12 +613,13 @@ export async function createRelation(
 
     const relation = res as Record<string, unknown>;
 
-    if (opts.json) {
-      console.log(JSON.stringify(relation, null, 2));
-      return;
-    }
-
-    log.success(`Created relation: ${opts.type} (${opts.source} → ${opts.target})`);
+    await reportWrite(relation, {
+      label: `Relation: ${opts.type} (${opts.source} → ${opts.target})`,
+      lane: "work",
+      workspaceId: opts.workspace ?? cfg.workspaceId,
+      cfg,
+      json: opts.json,
+    });
   } catch (e) {
     console.error(chalk.red("Error: " + (e as Error).message));
     process.exit(1);
@@ -629,6 +651,13 @@ export async function updateEntity(
     }
 
     log.success(`Updated: ${id}`);
+
+    // Graph-impact feedback — shallow immediate neighbors the edit may touch.
+    // Additive + graceful: absent on older backends, so output is unchanged.
+    const impact = entity.impact as ResolutionRef[] | undefined;
+    if (Array.isArray(impact) && impact.length > 0) {
+      log.dim(`→ ${impact.length} connected entit${impact.length === 1 ? "y" : "ies"} may be affected: ${impact.map(refLabel).join(", ")}`);
+    }
   } catch (e) {
     console.error(chalk.red("Error: " + (e as Error).message));
     process.exit(1);

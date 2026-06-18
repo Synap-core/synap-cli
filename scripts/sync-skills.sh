@@ -22,6 +22,14 @@ if [ ! -d "$SRC" ]; then
   exit 1
 fi
 
+# Each package's SKILL.md is a GENERATED build artifact assembled from the topic
+# source files (_skill.yaml + _order.txt + *.md). Regenerate it BEFORE copying so
+# the published CLI tarball always ships a fresh, assembled SKILL.md per package.
+if [ -f "$SRC/build.mjs" ]; then
+  echo "  building SKILL.md from topic sources ..."
+  node "$SRC/build.mjs" "$SRC"
+fi
+
 for name in synap synap-schema synap-ui; do
   if [ ! -f "$SRC/$name/SKILL.md" ]; then
     echo "sync-skills: missing skill $name at $SRC/$name/SKILL.md" >&2

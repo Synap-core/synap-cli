@@ -1,6 +1,7 @@
 import chalk from "chalk";
 import { log } from "../utils/logger.js";
 import { resolveHubConfig, hubGet, hubPost } from "../lib/hub-client.js";
+import { reportWrite } from "../lib/capture-lane.js";
 import { type BaseOpts, parseLimit } from "./data.js";
 
 type ObserveCategory = "working_style" | "communication" | "focus" | "technical" | "preference";
@@ -53,14 +54,14 @@ export async function observeWrite(
       cfg
     ) as Record<string, unknown>;
 
-    if (opts.json) {
-      console.log(JSON.stringify(res, null, 2));
-      return;
-    }
-
-    const id = String(res.id ?? res.entityId ?? "");
-    log.success(`Observation recorded  ${chalk.dim(id.slice(0, 8))}`);
-    log.dim(`  category: ${category}  confidence: ${confidence}`);
+    // Honest outcome: an inference (uo_validated:false) is gated → proposed, not
+    // silently "recorded". reportWrite reads the response and says which it was.
+    await reportWrite(res, {
+      label: `Observation: ${text.slice(0, 60)} (${category}, conf ${confidence})`,
+      lane: "user",
+      cfg,
+      json: opts.json,
+    });
   } catch (e) {
     console.error(chalk.red("Error: " + (e as Error).message));
     process.exit(1);

@@ -1144,15 +1144,23 @@ program
 // ─── open ─────────────────────────────────────────────────────────────────────
 
 program
-  .command("open <kind> <id>")
-  .description("Open an entity, view, cell, or document in the Synap desktop app")
-  .action(async (kind: string, id: string) => {
-    if (kind !== "entity" && kind !== "view" && kind !== "cell" && kind !== "document") {
-      console.error(`Unknown kind: "${kind}". Use: entity | view | cell | document`);
-      process.exit(1);
+  .command("open <kind-or-id> [id]")
+  .description("Open in the Synap desktop app. Use: open <kind> <id> or open <id> (auto-resolves type)")
+  .action(async (kindOrId: string, id?: string) => {
+    if (id) {
+      // open entity|view|cell|document|proposal <id>
+      const validKinds = ["entity", "view", "cell", "document", "proposal"];
+      if (!validKinds.includes(kindOrId)) {
+        console.error(`Unknown kind: "${kindOrId}". Use: ${validKinds.join(" | ")}`);
+        process.exit(1);
+      }
+      const { openInBrowser } = await import("./commands/open.js");
+      await openInBrowser({ kind: kindOrId as "entity" | "view" | "cell" | "document" | "proposal", id });
+    } else {
+      // open <id> — resolve type automatically
+      const { resolveAndOpen } = await import("./commands/open.js");
+      await resolveAndOpen(kindOrId);
     }
-    const { openInBrowser } = await import("./commands/open.js");
-    await openInBrowser({ kind: kind as "entity" | "view" | "cell" | "document", id });
   });
 
 // ─── doc ──────────────────────────────────────────────────────────────────────

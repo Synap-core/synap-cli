@@ -1,24 +1,28 @@
 /**
- * Capture-lane transparency helpers.
+ * Write-outcome transparency helpers — the glass-box for WRITES.
  *
- * The four-lane capture model routes knowledge by KIND (not by active workspace):
+ * Reads route through one verb (`ask`, which says how it routed). Writes route by
+ * KIND into one of three lanes — and every write must report, honestly and in one
+ * line, WHAT happened so the AI is GUIDED by the response, not guessing:
  *
  *   | Lane     | Destination                          | Governance      |
  *   |----------|--------------------------------------|-----------------|
- *   | ai-self  | shared agent / memory workspace      | auto            |
- *   | user     | pod-wide user_observation            | gated / auto    |
- *   | global   | pod-wide procedural                  | gated           |
- *   | work     | the linked product workspace         | gated           |
+ *   | user     | pod-wide user_observation            | gate inference  |
+ *   | global   | pod-wide procedural (knowledge_keys) | reviewed        |
+ *   | work     | the active product workspace         | proposal-gated  |
  *
- * This module does NOT change WHERE a capture routes — it only makes the
- * destination + governance TRANSPARENT in command output, so an agent always
- * knows where its knowledge landed (which workspace, and whether it was
- * auto-stored or proposed for review).
+ * The cardinal signal is **stored vs proposed**: `stored` = live, recallable now;
+ * `proposed` = gated/refrained — queued for human approval, NOT yet live. Every
+ * write command routes its hub response through `reportWrite` so this signal is
+ * consistent across `capture`, `observe`, `create entity`, `create relation`, `doc`.
  */
 
 import chalk from "chalk";
+import { log } from "../utils/logger.js";
 import { hubGet, type HubConfig } from "./hub-client.js";
 
+// "ai-self" retained as a deprecated union member only; the lane was removed
+// (no private agent scratchpad) — nothing routes there anymore.
 export type CaptureLane = "ai-self" | "user" | "global" | "work";
 export type Governance = "auto" | "proposed";
 
@@ -97,4 +101,71 @@ export function laneJsonFields(report: LaneReport): Record<string, unknown> {
     workspaceName: report.workspaceName,
     governance: report.governance,
   };
+}
+
+/** Detect the governance outcome from a hub write response (entity / proposal). */
+export function writeGovernance(res: Record<string, unknown>): Governance {
+  return res.status === "proposed" ||
+    Boolean(res.proposalId) ||
+    Number(res.proposalsCreated ?? 0) > 0
+    ? "proposed"
+    : "auto";
+}
+
+/**
+ * The ONE honest write reporter. Every write command routes its hub response
+ * through this so the AI gets a consistent, guiding signal:
+ *   • stored   → live now, recallable via `ask`
+ *   • proposed → gated/refrained, awaiting human approval, NOT yet live
+ * One human line + lane line; `--json` adds an `outcome` field while preserving
+ * the original response fields (backward-compatible).
+ */
+export async function reportWrite(
+  res: Record<string, unknown>,
+  o: {
+    label: string;
+    lane: CaptureLane;
+    workspaceId?: string;
+    cfg: HubConfig;
+    json?: boolean;
+  }
+): Promise<void> {
+  const governance = writeGovernance(res);
+  const report: LaneReport = {
+    lane: o.lane,
+    workspaceId: o.workspaceId,
+    workspaceName: o.workspaceId
+      ? await resolveWorkspaceName(o.workspaceId, o.cfg)
+      : o.lane === "global" || o.lane === "user"
+        ? "pod-wide"
+        : undefined,
+    governance,
+  };
+  const id = String(res.id ?? res.entityId ?? "");
+  const proposalId = String(res.proposalId ?? "");
+
+  if (o.json) {
+    console.log(
+      JSON.stringify(
+        {
+          ...res,
+          outcome: governance === "proposed" ? "proposed" : "stored",
+          ...laneJsonFields(report),
+        },
+        null,
+        2
+      )
+    );
+    return;
+  }
+
+  if (governance === "proposed") {
+    // A proposal is normal (a PR under review), NOT a failure — neutral tone,
+    // never an alarm. The agent keeps composing; it just goes live on approval.
+    log.info(`${o.label} — proposed (under review)`);
+    if (proposalId) log.dim(`  proposal: ${proposalId.slice(0, 8)}`);
+  } else {
+    log.success(`${o.label}${id ? "  " + chalk.dim(id.slice(0, 8)) : ""}`);
+  }
+  console.log("  " + formatLaneLine(report));
 }
