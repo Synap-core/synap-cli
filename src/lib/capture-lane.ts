@@ -164,6 +164,10 @@ export async function reportWrite(
     // never an alarm. The agent keeps composing; it just goes live on approval.
     log.info(`${o.label} — proposed (under review)`);
     if (proposalId) log.dim(`  proposal: ${proposalId.slice(0, 8)}`);
+    // Expose the stable proposed entity ID so the AI can reference this entity
+    // in cross-write proposal graphs (e.g. create entity B linked to entity A).
+    const proposedEntityId = String(res.proposedEntityId ?? "");
+    if (proposedEntityId) log.dim(`  entity: ${proposedEntityId.slice(0, 8)}`);
   } else {
     log.success(`${o.label}${id ? "  " + chalk.dim(id.slice(0, 8)) : ""}`);
   }
