@@ -29,7 +29,7 @@ import { createRequire } from "node:module";
 import chalk from "chalk";
 import ora from "ora";
 import prompts from "prompts";
-import { resolveHubConfig, hubGet, hubPost, hubPatch } from "../lib/hub-client.js";
+import { resolveHubConfig, hubGet, hubPost, hubPatch, resolveUserId } from "../lib/hub-client.js";
 import { checkPodHealth } from "../lib/pod.js";
 import { log, banner } from "../utils/logger.js";
 
@@ -107,7 +107,18 @@ export async function bridgeSetup(opts: BridgeSetupOpts): Promise<void> {
   // ── 4. Provision the capability (vault credential + tool + skill) ─────────
   const bridgeDir = opts.bridgeDir ?? DEFAULT_BRIDGE_DIR;
   const botToken = await resolveBotToken(opts.botToken);
-  const vaultRef = await applyBridgeCapability(bridgeDir, workspaceId, cfg, botToken);
+  const { vaultRef, secretId } = await applyBridgeCapability(
+    bridgeDir,
+    workspaceId,
+    cfg,
+    botToken
+  );
+
+  // ── 4b. Grant the bridge redeem access — token lives ONLY in the vault ─────
+  let granted = false;
+  if (secretId && botToken) {
+    granted = await grantRedeemAccess(secretId, cfg);
+  }
 
   // ── 5. Proactive delivery routing (optional) ─────────────────────────────
   if (opts.proactiveChannel) {
@@ -121,10 +132,9 @@ export async function bridgeSetup(opts: BridgeSetupOpts): Promise<void> {
     SYNAP_HUB_API_KEY: cfg.apiKey,
     SYNAP_WORKSPACE_ID: workspaceId,
   };
-  // The token is canonical in the pod vault (vaultRef). The bridge gateway is an
-  // external WS client that must hold a token in-process, so we also write a
-  // runtime copy — sourced from this same provisioning step, not hand-set.
-  if (botToken) managed.DISCORD_BOT_TOKEN = botToken;
+  // The token is NEVER written to .env — it lives in the pod vault and the
+  // bridge redeems it on boot via this ref. (Requires the grant below to land;
+  // if it didn't, we warn loudly rather than leaking the token to env.)
   if (vaultRef) managed.SYNAP_DISCORD_TOKEN_REF = vaultRef;
   if (opts.guildId) managed.DISCORD_GUILD_ID = opts.guildId;
   if (opts.enableIngest) managed.SYNAP_INGEST_ENABLED = "true";
@@ -132,7 +142,8 @@ export async function bridgeSetup(opts: BridgeSetupOpts): Promise<void> {
   if (opts.proactiveChannel) managed.SYNAP_PROACTIVE_CHANNEL_ID = opts.proactiveChannel;
 
   try {
-    upsertEnv(envPath, managed);
+    // Once the token is in the vault, purge any stale env copy of it.
+    upsertEnv(envPath, managed, vaultRef ? ["DISCORD_BOT_TOKEN"] : []);
     log.success(`Wrote pod credentials → ${envPath}`);
   } catch (err) {
     log.warn(`Could not write ${envPath}: ${(err as Error).message}`);
@@ -147,6 +158,7 @@ export async function bridgeSetup(opts: BridgeSetupOpts): Promise<void> {
     hasToken: Boolean(botToken),
     hasGuild: Boolean(opts.guildId),
     vaultRef,
+    granted,
   });
 }
 
@@ -193,7 +205,7 @@ async function applyBridgeCapability(
   workspaceId: string,
   cfg: Awaited<ReturnType<typeof resolveHubConfig>>,
   botToken: string | undefined
-): Promise<string | undefined> {
+): Promise<{ vaultRef?: string; secretId?: string }> {
   const spinner = ora("Provisioning capability…").start();
   // Read the capability definition from the bridge repo — ONE source of truth.
   const capPath = path.join(bridgeDir, "src", "synapCapabilities.js");
@@ -208,11 +220,11 @@ async function applyBridgeCapability(
     spinner.fail("Capability definition not found");
     log.dim(`  Looked in: ${capPath}`);
     log.dim(`  ${(err as Error).message}`);
-    return undefined;
+    return {};
   }
   if (!rawDef) {
     spinner.fail("No CAPABILITY_DEFINITION export in the bridge");
-    return undefined;
+    return {};
   }
 
   // Deep-clone + inject the bot token into the vault credential. With no token,
@@ -254,7 +266,7 @@ async function applyBridgeCapability(
     )) as {
       capabilityKey?: string;
       created?: {
-        vault?: Array<{ vaultRef?: string }>;
+        vault?: Array<{ vaultRef?: string; secretId?: string }>;
         tools?: unknown[];
         skills?: unknown[];
       };
@@ -262,14 +274,47 @@ async function applyBridgeCapability(
     const tools = res.created?.tools?.length ?? 0;
     const skills = res.created?.skills?.length ?? 0;
     const vaultRef = res.created?.vault?.[0]?.vaultRef;
+    const secretId = res.created?.vault?.[0]?.secretId;
     spinner.succeed(
       `Capability provisioned: ${res.capabilityKey ?? "?"} (${vaultRef ? "vault + " : ""}${tools} tool, ${skills} skill)`
     );
-    return vaultRef;
+    return { vaultRef, secretId };
   } catch (err) {
     spinner.fail("Capability apply failed (pod creds still written below)");
     log.dim(`  ${(err as Error).message}`);
-    return undefined;
+    return {};
+  }
+}
+
+/**
+ * Grant the bridge principal redeem access to the bot-token secret — the headless
+ * equivalent of the UI "grant access" flow, using the user's own credentials.
+ * After this, the token lives ONLY in the vault; the bridge redeems it on boot.
+ */
+async function grantRedeemAccess(
+  secretId: string,
+  cfg: Awaited<ReturnType<typeof resolveHubConfig>>
+): Promise<boolean> {
+  const spinner = ora("Granting the bridge redeem access…").start();
+  try {
+    const principal = await resolveUserId(cfg);
+    const res = (await hubPost(
+      `/vault/secrets/${secretId}/grant`,
+      { grantedTo: principal, scope: "permanent" },
+      cfg
+    )) as { grantId?: string; reused?: boolean };
+    spinner.succeed(
+      `Redeem access granted${res.reused ? " (existing)" : ""} — token stays in the vault`
+    );
+    return Boolean(res.grantId);
+  } catch (err) {
+    const msg = (err as Error).message;
+    if (msg.includes("404")) {
+      spinner.warn("Grant door not deployed yet — deploy the backend, then re-run this command");
+    } else {
+      spinner.warn(`Grant skipped: ${msg}`);
+    }
+    return false;
   }
 }
 
@@ -304,7 +349,11 @@ async function configureProactive(
  * Upsert KEY=value lines into a dotenv file, preserving comments and any other
  * keys. Existing managed keys are replaced in place; new ones are appended.
  */
-function upsertEnv(filePath: string, kv: Record<string, string>): void {
+function upsertEnv(
+  filePath: string,
+  kv: Record<string, string>,
+  remove: string[] = []
+): void {
   const dir = path.dirname(filePath);
   if (!fs.existsSync(dir)) {
     throw new Error(`bridge dir not found: ${dir}`);
@@ -314,17 +363,20 @@ function upsertEnv(filePath: string, kv: Record<string, string>): void {
     : "";
   const lines = existing.length ? existing.split("\n") : [];
   const remaining = new Map(Object.entries(kv));
+  const removeSet = new Set(remove);
 
-  const out = lines.map((line) => {
+  const out: string[] = [];
+  for (const line of lines) {
     const m = line.match(/^([A-Z0-9_]+)=/);
+    if (m && removeSet.has(m[1])) continue; // drop purged keys entirely
     if (m && remaining.has(m[1])) {
       const key = m[1];
-      const val = remaining.get(key)!;
+      out.push(`${key}=${remaining.get(key)!}`);
       remaining.delete(key);
-      return `${key}=${val}`;
+    } else {
+      out.push(line);
     }
-    return line;
-  });
+  }
 
   if (remaining.size) {
     if (out.length && out[out.length - 1] !== "") out.push("");
@@ -338,16 +390,19 @@ function upsertEnv(filePath: string, kv: Record<string, string>): void {
 function printNextSteps(
   clientId: string | undefined,
   bridgeDir: string,
-  state: { hasToken: boolean; hasGuild: boolean; vaultRef?: string }
+  state: { hasToken: boolean; hasGuild: boolean; vaultRef?: string; granted: boolean }
 ): void {
   log.blank();
   log.heading("Done");
   log.blank();
-  if (state.vaultRef) {
-    console.log(`  ${chalk.green("✓")} Bot token provisioned to the pod vault  ${chalk.dim(state.vaultRef)}`);
+  if (state.vaultRef && state.granted) {
+    console.log(`  ${chalk.green("✓")} Bot token in the pod vault, bridge granted redeem access — no env token  ${chalk.dim(state.vaultRef)}`);
+  } else if (state.vaultRef && state.hasToken) {
+    console.log(`  ${chalk.yellow("⚠")} Token stored in the vault (${chalk.dim(state.vaultRef)}) but the redeem GRANT did not land.`);
+    console.log(`     Deploy the backend (grant door) and re-run — the bridge can't log in until the grant exists.`);
   }
   console.log(
-    `  ${chalk.green("✓")} Bridge .env written (pod creds${state.hasToken ? " + token" : ""}${state.hasGuild ? " + guild" : ""})`
+    `  ${chalk.green("✓")} Bridge .env written (pod creds${state.hasGuild ? " + guild" : ""}; token stays in the vault)`
   );
   log.blank();
   log.heading("Remaining (Discord portal — human only)");
