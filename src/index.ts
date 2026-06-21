@@ -54,6 +54,23 @@ program
     await init(opts);
   });
 
+// Hidden: one-shot Discord↔Synap bridge provisioning (dogfood/dev convenience).
+program
+  .command("bridge-setup", { hidden: true })
+  .description("(hidden) One-shot Discord↔Synap bridge provisioning")
+  .option("--client-id <id>", "Discord application (client) id — prints the invite URL")
+  .option("--bridge-dir <path>", "Path to the telegram-discord-bridge repo")
+  .option("--workspace-id <uuid>", "Target workspace (default: pod profile's)")
+  .option("--proactive-channel <id>", "Discord channel id for the agent's proactive posts")
+  .option("--enable-ingest", "Turn on passive ingest of every message")
+  .option("--enable-react", "Turn on ✅-react capture")
+  .option("--pod-url <url>", "Synap pod URL (override)")
+  .option("--api-key <key>", "Hub Protocol API key (override)")
+  .action(async (opts) => {
+    const { bridgeSetup } = await import("./commands/bridge-setup.js");
+    await bridgeSetup(opts);
+  });
+
 program
   .command("connect")
   .description(
