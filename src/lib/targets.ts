@@ -12,7 +12,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { exec } from "node:child_process";
+import { exec, execFileSync } from "node:child_process";
 import chalk from "chalk";
 import ora from "ora";
 import prompts from "prompts";
@@ -180,47 +180,28 @@ export function isTargetName(value: string): value is TargetName {
 
 // ─── Workspace helpers ────────────────────────────────────────────────────────
 
+// Shape used by agent-template context generation. Agents are pod-wide now, so
+// the connect flow no longer fetches/provisions per-agent workspaces — these
+// stay typed for the (now always-empty) context inputs.
 interface WorkspaceItem { id: string; name: string; role?: string }
 
-async function fetchWorkspaces(podUrl: string, apiKey: string): Promise<WorkspaceItem[]> {
-  try {
-    const res = await fetch(`${podUrl.replace(/\/$/, "")}/api/hub/workspaces`, {
-      headers: { Authorization: `Bearer ${apiKey}` },
-      signal: AbortSignal.timeout(8000),
-    });
-    if (!res.ok) return [];
-    const data = await res.json() as { workspaces?: WorkspaceItem[] } | WorkspaceItem[];
-    return Array.isArray(data) ? data : (data.workspaces ?? []);
-  } catch { return []; }
-}
-
-async function provisionAgentWorkspace(
+/**
+ * Build the pod's /mcp URL with optional scope lenses:
+ *   ?workspaceId= — workspace lens (an app-lens of a project)
+ *   ?projectId=   — project focus lens (orthogonal; narrows every tool call)
+ * Both are opt-in and compose. Omitting both = pod-wide.
+ */
+export function buildMcpUrl(
   podUrl: string,
-  apiKey: string,
-  agentUserId: string,
-  workspaceName: string
-): Promise<WorkspaceItem | null> {
-  try {
-    const res = await fetch(`${podUrl.replace(/\/$/, "")}/api/hub/workspaces/provision-agent`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
-      body: JSON.stringify({ agentUserId, workspaceName }),
-      signal: AbortSignal.timeout(10000),
-    });
-    if (!res.ok) return null;
-    const data = await res.json() as { workspaceId?: string; id?: string; workspace?: WorkspaceItem; name?: string };
-    const resolvedId = data.workspaceId ?? data.id ?? (data.workspace?.id);
-    if (data.workspace) return data.workspace;
-    return resolvedId ? { id: resolvedId, name: data.name ?? workspaceName } : null;
-  } catch { return null; }
-}
-
-/** Build the pod's /mcp URL, appending ?workspaceId= when a workspace is scoped. */
-function buildMcpUrl(podUrl: string, workspaceId?: string): string {
+  workspaceId?: string,
+  projectId?: string
+): string {
   const podBase = podUrl.replace(/\/$/, "");
-  return workspaceId
-    ? `${podBase}/mcp?workspaceId=${encodeURIComponent(workspaceId)}`
-    : `${podBase}/mcp`;
+  const params = new URLSearchParams();
+  if (workspaceId) params.set("workspaceId", workspaceId);
+  if (projectId) params.set("projectId", projectId);
+  const qs = params.toString();
+  return qs ? `${podBase}/mcp?${qs}` : `${podBase}/mcp`;
 }
 
 /**
@@ -248,111 +229,21 @@ async function configureAgentContext(
   const { AGENT_TEMPLATES, getTemplate } = await import("./agent-templates.js");
 
   log.blank();
-  log.heading("Configure your agent  (3 steps)");
-  log.dim("Set up where this agent keeps its own memory, which team workspaces it writes to, and its skill template.");
+  log.heading("Configure your agent");
+  // Agent scope model (mirrors the user model): an agent is a POD-WIDE actor —
+  // it is NOT bound to a workspace. Its memory is automatic (the user/global/work
+  // lanes), so there's no "memory workspace" to pick. It was already enrolled
+  // across the pod's workspaces; focus is a runtime lens (a project), not a
+  // setup-time workspace choice. So the only thing to configure is the template.
+  log.dim("This agent is pod-wide. Its memory is automatic — nothing to scope here. Just pick a behaviour template.");
 
-  // Fetch workspaces once — reused by step 1 and step 2 (no duplicate network calls)
-  const wsSpinner = ora("Fetching workspaces…").start();
-  const allWorkspaces = await fetchWorkspaces(podUrl, apiKey);
-  wsSpinner.stop();
+  // No memory/product workspace prompts anymore — the agent is global by default.
+  const memoryWorkspace: WorkspaceItem | undefined = undefined;
+  const productWorkspaces: WorkspaceItem[] = [];
 
-  // ── Step 1 · Agent memory workspace ──────────────────────────────────────
+  // ── Template ──────────────────────────────────────────────────────────────
   log.blank();
-  log.info(chalk.bold("Step 1 of 3 — Agent memory"));
-  log.dim("A private workspace for this agent's own notes, learned patterns, and session context.");
-  log.blank();
-
-  let memoryWorkspace: WorkspaceItem | undefined;
-
-  const CREATE_SENTINEL = "__create__";
-  const SKIP_SENTINEL   = "__skip__";
-
-  // Score workspaces by name relevance to "agent memory" — higher = better suggestion
-  function memoryScore(w: WorkspaceItem): number {
-    const n = w.name.toLowerCase();
-    return ["memory", "agent", "assistant", agentType.toLowerCase()]
-      .reduce((s, kw) => s + (n.includes(kw) ? 1 : 0), 0);
-  }
-
-  const bestMemIdx = allWorkspaces.length > 0
-    ? allWorkspaces.reduce((bi, w, i) => memoryScore(w) > memoryScore(allWorkspaces[bi]) ? i : bi, 0)
-    : -1;
-  const hasSuggestion = bestMemIdx >= 0 && memoryScore(allWorkspaces[bestMemIdx]) > 0;
-
-  const memoryChoices = [
-    ...allWorkspaces.map((w, i) => {
-      const hint = (i === bestMemIdx && hasSuggestion) ? chalk.green("  ← suggested") : "";
-      return { title: `${chalk.bold(w.name)}  ${chalk.dim(w.id)}${hint}`, value: w.id };
-    }),
-    { title: chalk.cyan("Create a new workspace…"), value: CREATE_SENTINEL },
-    { title: chalk.dim("None — skip"), value: SKIP_SENTINEL },
-  ];
-
-  // Default: suggested workspace if one matches, otherwise "Create a new workspace"
-  const memoryDefaultIdx = hasSuggestion ? bestMemIdx : allWorkspaces.length;
-
-  const { memoryPickedId } = await prompts({
-    type: "select",
-    name: "memoryPickedId",
-    message: "Which workspace is this agent's private memory?",
-    choices: memoryChoices,
-    initial: memoryDefaultIdx,
-  });
-
-  if (memoryPickedId && memoryPickedId !== SKIP_SENTINEL) {
-    if (memoryPickedId === CREATE_SENTINEL) {
-      const defaultName = `${agentType} Memory`;
-      const { newName } = await prompts({
-        type: "text",
-        name: "newName",
-        message: "Workspace name:",
-        initial: defaultName,
-        validate: (v: string) => v.trim().length > 0 || "Name is required",
-      });
-      const finalName = ((newName as string | undefined) ?? "").trim() || defaultName;
-      if (!agentUserId) {
-        log.warn("Agent identity not available — cannot provision a workspace. Reconnect to try again.");
-      } else {
-        const createSpinner = ora(`Creating "${finalName}"…`).start();
-        const ws = await provisionAgentWorkspace(podUrl, apiKey, agentUserId, finalName);
-        if (ws) {
-          memoryWorkspace = ws;
-          createSpinner.succeed(`Created: ${chalk.bold(ws.name)}  ${chalk.dim(ws.id)}`);
-        } else {
-          createSpinner.fail("Could not create workspace — check pod logs. You can set one up manually later.");
-        }
-      }
-    } else {
-      memoryWorkspace = allWorkspaces.find((w) => w.id === memoryPickedId);
-    }
-  }
-
-  // ── Step 2 · Team / product workspaces ───────────────────────────────────
-  log.blank();
-  log.info(chalk.bold("Step 2 of 3 — Team workspaces"));
-  log.dim("Workspaces where the agent posts updates, tasks, and decisions for your team to see.");
-  log.blank();
-
-  // Reuse the already-fetched list — exclude whichever workspace was chosen as memory
-  const candidates = allWorkspaces.filter((w) => w.id !== memoryWorkspace?.id);
-  let productWorkspaces: WorkspaceItem[] = [];
-
-  if (candidates.length === 0) {
-    log.dim("No other workspaces found — you can configure this later by re-running connect.");
-  } else {
-    log.dim("Space to select/deselect, enter to confirm. Skip to leave unset.");
-    const { productIds } = await prompts({
-      type: "multiselect",
-      name: "productIds",
-      message: "Which workspace(s) should the agent write to?",
-      choices: candidates.map((w) => ({ title: `${w.name}  ${chalk.dim(w.id)}`, value: w.id })),
-    });
-    productWorkspaces = candidates.filter((w) => (productIds ?? [] as string[]).includes(w.id));
-  }
-
-  // ── Step 3 · Template ─────────────────────────────────────────────────────
-  log.blank();
-  log.info(chalk.bold("Step 3 of 3 — Agent template"));
+  log.info(chalk.bold("Agent template"));
   log.dim("The template sets the agent's default behaviour and routing rules.");
   log.blank();
 
@@ -376,12 +267,11 @@ async function configureAgentContext(
     productWorkspaces,
   });
 
-  // Persist workspace routing to config — drives capture/recall defaults
+  // Clear any stale per-agent workspace routing from older connects. The agent
+  // is pod-wide now: capture/recall default to the active workspace / pod-wide,
+  // not a pre-pinned "memory" or "product" workspace.
   const { setAgentWorkspaceRouting } = await import("./pod.js");
-  setAgentWorkspaceRouting({
-    memoryWorkspaceId: memoryWorkspace?.id,
-    productWorkspaceIds: productWorkspaces.map((w) => w.id),
-  });
+  setAgentWorkspaceRouting({ memoryWorkspaceId: undefined, productWorkspaceIds: [] });
 
   // Always write to ~/.synap/contexts/<surface>.md
   const contextDir = path.join(os.homedir(), ".synap", "contexts");
@@ -404,16 +294,7 @@ async function configureAgentContext(
   // Summary
   log.blank();
   log.info(`  Template     ${chalk.bold(template.label)}`);
-  if (memoryWorkspace) {
-    log.info(`  Memory       ${chalk.bold(memoryWorkspace.name)}  ${chalk.dim(memoryWorkspace.id)}`);
-  } else {
-    log.info(`  Memory       ${chalk.dim("(none)")}`);
-  }
-  if (productWorkspaces.length > 0) {
-    log.info(`  Product      ${productWorkspaces.map((w) => chalk.bold(w.name)).join(", ")}`);
-  } else {
-    log.info(`  Product      ${chalk.dim("(none)")}`);
-  }
+  log.info(`  Scope        ${chalk.bold("pod-wide")} ${chalk.dim("· memory is automatic · focus a project at runtime")}`);
   log.blank();
 }
 
@@ -493,19 +374,19 @@ async function installClaudeCode(
     message: "What do you want to install?",
     choices: [
       {
-        title: "Skills + agent key  (recommended)",
-        description: "Claude Code reads/writes Synap via synap CLI commands — no MCP overhead",
-        value: "skills",
-      },
-      {
-        title: "Skills + agent key + MCP server",
-        description: "Also registers a live MCP tool server (for users who prefer tool-call access)",
+        title: "MCP + Skills + agent key  (recommended)",
+        description: "MCP tools are always present (ambient) so the AI knows Synap on every session; skills + CLI add the rich power-user path",
         value: "both",
       },
       {
         title: "MCP server only",
-        description: "Tool-call interface only — skip skills and CLI setup",
+        description: "Ambient tool-call interface only — skip skills and CLI setup. Best for non-terminal clients",
         value: "mcp",
+      },
+      {
+        title: "Skills + agent key (no MCP)",
+        description: "CLI-driven only — Synap is known only when the skill is loaded. Lighter, but not ambient",
+        value: "skills",
       },
     ],
     initial: 0,
@@ -631,9 +512,11 @@ export async function writeClaudeCodeEnv(
   // Both steps are required — fail loudly if either is unreachable.
   const meRes = await fetch(`${podBase}/api/hub/users/me`, {
     headers: { Authorization: `Bearer ${cfg.apiKey}` },
-    signal: AbortSignal.timeout(5000),
+    signal: AbortSignal.timeout(30000),
   });
   if (!meRes.ok) {
+    if (meRes.status === 401)
+      throw new Error(credentialError("claude-code", 401, await meRes.text().catch(() => "")));
     throw new Error(`Could not reach pod at ${cfg.podUrl} (HTTP ${meRes.status}). Check your pod URL and API key.`);
   }
   const me = await meRes.json() as { id?: string; scopes?: string[] };
@@ -643,11 +526,11 @@ export async function writeClaudeCodeEnv(
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${cfg.apiKey}` },
     body: JSON.stringify({ agentType: "claude-code", idempotent: true }),
-    signal: AbortSignal.timeout(10000),
+    signal: AbortSignal.timeout(30000),
   });
   if (!agentSetupRes.ok) {
     const text = await agentSetupRes.text().catch(() => agentSetupRes.statusText);
-    throw new Error(`Failed to provision agent key for claude-code (HTTP ${agentSetupRes.status}): ${text}\nEnsure your API key has hub-protocol.write scope.`);
+    throw new Error(credentialError("claude-code", agentSetupRes.status, text));
   }
   const agentSetup = await agentSetupRes.json() as { hubApiKey?: string; agentUserId?: string; alreadyValid?: boolean };
   if (agentSetup.alreadyValid) {
@@ -671,7 +554,7 @@ export async function writeClaudeCodeEnv(
         // users/me always returns the human owner regardless of key type.
         const verifyRes = await fetch(`${podBase}/api/hub/auth/status`, {
           headers: { Authorization: `Bearer ${candidate}` },
-          signal: AbortSignal.timeout(5000),
+          signal: AbortSignal.timeout(30000),
         });
         if (verifyRes.ok) {
           const verifyStatus = await verifyRes.json() as { userId?: string };
@@ -689,7 +572,7 @@ export async function writeClaudeCodeEnv(
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${cfg.apiKey}` },
         body: JSON.stringify({ agentType: "claude-code" }),
-        signal: AbortSignal.timeout(10000),
+        signal: AbortSignal.timeout(30000),
       });
       if (reproRes.ok) {
         const repro = await reproRes.json() as { hubApiKey?: string; agentUserId?: string; alreadyValid?: boolean };
@@ -725,26 +608,82 @@ export async function writeClaudeCodeEnv(
   if (me.scopes?.length) env["SYNAP_KEY_SCOPES"] = me.scopes.join(",");
   settings.env = env;
 
-  // ── MCP server entry (HTTP transport, native Claude Code format) ─────────
-  if (writeMcp) {
-    // Append ?workspaceId= when one is set so every tool call is pre-scoped.
-    const mcpUrl = buildMcpUrl(cfg.podUrl, cfg.workspaceId);
-
-    const mcpServers = (settings.mcpServers ?? {}) as Record<string, unknown>;
-    mcpServers["synap"] = {
-      url: mcpUrl,
-      headers: { Authorization: `Bearer ${effectiveApiKey}` },
-    };
-    settings.mcpServers = mcpServers;
+  // ── Clean up the dead settings.json mcpServers entry ─────────────────────
+  // Claude Code does NOT load MCP servers from ~/.claude/settings.json — they
+  // live in the `claude mcp` registry (~/.claude.json, user scope). A `synap`
+  // entry written here by older CLI versions is inert (confirmed: `claude mcp
+  // list` never showed it). Strip it so the only source of truth is the registry.
+  if (settings.mcpServers && typeof settings.mcpServers === "object") {
+    delete (settings.mcpServers as Record<string, unknown>)["synap"];
+    if (Object.keys(settings.mcpServers as Record<string, unknown>).length === 0)
+      delete settings.mcpServers;
   }
 
   if (!fs.existsSync(settingsDir)) {
     fs.mkdirSync(settingsDir, { recursive: true });
   }
   fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + "\n", { mode: 0o600 });
+
+  // ── Register the MCP server where Claude Code actually reads it ───────────
+  // The official `claude mcp add` writes to the user-scope registry that
+  // `claude mcp list` + the runtime consult — unlike settings.json mcpServers,
+  // which Claude Code ignores. This is what makes a relaunch actually load the
+  // synap tools.
+  if (writeMcp) {
+    const mcpUrl = buildMcpUrl(cfg.podUrl, cfg.workspaceId);
+    registerClaudeCodeMcp(mcpUrl, effectiveApiKey);
+  }
+}
+
+/**
+ * Register the Synap MCP server with Claude Code via the official CLI, into the
+ * user-scope registry (`claude mcp list` truth). Idempotent: drops any prior
+ * entry first. Best-effort: if the `claude` binary isn't on PATH, prints the
+ * exact command to run by hand rather than failing the whole connect.
+ */
+function registerClaudeCodeMcp(mcpUrl: string, apiKey: string): void {
+  const header = `Authorization: Bearer ${apiKey}`;
+  try {
+    try {
+      execFileSync("claude", ["mcp", "remove", "synap"], { stdio: "ignore" });
+    } catch {
+      /* no prior entry — fine */
+    }
+    execFileSync(
+      "claude",
+      ["mcp", "add", "--transport", "http", "synap", mcpUrl, "--header", header, "--scope", "user"],
+      { stdio: "ignore" }
+    );
+    log.success("MCP server registered with Claude Code (`claude mcp add`, user scope). Relaunch Claude Code to load the synap tools.");
+  } catch {
+    log.dim("Could not run `claude mcp add` (is the claude CLI on PATH?). Register it by hand:");
+    log.dim(`  claude mcp add --transport http synap ${mcpUrl} --header "${header}" --scope user`);
+  }
 }
 
 // ─── Agent key provisioning helper ──────────────────────────────────────────
+
+/**
+ * Build an actionable error for a failed agent-key provision. A 401 here almost
+ * always means the pod key saved by `synap login` is expired or REVOKED (the
+ * `/setup/agent` endpoint accepts a CP JWT, a provisioning token, or a Hub key
+ * with the `setup.agent` scope) — so the fix is to re-authenticate, NOT to fiddle
+ * with scopes. Don't mislead with "needs hub-protocol.write".
+ */
+function credentialError(agentType: string, status: number, body: string): string {
+  if (status === 401) {
+    return (
+      `Can't provision the agent key for ${agentType} (HTTP 401): your saved pod key is invalid, expired, or revoked.\n` +
+      `Fix: run \`synap login --reconnect\` to re-authenticate this pod and mint a fresh key, then retry.\n` +
+      `(Plain \`synap login\` only health-checks — it won't refresh a revoked key.)\n` +
+      (body ? `Server said: ${body}` : "")
+    );
+  }
+  return (
+    `Failed to provision agent key for ${agentType} (HTTP ${status}): ${body}\n` +
+    `If this persists, re-authenticate with \`synap login --reconnect\`.`
+  );
+}
 
 function openBrowserUrl(url: string): void {
   const safe = url.replace(/"/g, "%22");
@@ -769,7 +708,7 @@ async function waitForKeyApproval(
     try {
       poll = await fetch(pollUrl, {
         headers: { Authorization: `Bearer ${humanApiKey}` },
-        signal: AbortSignal.timeout(5000),
+        signal: AbortSignal.timeout(30000),
       });
     } catch { continue; }
     if (!poll.ok) continue;
@@ -791,7 +730,7 @@ async function waitForKeyApproval(
  * browser before this function returns.
  * Throws on failure — callers must not silently fall back to a human key.
  */
-async function provisionAgentKey(
+export async function provisionAgentKey(
   podUrl: string,
   humanApiKey: string,
   agentType: string,
@@ -807,7 +746,7 @@ async function provisionAgentKey(
         Authorization: `Bearer ${humanApiKey}`,
       },
       body: JSON.stringify({ agentType, idempotent: false, requireApproval }),
-      signal: AbortSignal.timeout(10000),
+      signal: AbortSignal.timeout(30000),
     });
   } catch (err) {
     throw new Error(
@@ -817,10 +756,7 @@ async function provisionAgentKey(
   }
   if (!res.ok) {
     const text = await res.text().catch(() => res.statusText);
-    throw new Error(
-      `Failed to provision agent key for ${agentType} (HTTP ${res.status}): ${text}\n` +
-      `Ensure your API key has hub-protocol.write scope.`
-    );
+    throw new Error(credentialError(agentType, res.status, text));
   }
   const body = await res.json() as {
     hubApiKey?: string;
@@ -860,13 +796,15 @@ async function provisionAgentKey(
  * @param agentUserId  The agent user to enroll.
  * @param workspaceId  When set, enroll in that one workspace only; omit for all.
  */
-async function enrollAgentIfNeeded(
+export async function enrollAgentIfNeeded(
   podUrl: string,
   callerKey: string,
   agentUserId: string,
-  workspaceId?: string
+  workspaceId?: string,
+  opts?: { quiet?: boolean }
 ): Promise<void> {
   if (!agentUserId) return;
+  const quiet = opts?.quiet === true; // suppress status logs (e.g. --json callers)
   const podBase = podUrl.replace(/\/$/, "");
   try {
     const res = await fetch(`${podBase}/api/hub/workspaces/enroll-agent`, {
@@ -877,21 +815,23 @@ async function enrollAgentIfNeeded(
         ...(workspaceId ? { workspaceId } : {}),
         role: "editor",
       }),
-      signal: AbortSignal.timeout(10000),
+      signal: AbortSignal.timeout(30000),
     });
     if (res.ok) {
       const data = await res.json() as { enrolled?: string[] };
-      if (data.enrolled?.length) {
+      if (data.enrolled?.length && !quiet) {
         log.dim(`  Agent enrolled in ${data.enrolled.length} workspace(s).`);
       }
-    } else {
+    } else if (!quiet) {
       const text = await res.text().catch(() => res.statusText);
       log.warn(`  Workspace enrollment failed (HTTP ${res.status}): ${text}`);
       log.dim("  Access can be added manually via pod settings.");
     }
   } catch (err) {
-    log.warn(`  Workspace enrollment unreachable: ${(err as Error).message}`);
-    log.dim("  Access can be added manually via pod settings.");
+    if (!quiet) {
+      log.warn(`  Workspace enrollment unreachable: ${(err as Error).message}`);
+      log.dim("  Access can be added manually via pod settings.");
+    }
   }
 }
 

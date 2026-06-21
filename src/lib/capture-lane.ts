@@ -22,7 +22,8 @@ import { log } from "../utils/logger.js";
 import { hubGet, type HubConfig } from "./hub-client.js";
 
 // "ai-self" retained as a deprecated union member only; the lane was removed
-// (no private agent scratchpad) — nothing routes there anymore.
+// (no private agent scratchpad) — nothing routes there anymore. "user" and
+// "global" are produced by the backend routing endpoint (P7b), not by the CLI.
 export type CaptureLane = "ai-self" | "user" | "global" | "work";
 export type Governance = "auto" | "proposed";
 
@@ -40,8 +41,8 @@ export interface LaneReport {
 /**
  * Derive the lane from the workspace-routing `source` returned by
  * `resolveKnowledgeWorkspace`. A domain capture always lands in a real product
- * workspace → the Work lane. (The ai-self / agent-memory lane was removed; the
- * Global lane is set directly, not derived from a workspace source.)
+ * workspace → the Work lane. (The backend routing endpoint P7b is the SSoT for
+ * resolving user/global lanes; the CLI's lane detection is a best-effort hint.)
  *
  *   source                              → lane
  *   "explicit" / "team" / "active …"    → work

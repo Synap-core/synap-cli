@@ -1,6 +1,6 @@
 import chalk from "chalk";
 import { log } from "../utils/logger.js";
-import { resolveHubConfig, resolveUserId, hubGet, hubPost, hubPatch } from "../lib/hub-client.js";
+import { resolveHubConfig, resolveUserId, hubGet, hubPost, hubPatch, readActiveSessionId } from "../lib/hub-client.js";
 import { reportWrite } from "../lib/capture-lane.js";
 
 export interface BaseOpts {
@@ -410,16 +410,17 @@ function formatAskItem(substrate: string, item: Record<string, unknown>): string
 
 export async function askKnowledge(
   query: string,
-  opts: BaseOpts & { workspace?: string; limit?: string; json?: boolean }
+  opts: BaseOpts & { workspace?: string; limit?: string; json?: boolean; session?: boolean }
 ): Promise<void> {
   try {
     const cfg = await resolveHubConfig(opts);
     const limit = parseLimit(opts.limit, 10);
     const workspaceId = opts.workspace ?? cfg.workspaceId;
+    const sessionId = opts.session ? readActiveSessionId() : undefined;
 
     const res = (await hubPost(
       "/knowledge/ask",
-      { query, ...(workspaceId ? { workspaceId } : {}), limit },
+      { query, ...(workspaceId ? { workspaceId } : {}), ...(sessionId ? { sessionId } : {}), limit },
       cfg
     )) as AskResponse;
 

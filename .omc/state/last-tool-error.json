@@ -1,7 +1,7 @@
 {
-  "tool_name": "Bash",
-  "tool_input_preview": "{\"command\":\"cd /Users/antoine/Documents/Code/synap\\nUID=\\\"e418d146-e495-4b8a-8e8b-985f9f885431\\\"\\necho \\\"═══ user_observation entities (pod-wide) — dead? ═══\\\"\\ncurl -s \\\"https://pod.perso.thearchitec...",
-  "error": "Exit code 1\n(eval):2: bad math expression: operator expected at `b8a-8e8b-9...'",
-  "timestamp": "2026-06-13T14:27:21.393Z",
+  "tool_name": "Read",
+  "tool_input_preview": "{\"file_path\":\"/Users/antoine/Documents/Code/synap\"}",
+  "error": "EISDIR: illegal operation on a directory, read '/Users/antoine/Documents/Code/synap'",
+  "timestamp": "2026-06-20T19:08:04.579Z",
   "retry_count": 1
 }

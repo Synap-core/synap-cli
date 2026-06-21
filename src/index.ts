@@ -213,6 +213,47 @@ program
     await connections();
   });
 
+// ─── mcp ────────────────────────────────────────────────────────────────────
+// The MCP front door: point any AI client at the pod's /mcp server.
+const mcp = program
+  .command("mcp")
+  .description("Connect any AI client to your pod's MCP server (the ambient tool layer)");
+
+mcp
+  .command("url")
+  .description("Print a ready-to-paste MCP connection (URL + key + snippets) for UI clients like ChatGPT")
+  .option("--client <name>", "Name the dedicated agent key after the target client")
+  .option("--workspace <id>", "Scope to a specific workspace (omit for pod-wide)")
+  .option("--project <id>", "Focus the agent on a project (narrows every tool call; orthogonal to --workspace)")
+  .option("--json", "Output as JSON")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (opts) => {
+    const { mcpUrl } = await import("./commands/mcp.js");
+    await mcpUrl(opts);
+  });
+
+mcp
+  .command("verify")
+  .description("Health-check: is the pod's /mcp endpoint reachable and the key valid?")
+  .option("--workspace <id>", "Scope to a specific workspace")
+  .option("--json", "Output as JSON")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (opts) => {
+    const { mcpVerify } = await import("./commands/mcp.js");
+    await mcpVerify(opts);
+  });
+
+mcp
+  .command("connect [client]")
+  .description("Write the MCP config for a file-configurable client (Claude Code, Cursor, Desktop, …) — alias of `synap connect`")
+  .option("--name <name>", "Pod profile to connect")
+  .action(async (client: string | undefined, opts: { name?: string }) => {
+    const { connect } = await import("./commands/connect.js");
+    await connect({ target: client, name: opts.name });
+  });
+
 program
   .command("login")
   .description("Connect to a Synap pod (self-hosted or managed)")
@@ -243,11 +284,29 @@ program
     // Already have pods — show status and offer reconnect if any are unreachable
     const { checkPodHealth } = await import("./lib/pod.js");
     const ora = (await import("ora")).default;
-    const spinner = ora("Checking pod health...").start();
+    const spinner = ora("Checking pods + credentials...").start();
     const checks = await Promise.all(
       profiles.map(async (p) => {
         const h = await checkPodHealth(p.config.podUrl).catch(() => ({ healthy: false }));
-        return { ...p, healthy: h.healthy };
+        // A pod can be HEALTHY (public /health) while the saved key is REVOKED.
+        // Validate the actual credential too — otherwise a dead key looks "ok"
+        // and the user gets cryptic 401s downstream (the connect trap).
+        let keyValid = false;
+        if (h.healthy && p.config.hubApiKey) {
+          try {
+            const res = await fetch(
+              `${p.config.podUrl.replace(/\/$/, "")}/api/hub/auth/status`,
+              {
+                headers: { Authorization: `Bearer ${p.config.hubApiKey}` },
+                signal: AbortSignal.timeout(6000),
+              }
+            );
+            keyValid = res.ok;
+          } catch {
+            keyValid = false;
+          }
+        }
+        return { ...p, healthy: h.healthy, keyValid };
       })
     );
     spinner.stop();
@@ -255,15 +314,20 @@ program
     console.log("\n  Configured pods:\n");
     for (const p of checks) {
       const active = p.active ? chalk.green(" ● ") : "   ";
-      const status = p.healthy ? chalk.green("ok") : chalk.red("unreachable");
+      const status = !p.healthy
+        ? chalk.red("unreachable")
+        : p.keyValid
+          ? chalk.green("ok")
+          : chalk.yellow("key expired");
       console.log(`  ${active}${chalk.bold(p.name.padEnd(14))} ${status}  ${chalk.dim(p.config.podUrl)}`);
     }
     console.log();
 
-    const unreachable = checks.filter((p) => !p.healthy);
-    if (unreachable.length > 0) {
-      console.log(chalk.yellow(`  ${unreachable.length} pod(s) unreachable. To refresh credentials:`));
-      for (const p of unreachable) {
+    // Anything that won't authenticate — unreachable OR a revoked/expired key.
+    const needsReconnect = checks.filter((p) => !p.healthy || !p.keyValid);
+    if (needsReconnect.length > 0) {
+      console.log(chalk.yellow(`  ${needsReconnect.length} pod(s) need re-authentication. Refresh credentials:`));
+      for (const p of needsReconnect) {
         console.log(chalk.dim(`    synap login --reconnect ${p.name}`));
       }
       console.log();
@@ -331,6 +395,7 @@ program
   .option("--workspace <id>", "Scope to a specific workspace (omit for pod-wide)")
   .option("--limit <n>", "Max results per substrate", "10")
   .option("--json", "Output as JSON")
+  .option("--session", "Scope retrieval to the active session context")
   .option("--pod-url <url>", "Pod URL override")
   .option("--api-key <key>", "API key override")
   .action(async (query: string, opts) => {
@@ -350,6 +415,7 @@ program
   .option("--why <text>", "Reasoning or context")
   .option("--evidence <text>", "Supporting file path, URL, or code snippet")
   .option("--tags <csv>", "Comma-separated tags e.g. repo:synap-backend,layer:migrations")
+  .option("--session", "Link captured knowledge to the active session")
   .option("--global", "GLOBAL lane: pod-wide cross-cutting runbook (→ knowledge_keys), visible in every workspace")
   .option("--key <ns:slug>", "Stable key for a --global runbook (derived from --type + --claim if omitted)")
   .option("--team", "Write to the first product workspace instead of the active workspace")

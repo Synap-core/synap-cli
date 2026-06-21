@@ -24,6 +24,7 @@ import {
   resolveHubConfig,
   resolveUserId,
   hubPost,
+  readActiveSessionId,
   type HubConfig,
 } from "../lib/hub-client.js";
 import { getAgentWorkspaceRouting } from "../lib/pod.js";
@@ -61,6 +62,8 @@ export interface CaptureOpts {
   json?: boolean;
   /** Skip the y/N confirmation prompt (smart mode only) */
   yes?: boolean;
+  /** Link the captured knowledge to the active session */
+  session?: boolean;
 }
 
 /**
@@ -255,7 +258,8 @@ async function runSmartCapture(text: string, opts: CaptureOpts): Promise<void> {
   }
 
   // 1. Structure
-  const structureBody: Record<string, unknown> = { userId, text, workspaceId };
+  const smartSessionId = opts.session ? readActiveSessionId() : undefined;
+  const structureBody: Record<string, unknown> = { userId, text, workspaceId, ...(smartSessionId ? { sessionId: smartSessionId } : {}) };
   const structureRes = await hubPost("/capture/structure", structureBody, cfg) as StructureResult;
 
   if (opts.json) {
@@ -268,6 +272,7 @@ async function runSmartCapture(text: string, opts: CaptureOpts): Promise<void> {
     const executeRes = await hubPost("/capture/execute", {
       userId,
       workspaceId,
+      ...(smartSessionId ? { sessionId: smartSessionId } : {}),
       entities: structureRes.proposals,
       relations: structureRes.relations ?? [],
     }, cfg) as Record<string, unknown>;
@@ -306,6 +311,7 @@ async function runSmartCapture(text: string, opts: CaptureOpts): Promise<void> {
   const executeRes = await hubPost("/capture/execute", {
     userId,
     workspaceId,
+    ...(smartSessionId ? { sessionId: smartSessionId } : {}),
     entities: structureRes.proposals,
     relations: structureRes.relations ?? [],
   }, cfg) as Record<string, unknown>;
@@ -408,11 +414,14 @@ export async function captureKnowledge(opts: CaptureOpts): Promise<void> {
     // lens that supplies its domain (so no `engineering_knowledge`). A structured
     // decision RECORD (rationale/alternatives/status) is a different artifact, reached
     // via smart `capture "<text>"` or `create entity --profile=decision`.
+    const sessionId = opts.session ? readActiveSessionId() : undefined;
+
     const res = await hubPost("/entities", {
       userId,
       workspaceId,
       profileSlug: "knowledge",
       title,
+      ...(sessionId ? { sessionId } : {}),
       properties: {
         ek_type: opts.type,
         ek_claim: opts.claim,

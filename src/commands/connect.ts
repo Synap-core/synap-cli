@@ -21,7 +21,7 @@ import prompts from "prompts";
 import ora from "ora";
 import chalk from "chalk";
 import { log, banner } from "../utils/logger.js";
-import { checkPodHealth, listPodProfiles, type LocalPodConfig, getAgentWorkspaceRouting, setAgentWorkspaceRouting } from "../lib/pod.js";
+import { checkPodHealth, listPodProfiles, type LocalPodConfig } from "../lib/pod.js";
 import {
   installForTarget,
   isTargetName,
@@ -84,9 +84,6 @@ export async function connect(opts: ConnectOptions): Promise<void> {
 
   log.blank();
   if (ok) {
-    // Fire-and-forget: auto-detect agent workspace and save routing
-    detectAndSaveAgentWorkspaceRouting(podUrl, apiKey).catch(() => {});
-
     log.success(`${TARGETS[target].label} connected to ${podUrl}`);
     // For MCP targets, surface the provider pull option — lets users get real
     // AI provider credentials from the pod vault into their local tool config.
@@ -207,29 +204,5 @@ function describeCaps(supports: { skills: boolean; mcp: boolean }): string {
   return parts.length ? `  ${chalk.dim(`(${parts.join(" + ")})`)}` : "";
 }
 
-/**
- * Detect an agent workspace from the pod and persist it as the memory workspace
- * in the local routing config. Fire-and-forget — errors are swallowed.
- */
-async function detectAndSaveAgentWorkspaceRouting(podUrl: string, apiKey: string): Promise<void> {
-  try {
-    const res = await fetch(`${podUrl}/api/hub/workspaces`, {
-      headers: { Authorization: `Bearer ${apiKey}` },
-      signal: AbortSignal.timeout(8_000),
-    });
-    if (!res.ok) return;
-    const data = (await res.json()) as Record<string, unknown>;
-    const list = ((data.workspaces as unknown[]) ?? (Array.isArray(data) ? (data as unknown[]) : [])) as Record<string, unknown>[];
-    const agentWs = list.find((w) => w.workspaceType === "agent");
-    if (!agentWs?.id) return;
-    const agentWsId = String(agentWs.id);
-    const existing = getAgentWorkspaceRouting() ?? {};
-    // Only set if not already configured — respect an explicit user choice
-    if (!existing.memoryWorkspaceId) {
-      setAgentWorkspaceRouting({ ...existing, memoryWorkspaceId: agentWsId });
-      log.dim("  Agent workspace detected and saved as memory workspace.");
-    }
-  } catch {
-    // best-effort — never surface to the user
-  }
-}
+// (detectAndSaveAgentWorkspaceRouting removed — agents are pod-wide now; there
+// is no "memory workspace" to auto-detect and pin. Memory is automatic.)

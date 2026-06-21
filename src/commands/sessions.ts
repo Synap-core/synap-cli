@@ -72,7 +72,11 @@ export async function listSessions(
   try {
     const cfg = await resolveHubConfig(opts);
     const params: Record<string, string | number | undefined> = {};
-    if (opts.workspace) params.workspaceId = opts.workspace;
+    // Fall back to the active workspace (config/env) like `start` does — the
+    // focus-sessions REST requires workspaceId, and an operator with an active
+    // workspace shouldn't have to repeat --workspace on every session command.
+    const wsId = opts.workspace || cfg.workspaceId;
+    if (wsId) params.workspaceId = wsId;
     if (opts.status) params.status = opts.status;
     if (opts.limit) params.limit = parseInt(opts.limit, 10);
 
@@ -120,7 +124,8 @@ export async function getSession(
   try {
     const cfg = await resolveHubConfig(opts);
     const params: Record<string, string | number | undefined> = {};
-    if (opts.workspace) params.workspaceId = opts.workspace;
+    const wsId = opts.workspace || cfg.workspaceId;
+    if (wsId) params.workspaceId = wsId;
 
     const res = await hubGet(`/focus-sessions/${id}`, params, cfg);
 
@@ -158,12 +163,13 @@ export async function updateSession(
   try {
     const cfg = await resolveHubConfig(opts);
 
-    if (!opts.workspace) {
-      console.error(chalk.red("Error: --workspace <id> is required"));
+    const wsId = opts.workspace || cfg.workspaceId;
+    if (!wsId) {
+      console.error(chalk.red("Error: no active workspace — pass --workspace <id> or set one with `synap use`"));
       process.exit(1);
     }
 
-    const body: Record<string, string | number | undefined> = { workspaceId: opts.workspace };
+    const body: Record<string, string | number | undefined> = { workspaceId: wsId };
     if (opts.progress !== undefined) body.progress = parseInt(opts.progress, 10);
     if (opts.status) body.status = opts.status;
     if (opts.goal) body.goal = opts.goal;
@@ -193,7 +199,9 @@ export async function attachSession(
   // Validate the session exists before attaching
   try {
     const cfg = await resolveHubConfig(opts);
-    await hubGet(`/focus-sessions/${id}`, {}, cfg);
+    const params: Record<string, string | number | undefined> = {};
+    if (cfg.workspaceId) params.workspaceId = cfg.workspaceId;
+    await hubGet(`/focus-sessions/${id}`, params, cfg);
   } catch (e) {
     console.error(chalk.red("Error: session not found — " + (e as Error).message));
     process.exit(1);
@@ -247,14 +255,15 @@ export async function closeSession(
   try {
     const cfg = await resolveHubConfig(opts);
 
-    if (!opts.workspace) {
-      console.error(chalk.red("Error: --workspace <id> is required"));
+    const wsId = opts.workspace || cfg.workspaceId;
+    if (!wsId) {
+      console.error(chalk.red("Error: no active workspace — pass --workspace <id> or set one with `synap use`"));
       process.exit(1);
     }
 
     // Close via PATCH — the /focus-sessions/:id endpoint sets closedAt automatically
     // when status transitions to "closed"
-    const body: Record<string, string | number | undefined> = { workspaceId: opts.workspace, status: "closed" };
+    const body: Record<string, string | number | undefined> = { workspaceId: wsId, status: "closed" };
 
     await hubPatch(`/focus-sessions/${id}`, body, cfg);
 
