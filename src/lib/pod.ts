@@ -35,7 +35,8 @@ export type SurfaceName =
   | "windsurf"
   | "goose"
   | "zed"
-  | "vscode";
+  | "vscode"
+  | "discord";
 
 export interface SurfaceAgentKey {
   hubApiKey: string;

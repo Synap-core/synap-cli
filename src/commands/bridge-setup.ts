@@ -30,7 +30,8 @@ import chalk from "chalk";
 import ora from "ora";
 import prompts from "prompts";
 import { resolveHubConfig, hubGet, hubPost, hubPatch, resolveUserId } from "../lib/hub-client.js";
-import { checkPodHealth } from "../lib/pod.js";
+import { checkPodHealth, getSurfaceAgentKey, setSurfaceAgentKey } from "../lib/pod.js";
+import { enrollAgentIfNeeded } from "../lib/targets.js";
 import { log, banner } from "../utils/logger.js";
 
 export interface BridgeSetupOpts {
@@ -104,6 +105,14 @@ export async function bridgeSetup(opts: BridgeSetupOpts): Promise<void> {
     process.exit(1);
   }
 
+  // ── 3c. Provision a Discord AGENT key linked to the operator ──────────────
+  // The bridge must run as a real backend agent — NOT with the operator's raw
+  // key. An agent key carries linkedUserId=<operator>; the backend remaps its
+  // reads to the operator's data floor (hub-protocol-rest.ts auth middleware)
+  // while attributing writes to the agent for governed proposals. All the
+  // operator-key work below (capability apply, vault grant) keeps using `cfg`.
+  const agentKey = await provisionDiscordAgentKey(cfg.podUrl, cfg.apiKey, cfg.workspaceId);
+
   // ── 4. Provision the capability (vault credential + tool + skill) ─────────
   const bridgeDir = opts.bridgeDir ?? DEFAULT_BRIDGE_DIR;
   const botToken = await resolveBotToken(opts.botToken);
@@ -129,7 +138,10 @@ export async function bridgeSetup(opts: BridgeSetupOpts): Promise<void> {
   const envPath = path.join(bridgeDir, ".env");
   const managed: Record<string, string> = {
     SYNAP_POD_URL: cfg.podUrl,
-    SYNAP_HUB_API_KEY: cfg.apiKey,
+    // The bridge runs as the Discord AGENT (linked to the operator), not with
+    // the operator's raw key. Reads remap to the operator floor; writes are
+    // governed as the agent.
+    SYNAP_HUB_API_KEY: agentKey,
     SYNAP_WORKSPACE_ID: workspaceId,
   };
   // The token is NEVER written to .env — it lives in the pod vault and the
@@ -168,6 +180,129 @@ export async function bridgeSetup(opts: BridgeSetupOpts): Promise<void> {
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
+
+/**
+ * Provision (or reuse) a Discord AGENT key linked to the operator.
+ *
+ * Mirrors the claude-code flow in `lib/targets.ts` (writeClaudeCodeEnv) which
+ * handles the write-once-key reality of POST /api/hub/setup/agent:
+ *   - First mint (idempotent:true, no prior agent) → returns { hubApiKey }.
+ *   - Re-run (agent already exists)               → returns { alreadyValid:true }
+ *     with NO key (the key is never re-transmitted).
+ *
+ * So on the idempotent path we must reuse the previously stored agent key, and
+ * self-heal (reprovision) only if it's missing or no longer resolves to the
+ * agent. The resulting key carries linkedUserId=<operator>, so the backend
+ * remaps its reads/redeems to the operator's data floor.
+ *
+ * @param podUrl      Pod base URL.
+ * @param operatorKey The operator's raw hub key (authorizes the provisioning).
+ * @param workspaceId Workspace to enroll the agent into (omit for all).
+ * @returns the Discord agent key to write as SYNAP_HUB_API_KEY.
+ */
+async function provisionDiscordAgentKey(
+  podUrl: string,
+  operatorKey: string,
+  workspaceId: string | undefined
+): Promise<string> {
+  const spinner = ora("Provisioning Discord agent key…").start();
+  const podBase = podUrl.replace(/\/$/, "");
+
+  const setupRes = await fetch(`${podBase}/api/hub/setup/agent`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${operatorKey}` },
+    body: JSON.stringify({ agentType: "discord", idempotent: true }),
+    signal: AbortSignal.timeout(30000),
+  });
+  if (!setupRes.ok) {
+    spinner.fail("Could not provision the Discord agent key");
+    const text = await setupRes.text().catch(() => setupRes.statusText);
+    log.error(`POST /api/hub/setup/agent failed (HTTP ${setupRes.status}): ${text.slice(0, 300)}`);
+    log.dim("The operator key may be expired or missing scope. Run `synap keys rotate` or `synap init`.");
+    process.exit(1);
+  }
+  const setup = (await setupRes.json()) as {
+    hubApiKey?: string;
+    agentUserId?: string;
+    alreadyValid?: boolean;
+  };
+
+  let effectiveKey: string;
+  let agentUserId = setup.agentUserId ?? "";
+
+  if (setup.alreadyValid) {
+    // Idempotent path — pod says the agent exists but does NOT re-transmit the
+    // key. Reuse the stored Discord agent key; verify it resolves to the agent.
+    const stored = getSurfaceAgentKey("discord");
+    const candidate = stored?.hubApiKey ?? null;
+    const expectedAgentUserId = setup.agentUserId ?? stored?.agentUserId;
+    let candidateIsValid = false;
+
+    if (candidate && expectedAgentUserId) {
+      try {
+        // auth/status returns the key's actual owner userId; for an agent key
+        // this is the agent userId (users/me would return the operator).
+        const verifyRes = await fetch(`${podBase}/api/hub/auth/status`, {
+          headers: { Authorization: `Bearer ${candidate}` },
+          signal: AbortSignal.timeout(30000),
+        });
+        if (verifyRes.ok) {
+          const status = (await verifyRes.json()) as { userId?: string };
+          candidateIsValid = status.userId === expectedAgentUserId;
+        }
+      } catch { /* reprovision below */ }
+    }
+
+    if (candidateIsValid && candidate) {
+      effectiveKey = candidate;
+      agentUserId = expectedAgentUserId ?? agentUserId;
+      spinner.succeed("Reusing existing Discord agent key");
+    } else {
+      // Stored key is stale, wrong identity, or never persisted → reprovision
+      // (no idempotent flag) to mint a fresh agent key.
+      const reproRes = await fetch(`${podBase}/api/hub/setup/agent`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${operatorKey}` },
+        body: JSON.stringify({ agentType: "discord" }),
+        signal: AbortSignal.timeout(30000),
+      });
+      if (reproRes.ok) {
+        const repro = (await reproRes.json()) as { hubApiKey?: string; agentUserId?: string };
+        if (!repro.hubApiKey) {
+          spinner.fail("Reprovision returned no key");
+          log.error("setup/agent reprovision succeeded but returned no hubApiKey — check pod logs.");
+          process.exit(1);
+        }
+        effectiveKey = repro.hubApiKey;
+        agentUserId = repro.agentUserId ?? agentUserId;
+        spinner.succeed("Reprovisioned a fresh Discord agent key (stored key was stale)");
+      } else {
+        spinner.fail("Could not reprovision the Discord agent key");
+        const text = await reproRes.text().catch(() => reproRes.statusText);
+        log.error(`POST /api/hub/setup/agent failed (HTTP ${reproRes.status}): ${text.slice(0, 300)}`);
+        process.exit(1);
+      }
+    }
+  } else {
+    // First mint — the key is only ever returned here.
+    if (!setup.hubApiKey) {
+      spinner.fail("Provisioning returned no key");
+      log.error("setup/agent succeeded but returned no hubApiKey — check pod logs.");
+      process.exit(1);
+    }
+    effectiveKey = setup.hubApiKey;
+    spinner.succeed("Discord agent key provisioned");
+  }
+
+  // Persist so a re-run can reuse it (the key is never re-transmitted).
+  setSurfaceAgentKey("discord", { hubApiKey: effectiveKey, agentUserId });
+
+  // Enroll the agent user into the operator's workspace(s) using the OPERATOR
+  // key (before the bridge ever uses the agent key).
+  await enrollAgentIfNeeded(podUrl, operatorKey, agentUserId, workspaceId);
+
+  return effectiveKey;
+}
 
 async function resolveWorkspaceId(
   known: string | undefined,
