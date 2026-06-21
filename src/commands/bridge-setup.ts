@@ -154,9 +154,14 @@ export async function bridgeSetup(opts: BridgeSetupOpts): Promise<void> {
   }
 
   // ── 7. Next steps (the human-only remainder) ─────────────────────────────
+  // Re-running without --guild-id is fine: the upsert preserves an existing
+  // DISCORD_GUILD_ID. Treat that as "have guild" so we don't nag.
+  const envHasGuild =
+    fs.existsSync(envPath) &&
+    /^DISCORD_GUILD_ID=.+/m.test(fs.readFileSync(envPath, "utf-8"));
   printNextSteps(opts.clientId, bridgeDir, {
     hasToken: Boolean(botToken),
-    hasGuild: Boolean(opts.guildId),
+    hasGuild: Boolean(opts.guildId) || envHasGuild,
     vaultRef,
     granted,
   });
