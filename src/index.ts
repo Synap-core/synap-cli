@@ -59,6 +59,8 @@ program
   .command("bridge-setup", { hidden: true })
   .description("(hidden) One-shot Discord↔Synap bridge provisioning")
   .option("--client-id <id>", "Discord application (client) id — prints the invite URL")
+  .option("--bot-token <token>", "Discord bot token — provisioned into the pod vault")
+  .option("--guild-id <id>", "Discord server (guild) id — written to the bridge .env")
   .option("--bridge-dir <path>", "Path to the telegram-discord-bridge repo")
   .option("--workspace-id <uuid>", "Target workspace (default: pod profile's)")
   .option("--proactive-channel <id>", "Discord channel id for the agent's proactive posts")

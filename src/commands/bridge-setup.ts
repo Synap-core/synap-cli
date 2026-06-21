@@ -42,6 +42,10 @@ export interface BridgeSetupOpts {
   proactiveChannel?: string;
   enableIngest?: boolean;
   enableReact?: boolean;
+  /** Discord bot token — provisioned INTO the pod vault (not a loose env var). */
+  botToken?: string;
+  /** Discord server (guild) id — written to the bridge .env. */
+  guildId?: string;
 }
 
 const DEFAULT_BRIDGE_DIR = path.join(
@@ -100,9 +104,10 @@ export async function bridgeSetup(opts: BridgeSetupOpts): Promise<void> {
     process.exit(1);
   }
 
-  // ── 4. Apply the bridge's capability definition (single source of truth) ──
+  // ── 4. Provision the capability (vault credential + tool + skill) ─────────
   const bridgeDir = opts.bridgeDir ?? DEFAULT_BRIDGE_DIR;
-  await applyBridgeCapability(bridgeDir, workspaceId, cfg);
+  const botToken = await resolveBotToken(opts.botToken);
+  const vaultRef = await applyBridgeCapability(bridgeDir, workspaceId, cfg, botToken);
 
   // ── 5. Proactive delivery routing (optional) ─────────────────────────────
   if (opts.proactiveChannel) {
@@ -116,6 +121,12 @@ export async function bridgeSetup(opts: BridgeSetupOpts): Promise<void> {
     SYNAP_HUB_API_KEY: cfg.apiKey,
     SYNAP_WORKSPACE_ID: workspaceId,
   };
+  // The token is canonical in the pod vault (vaultRef). The bridge gateway is an
+  // external WS client that must hold a token in-process, so we also write a
+  // runtime copy — sourced from this same provisioning step, not hand-set.
+  if (botToken) managed.DISCORD_BOT_TOKEN = botToken;
+  if (vaultRef) managed.SYNAP_DISCORD_TOKEN_REF = vaultRef;
+  if (opts.guildId) managed.DISCORD_GUILD_ID = opts.guildId;
   if (opts.enableIngest) managed.SYNAP_INGEST_ENABLED = "true";
   if (opts.enableReact) managed.SYNAP_REACT_CAPTURE_ENABLED = "true";
   if (opts.proactiveChannel) managed.SYNAP_PROACTIVE_CHANNEL_ID = opts.proactiveChannel;
@@ -132,7 +143,11 @@ export async function bridgeSetup(opts: BridgeSetupOpts): Promise<void> {
   }
 
   // ── 7. Next steps (the human-only remainder) ─────────────────────────────
-  printNextSteps(opts.clientId, bridgeDir);
+  printNextSteps(opts.clientId, bridgeDir, {
+    hasToken: Boolean(botToken),
+    hasGuild: Boolean(opts.guildId),
+    vaultRef,
+  });
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -163,47 +178,98 @@ async function resolveWorkspaceId(
   return ws || undefined;
 }
 
+async function resolveBotToken(provided?: string): Promise<string | undefined> {
+  if (provided) return provided;
+  const { token } = await prompts({
+    type: "password",
+    name: "token",
+    message: "Discord bot token (stored in the pod vault; leave blank to skip):",
+  });
+  return (token as string) || undefined;
+}
+
 async function applyBridgeCapability(
   bridgeDir: string,
   workspaceId: string,
-  cfg: Awaited<ReturnType<typeof resolveHubConfig>>
-): Promise<void> {
-  const spinner = ora("Applying bridge capability…").start();
+  cfg: Awaited<ReturnType<typeof resolveHubConfig>>,
+  botToken: string | undefined
+): Promise<string | undefined> {
+  const spinner = ora("Provisioning capability…").start();
   // Read the capability definition from the bridge repo — ONE source of truth.
   const capPath = path.join(bridgeDir, "src", "synapCapabilities.js");
-  let definition: unknown;
+  let rawDef: unknown;
   try {
     const require = createRequire(import.meta.url);
-    // Bust any stale module cache so re-runs pick up edits.
     const resolved = require.resolve(capPath);
     if (require.cache && require.cache[resolved]) delete require.cache[resolved];
     const mod = require(capPath) as { CAPABILITY_DEFINITION?: unknown };
-    definition = mod.CAPABILITY_DEFINITION;
+    rawDef = mod.CAPABILITY_DEFINITION;
   } catch (err) {
-    spinner.warn("Skipped capability apply (bridge definition not found)");
+    spinner.fail("Capability definition not found");
     log.dim(`  Looked in: ${capPath}`);
     log.dim(`  ${(err as Error).message}`);
-    log.dim("  The bridge also applies it automatically on first boot.");
-    return;
+    return undefined;
   }
-  if (!definition) {
-    spinner.warn("Skipped capability apply (no CAPABILITY_DEFINITION export)");
-    return;
+  if (!rawDef) {
+    spinner.fail("No CAPABILITY_DEFINITION export in the bridge");
+    return undefined;
   }
+
+  // Deep-clone + inject the bot token into the vault credential. With no token,
+  // drop the vault + credentialRef so we never store an empty/placeholder secret.
+  const def = JSON.parse(JSON.stringify(rawDef)) as {
+    vault?: Array<{ ref?: string; value?: string }>;
+    tools?: Array<{ credentialRef?: string }>;
+  };
+  if (botToken) {
+    for (const v of def.vault ?? []) {
+      if (typeof v.value === "string") {
+        v.value = v.value.replace("{{botToken}}", botToken);
+      }
+    }
+  } else {
+    // No token → drop the vault and any tool credentialRef that referenced it
+    // (a bare template-local ref or a vault:// string), so we never store a
+    // placeholder secret or leave a dangling reference.
+    const vaultRefs = new Set(
+      (def.vault ?? []).map((v) => v.ref).filter((r): r is string => Boolean(r))
+    );
+    delete def.vault;
+    for (const t of def.tools ?? []) {
+      if (
+        t.credentialRef &&
+        (vaultRefs.has(t.credentialRef) || t.credentialRef.startsWith("vault://"))
+      ) {
+        delete t.credentialRef;
+      }
+    }
+    spinner.text = "Provisioning capability (no token → structure only)…";
+  }
+
   try {
     const res = (await hubPost(
       "/capabilities/apply",
-      { definition, workspaceId },
+      { definition: def, workspaceId },
       cfg
-    )) as { capabilityKey?: string; created?: { tools?: unknown[]; skills?: unknown[] } };
+    )) as {
+      capabilityKey?: string;
+      created?: {
+        vault?: Array<{ vaultRef?: string }>;
+        tools?: unknown[];
+        skills?: unknown[];
+      };
+    };
     const tools = res.created?.tools?.length ?? 0;
     const skills = res.created?.skills?.length ?? 0;
+    const vaultRef = res.created?.vault?.[0]?.vaultRef;
     spinner.succeed(
-      `Capability applied: ${res.capabilityKey ?? "?"} (${tools} tool, ${skills} skill)`
+      `Capability provisioned: ${res.capabilityKey ?? "?"} (${vaultRef ? "vault + " : ""}${tools} tool, ${skills} skill)`
     );
+    return vaultRef;
   } catch (err) {
-    spinner.warn("Capability apply did not complete (the bridge will retry on boot)");
+    spinner.fail("Capability apply failed (pod creds still written below)");
     log.dim(`  ${(err as Error).message}`);
+    return undefined;
   }
 }
 
@@ -269,21 +335,37 @@ function upsertEnv(filePath: string, kv: Record<string, string>): void {
   fs.writeFileSync(filePath, out.join("\n"), { mode: 0o600 });
 }
 
-function printNextSteps(clientId: string | undefined, bridgeDir: string): void {
+function printNextSteps(
+  clientId: string | undefined,
+  bridgeDir: string,
+  state: { hasToken: boolean; hasGuild: boolean; vaultRef?: string }
+): void {
   log.blank();
-  log.heading("Remaining manual steps (Discord side)");
+  log.heading("Done");
+  log.blank();
+  if (state.vaultRef) {
+    console.log(`  ${chalk.green("✓")} Bot token provisioned to the pod vault  ${chalk.dim(state.vaultRef)}`);
+  }
+  console.log(
+    `  ${chalk.green("✓")} Bridge .env written (pod creds${state.hasToken ? " + token" : ""}${state.hasGuild ? " + guild" : ""})`
+  );
+  log.blank();
+  log.heading("Remaining (Discord portal — human only)");
   log.blank();
   if (clientId) {
     const url = `https://discord.com/oauth2/authorize?client_id=${clientId}&permissions=${BOT_PERMISSIONS}&scope=bot+applications.commands`;
-    console.log(`  ${chalk.bold("1.")} Invite the bot (open this, pick your server):`);
+    console.log(`  ${chalk.bold("•")} Invite the bot (open, pick your server):`);
     console.log(`     ${chalk.cyan(url)}`);
   } else {
-    console.log(`  ${chalk.bold("1.")} Create the bot invite URL — pass ${chalk.cyan("--client-id <app-id>")} to print it.`);
+    console.log(`  ${chalk.bold("•")} Invite URL — re-run with ${chalk.cyan("--client-id <app-id>")} to print it.`);
   }
-  console.log(`  ${chalk.bold("2.")} Developer Portal → Bot → Reset Token → put in ${chalk.dim(".env DISCORD_BOT_TOKEN")}`);
-  console.log(`  ${chalk.bold("3.")} Bot → Privileged Intents → enable ${chalk.bold("MESSAGE CONTENT")}`);
-  console.log(`  ${chalk.bold("4.")} Right-click server → Copy Server ID → ${chalk.dim(".env DISCORD_GUILD_ID")}`);
-  console.log(`  ${chalk.bold("5.")} For proactive/agent posts: set ${chalk.dim("DISCORD_BOT_TOKEN")} on the POD too`);
+  console.log(`  ${chalk.bold("•")} Bot → Privileged Intents → enable ${chalk.bold("MESSAGE CONTENT")}`);
+  if (!state.hasToken) {
+    console.log(`  ${chalk.bold("•")} Token not provisioned — re-run with ${chalk.cyan("--bot-token <token>")} (stores it in the vault)`);
+  }
+  if (!state.hasGuild) {
+    console.log(`  ${chalk.bold("•")} Server ID — re-run with ${chalk.cyan("--guild-id <id>")} (or set DISCORD_GUILD_ID)`);
+  }
   log.blank();
   console.log(`  Then: ${chalk.green(`cd ${bridgeDir} && npm run smoke && npm start`)}`);
   log.blank();
