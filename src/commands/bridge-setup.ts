@@ -56,8 +56,30 @@ const DEFAULT_BRIDGE_DIR = path.join(
   "telegram-discord-bridge"
 );
 
-// Bot invite permissions: View Channels + Send Messages + Read History + Add Reactions.
-const BOT_PERMISSIONS = 68672;
+// Bot invite permissions — the full set the bridge's features actually use.
+// Bits per Discord's permission reference (https://discord.com/developers/docs/topics/permissions).
+// BigInt because thread permissions exceed 2^31. Least-privilege *within* what we
+// need: NO Administrator / Manage Server / Manage Roles / Kick / Ban / Mention-Everyone.
+// (The privileged MESSAGE CONTENT gateway intent is enabled in the Developer Portal,
+//  NOT here — invite permissions and gateway intents are separate systems.)
+const BOT_PERMISSION_BITS: Record<string, bigint> = {
+  VIEW_CHANNEL: 1n << 10n, // see channels/threads
+  SEND_MESSAGES: 1n << 11n, // reply in channels
+  SEND_MESSAGES_IN_THREADS: 1n << 38n, // reply inside threads (client-comms / team)
+  CREATE_PUBLIC_THREADS: 1n << 35n, // /link-client creates the per-client threads
+  CREATE_PRIVATE_THREADS: 1n << 36n, // private team threads
+  MANAGE_THREADS: 1n << 34n, // archive / rename / reuse threads
+  MANAGE_CHANNELS: 1n << 4n, // /link-client creates the per-client room (the missing one)
+  MANAGE_MESSAGES: 1n << 13n, // pin context (Google Drive links, key messages)
+  READ_MESSAGE_HISTORY: 1n << 16n, // read channel context for the agent
+  ADD_REACTIONS: 1n << 6n, // react-capture
+  EMBED_LINKS: 1n << 14n, // rich link/button embeds (open-in-browser deep links)
+  ATTACH_FILES: 1n << 15n, // attachments (skill-from-file, exports)
+  USE_EXTERNAL_EMOJIS: 1n << 18n, // richer reactions
+};
+const BOT_PERMISSIONS = Object.values(BOT_PERMISSION_BITS)
+  .reduce((acc, bit) => acc | bit, 0n)
+  .toString();
 
 export async function bridgeSetup(opts: BridgeSetupOpts): Promise<void> {
   banner();
