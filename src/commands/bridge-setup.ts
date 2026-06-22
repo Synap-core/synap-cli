@@ -26,6 +26,7 @@ import path from "node:path";
 import os from "node:os";
 import fs from "node:fs";
 import { createRequire } from "node:module";
+import { fileURLToPath } from "node:url";
 import chalk from "chalk";
 import ora from "ora";
 import prompts from "prompts";
@@ -145,7 +146,10 @@ export async function bridgeSetup(opts: BridgeSetupOpts): Promise<void> {
     botToken
   );
 
-  // ── 4b. Grant the bridge redeem access — token lives ONLY in the vault ─────
+  // ── 4b. Apply the agency capability templates (idempotent, self-healing) ────
+  await applyAgencyCapabilities(workspaceId, cfg);
+
+  // ── 4d. Grant the bridge redeem access — token lives ONLY in the vault ─────
   let granted = false;
   if (secretId && botToken) {
     granted = await grantRedeemAccess(secretId, cfg);
@@ -199,6 +203,144 @@ export async function bridgeSetup(opts: BridgeSetupOpts): Promise<void> {
     vaultRef,
     granted,
   });
+}
+
+// ── Agency capability seeding ────────────────────────────────────────────────
+
+/**
+ * Secret-gating plan for agency capability templates.
+ *
+ * Each entry:
+ *   key    — filename stem (<key>.capability.json)
+ *   needs  — env var that must be present to apply (null = unconditional)
+ *   params — values to pass as the `params` body field (mirrors seed-agency-capabilities.mjs)
+ *
+ * discord-bot is intentionally absent: applyBridgeCapability already handles it
+ * from the live bridge repo (ONE source of truth) — don't double-apply.
+ */
+const AGENCY_CAPABILITY_PLAN: Array<{
+  key: string;
+  needs: string | null;
+  params: Record<string, string | undefined>;
+}> = [
+  { key: "nango-gmail",    needs: null,              params: {} },
+  { key: "nango-gdrive",   needs: null,              params: {} },
+  { key: "nango-calendar", needs: null,              params: {} },
+  { key: "agency-skills",  needs: null,              params: {} },
+  { key: "generic-apikey", needs: null,              params: {} },
+  {
+    key: "unipile-linkedin",
+    needs: "UNIPILE_API_KEY",
+    params: {
+      unipileApiKey:    process.env.UNIPILE_API_KEY,
+      ...(process.env.UNIPILE_BASE_URL    && { unipileBaseUrl:    process.env.UNIPILE_BASE_URL }),
+      ...(process.env.UNIPILE_ACCOUNT_ID  && { unipileAccountId:  process.env.UNIPILE_ACCOUNT_ID }),
+    },
+  },
+  {
+    key: "telegram-bridge",
+    needs: "TELEGRAM_BOT_TOKEN",
+    params: { telegramBotToken: process.env.TELEGRAM_BOT_TOKEN },
+  },
+];
+
+/**
+ * Resolve the canonical templates directory.
+ *
+ * Resolution order:
+ *   1. CAPABILITY_TEMPLATES_DIR env var (override for CI / custom installs)
+ *   2. Monorepo-relative default: <cli-package-root>/../../synap-backend/templates/capabilities
+ *      Works when the CLI is run from source (pnpm dev / npx tsx) inside the monorepo.
+ *
+ * If the resolved dir does not exist (e.g. published `npx @synap/cli` with no monorepo),
+ * returns null — caller must skip and warn rather than fail.
+ */
+function resolveTemplatesDir(): string | null {
+  if (process.env.CAPABILITY_TEMPLATES_DIR) {
+    const override = process.env.CAPABILITY_TEMPLATES_DIR;
+    return fs.existsSync(override) ? override : null;
+  }
+  // __dirname is not available in ESM; derive from import.meta.url
+  const thisFile = fileURLToPath(import.meta.url);
+  // Compiled output lands in dist/commands/; source lives in src/commands/.
+  // Either way, two levels up reaches the cli package root, then we navigate
+  // to the sibling synap-backend repo.
+  const cliRoot = path.resolve(path.dirname(thisFile), "..", "..");
+  const candidate = path.resolve(cliRoot, "..", "synap-backend", "templates", "capabilities");
+  return fs.existsSync(candidate) ? candidate : null;
+}
+
+/**
+ * Apply the agency capability templates idempotently.
+ *
+ * - Reads each *.capability.json from the templates dir.
+ * - POSTs to /capabilities/apply with { definition, params, workspaceId }.
+ * - Skips secret-backed templates when the required env var is absent.
+ * - Skips discord-bot (already applied via applyBridgeCapability).
+ * - Logs a concise per-template result line (applied / reused / skipped).
+ * - NEVER throws — errors are warned so the overall setup continues.
+ */
+async function applyAgencyCapabilities(
+  workspaceId: string,
+  cfg: Awaited<ReturnType<typeof resolveHubConfig>>
+): Promise<void> {
+  const templatesDir = resolveTemplatesDir();
+  if (!templatesDir) {
+    log.warn(
+      "Agency capability templates not found — skipping. " +
+      "Set CAPABILITY_TEMPLATES_DIR=<path> to seed them from a custom location."
+    );
+    return;
+  }
+
+  log.dim(`Seeding agency capabilities from ${templatesDir}…`);
+
+  for (const item of AGENCY_CAPABILITY_PLAN) {
+    const filePath = path.join(templatesDir, `${item.key}.capability.json`);
+    if (!fs.existsSync(filePath)) {
+      log.dim(`  [skip] ${item.key} — template file not found`);
+      continue;
+    }
+
+    if (item.needs && !process.env[item.needs]) {
+      log.dim(`  [skip] ${item.key} — set ${item.needs} to seed it`);
+      continue;
+    }
+
+    let definition: unknown;
+    try {
+      definition = JSON.parse(fs.readFileSync(filePath, "utf-8"));
+    } catch (err) {
+      log.warn(`  [error] ${item.key} — could not parse template: ${(err as Error).message}`);
+      continue;
+    }
+
+    try {
+      const res = (await hubPost(
+        "/capabilities/apply",
+        { definition, params: item.params, workspaceId },
+        cfg
+      )) as {
+        capabilityKey?: string;
+        created?: {
+          container?: { name?: string; status?: string };
+          tools?: Array<{ name?: string; status?: string }>;
+          skills?: Array<{ name?: string; status?: string }>;
+        };
+      };
+      const container = res.created?.container;
+      const tools = res.created?.tools?.length ?? 0;
+      const skills = res.created?.skills?.length ?? 0;
+      const containerLabel = container
+        ? `${container.name}(${container.status})`
+        : "—";
+      log.dim(
+        `  [ok]   ${item.key.padEnd(18)} container=${containerLabel} tools=${tools} skills=${skills}`
+      );
+    } catch (err) {
+      log.warn(`  [error] ${item.key} — ${(err as Error).message}`);
+    }
+  }
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
