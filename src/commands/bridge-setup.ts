@@ -86,7 +86,7 @@ export async function bridgeSetup(opts: BridgeSetupOpts): Promise<void> {
   log.success(`Pod healthy: ${cfg.podUrl}`);
 
   // ── 3. Resolve workspace ───────────────────────────────────────────────
-  const workspaceId = await resolveWorkspaceId(opts.workspaceId ?? cfg.workspaceId, cfg);
+  const workspaceId = await resolveWorkspaceId(opts.workspaceId, cfg.workspaceId, cfg);
   if (!workspaceId) {
     log.error("Could not resolve a workspace. Pass --workspace-id <uuid>.");
     process.exit(1);
@@ -305,10 +305,15 @@ async function provisionDiscordAgentKey(
 }
 
 async function resolveWorkspaceId(
-  known: string | undefined,
+  explicit: string | undefined,
+  defaultWs: string | undefined,
   cfg: Awaited<ReturnType<typeof resolveHubConfig>>
 ): Promise<string | undefined> {
-  if (known) return known;
+  // An explicit --workspace-id wins outright. Otherwise ALWAYS ask (with the
+  // saved profile workspace pre-selected) — the operator must consciously pick
+  // the workspace every channel + entity the bridge creates will live in (e.g.
+  // your CRM workspace), instead of silently inheriting the saved default.
+  if (explicit) return explicit;
   let list: Array<{ id: string; name?: string }> = [];
   try {
     const res = (await hubGet("/workspaces", {}, cfg)) as unknown;
@@ -317,17 +322,19 @@ async function resolveWorkspaceId(
       : ((res as { workspaces?: unknown[] })?.workspaces ?? []);
     list = (arr as Array<{ id: string; name?: string }>).filter((w) => w?.id);
   } catch {
-    return undefined;
+    return defaultWs;
   }
-  if (list.length === 0) return undefined;
+  if (list.length === 0) return defaultWs;
   if (list.length === 1) return list[0].id;
+  const defaultIdx = defaultWs ? list.findIndex((w) => w.id === defaultWs) : -1;
   const { ws } = await prompts({
     type: "select",
     name: "ws",
-    message: "Which workspace should the bridge write into?",
+    message: "Which workspace should the bridge write into? (channels + entities land here)",
     choices: list.map((w) => ({ title: `${w.name ?? "(unnamed)"}  ${chalk.dim(w.id)}`, value: w.id })),
+    initial: defaultIdx >= 0 ? defaultIdx : 0,
   });
-  return ws || undefined;
+  return (ws as string) || defaultWs;
 }
 
 async function resolveBotToken(provided?: string): Promise<string | undefined> {
