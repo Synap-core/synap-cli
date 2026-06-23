@@ -149,6 +149,8 @@ export async function bridgeSetup(opts: BridgeSetupOpts): Promise<void> {
   // ── 4b. Apply the agency capability templates (idempotent, self-healing) ────
   await applyAgencyCapabilities(cfg);
 
+  await applyAgencySkills(cfg);
+
   // ── 4d. Grant the bridge redeem access — token lives ONLY in the vault ─────
   let granted = false;
   if (secretId && botToken) {
@@ -344,6 +346,61 @@ async function applyAgencyCapabilities(
       );
     } catch (err) {
       log.warn(`  [error] ${item.key} — ${(err as Error).message}`);
+    }
+  }
+}
+
+// ── Agency skill seeding (instruction skills) ──────────────────────────────
+
+/** Skills to seed unconditionally — pod-wide instruction know-how. */
+const AGENCY_SKILL_PLAN = ["stellar-scf-grants-advisor"];
+
+/** Resolve the skills templates directory (parallels resolveTemplatesDir). */
+function resolveSkillsTemplatesDir(): string | null {
+  const thisFile = fileURLToPath(import.meta.url);
+  const cliRoot = path.resolve(path.dirname(thisFile), "..", "..");
+  const candidate = path.resolve(cliRoot, "..", "synap-backend", "templates", "skills");
+  return fs.existsSync(candidate) ? candidate : null;
+}
+
+/**
+ * Seed instruction skills from templates/skills/.
+ * POSTs each .skill.json to /agent-skills/import — idempotent (slug-unique guard).
+ */
+async function applyAgencySkills(
+  cfg: Awaited<ReturnType<typeof resolveHubConfig>>
+): Promise<void> {
+  const skillsDir = resolveSkillsTemplatesDir();
+  if (!skillsDir) { log.warn("Agency skill templates not found — skipping."); return; }
+
+  const userId = await resolveUserId(cfg);
+  log.dim(`Seeding agency skills from ${skillsDir}…`);
+
+  for (const key of AGENCY_SKILL_PLAN) {
+    const filePath = path.join(skillsDir, `${key}.skill.json`);
+    if (!fs.existsSync(filePath)) { log.dim(`  [skip] ${key} — template file not found`); continue; }
+
+    let payload: unknown;
+    try { payload = JSON.parse(fs.readFileSync(filePath, "utf-8")); } catch (err) {
+      log.warn(`  [error] ${key} — ${(err as Error).message}`); continue;
+    }
+
+    try {
+      const res = (await hubPost("/agent-skills/import", { userId, ...(payload as object) }, cfg)) as {
+        skill?: { id: string; name: string };
+        documents?: Array<{ id: string }>;
+        error?: string;
+      };
+      if (res.error && /already exists/i.test(res.error)) {
+        log.dim(`  [ok]   ${key.padEnd(34)} (already seeded)`);
+      } else if (res.skill) {
+        const docCount = res.documents?.length ?? 0;
+        log.dim(`  [ok]   ${key.padEnd(34)} skill=${res.skill.name} docs=${docCount}`);
+      } else {
+        log.dim(`  [ok]   ${key.padEnd(34)} imported`);
+      }
+    } catch (err) {
+      log.warn(`  [error] ${key} — ${(err as Error).message}`);
     }
   }
 }
