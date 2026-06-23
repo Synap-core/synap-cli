@@ -147,7 +147,7 @@ export async function bridgeSetup(opts: BridgeSetupOpts): Promise<void> {
   );
 
   // ── 4b. Apply the agency capability templates (idempotent, self-healing) ────
-  await applyAgencyCapabilities(workspaceId, cfg);
+  await applyAgencyCapabilities(cfg);
 
   // ── 4d. Grant the bridge redeem access — token lives ONLY in the vault ─────
   let granted = false;
@@ -281,7 +281,6 @@ function resolveTemplatesDir(): string | null {
  * - NEVER throws — errors are warned so the overall setup continues.
  */
 async function applyAgencyCapabilities(
-  workspaceId: string,
   cfg: Awaited<ReturnType<typeof resolveHubConfig>>
 ): Promise<void> {
   const templatesDir = resolveTemplatesDir();
@@ -316,9 +315,13 @@ async function applyAgencyCapabilities(
     }
 
     try {
+      // Seed POD-WIDE (no workspaceId): agency capabilities are the agent's
+      // pod-wide abilities (the tools/skills are pod-wide too), so the container
+      // must be pod-wide to match — and the browser's capabilities view reads the
+      // pod-wide set. Only channels/entities belong to the chosen workspace.
       const res = (await hubPost(
         "/capabilities/apply",
-        { definition, params: item.params, workspaceId },
+        { definition, params: item.params },
         cfg
       )) as {
         capabilityKey?: string;
