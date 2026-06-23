@@ -152,7 +152,9 @@ export async function bridgeSetup(opts: BridgeSetupOpts): Promise<void> {
   // ── 4d. Grant the bridge redeem access — token lives ONLY in the vault ─────
   let granted = false;
   if (secretId && botToken) {
-    granted = await grantRedeemAccess(secretId, cfg);
+    // Grant to the AGENT (the bridge's redeem identity), not the operator.
+    const agentUserId = getSurfaceAgentKey("discord")?.agentUserId;
+    granted = await grantRedeemAccess(secretId, cfg, agentUserId);
   }
 
   // ── 5. Proactive delivery routing (optional) ─────────────────────────────
@@ -607,11 +609,16 @@ async function applyBridgeCapability(
  */
 async function grantRedeemAccess(
   secretId: string,
-  cfg: Awaited<ReturnType<typeof resolveHubConfig>>
+  cfg: Awaited<ReturnType<typeof resolveHubConfig>>,
+  agentUserId?: string
 ): Promise<boolean> {
   const spinner = ora("Granting the bridge redeem access…").start();
   try {
-    const principal = await resolveUserId(cfg);
+    // The bridge redeems AS the agent: the backend binds redemption to the
+    // agent key's userId (linkedUserId remap → vault_grants.granted_to must be
+    // the AGENT, not the operator). Granting to the operator leaves the bridge
+    // with no_grant. Fall back to the operator only if the agent id is unknown.
+    const principal = agentUserId || (await resolveUserId(cfg));
     const res = (await hubPost(
       `/vault/secrets/${secretId}/grant`,
       { grantedTo: principal, scope: "permanent" },
