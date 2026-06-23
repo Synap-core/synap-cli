@@ -359,7 +359,7 @@ const AGENCY_SKILL_PLAN = ["stellar-scf-grants-advisor"];
 function resolveSkillsTemplatesDir(): string | null {
   const thisFile = fileURLToPath(import.meta.url);
   const cliRoot = path.resolve(path.dirname(thisFile), "..", "..");
-  const candidate = path.resolve(cliRoot, "..", "synap-backend", "templates", "skills");
+  const candidate = path.resolve(cliRoot, "templates", "instruction-skills");
   return fs.existsSync(candidate) ? candidate : null;
 }
 
