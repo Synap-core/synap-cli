@@ -71,24 +71,47 @@ export async function connectorsConnect(service: string | undefined, opts: Conne
 
   const workspaceId = opts.workspace ?? cfg.workspaceId;
 
-  const spinner = ora({ text: "Starting OAuth session…", color: "cyan" }).start();
+  const spinner = ora({ text: "Resolving connection…", color: "cyan" }).start();
 
-  let redirectUrl: string;
+  // The unified door: resolves the provider, checks for an existing connection,
+  // and returns connected / setup_required / provider_required in one call.
+  // Connects as the operator (the CLI's key owner) — no per-user binding here.
+  let res: Record<string, unknown>;
   try {
     const body: Record<string, unknown> = {};
-    if (service) body.providerId = service;
+    if (service) body.provider = service;
     if (workspaceId) body.workspaceId = workspaceId;
-    const res = await hubPost("/connectors/session", body, cfg);
-    const r = res as Record<string, unknown>;
-    redirectUrl = String(r.redirectUrl);
+    res = (await hubPost("/connectors/connect", body, cfg)) as Record<string, unknown>;
     spinner.stop();
   } catch (err) {
-    spinner.fail(chalk.red("Failed to start connector session"));
+    spinner.fail(chalk.red("Failed to resolve connection"));
     log.error((err as Error).message);
     process.exit(1);
   }
 
-  log.heading(`Connect to ${service ?? "external services"}`);
+  const status = String(res.status);
+
+  if (status === "connected") {
+    log.heading(`${res.displayName ?? res.provider} is already connected`);
+    log.dim(`Run \`synap connectors list\` to see all connections.`);
+    return;
+  }
+
+  if (status === "provider_required") {
+    const providers = (res.providers ?? []) as Array<{ provider: string; displayName?: string }>;
+    log.heading("Which service do you want to connect?");
+    console.log();
+    for (const p of providers) {
+      console.log(`  ${chalk.cyan(p.provider)}${p.displayName ? chalk.dim(`  (${p.displayName})`) : ""}`);
+    }
+    console.log();
+    log.dim(`Run \`synap connectors connect <name>\` with one of the above.`);
+    return;
+  }
+
+  // setup_required
+  const redirectUrl = String(res.redirectUrl);
+  log.heading(`Connect to ${res.displayName ?? res.provider ?? service ?? "external service"}`);
   console.log();
   console.log(`  Opening OAuth flow in your browser…`);
   console.log(`  ${chalk.dim("If it didn't open, paste this URL in your browser:")}`);
