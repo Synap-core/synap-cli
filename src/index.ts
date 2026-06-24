@@ -781,6 +781,40 @@ skillCmd
   });
 
 skillCmd
+  .command("add <source>")
+  .description(
+    "Add skill(s) to your pod from: bundled · a local path · ~/.claude/skills/ · owner/repo · a git URL"
+  )
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (source: string, opts) => {
+    const { addSkill } = await import("./commands/skill-manage.js");
+    await addSkill(source, opts);
+  });
+
+skillCmd
+  .command("list")
+  .alias("ls")
+  .description("List the instruction skills installed on your pod")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (opts) => {
+    const { listSkills } = await import("./commands/skill-manage.js");
+    await listSkills(opts);
+  });
+
+skillCmd
+  .command("remove <slug>")
+  .alias("rm")
+  .description("Remove a skill from your pod by slug")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (slug: string, opts) => {
+    const { removeSkill } = await import("./commands/skill-manage.js");
+    await removeSkill(slug, opts);
+  });
+
+skillCmd
   .command("sync")
   .description("Bulk-import local skills from ~/.claude/skills/ into the pod")
   .option("--from <path>", "Skills directory path (default: ~/.claude/skills)")
@@ -1390,7 +1424,7 @@ program
   .option("--pod-url <url>", "Pod URL override")
   .option("--api-key <key>", "API key override")
   .action(async (service: string | undefined, opts) => {
-    const { toolsConnect } = await import("./commands/connectors.js");
+    const { toolsConnect } = await import("./commands/tools.js");
     await toolsConnect(service, opts);
   });
 
@@ -1406,7 +1440,7 @@ tools
   .option("--json", "Output as JSON")
   .option("--workspace <id>", "Workspace context")
   .action(async (opts) => {
-    const { toolsList } = await import("./commands/connectors.js");
+    const { toolsList } = await import("./commands/tools.js");
     await toolsList(opts);
   });
 
@@ -1417,7 +1451,7 @@ tools
   .option("--pod-url <url>", "Pod URL override")
   .option("--api-key <key>", "API key override")
   .action(async (service: string | undefined, opts) => {
-    const { toolsConnect } = await import("./commands/connectors.js");
+    const { toolsConnect } = await import("./commands/tools.js");
     await toolsConnect(service, opts);
   });
 
@@ -1426,7 +1460,7 @@ tools
   .description("Trigger a manual sync for a connected tool")
   .option("--workspace <id>", "Workspace context")
   .action(async (provider: string, opts) => {
-    const { toolsSync } = await import("./commands/connectors.js");
+    const { toolsSync } = await import("./commands/tools.js");
     await toolsSync(provider, opts);
   });
 
@@ -1436,7 +1470,7 @@ tools
   .option("--workspace <id>", "Workspace context")
   .option("--force", "Skip confirmation")
   .action(async (provider: string, opts) => {
-    const { toolsDisconnect } = await import("./commands/connectors.js");
+    const { toolsDisconnect } = await import("./commands/tools.js");
     await toolsDisconnect(provider, opts);
   });
 
@@ -1446,7 +1480,7 @@ tools
   .option("--write-context [path]", "Write to .claude/TOOLS_CONTEXT.md")
   .option("--json", "Output raw JSON instead of formatted markdown")
   .action(async (opts) => {
-    const { toolsSchema } = await import("./commands/connectors.js");
+    const { toolsSchema } = await import("./commands/tools.js");
     await toolsSchema(opts);
   });
 

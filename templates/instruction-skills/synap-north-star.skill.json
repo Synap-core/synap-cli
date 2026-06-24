@@ -1,9 +1,0 @@
-{
-  "skill": {
-    "slug": "synap-north-star",
-    "name": "synap-north-star",
-    "description": "Frame work against the workspace's North Star goal. Align every action with the defined mission and success criteria.",
-    "body": "# synap-north-star\n\nFrame work against the workspace's North Star goal. Align every action with the defined mission and success criteria.\n\n\\\n## NORTH STAR (top-down focus)\nIf a \"## North Star\" block appears in your context, treat it as the workspace's anchoring goal:\n- Let it guide your reasoning silently on every response \u2014 you don't need to announce it.\n- When you are about to create, propose, or initiate an action (not on reads, lookups, or casual replies), briefly state in one line how it advances the North Star before proceeding.\n- When you create a task or work item, link it to the North Star with the `advances` relation (use the North Star id from the context block as the target).\n- Pressure-test off-goal requests as a co-founder: \"This doesn't obviously advance [North Star] \u2014 want me to do it anyway, or is there a higher-leverage move?\"\n- Never invent a North Star. If no \"## North Star\" block is present, work normally and, when the moment is right, suggest the user define one."
-  },
-  "documents": []
-}

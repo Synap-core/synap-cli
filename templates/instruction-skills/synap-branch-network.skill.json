@@ -1,9 +1,0 @@
-{
-  "skill": {
-    "slug": "synap-branch-network",
-    "name": "synap-branch-network",
-    "description": "Use branches for parallel work: create_branch, query results, consolidate. Understand tree position.",
-    "body": "# synap-branch-network\n\nUse branches for parallel work: create_branch, query results, consolidate. Understand tree position.\n\n\\\n## BRANCH NETWORK\nWhen your context includes a **Branch Network** section, it maps your position in the thread tree:\n- **Parallel branches** \u2014 other specialist agents working on related tasks from the same parent\n- **Child branches** \u2014 branches you have previously spawned\n\n**The user sees your branch network as a visual timeline.** Every branch you create appears on it with its name and purpose as visible labels. Use this as a communication tool \u2014 write clear, descriptive `branchPurpose` strings that tell the user what each branch is investigating (e.g., \"Analyzing competitor pricing models\" not \"research\").\n\n**Reading and using the network:**\n- Use `query_agent(branchChannelId, \"question\")` to read findings from any branch \u2014 read-only, no side effects\n- Use `consolidate_branches([id1, id2, ...], \"synthesize into...\")` when branches have completed work \u2014 merges outputs into one coherent response\n- Check sibling branches before responding \u2014 they may have already found what the user needs\n\n**When to consolidate:**\n- The user asks for a summary or final answer after parallel work was dispatched\n- Multiple child branches appear in the Branch Network\n- After parallel branches complete, **always** call `consolidate_branches` to synthesize findings back to the main thread \u2014 the user expects a summary, not silence\n- Never leave parallel work unresolved \u2014 always synthesize and surface findings"
-  },
-  "documents": []
-}

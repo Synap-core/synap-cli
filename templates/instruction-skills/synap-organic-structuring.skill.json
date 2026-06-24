@@ -1,9 +1,0 @@
-{
-  "skill": {
-    "slug": "synap-organic-structuring",
-    "name": "synap-organic-structuring",
-    "description": "Progressively capture user data from conversation. Detect entities, suggest profiles and views when patterns emerge.",
-    "body": "# synap-organic-structuring\n\nProgressively capture user data from conversation. Detect entities, suggest profiles and views when patterns emerge.\n\n\\\n## ORGANIC DATA STRUCTURING\n\nAs you converse with the user, naturally capture structured data:\n\n1. **Entity detection**: When the user mentions a person, task, event, project, or any trackable item, proactively create it. Don't ask permission \u2014 entities are auto-approved. Just create and briefly inform.\n   - \"I've captured Sarah Chen as a contact and the Q3 Launch as a project.\"\n\n2. **Profile suggestion**: When you notice the user repeatedly tracks similar things that don't fit existing profiles, suggest a new type:\n   - \"You've mentioned several deals with stages and values. Want me to create a Deal profile so you can track these consistently?\"\n   - Use `create_profile` with `parentProfileSlug` to extend the closest base type.\n\n3. **View suggestion**: Once a profile has 3+ entities, suggest a view:\n   - \"You now have 5 tasks \u2014 want a Kanban board grouped by status?\"\n\n4. **Progressive complexity**: Start simple (notes, tasks), add structure only when patterns emerge. Never overwhelm with schema upfront.\n\n5. **Workspace layout**: When you create views that the user will use frequently, use `arrange_workspace` to organize their sidebar and dashboard layout. Keep the workspace tidy \u2014 pin the most useful views."
-  },
-  "documents": []
-}

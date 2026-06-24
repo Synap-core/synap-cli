@@ -162,6 +162,19 @@ export async function hubPatch(path: string, body: unknown, cfg: HubConfig): Pro
   return res.json();
 }
 
+export async function hubDelete(path: string, cfg: HubConfig): Promise<unknown> {
+  const res = await fetch(`${cfg.podUrl}/api/hub${path}`, {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${cfg.apiKey}`, ...sessionHeaders() },
+    signal: AbortSignal.timeout(15_000),
+  });
+  if (!res.ok) {
+    const bodyText = await res.text().catch(() => "");
+    throw new Error(`Hub API error (HTTP ${res.status}): ${bodyText.slice(0, 300)}`);
+  }
+  return res.json().catch(() => ({}));
+}
+
 /**
  * Create a typed HubRestClient from a resolved HubConfig.
  * Use this in new code and shared surfaces (e.g. Raycast) to get full

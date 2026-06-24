@@ -1,9 +1,0 @@
-{
-  "skill": {
-    "slug": "synap-user-model",
-    "name": "synap-user-model",
-    "description": "Learn and apply the user's preferences, communication style, and working patterns over time.",
-    "body": "# synap-user-model\n\nLearn and apply the user's preferences, communication style, and working patterns over time.\n\n\\\n## USER MODEL\nYou maintain a structured model of the user across sessions using `user_observation` entities (pod-scoped profile).\n\n**Reading:** The durable model is LOADED FOR YOU at session start \u2014 see the\n\"## What I Know About You (durable)\" section above (working style, communication\npreferences, focus patterns, technical habits). Use it; you do not need to search\nfor it. (You may still inspect `user_observation` entities mid-session if you need detail.)\n\n**Writing:** When you observe a NEW durable pattern \u2014 something that will change how\nyou work with this person across sessions \u2014 call the **`record_observation`** tool:\n- `observation`: plain-language description of the pattern\n- `category`: working_style | communication | focus | preferences | habits | technical\n- `confidence`: ~0.6 for an inference; 0.9 for an explicit \"I always want X\"\n- `validated`: true only if the user explicitly confirmed it\n\n**Rules:**\n- Only write observations with genuine signal \u2014 not one-time behaviour\n- Update existing observations instead of creating duplicates (search by category first)\n- Never tell the user \"I updated your model\" mid-conversation \u2014 do it silently\n- If the user says something like \"I always want X\", create immediately with confidence 0.9"
-  },
-  "documents": []
-}

@@ -1,9 +1,0 @@
-{
-  "skill": {
-    "slug": "synap-graph-gardening",
-    "name": "synap-graph-gardening",
-    "description": "Writes are impact-aware. After creating/updating entities, read the graph impact and resolve it.",
-    "body": "# synap-graph-gardening\n\nWrites are impact-aware. After creating/updating entities, read the graph impact and resolve it.\n\n\\\n## GARDEN THE GRAPH \u2014 your writes tell you their impact\nWriting is no longer blind. After `create_entity` / `update_entity`, READ the impact the tool returns and act on it \u2014 keep the graph connected, never leave an isolated or duplicate node.\n- `resolution.existingSameProfile` \u2192 an entity with this name already exists as the SAME profile \u2192 `update_entity` it instead of creating a duplicate.\n- `resolution.autoConnected` \u2192 same-name, DIFFERENT-profile facets were already woven together (`same_subject`). Acknowledge it; add a more specific relation if the real link is narrower.\n- `resolution.suggestions` \u2192 entities worth linking \u2192 `create_relation` for the ones that genuinely apply.\n- On update, `impact` lists the immediate neighbors \u2192 resolve secondary effects (supersede a now-stale entity, update dependents, re-link).\nThe circle: write \u2192 if it exists, update not duplicate \u2192 extend the auto-woven links \u2192 link the suggestions \u2192 resolve the update's impact. More data is better WHEN structured; the graph now helps you keep it so. (Matching is exact-name today; still link deliberately when two things relate but their names differ.)"
-  },
-  "documents": []
-}

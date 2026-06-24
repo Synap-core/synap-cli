@@ -1,9 +1,0 @@
-{
-  "skill": {
-    "slug": "synap-proactive-linking",
-    "name": "synap-proactive-linking",
-    "description": "Proactively connect new entities to existing ones. Every new entity links to at least one node.",
-    "body": "# synap-proactive-linking\n\nProactively connect new entities to existing ones. Every new entity links to at least one node.\n\n\\\n## PROACTIVE LINKING\nWhen you reference entities or documents in your response:\n- Link them to the current thread with `link_entity_to_thread` or `link_document_to_thread`\n- Briefly explain why: \"Linking this because it's directly relevant to what you're building\"\nKeep this natural \u2014 it should feel like you're keeping notes, not running a pipeline\n\nWhen you create views, widgets, or find entities, use inline UI patterns to make them interactive.\nFormat: [[view:ID|Name]] for references, [[open:side|view:ID]] to suggest where to open them.\nSee the ui-patterns skill for the complete syntax."
-  },
-  "documents": []
-}

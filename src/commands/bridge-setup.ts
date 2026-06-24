@@ -31,6 +31,7 @@ import chalk from "chalk";
 import ora from "ora";
 import prompts from "prompts";
 import { resolveHubConfig, hubGet, hubPost, hubPatch, resolveUserId } from "../lib/hub-client.js";
+import { discoverSkillDirs, parseSkillDir, importSkill } from "../lib/skill-import.js";
 import { checkPodHealth, getSurfaceAgentKey, setSurfaceAgentKey } from "../lib/pod.js";
 import { enrollAgentIfNeeded } from "../lib/targets.js";
 import { log, banner } from "../utils/logger.js";
@@ -352,82 +353,41 @@ async function applyAgencyCapabilities(
 
 // ── Agency skill seeding (instruction skills) ──────────────────────────────
 
-/** Skills to seed unconditionally — pod-wide instruction know-how. */
-/** Skills to seed unconditionally — pod-wide instruction know-how. */
-const AGENCY_SKILL_PLAN = [
-  // Synap-native instruction skills (migrated from hardcoded prompt sections)
-  "synap-agent-memory",
-  "synap-automation-awareness",
-  "synap-branch-network",
-  "synap-channel-routing",
-  "synap-cofounder-response",
-  "synap-coordination",
-  "synap-data-discipline",
-  "synap-event-context",
-  "synap-graph-gardening",
-  "synap-group-context",
-  "synap-investigation",
-  "synap-memory-first",
-  "synap-next-action",
-  "synap-north-star",
-  "synap-organic-structuring",
-  "synap-personal-tone",
-  "synap-pm-context",
-  "synap-proactive-linking",
-  "synap-show-dont-tell",
-  "synap-task-recap",
-  "synap-user-model",
-  // Proprietary (The Arch Consulting)
-  "stellar-scf-grants-advisor",
-];
-
-/** Resolve the skills templates directory (parallels resolveTemplatesDir). */
-function resolveSkillsTemplatesDir(): string | null {
+/**
+ * Resolve the bundled skills templates directory (standard SKILL.md dirs).
+ * Shared with `synap skill add --bundled` via resolveBundledSkillsDir.
+ */
+export function resolveBundledSkillsDir(): string | null {
   const thisFile = fileURLToPath(import.meta.url);
   const cliRoot = path.resolve(path.dirname(thisFile), "..", "..");
-  const candidate = path.resolve(cliRoot, "templates", "instruction-skills");
+  const candidate = path.resolve(cliRoot, "templates", "skills");
   return fs.existsSync(candidate) ? candidate : null;
 }
 
 /**
- * Seed instruction skills from templates/skills/.
- * POSTs each .skill.json to /agent-skills/import — idempotent (slug-unique guard).
+ * Seed the bundled Synap-native skills from templates/skills/ (standard SKILL.md
+ * directories). Each becomes a pod-wide instruction skill via /agent-skills/import;
+ * references/ files become linked documents. Idempotent (slug-unique guard).
  */
 async function applyAgencySkills(
   cfg: Awaited<ReturnType<typeof resolveHubConfig>>
 ): Promise<void> {
-  const skillsDir = resolveSkillsTemplatesDir();
-  if (!skillsDir) { log.warn("Agency skill templates not found — skipping."); return; }
+  const skillsDir = resolveBundledSkillsDir();
+  if (!skillsDir) { log.warn("Bundled skill templates not found — skipping."); return; }
 
   const userId = await resolveUserId(cfg);
-  log.dim(`Seeding agency skills from ${skillsDir}…`);
+  const dirs = discoverSkillDirs(skillsDir);
+  log.dim(`Seeding ${dirs.length} bundled skill(s) from ${skillsDir}…`);
 
-  for (const key of AGENCY_SKILL_PLAN) {
-    const filePath = path.join(skillsDir, `${key}.skill.json`);
-    if (!fs.existsSync(filePath)) { log.dim(`  [skip] ${key} — template file not found`); continue; }
-
-    let payload: unknown;
-    try { payload = JSON.parse(fs.readFileSync(filePath, "utf-8")); } catch (err) {
-      log.warn(`  [error] ${key} — ${(err as Error).message}`); continue;
-    }
-
-    try {
-      const res = (await hubPost("/agent-skills/import", { userId, ...(payload as object) }, cfg)) as {
-        skill?: { id: string; name: string };
-        documents?: Array<{ id: string }>;
-        error?: string;
-      };
-      if (res.error && /already exists/i.test(res.error)) {
-        log.dim(`  [ok]   ${key.padEnd(34)} (already seeded)`);
-      } else if (res.skill) {
-        const docCount = res.documents?.length ?? 0;
-        log.dim(`  [ok]   ${key.padEnd(34)} skill=${res.skill.name} docs=${docCount}`);
-      } else {
-        log.dim(`  [ok]   ${key.padEnd(34)} imported`);
-      }
-    } catch (err) {
-      log.warn(`  [error] ${key} — ${(err as Error).message}`);
-    }
+  for (const dir of dirs) {
+    const parsed = parseSkillDir(dir);
+    if (!parsed) continue;
+    const res = await importSkill(parsed, userId, cfg);
+    const tag =
+      res.status === "exists" ? "(already seeded)"
+      : res.status === "error" ? `[error] ${res.error}`
+      : `imported${res.docs ? ` · ${res.docs} docs` : ""}`;
+    log.dim(`  [${res.status === "error" ? "!!" : "ok"}]   ${parsed.slug.padEnd(34)} ${tag}`);
   }
 }
 
