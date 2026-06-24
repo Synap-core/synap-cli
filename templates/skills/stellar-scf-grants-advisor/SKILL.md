@@ -1,9 +1,6 @@
 ---
 name: stellar-scf-grants-advisor
 description: Expert advisor for Stellar Community Fund (SCF) Build Award submissions. Use whenever the user asks to review, score, rewrite or build a Stellar grant Abstract or Build dossier. Triggers include any mention of SCF, Stellar Community Fund, Stellar grant, Stellar Build, Soroban grant, Stellar Abstract submission, or filenames/sheets named "Stellar Grants", "Project Abstract", "Application Build".
-metadata:
-  synap_native: false
-  auto_load: false
 ---
 
 # Stellar SCF Grants Advisor
@@ -102,4 +99,4 @@ After generating the file, present a concise chat summary: estimated probability
 
 Every review must end with an explicit budget recommendation, anchored on a named past winner or target. Format: *"Recommended budget: $X. This matches [Past Winner Name] (SCF #Y, $ZK awarded) which had a comparable profile of [team size] + [contract scope] + [distribution]. We recommend staying sub-max ($150K) to avoid the heightened scrutiny that SCF panels apply to maximum-ask submissions."*
 
-The data table in `reference/06-budget-benchmarks.md` lets you
+The data table in `reference/06-budget-benchmarks.md` lets you 

@@ -3,12 +3,13 @@
  *
  * Follows the Agent Skills open standard (agentskills.io): a skill is a DIRECTORY
  * with a `SKILL.md` at its root (YAML frontmatter + markdown body) and optional
- * `references/` files loaded on demand. This is the same format Claude Code,
- * Codex, Gemini CLI, Copilot and others use — so a Synap skill is portable, and
- * users can import any standard skill (incl. their own ~/.claude/skills/).
+ * nested files/subdirs for reference docs, examples, templates, and code. Every
+ * non-SKILL.md file becomes a linked document (the agent reads them on demand via
+ * get_document). This is the same format Claude Code, Codex, Gemini CLI, Copilot
+ * and others use.
  *
  * The pod stores them via POST /agent-skills/import: the SKILL.md body becomes
- * the instruction skill, each references/ file becomes a linked document.
+ * the instruction skill, every other file becomes a linked document.
  */
 
 import fs from "node:fs";
@@ -22,7 +23,7 @@ export interface ParsedSkill {
   body: string;
   /** auto_load=true → always-loaded core DNA; false → on-demand (catalog + load_skill). */
   autoLoad: boolean;
-  documents: Array<{ title: string; content: string; type: string }>;
+  documents: Array<{ title: string; content: string; type: string; language?: string }>;
 }
 
 /**
@@ -41,11 +42,79 @@ function parseFrontmatter(raw: string): {
 
   const fm: Record<string, string> = {};
   for (const line of fmBlock.split("\n")) {
-    // Flatten nested metadata keys (e.g. "  auto_load: true") to their leaf key.
     const m = line.match(/^\s*([a-zA-Z0-9_-]+):\s*(.*)$/);
     if (m && m[2] !== "") fm[m[1].trim()] = m[2].trim().replace(/^["']|["']$/g, "");
   }
   return { fm, body };
+}
+
+/**
+ * Recursively walk a directory, collecting every file (except SKILL.md) as a
+ * document. Preserves the relative path from `root` as the document title so the
+ * agent can reference files exactly as they appear in the skill (e.g.
+ * "reference/02-scoring-framework.md", "examples/q2-description-rewrites.md",
+ * "templates/abstract-review-builder.py").
+ *
+ * Binary files are skipped. Files over 512KB are skipped (anti-bloat guard).
+ */
+function collectAllDocuments(
+  root: string,
+  skillMdPath: string
+): ParsedSkill["documents"] {
+  const docs: ParsedSkill["documents"] = [];
+  const MAX_BYTES = 512 * 1024;
+
+  function walk(dir: string, prefix: string) {
+    let entries: fs.Dirent[];
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); }
+    catch { return; }
+
+    for (const entry of entries) {
+      const full = path.join(dir, entry.name);
+      const relPath = prefix ? `${prefix}/${entry.name}` : entry.name;
+
+      if (entry.isDirectory() || entry.isSymbolicLink()) {
+        // Follow symlink dirs; skip node_modules + .git
+        try {
+          const stat = entry.isSymbolicLink() ? fs.statSync(full) : null;
+          const isDir = entry.isDirectory() || (stat?.isDirectory() ?? false);
+          if (isDir && !["node_modules", ".git"].includes(entry.name)) {
+            walk(full, relPath);
+          }
+        } catch { /* broken symlink — skip */ }
+        continue;
+      }
+
+      if (!entry.isFile()) continue;
+      if (full === skillMdPath) continue; // body, not a document
+      if (entry.name.startsWith(".")) continue; // hidden files
+
+      try {
+        const stat = fs.statSync(full);
+        if (stat.size > MAX_BYTES) continue;
+      } catch { continue; }
+
+      // Map extension → document type
+      const ext = path.extname(entry.name).toLowerCase();
+      let type = "markdown";
+      let language: string | undefined;
+      if (ext === ".md") { type = "markdown"; }
+      else if (ext === ".py") { type = "code"; language = "python"; }
+      else if (ext === ".js" || ext === ".ts") { type = "code"; language = ext === ".ts" ? "typescript" : "javascript"; }
+      else if (ext === ".json") { type = "code"; language = "json"; }
+      else if (ext === ".txt") { type = "text"; }
+      else { continue; } // skip binary/unrecognized
+
+      let content: string;
+      try { content = fs.readFileSync(full, "utf-8"); }
+      catch { continue; } // binary file detected at read time — skip
+
+      docs.push({ title: relPath, content, type, language });
+    }
+  }
+
+  walk(root, "");
+  return docs;
 }
 
 /** Parse a single SKILL.md skill directory into an import payload. */
@@ -56,34 +125,19 @@ export function parseSkillDir(dir: string): ParsedSkill | null {
   const raw = fs.readFileSync(skillMd, "utf-8");
   const { fm, body } = parseFrontmatter(raw);
 
-  const slug = fm.name || path.basename(dir);
-  const name = fm.name || slug;
-  const description = fm.description || "";
-  const autoLoad = fm.auto_load === "true";
-
-  // references/ → documents (loaded on demand by the agent via get_document)
-  const documents: ParsedSkill["documents"] = [];
-  const refDir = path.join(dir, "references");
-  if (fs.existsSync(refDir)) {
-    for (const file of fs.readdirSync(refDir)) {
-      const full = path.join(refDir, file);
-      if (fs.statSync(full).isFile()) {
-        documents.push({
-          title: `references/${file}`,
-          content: fs.readFileSync(full, "utf-8"),
-          type: "markdown",
-        });
-      }
-    }
-  }
-
-  return { slug, name, description, body: body.trim(), autoLoad, documents };
+  return {
+    slug: fm.name || path.basename(dir),
+    name: fm.name || path.basename(dir),
+    description: fm.description || "",
+    body: body.trim(),
+    autoLoad: fm.auto_load === "true",
+    documents: collectAllDocuments(dir, skillMd),
+  };
 }
 
 /** Find every skill directory (one containing SKILL.md) under a root, one level deep. */
 export function discoverSkillDirs(root: string): string[] {
   if (!fs.existsSync(root)) return [];
-  // The root itself may be a single skill dir.
   if (fs.existsSync(path.join(root, "SKILL.md"))) return [root];
   const out: string[] = [];
   for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
