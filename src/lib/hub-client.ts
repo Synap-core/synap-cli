@@ -65,11 +65,14 @@ export async function resolveHubConfig(opts?: { podUrl?: string; apiKey?: string
   const envUser = process.env.SYNAP_USER_ID;
   const envScopes = process.env.SYNAP_KEY_SCOPES;
   const envWorkspace = process.env.SYNAP_WORKSPACE_ID;
-  if (envPod && envKey && envUser) {
+  // Env vars win over saved profile when the core pair is present. userId is
+  // resolved lazily by resolveUserId() — don't gate on it; most shells only set
+  // SYNAP_POD_URL + SYNAP_HUB_API_KEY (set by synap connect / bridge-setup).
+  if (envPod && envKey) {
     return {
       podUrl: envPod,
       apiKey: envKey,
-      userId: envUser,
+      userId: envUser ?? "cli",
       workspaceId: envWorkspace || getActiveWorkspaceId(),
       scopes: envScopes ? envScopes.split(",") : undefined,
     };
