@@ -161,18 +161,50 @@ export async function addSkill(
 /** synap skill list */
 export async function listSkills(opts: SkillManageOpts): Promise<void> {
   const cfg = await resolveHubConfig(opts);
-  const res = (await hubGet("/agent-skills", {}, cfg)) as {
-    skills?: Array<{ slug: string; name: string; description: string | null }>;
-  };
-  const skills = res.skills ?? [];
+  // The executable route returns ALL skills (instruction + code) with kind and metadata.
+  // The doc-style /agent-skills route only returns a subset and has empty slugs for legacy rows.
+  const res = (await hubGet(
+    `/agent-skills/executable?userId=${cfg.userId ?? ""}&status=active&approved=true`,
+    {},
+    cfg
+  )) as Array<{
+    name: string;
+    description?: string;
+    kind?: string;
+    metadata?: { autoLoad?: boolean };
+    body?: string;
+    code?: string;
+  }>;
+  const skills = Array.isArray(res) ? res : [];
+  const core = skills.filter((s) => s.metadata?.autoLoad === true);
+  const onDemand = skills.filter((s) => s.metadata?.autoLoad !== true);
+
   if (skills.length === 0) {
     log.dim("No skills on the pod yet. Add some: synap skill add bundled");
     return;
   }
-  console.log(chalk.bold(`\nSkills on your pod (${skills.length})\n`));
-  for (const s of skills) {
-    console.log(`  ${chalk.cyan(s.slug)}`);
-    if (s.description) console.log(`    ${chalk.dim(s.description.slice(0, 100))}`);
+
+  const summary = `${skills.length} total (${core.length} core auto-load, ${onDemand.length} on-demand)`;
+  console.log(chalk.bold(`\nSkills on your pod — ${summary}\n`));
+
+  const print = (skills: typeof core, badge: string) => {
+    for (const s of skills) {
+      const slug = s.name;
+      const kind = s.kind ?? (s.body ? "instruction" : s.code ? "code" : "?");
+      const desc = s.description?.slice(0, 120) ?? "";
+      console.log(`  ${chalk.cyan(slug.padEnd(42))} ${chalk.dim(kind)}  ${badge}`);
+      if (desc) console.log(`  ${" ".repeat(42)} ${chalk.dim(desc)}`);
+    }
+  };
+
+  if (core.length > 0) {
+    console.log(chalk.bold("Core (auto-injected every turn)"));
+    print(core, chalk.green("● core"));
+  }
+  if (onDemand.length > 0) {
+    if (core.length > 0) console.log("");
+    console.log(chalk.bold("On-demand (catalog — agent calls load_skill when relevant)"));
+    print(onDemand, chalk.yellow("○ on-demand"));
   }
   console.log("");
 }
