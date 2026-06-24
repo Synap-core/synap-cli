@@ -353,7 +353,33 @@ async function applyAgencyCapabilities(
 // ── Agency skill seeding (instruction skills) ──────────────────────────────
 
 /** Skills to seed unconditionally — pod-wide instruction know-how. */
-const AGENCY_SKILL_PLAN = ["stellar-scf-grants-advisor"];
+/** Skills to seed unconditionally — pod-wide instruction know-how. */
+const AGENCY_SKILL_PLAN = [
+  // Synap-native instruction skills (migrated from hardcoded prompt sections)
+  "synap-agent-memory",
+  "synap-automation-awareness",
+  "synap-branch-network",
+  "synap-channel-routing",
+  "synap-cofounder-response",
+  "synap-coordination",
+  "synap-data-discipline",
+  "synap-event-context",
+  "synap-graph-gardening",
+  "synap-group-context",
+  "synap-investigation",
+  "synap-memory-first",
+  "synap-next-action",
+  "synap-north-star",
+  "synap-organic-structuring",
+  "synap-personal-tone",
+  "synap-pm-context",
+  "synap-proactive-linking",
+  "synap-show-dont-tell",
+  "synap-task-recap",
+  "synap-user-model",
+  // Proprietary (The Arch Consulting)
+  "stellar-scf-grants-advisor",
+];
 
 /** Resolve the skills templates directory (parallels resolveTemplatesDir). */
 function resolveSkillsTemplatesDir(): string | null {

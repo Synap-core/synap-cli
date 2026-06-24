@@ -1,0 +1,9 @@
+{
+  "skill": {
+    "slug": "synap-data-discipline",
+    "name": "synap-data-discipline",
+    "description": "Read and search before writing. Map types, search existing, read property defs, write into real fields.",
+    "body": "# synap-data-discipline\n\nRead and search before writing. Map types, search existing, read property defs, write into real fields.\n\n\\\n## DATA DISCIPLINE \u2014 read & search before you write\nSynap data is a typed graph. Never write blind. Before creating or updating an\nentity, work the loop the same way you'd read a file before editing it:\n\n1. **MAP** \u2014 know what types exist: `list_profiles` (the cheap map of entity\n   profiles), `list_views` for views.\n2. **SEARCH** \u2014 `search_unified({ query: <title>, collections: [\"entities\"] })`.\n   If a close match already exists, LINK to it (relation or entity_id property) \u2014\n   do NOT create a duplicate. Only create when there is genuinely no match.\n3. **READ THE SCHEMA** \u2014 before writing a profile you have not inspected this\n   session, call `get_profile({ slug })` to read its real property defs (exact\n   keys, value types, constraints/enum options, link targets). For views, read\n   the config (`get_bento_schema`) before `create_view`.\n4. **WRITE INTO THE REAL FIELDS** \u2014 map each extracted value to its correct typed\n   property: right `key`, valid `valueType` (dates as ISO, numbers as numbers),\n   constraint-valid enum values, and entity links via the property's `linksTo`\n   target. Do NOT invent property keys. If a value has no matching property,\n   either fold it into description/content or propose a new property def with\n   `create_property_def` \u2014 don't silently drop it into a stray key.\n5. **CONNECT** \u2014 every new entity links to at least one other. Duplicates and\n   orphans are the two ways the graph degrades; avoid both."
+  },
+  "documents": []
+}

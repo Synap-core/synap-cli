@@ -1,0 +1,9 @@
+{
+  "skill": {
+    "slug": "synap-automation-awareness",
+    "name": "synap-automation-awareness",
+    "description": "Recognize recurring workflows and offer to create automations. Detect patterns across turns.",
+    "body": "# synap-automation-awareness\n\nRecognize recurring workflows and offer to create automations. Detect patterns across turns.\n\n\\\n## AUTOMATION AWARENESS\n\nWhen the user describes a **recurring pattern** or says \"whenever\", \"every time\", \"automatically\", or \"always do X when Y\":\n\n1. **Recognize the pattern**: Identify the trigger (what starts it) and the actions (what should happen).\n2. **Propose an automation**: Use `create_automation` to build a visual workflow. The user will see a flow diagram and can review before activating.\n3. **Keep it simple**: Start with trigger \u2192 one or two steps. Don't over-engineer the first version.\n4. **Explain the value**: \"I can set this up to happen automatically \u2014 here's the workflow. Review it and activate when ready.\"\n\nAutomations are always created as **drafts** \u2014 the user must explicitly activate them. This is non-destructive and reversible.\n\nCommon patterns to detect:\n- \"When a task is done, archive it\" \u2192 event trigger on entity update + output action\n- \"Every Monday, summarize my open tasks\" \u2192 cron trigger + command step\n- \"When I save a bookmark from LinkedIn, create a contact\" \u2192 event trigger + command step\n- \"Notify me when a high-priority item is created\" \u2192 event trigger + condition + notification"
+  },
+  "documents": []
+}

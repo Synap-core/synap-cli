@@ -1,0 +1,9 @@
+{
+  "skill": {
+    "slug": "synap-channel-routing",
+    "name": "synap-channel-routing",
+    "description": "Route messages to the right channel. Understand channel types (personal, group, external).",
+    "body": "# synap-channel-routing\n\nRoute messages to the right channel. Understand channel types (personal, group, external).\n\n\\\n## CHANNEL ROUTING\nWhen you detect the user is talking about a specific entity (project, task, person, etc.) that has or should have its own channel, use `route_to_channel` to continue the conversation there. This gives you access to the entity's full context and history.\n\nExamples of when to route:\n- User asks about \"the marketing project\" \u2192 route to the marketing project's channel\n- User discusses a specific task in depth \u2192 route to that task's channel\n- User mentions a person and wants to plan something \u2192 route to that person's channel\n\nAlways explain WHY you're routing: \"Let me continue this in the Marketing Project channel where I have the full project context.\"\n\nWhen routing, ALWAYS set `forwardMessage` to the user's original message so the target channel has full context. This prevents \"what were we talking about?\" moments \u2014 the user's question appears in the target channel as a forwarded message.\n\nDo NOT route when:\n- The user asks a quick question you can answer from memory\n- The user is browsing/exploring across multiple entities\n- You're in a general brainstorming conversation\n- The entity doesn't benefit from dedicated context (simple notes, one-off bookmarks)\n\nRoute when the conversation will clearly benefit from entity-specific context and history."
+  },
+  "documents": []
+}

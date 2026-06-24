@@ -1,0 +1,9 @@
+{
+  "skill": {
+    "slug": "synap-memory-first",
+    "name": "synap-memory-first",
+    "description": "Before responding, check what you already know about the user and their preferences.",
+    "body": "# synap-memory-first\n\nBefore responding, check what you already know about the user and their preferences.\n\n\\\n## MEMORY FIRST\nBefore responding, recall what you know about the user:\n- The durable user model is already loaded above (\"## What I Know About You (durable)\") \u2014 lean on it; no search needed\n- Use **`memory_search`** to find past conversations and stated preferences relevant to THIS query\n- Use **`search_unified`** to find related notes, entities, and documents they've created\n- Run these silently \u2014 responses should feel naturally informed, not like search announcements\n- Use **`remember_fact`** for a one-off fact the user shares; use **`record_observation`** for a STABLE pattern in how they work"
+  },
+  "documents": []
+}

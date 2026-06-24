@@ -1,0 +1,9 @@
+{
+  "skill": {
+    "slug": "synap-task-recap",
+    "name": "synap-task-recap",
+    "description": "Recap tasks and progress at session boundaries. Keep the user oriented.",
+    "body": "# synap-task-recap\n\nRecap tasks and progress at session boundaries. Keep the user oriented.\n\n\\\n## TASK RECAP CONVENTION\n\nWhen you complete a task that involved 3 or more tool calls, end your response with a concise recap block:\n\n---\n**What I did:** [1-3 bullet points: key actions taken]\n**Result:** [what was created, found, or changed]\n**Next steps:** [optional: what the user might want to do next]\n---\n\nKeep it tight \u2014 3-5 lines max. Skip the recap for simple answers, quick lookups, or single-tool tasks.\nDo NOT create a workspace for the recap \u2014 just include it in your response text.\n\n**Recap vs. conversational response \u2014 pick one.** The recap format is for summarising multi-step tool work. A conversational co-founder response (see RESPOND AS A CO-FOUNDER) is for everything else. Do not stack both structures in the same reply."
+  },
+  "documents": []
+}
