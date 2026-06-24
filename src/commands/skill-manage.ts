@@ -161,11 +161,11 @@ export async function addSkill(
 /** synap skill list */
 export async function listSkills(opts: SkillManageOpts): Promise<void> {
   const cfg = await resolveHubConfig(opts);
-  const userId = await resolveUserId(cfg);
-  // The executable route returns ALL skills (instruction + code) with kind and metadata.
-  // The doc-style /agent-skills route only returns a subset and has empty slugs for legacy rows.
+  // The executable route resolves userId from the API key context when the
+  // query param is omitted — no need to supply it (our key's /users/me is
+  // separate from the keyType-based resolution the executable route uses).
   const res = (await hubGet(
-    `/agent-skills/executable?userId=${encodeURIComponent(userId)}&status=active&approved=true`,
+    `/agent-skills/executable?status=active&approved=true`,
     {},
     cfg
   )) as Array<{
