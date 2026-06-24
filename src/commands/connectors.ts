@@ -1,8 +1,13 @@
 /**
- * synap connectors — Manage pod connector integrations (Nango-powered)
+ * synap tools — Add and manage external service tools (credentials + connections)
  *
- * Subcommands: list, sync, disconnect, schema
- * Top-level alias: synap connect [service]
+ * "Connector" is a hidden implementation detail. The user model is: add a tool,
+ * it needs a credential — either a vault-stored API key or an OAuth connection
+ * through a credential provider (Nango by default). The tool's credentialRef
+ * (vault:// | nango://) is resolved at execution time; the user never sees
+ * the connector name.
+ *
+ * Subcommands: list, connect, disconnect, sync, add
  */
 
 import chalk from "chalk";
@@ -52,7 +57,7 @@ async function fetchProviders(cfg: HubCfg, workspaceId?: string): Promise<Connec
   return (r.providers ?? []) as ConnectorProvider[];
 }
 
-// ── Public: connectorsConnect ─────────────────────────────────────────────────
+// ── Public: toolsConnect ───────────────────────────────────────────────────────
 
 export interface ConnectOpts {
   workspace?: string;
@@ -60,7 +65,7 @@ export interface ConnectOpts {
   apiKey?: string;
 }
 
-export async function connectorsConnect(service: string | undefined, opts: ConnectOpts): Promise<void> {
+export async function toolsConnect(service: string | undefined, opts: ConnectOpts): Promise<void> {
   let cfg: HubCfg;
   try {
     cfg = await resolveHubConfig({ podUrl: opts.podUrl, apiKey: opts.apiKey });
@@ -93,7 +98,7 @@ export async function connectorsConnect(service: string | undefined, opts: Conne
 
   if (status === "connected") {
     log.heading(`${res.displayName ?? res.provider} is already connected`);
-    log.dim(`Run \`synap connectors list\` to see all connections.`);
+    log.dim(`Run \`synap tools list\` to see all tools and their credentials.`);
     return;
   }
 
@@ -105,7 +110,7 @@ export async function connectorsConnect(service: string | undefined, opts: Conne
       console.log(`  ${chalk.cyan(p.provider)}${p.displayName ? chalk.dim(`  (${p.displayName})`) : ""}`);
     }
     console.log();
-    log.dim(`Run \`synap connectors connect <name>\` with one of the above.`);
+    log.dim(`Run \`synap tools connect <name>\` with one of the above.`);
     return;
   }
 
@@ -121,17 +126,17 @@ export async function connectorsConnect(service: string | undefined, opts: Conne
 
   openBrowser(redirectUrl);
 
-  log.dim(`Once connected, records will import automatically. Run \`synap connectors list\` to check status.`);
+  log.dim(`Once connected, records will import automatically. Run \`synap tools list\` to check status.`);
 }
 
-// ── Public: connectorsList ────────────────────────────────────────────────────
+// ── Public: toolsList ──────────────────────────────────────────────────────────
 
 export interface ListOpts {
   json?: boolean;
   workspace?: string;
 }
 
-export async function connectorsList(opts: ListOpts): Promise<void> {
+export async function toolsList(opts: ListOpts): Promise<void> {
   let cfg: HubCfg;
   try {
     cfg = await resolveHubConfig();
@@ -142,14 +147,14 @@ export async function connectorsList(opts: ListOpts): Promise<void> {
 
   const workspaceId = opts.workspace ?? cfg.workspaceId;
 
-  const spinner = opts.json ? null : ora({ text: "Fetching connectors…", color: "cyan" }).start();
+  const spinner = opts.json ? null : ora({ text: "Fetching tools…", color: "cyan" }).start();
 
   let providers: ConnectorProvider[];
   try {
     providers = await fetchProviders(cfg, workspaceId);
     spinner?.stop();
   } catch (err) {
-    spinner?.fail(chalk.red("Failed to fetch connectors"));
+    spinner?.fail(chalk.red("Failed to fetch tools"));
     log.error((err as Error).message);
     process.exit(1);
   }
@@ -160,7 +165,7 @@ export async function connectorsList(opts: ListOpts): Promise<void> {
   }
 
   if (providers.length === 0) {
-    log.warn("No connectors configured on this pod.");
+    log.warn("No tools configured on this pod.");
     log.dim(`Set up Nango at ${cfg.podUrl}/admin/settings.`);
     return;
   }
@@ -179,13 +184,13 @@ export async function connectorsList(opts: ListOpts): Promise<void> {
   console.log();
 }
 
-// ── Public: connectorsSync ────────────────────────────────────────────────────
+// ── Public: toolsSync ────────────────────────────────────────────────────
 
 export interface SyncOpts {
   workspace?: string;
 }
 
-export async function connectorsSync(provider: string, opts: SyncOpts): Promise<void> {
+export async function toolsSync(provider: string, opts: SyncOpts): Promise<void> {
   let cfg: HubCfg;
   try {
     cfg = await resolveHubConfig();
@@ -234,14 +239,14 @@ export async function connectorsSync(provider: string, opts: SyncOpts): Promise<
   }
 }
 
-// ── Public: connectorsDisconnect ──────────────────────────────────────────────
+// ── Public: toolsDisconnect ──────────────────────────────────────────────
 
 export interface DisconnectOpts {
   workspace?: string;
   force?: boolean;
 }
 
-export async function connectorsDisconnect(provider: string, opts: DisconnectOpts): Promise<void> {
+export async function toolsDisconnect(provider: string, opts: DisconnectOpts): Promise<void> {
   let cfg: HubCfg;
   try {
     cfg = await resolveHubConfig();
@@ -294,14 +299,14 @@ export async function connectorsDisconnect(provider: string, opts: DisconnectOpt
   }
 }
 
-// ── Public: connectorsSchema ──────────────────────────────────────────────────
+// ── Public: toolsSchema ──────────────────────────────────────────────────
 
 export interface SchemaOpts {
   writeContext?: string | boolean;
   json?: boolean;
 }
 
-export async function connectorsSchema(opts: SchemaOpts): Promise<void> {
+export async function toolsSchema(opts: SchemaOpts): Promise<void> {
   let cfg: HubCfg;
   try {
     cfg = await resolveHubConfig();
@@ -334,7 +339,7 @@ export async function connectorsSchema(opts: SchemaOpts): Promise<void> {
     const outputPath =
       typeof opts.writeContext === "string" && opts.writeContext.length > 0
         ? opts.writeContext
-        : ".claude/CONNECTOR_CONTEXT.md";
+        : ".claude/TOOLS_CONTEXT.md";
 
     const dir = outputPath.includes("/") ? outputPath.split("/").slice(0, -1).join("/") : ".";
     if (dir && dir !== "." && !existsSync(dir)) {
@@ -395,19 +400,19 @@ function buildConnectorSchemaMarkdown(schema: Record<string, unknown>, podUrl: s
     `synap connect github`,
     ``,
     `# List all connectors and connection status`,
-    `synap connectors list`,
-    `synap connectors list --json`,
+    `synap tools list`,
+    `synap tools list --json`,
     ``,
     `# Trigger a manual sync for a connected provider`,
-    `synap connectors sync <provider>`,
+    `synap tools sync <provider>`,
     ``,
     `# Disconnect a provider`,
-    `synap connectors disconnect <provider>`,
-    `synap connectors disconnect google --force`,
+    `synap tools disconnect <provider>`,
+    `synap tools disconnect google --force`,
     ``,
     `# Fetch this schema`,
-    `synap connectors schema`,
-    `synap connectors schema --write-context   # writes to .claude/CONNECTOR_CONTEXT.md`,
+    `synap tools schema`,
+    `synap tools schema --write-context   # writes to .claude/TOOLS_CONTEXT.md`,
     `\`\`\``,
     ``,
     `## Hub REST Endpoints`,
@@ -422,10 +427,10 @@ function buildConnectorSchemaMarkdown(schema: Record<string, unknown>, podUrl: s
     ``,
     `## AI Usage Flow`,
     ``,
-    `1. Check connected services: \`synap connectors list\``,
+    `1. Check connected services: \`synap tools list\``,
     `2. Connect a new service: \`synap connect <provider>\` — opens OAuth in browser`,
     `3. Once connected, records import automatically on Nango's schedule`,
-    `4. Trigger immediate import: \`synap connectors sync <provider>\``,
+    `4. Trigger immediate import: \`synap tools sync <provider>\``,
     `5. Query imported entities: \`synap ask "meeting notes from Google Calendar"\``,
   );
 

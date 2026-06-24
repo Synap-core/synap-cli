@@ -122,11 +122,11 @@ function sectionConnectors(): void {
   console.log(chalk.bold("\n## Connectors"));
   console.log(chalk.dim("  39 Nango-powered integrations: Google, GitHub, Notion, Linear, Slack, Jira, …"));
   console.log("");
-  console.log(`  ${chalk.cyan("synap connectors list")}      ${chalk.dim("→ available connectors + connection status")}`);
-  console.log(`  ${chalk.cyan("synap connect-service [name]")} ${chalk.dim("→ interactive connect flow")}`);
-  console.log(`  ${chalk.cyan("synap connectors sync <provider>")} ${chalk.dim("→ trigger manual sync")}`);
-  console.log(`  ${chalk.cyan("synap connectors disconnect <provider>")}`);
-  console.log(`  ${chalk.cyan("synap connectors schema")}    ${chalk.dim("→ supported providers + field mapping (AI context)")}`);
+  console.log(`  ${chalk.cyan("synap tools list")}            ${chalk.dim("→ available tools + connection status")}`);
+  console.log(`  ${chalk.cyan("synap tools connect [name]")}   ${chalk.dim("→ connect a credential to a tool")}`);
+  console.log(`  ${chalk.cyan("synap tools sync <provider>")}  ${chalk.dim("→ trigger manual sync")}`);
+  console.log(`  ${chalk.cyan("synap tools disconnect <provider>")}`);
+  console.log(`  ${chalk.cyan("synap tools schema")}          ${chalk.dim("→ supported providers + field mapping (AI context)")}`);
 }
 
 function sectionAgents(): void {
@@ -218,6 +218,7 @@ export async function explain(opts: ExplainOpts): Promise<void> {
     case "proposal":
       sectionGovernance();
       break;
+    case "tools":
     case "connectors":
     case "connector":
     case "integrations":
