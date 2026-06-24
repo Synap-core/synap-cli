@@ -159,13 +159,18 @@ export async function addSkill(
 }
 
 /** synap skill list */
-export async function listSkills(opts: SkillManageOpts): Promise<void> {
+export async function listSkills(opts: SkillManageOpts & { debug?: boolean }): Promise<void> {
   const cfg = await resolveHubConfig(opts);
-  // The executable route resolves userId from the API key context when the
-  // query param is omitted — no need to supply it (our key's /users/me is
-  // separate from the keyType-based resolution the executable route uses).
+  if (opts.debug) log.dim(`key prefix: ${cfg.apiKey.slice(0, 16)}...  userId: ${cfg.userId}  pod: ${cfg.podUrl}`);
+
+  // Resolve the operator userId from the key context. The executable route
+  // returns ALL pod-scoped skills regardless of userId, but the scope filter
+  // in the tRPC procedure uses the ACTING userId from the key context.
+  // We send the userId explicitly so the filter includes user-scoped skills
+  // matching the resolved user, not just pod-scoped ones.
+  const userId = await resolveUserId(cfg);
   const res = (await hubGet(
-    `/agent-skills/executable?status=active&approved=true`,
+    `/agent-skills/executable?userId=${encodeURIComponent(userId)}&status=active&approved=true`,
     {},
     cfg
   )) as Array<{

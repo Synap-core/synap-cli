@@ -798,6 +798,7 @@ skillCmd
   .description("List the instruction skills installed on your pod")
   .option("--pod-url <url>", "Pod URL override")
   .option("--api-key <key>", "API key override")
+  .option("--debug", "Show resolved credentials")
   .action(async (opts) => {
     const { listSkills } = await import("./commands/skill-manage.js");
     await listSkills(opts);
