@@ -4,3 +4,7 @@ dist/
 !src/
 skills/
 .synap-session
+
+# Bundled skill templates (the "skills/" rule above is for ~/.claude-style local skills)
+!templates/skills/
+!templates/skills/**
