@@ -156,9 +156,10 @@ program
 program
   .command("statusline", { hidden: true })
   .description("(internal) Compact ANSI status line for Claude Code")
-  .action(async () => {
+  .option("--refresh", "Refresh the pod cache (run detached in the background)")
+  .action(async (opts: { refresh?: boolean }) => {
     const { statusline } = await import("./commands/statusline.js");
-    await statusline();
+    await statusline({ refresh: opts.refresh });
   });
 
 program
