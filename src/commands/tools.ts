@@ -308,25 +308,19 @@ export async function toolsSync(provider: string, opts: SyncOpts): Promise<void>
     process.exit(1);
   }
 
-  const spinner = ora({ text: "Triggering sync…", color: "cyan" }).start();
-
-  try {
-    await hubPost(
-      "/connectors/actions",
-      { connectionId, providerConfigKey: provider, actionName: "sync", input: {} },
-      cfg
-    );
-    spinner.succeed(chalk.green(`Sync triggered for ${chalk.bold(provider)}. Records will import in the background.`));
-  } catch (err) {
-    const msg = (err as Error).message;
-    // Non-200 may mean manual sync not configured — handle gracefully
-    spinner.warn(
-      chalk.yellow(
-        `Sync triggered (manual sync may not be configured for this provider — automatic sync runs on the Nango schedule)`
-      )
-    );
-    log.dim(msg);
-  }
+  // NOTE: the old background-import "sync" (POST /connectors/actions, a Nango
+  // named action) was retired — self-hosted Nango doesn't run Actions, and the
+  // model moved to ON-DEMAND access: a connected service is reached live via its
+  // capability skills (e.g. gmail_search), not pre-imported on a schedule. So
+  // there is nothing to trigger here; report honestly instead of calling a dead
+  // route and faking success.
+  void connectionId;
+  log.heading(`${chalk.bold(provider)} is connected — no manual sync needed`);
+  log.dim(
+    "Connected services are queried on demand by your agent's capabilities " +
+      "(e.g. search, list, send), not imported on a schedule."
+  );
+  log.dim(`Run \`synap tools list\` to see connection status.`);
 }
 
 // ── Public: toolsDisconnect ──────────────────────────────────────────────
@@ -407,9 +401,14 @@ export async function toolsSchema(opts: SchemaOpts): Promise<void> {
 
   const spinner = opts.json ? null : ora({ text: "Fetching tool schema…", color: "cyan" }).start();
 
+  // The dedicated /connectors/schema route was retired; the provider catalog +
+  // connection status now comes from /connectors/providers (the same source the
+  // list command uses). Shape it into the { providers } envelope the markdown
+  // builder expects.
   let schema: unknown;
   try {
-    schema = await hubGet("/connectors/schema", {}, cfg);
+    const providers = await fetchProviders(cfg);
+    schema = { providers };
     spinner?.stop();
   } catch (err) {
     spinner?.fail(chalk.red("Failed to fetch tool schema"));
@@ -493,7 +492,7 @@ function buildToolSchemaMarkdown(schema: Record<string, unknown>, podUrl: string
     `synap tools list`,
     `synap tools list --json`,
     ``,
-    `# Trigger a manual sync for a connected provider`,
+    `# Check a connected provider (services are queried on demand, not pre-imported)`,
     `synap tools sync <provider>`,
     ``,
     `# Disconnect a provider`,
@@ -509,19 +508,19 @@ function buildToolSchemaMarkdown(schema: Record<string, unknown>, podUrl: string
     ``,
     `| Method | Path | Description |`,
     `|--------|------|-------------|`,
+    `| POST | /api/hub/connectors/connect | Resolve-or-start a connection (unified door) |`,
     `| GET | /api/hub/connectors/providers | List providers and connection status |`,
     `| POST | /api/hub/connectors/session | Start OAuth session, get redirectUrl |`,
     `| POST | /api/hub/connectors/disconnect | Disconnect a provider |`,
-    `| GET | /api/hub/connectors/schema | This schema |`,
-    `| POST | /api/hub/connectors/actions | Trigger a provider action (e.g. sync) |`,
+    `| POST | /api/hub/connectors/tool-execute | Run a provider call (proxied, governed) |`,
     ``,
     `## AI Usage Flow`,
     ``,
     `1. Check connected services: \`synap tools list\``,
     `2. Connect a new service: \`synap connect <provider>\` — opens OAuth in browser`,
-    `3. Once connected, records import automatically on Nango's schedule`,
-    `4. Trigger immediate import: \`synap tools sync <provider>\``,
-    `5. Query imported entities: \`synap ask "meeting notes from Google Calendar"\``,
+    `3. Connecting installs the service's capability skills (e.g. gmail_send, gmail_search)`,
+    `4. The agent reaches the service ON DEMAND through those skills (no scheduled import)`,
+    `5. Ask naturally: \`synap ask "any emails from Acme this week?"\``,
   );
 
   return lines.join("\n");
