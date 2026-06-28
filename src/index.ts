@@ -398,6 +398,38 @@ program
     await useWorkspace(workspace, opts);
   });
 
+// ─── project / lens (per-Claude-session scoping) ──────────────────────────────
+const project = program
+  .command("project")
+  .description("Focus this Claude session on a project (cross-cutting lens)");
+project
+  .command("use <projectId>")
+  .description("Scope this session to a project — narrows scoped calls + statusline")
+  .option("--json", "Output as JSON")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (projectId: string, opts) => {
+    const { useProject } = await import("./commands/lens.js");
+    await useProject(projectId, opts);
+  });
+project
+  .command("clear")
+  .description("Clear this session's project focus")
+  .option("--json", "Output as JSON")
+  .action(async (opts) => {
+    const { clearProject } = await import("./commands/lens.js");
+    await clearProject(opts);
+  });
+
+program
+  .command("lens")
+  .description("Show this Claude session's lens (workspace + project + focus session)")
+  .option("--json", "Output as JSON")
+  .action(async (opts) => {
+    const { showLens } = await import("./commands/lens.js");
+    await showLens(opts);
+  });
+
 // ─── note ─────────────────────────────────────────────────────────────────────
 // Quick `note` entity. The one canonical READ verb is `ask`; the one canonical
 // structured-WRITE verb is `capture`. (search / recall / remember removed — they

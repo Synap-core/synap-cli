@@ -161,14 +161,23 @@ export async function useWorkspace(
       process.exit(1);
     }
 
-    const { setActiveWorkspaceId } = await import("../lib/pod.js");
-    setActiveWorkspaceId(String(match.id));
+    // In a Claude Code session, scope to THIS session's lens (so concurrent
+    // sessions can be on different workspaces). Otherwise set the global default.
+    const { getClaudeSessionId, writeLens } = await import("../lib/session-lens.js");
+    const claudeSession = getClaudeSessionId();
+    if (claudeSession) {
+      writeLens(claudeSession, { workspaceId: String(match.id) });
+    } else {
+      const { setActiveWorkspaceId } = await import("../lib/pod.js");
+      setActiveWorkspaceId(String(match.id));
+    }
 
     if (opts.json) {
-      console.log(JSON.stringify({ workspaceId: match.id, name: match.name }, null, 2));
+      console.log(JSON.stringify({ workspaceId: match.id, name: match.name, scope: claudeSession ? "session" : "global" }, null, 2));
       return;
     }
-    log.success(`Now in workspace: ${chalk.bold(String(match.name ?? match.id))} ${chalk.dim(String(match.id ?? ""))}`);
+    const scopeNote = claudeSession ? chalk.dim(" (this session)") : "";
+    log.success(`Now in workspace: ${chalk.bold(String(match.name ?? match.id))} ${chalk.dim(String(match.id ?? ""))}${scopeNote}`);
   } catch (e) {
     console.error(chalk.red("Error: " + (e as Error).message));
     process.exit(1);

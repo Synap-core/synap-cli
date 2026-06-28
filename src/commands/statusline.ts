@@ -24,6 +24,7 @@ import fs from "node:fs";
 import os from "node:os";
 import { execSync, spawn } from "node:child_process";
 import { resolveHubConfig, hubGet } from "../lib/hub-client.js";
+import { resolveActiveLens } from "../lib/session-lens.js";
 
 const CACHE_FILE = "/tmp/synap-statusline-cache.json";
 const LOCK_FILE = "/tmp/synap-statusline-refresh.lock";
@@ -107,13 +108,19 @@ function lockIsFresh(): boolean {
   }
 }
 
-function triggerRefresh(): void {
+function triggerRefresh(claudeSessionId?: string): void {
   if (lockIsFresh()) return; // a refresh is already running
   try {
     const entry = process.argv[1]; // the CLI entry script
+    // The detached refresh has no Claude env of its own — forward the session
+    // id (from stdin) so its resolveHubConfig/lens picks the right workspace.
+    const env = claudeSessionId
+      ? { ...process.env, SYNAP_LENS_SESSION: claudeSessionId }
+      : process.env;
     const child = spawn(process.execPath, [entry, "statusline", "--refresh"], {
       detached: true,
       stdio: "ignore",
+      env,
     });
     child.unref();
   } catch {
@@ -136,14 +143,27 @@ async function refresh(): Promise<void> {
     const cfg = await resolveHubConfig({});
     if (!cfg.podUrl || !cfg.apiKey) return;
 
-    // Minimal 3-call burst (the pod's edge limiter is shared with agent
-    // traffic). `/workspaces` succeeding doubles as the liveness signal — no
-    // separate `/health` call. Project lens is deferred to the aggregation
-    // endpoint (a server-side join — free there, 2 extra calls here).
-    const [ws, skills, sessions] = await Promise.allSettled([
+    // This connection's per-Claude-session lens (forwarded as SYNAP_LENS_SESSION
+    // by the render process). Drives WHICH project/session we show — the bound
+    // ones, not a global guess.
+    const lens = resolveActiveLens();
+
+    // Minimal burst (the pod's edge limiter is shared with agent traffic).
+    // `/workspaces` succeeding doubles as the liveness signal — no separate
+    // `/health`. The bound focus-session and project are fetched by id only
+    // when the lens has them (0–2 extra calls).
+    const sessionReq = lens?.focusSessionId
+      ? hubGet(`/focus-sessions/${lens.focusSessionId}`, cfg.workspaceId ? { workspaceId: cfg.workspaceId } : {}, cfg)
+      : hubGet("/focus-sessions?status=active&limit=1", {}, cfg);
+    const projectReq = lens?.projectId
+      ? hubGet(`/projects?ids=${encodeURIComponent(lens.projectId)}`, {}, cfg)
+      : Promise.resolve(null);
+
+    const [ws, skills, session, project] = await Promise.allSettled([
       hubGet("/workspaces", {}, cfg),
       hubGet("/agent-skills?limit=1", {}, cfg),
-      hubGet("/focus-sessions?status=active&limit=1", {}, cfg),
+      sessionReq,
+      projectReq,
     ]);
 
     // Reached the pod iff /workspaces returned a well-formed payload.
@@ -161,12 +181,25 @@ async function refresh(): Promise<void> {
     const skillCount =
       skills.status === "fulfilled" ? ((skills.value as { total?: number })?.total ?? 0) : prev?.skillCount ?? 0;
 
+    // Bound session — either the by-id fetch (object) or the active-list fallback.
     let sessionGoal = prev?.sessionGoal ?? "";
     let sessionId = prev?.sessionId ?? "";
-    if (sessions.status === "fulfilled") {
-      const s = (sessions.value as { sessions?: Array<{ id: string; goal?: string }> })?.sessions?.[0];
+    if (session.status === "fulfilled" && session.value) {
+      const v = session.value as { id?: string; goal?: string; sessions?: Array<{ id: string; goal?: string }> };
+      const s = v.sessions ? v.sessions[0] : v; // list-shape vs object-shape
       sessionGoal = s?.goal?.slice(0, 60) ?? "";
       sessionId = s?.id ?? "";
+    } else if (lens?.focusSessionId) {
+      sessionGoal = "";
+      sessionId = "";
+    }
+
+    // Bound project (only when the lens has one).
+    let projectName = lens?.projectId ? prev?.projectName ?? "" : "";
+    let projectId = lens?.projectId ?? "";
+    if (project.status === "fulfilled" && project.value) {
+      const p = (project.value as { projects?: Array<{ id: string; name: string }> })?.projects?.find((x) => x.id === lens?.projectId);
+      projectName = p?.name?.slice(0, 30) ?? "";
     }
 
     const out: PodCache = {
@@ -174,8 +207,8 @@ async function refresh(): Promise<void> {
       ok: true,
       activeWorkspaceId: cfg.workspaceId ?? "", // the lens THIS connection resolves to
       workspaces,
-      projectName: "", // deferred to aggregation endpoint
-      projectId: "",
+      projectName,
+      projectId,
       skillCount,
       proposalCount: prev?.proposalCount ?? 0, // deferred to aggregation endpoint
       sessionGoal,
@@ -203,9 +236,13 @@ function render(): void {
     if (raw?.trim()) cc = JSON.parse(raw);
   } catch {}
 
+  // The Claude session id — forwarded to the detached refresh so it resolves
+  // THIS session's lens (workspace/project/session), not a global guess.
+  const claudeSessionId = (cc.session_id as string | undefined) || process.env.CLAUDE_CODE_SESSION_ID;
+
   const cache = readCache();
   // Trigger a background refresh if cache is missing or stale.
-  if (!cache || Date.now() - cache.ts > REFRESH_TTL_MS) triggerRefresh();
+  if (!cache || Date.now() - cache.ts > REFRESH_TTL_MS) triggerRefresh(claudeSessionId);
 
   const pod = cache ?? emptyCache();
 

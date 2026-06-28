@@ -48,8 +48,13 @@ export async function startSession(
     }
 
     const id = String(session.id ?? "");
-    // Auto-attach: make this session active for the current terminal
+    // Auto-attach: make this session active for the current terminal (per-CWD)
+    // AND for this Claude Code session's lens (per-session), so the statusline
+    // and every scoped call reflect it.
     writeActiveSessionId(id);
+    const { getClaudeSessionId, writeLens } = await import("../lib/session-lens.js");
+    const cs = getClaudeSessionId();
+    if (cs) writeLens(cs, { focusSessionId: id });
     log.success(`Session started and attached`);
     console.log(`  ID:      ${chalk.bold(id)}`);
     console.log(`  Goal:    ${chalk.white(opts.goal)}`);
@@ -207,6 +212,9 @@ export async function attachSession(
     process.exit(1);
   }
   writeActiveSessionId(id);
+  const { getClaudeSessionId, writeLens } = await import("../lib/session-lens.js");
+  const cs = getClaudeSessionId();
+  if (cs) writeLens(cs, { focusSessionId: id });
   if (opts.json) {
     console.log(JSON.stringify({ ok: true, sessionId: id }));
     return;

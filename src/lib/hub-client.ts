@@ -2,6 +2,7 @@ import { existsSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { getActivePodConfig, getActiveWorkspaceId, listPodProfiles } from "./pod.js";
 import { resolveAgentOverride } from "./agents-config.js";
+import { resolveActiveLens } from "./session-lens.js";
 import { HubRestClient } from "@synap/hub-rest-client";
 
 export interface HubConfig {
@@ -70,7 +71,9 @@ export async function resolveHubConfig(opts?: { podUrl?: string; apiKey?: string
       podUrl: envPod,
       apiKey: envKey,
       userId: envUser,
-      workspaceId: envWorkspace || getActiveWorkspaceId(),
+      // Per-Claude-session lens wins over the global env var, so concurrent
+      // sessions can each be scoped to a different workspace.
+      workspaceId: resolveActiveLens()?.workspaceId || envWorkspace || getActiveWorkspaceId(),
       scopes: envScopes ? envScopes.split(",") : undefined,
     };
   }
@@ -81,7 +84,7 @@ export async function resolveHubConfig(opts?: { podUrl?: string; apiKey?: string
     podUrl: config.podUrl,
     apiKey: config.hubApiKey,
     userId: config.agentUserId,
-    workspaceId: getActiveWorkspaceId(),
+    workspaceId: resolveActiveLens()?.workspaceId || getActiveWorkspaceId(),
   };
 }
 
@@ -110,7 +113,8 @@ export function clearActiveSessionId(): void {
 }
 
 function sessionHeaders(): Record<string, string> {
-  const id = readActiveSessionId();
+  // Per-Claude-session lens wins; fall back to the legacy per-CWD .synap-session.
+  const id = resolveActiveLens()?.focusSessionId || readActiveSessionId();
   return id ? { "X-Session-Id": id } : {};
 }
 
