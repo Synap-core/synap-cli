@@ -1549,11 +1549,12 @@ tools
 
 const capability = program
   .command("capability")
-  .description("Discover, enable, and launch capability verbs (runnable skill-backed actions)");
+  .alias("cap")
+  .description("The one capability-first root: list, add, enable, connect, show, run a capability pack");
 
 capability
   .command("list")
-  .description("List capabilities grouped by tool, with runnable verbs")
+  .description("List capabilities — one row per pack, with status, connection, and verbs")
   .option("--json", "Output as JSON")
   .option("--workspace <id>", "Workspace context")
   .action(async (opts) => {
@@ -1562,12 +1563,40 @@ capability
   });
 
 capability
-  .command("enable <verb-or-skill>")
-  .description("Enable (approve) a draft skill so its verb can run")
+  .command("add <name>")
+  .description("Install a capability from the catalog (materialize its tools + skills)")
   .option("--workspace <id>", "Workspace context")
-  .action(async (verbOrSkill: string, opts) => {
+  .action(async (name: string, opts) => {
+    const { capabilityAdd } = await import("./commands/capability.js");
+    await capabilityAdd(name, opts);
+  });
+
+capability
+  .command("enable <name>")
+  .description("Turn on a capability — ensures its connection, then pick which verbs it can do")
+  .option("--workspace <id>", "Workspace context")
+  .action(async (name: string, opts) => {
     const { capabilityEnable } = await import("./commands/capability.js");
-    await capabilityEnable(verbOrSkill, opts);
+    await capabilityEnable(name, opts);
+  });
+
+capability
+  .command("connect <name>")
+  .description("Run just the connection sub-flow for a capability (OAuth or paste a key)")
+  .option("--workspace <id>", "Workspace context")
+  .action(async (name: string, opts) => {
+    const { capabilityConnect } = await import("./commands/capability.js");
+    await capabilityConnect(name, opts);
+  });
+
+capability
+  .command("show <name>")
+  .description("Show one capability's full detail: status, connection, verbs, next action")
+  .option("--json", "Output as JSON")
+  .option("--workspace <id>", "Workspace context")
+  .action(async (name: string, opts) => {
+    const { capabilityShow } = await import("./commands/capability.js");
+    await capabilityShow(name, opts);
   });
 
 capability

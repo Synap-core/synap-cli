@@ -1,15 +1,22 @@
 /**
- * synap capability — Discover, enable, and LAUNCH capability verbs
+ * synap capability (alias `cap`) — the ONE capability-first root.
+ *
+ * A Capability is a named, installable PACK of what you (and your AI) can do
+ * (e.g. "Google Workspace", "Discord Bot"). Tools = its connection; skills = its
+ * verbs; templates = the catalog. The user only ever lists, adds, and enables a
+ * PACK — never a bare tool or skill (CAPABILITIES-NORTH-STAR.md).
  *
  * A capability VERB is a runnable action backed by a skill (verbId = skill name).
  * `run` is the launcher: it parses arbitrary `--key value` flags into the skill's
  * `parameters` and POSTs to /capabilities/execute (the agnostic capability door).
  *
- * Subcommands: list, enable, run, test
+ * Subcommands: list, add, enable, connect, show, run, test
  */
 
 import chalk from "chalk";
 import ora from "ora";
+import prompts from "prompts";
+import { exec } from "child_process";
 import { resolveHubConfig, hubGet, hubPost } from "../lib/hub-client.js";
 import { log } from "../utils/logger.js";
 
@@ -46,12 +53,45 @@ interface SkillRow {
   kind?: string;
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
+// The pack-grouped read-model from GET /capabilities/catalog (the spine).
+type CardStatus =
+  | "available"
+  | "needs_connection"
+  | "connected"
+  | "draft"
+  | "ready"
+  | "partial";
 
-/** A capability is "enabled" when its AI use is auto-approved (not draft). */
-function isEnabled(cap: Capability): boolean {
-  return cap.approved === true || cap.governance === "auto";
+interface CardVerb {
+  verbId: string;
+  label: string;
+  type: "read" | "write";
+  enabled: boolean;
+  governance: "auto" | "propose";
+  runnable: boolean;
 }
+
+interface CardConnection {
+  required: boolean;
+  kind: "provider" | "vault" | null;
+  provider?: string;
+  state: "connected" | "missing" | "expired";
+  account?: string;
+}
+
+interface CapabilityCard {
+  id: string | null;
+  key: string;
+  name: string;
+  description?: string | null;
+  source: "installed" | "available";
+  status: CardStatus;
+  connection?: CardConnection;
+  verbs: CardVerb[];
+  nextAction: { kind: "add" | "connect" | "enable" | "run" | "none"; hint: string };
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
 /**
  * GET /capabilities requires a workspaceId (uuid) — resolve it the way tools.ts
@@ -130,6 +170,98 @@ function parseParams(tokens: string[]): Record<string, unknown> {
   return params;
 }
 
+// ── Catalog (the pack-grouped spine) ─────────────────────────────────────────
+
+/**
+ * GET /capabilities/catalog — one CapabilityCard per pack. Throws on transport
+ * errors; the 404 ("endpoint not deployed yet") is surfaced by the caller.
+ */
+async function fetchCatalog(cfg: HubCfg, workspaceId: string): Promise<CapabilityCard[]> {
+  const res = await hubGet("/capabilities/catalog", { workspaceId }, cfg);
+  return ((res as Record<string, unknown>).capabilities ?? []) as CapabilityCard[];
+}
+
+/** True when the thrown hub error is the "catalog door not deployed" 404. */
+function isCatalogMissing(err: unknown): boolean {
+  return err instanceof Error && err.message.includes("HTTP 404");
+}
+
+function catalogNeedsDeploy(): void {
+  log.warn("This pod doesn't expose the capability catalog yet.");
+  log.dim("`synap cap` needs the latest pod deploy (GET /capabilities/catalog).");
+  log.dim("Update the pod, then retry — or use `synap tools list` in the meantime.");
+}
+
+/** Resolve a name/key (case-insensitive) to its catalog card. */
+function findCard(cards: CapabilityCard[], name: string): CapabilityCard | undefined {
+  const q = name.trim().toLowerCase();
+  return (
+    cards.find((c) => c.name.toLowerCase() === q) ??
+    cards.find((c) => c.key.toLowerCase() === q)
+  );
+}
+
+/** Status → badge glyph (●/◑/○) per §6. */
+function statusBadge(status: CardStatus): string {
+  switch (status) {
+    case "ready":
+    case "connected":
+      return chalk.green("●");
+    case "needs_connection":
+    case "draft":
+    case "partial":
+      return chalk.yellow("◑");
+    default:
+      return chalk.dim("○");
+  }
+}
+
+/** A one-line summary for the pack row (right of the name). */
+function statusSummary(card: CapabilityCard): string {
+  const n = card.verbs.length;
+  switch (card.status) {
+    case "ready":
+    case "connected": {
+      const acct = card.connection?.account ? `${card.connection.account} · ` : "";
+      return `${acct}connected · ${n} verb${n === 1 ? "" : "s"}`;
+    }
+    case "needs_connection":
+      return "needs connection";
+    case "partial":
+      return `partial · ${n} verb${n === 1 ? "" : "s"}`;
+    case "draft":
+      return `${n} verb${n === 1 ? "" : "s"} · not enabled`;
+    default:
+      return "in catalog";
+  }
+}
+
+/** Render one verb inline: ▸ read / ✋ write·approval, dim when not enabled. */
+function renderVerb(v: CardVerb): string {
+  if (v.type === "write") {
+    const txt = `✋ ${v.label} (write·approval)`;
+    return v.enabled ? chalk.bold(txt) : chalk.dim(txt);
+  }
+  const txt = `▸ ${v.label} (read)`;
+  return v.enabled || v.runnable ? txt : chalk.dim(txt);
+}
+
+/** Render a full pack row: badge · name · summary · [status] + verbs + hint. */
+function renderCard(card: CapabilityCard): void {
+  const badge = statusBadge(card.status);
+  const name = card.status === "available" ? chalk.dim(card.name) : chalk.bold(card.name);
+  const summary = chalk.dim(statusSummary(card));
+  const tag = chalk.dim(`[${card.status}]`);
+  console.log(`  ${badge}  ${name}  ${summary}  ${tag}`);
+
+  if (card.verbs.length > 0) {
+    console.log(`       ${card.verbs.map(renderVerb).join("   ")}`);
+  }
+  if (card.nextAction.hint) {
+    console.log(`       ${chalk.cyan("→")} ${chalk.dim(card.nextAction.hint)}`);
+  }
+}
+
 // ── Public: capabilityList ──────────────────────────────────────────────────
 
 export interface CapListOpts {
@@ -150,58 +282,185 @@ export async function capabilityList(opts: CapListOpts): Promise<void> {
 
   const spinner = opts.json ? null : ora({ text: "Fetching capabilities…", color: "cyan" }).start();
 
-  let caps: Capability[];
+  let cards: CapabilityCard[];
   try {
-    caps = await fetchCapabilities(cfg, workspaceId);
+    cards = await fetchCatalog(cfg, workspaceId);
     spinner?.stop();
   } catch (err) {
+    spinner?.stop();
+    if (isCatalogMissing(err)) {
+      catalogNeedsDeploy();
+      return;
+    }
     spinner?.fail(chalk.red("Failed to fetch capabilities"));
     log.error((err as Error).message);
     process.exit(1);
   }
 
   if (opts.json) {
-    console.log(JSON.stringify({ capabilities: caps }, null, 2));
+    console.log(JSON.stringify({ capabilities: cards }, null, 2));
     return;
   }
 
-  if (caps.length === 0) {
+  if (cards.length === 0) {
     log.warn("No capabilities available in this workspace.");
-    log.dim("Connect a service (`synap tools connect <name>`) to install capability skills.");
+    log.dim("Add one from the catalog:  synap cap add <name>");
     return;
   }
 
-  const enabled = caps.filter(isEnabled);
-  log.heading(`Capabilities (${enabled.length} enabled / ${caps.length} total)`);
+  const installed = cards.filter((c) => c.source === "installed");
+  log.heading(`Capabilities (${installed.length} installed / ${cards.length} total)`);
   console.log();
 
-  for (const cap of caps) {
-    const on = isEnabled(cap);
-    const dot = on ? chalk.green("●") : chalk.dim("○");
-    const name = on ? chalk.bold(cap.name) : chalk.dim(cap.name);
-    const kind = chalk.dim(`(${cap.kind})`);
-    console.log(`  ${dot} ${name} ${kind}`);
-
-    for (const v of cap.verbs ?? []) {
-      const runnable = v.granted === true;
-      const marker = runnable ? chalk.green("▸") : chalk.dim("·");
-      const label = runnable ? v.label : chalk.dim(v.label);
-      const mode = chalk.dim(`[${v.effectiveExecMode ?? v.govDefault ?? "?"}]`);
-      const runHint = runnable ? "" : chalk.dim(" — not runnable");
-      console.log(`      ${marker} ${label} ${chalk.dim(v.id)} ${mode}${runHint}`);
-    }
+  for (const card of cards) {
+    renderCard(card);
+    console.log();
   }
-  console.log();
-  log.dim("Run a verb:  synap capability run <verb> --<param> <value>");
+  log.dim("Add:  synap cap add <name>   ·   Enable:  synap cap enable <name>   ·   Run:  synap cap run <verb> --<param> <value>");
 }
 
-// ── Public: capabilityEnable ────────────────────────────────────────────────
+// ── Connection sub-flow (shared by enable + connect) ────────────────────────
 
-export interface CapEnableOpts {
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+function openBrowser(url: string): void {
+  const platform = process.platform;
+  const cmd =
+    platform === "darwin"
+      ? `open "${url}"`
+      : platform === "win32"
+        ? `start "" "${url}"`
+        : `xdg-open "${url}"`;
+  try {
+    exec(cmd);
+  } catch {
+    // silently ignore — caller already prints the URL
+  }
+}
+
+/**
+ * Poll /connectors/connect until the provider flips to `connected` (the user
+ * finished OAuth in the browser). Same self-completing door + bounded loop as
+ * toolsConnect in tools.ts. Returns the connected response or null on timeout.
+ */
+async function pollUntilConnected(
+  cfg: HubCfg,
+  provider: string,
+  workspaceId: string | undefined,
+  timeoutMs = 180_000,
+  intervalMs = 3_000
+): Promise<Record<string, unknown> | null> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    await sleep(intervalMs);
+    try {
+      const body: Record<string, unknown> = { provider };
+      if (workspaceId) body.workspaceId = workspaceId;
+      const res = (await hubPost("/connectors/connect", body, cfg)) as Record<string, unknown>;
+      if (String(res.status) === "connected") return res;
+    } catch {
+      // transient — keep polling until the deadline
+    }
+  }
+  return null;
+}
+
+/**
+ * Ensure a capability's required connection is satisfied. Provider (nango://) →
+ * OAuth open + poll. Vault (vault://) → prompt for the key, POST /vault/secrets.
+ * Returns true when the connection is (now) satisfied, false otherwise.
+ */
+async function ensureConnection(
+  cfg: HubCfg,
+  workspaceId: string,
+  card: CapabilityCard
+): Promise<boolean> {
+  const conn = card.connection;
+  if (!conn || !conn.required || conn.state === "connected") return true;
+
+  // ── Vault credential — prompt + store server-side ─────────────────────────
+  if (conn.kind === "vault") {
+    const service = conn.provider ?? card.key;
+    const answer = await prompts({
+      type: "password",
+      name: "value",
+      message: `Paste the ${chalk.bold(card.name)} credential (${service})`,
+    });
+    const value = answer.value as string | undefined;
+    if (!value) {
+      log.dim("Cancelled — no credential entered.");
+      return false;
+    }
+    const spinner = ora({ text: "Storing credential in the vault…", color: "cyan" }).start();
+    try {
+      await hubPost(
+        "/vault/secrets",
+        { name: `${card.name} credential`, value, service, type: "credential", workspaceId },
+        cfg
+      );
+      spinner.succeed(chalk.green(`Stored ${chalk.bold(service)} credential.`));
+      // NOTE: the catalog computes connection.state from the tool's credentialRef.
+      // If a verb still won't run after this, the ref may need manual linking.
+      return true;
+    } catch (err) {
+      spinner.fail(chalk.red("Failed to store credential"));
+      log.error((err as Error).message);
+      return false;
+    }
+  }
+
+  // ── Provider OAuth (nango://) — open + poll ───────────────────────────────
+  const provider = conn.provider ?? card.key;
+  const spinner = ora({ text: `Resolving ${chalk.bold(provider)} connection…`, color: "cyan" }).start();
+  let res: Record<string, unknown>;
+  try {
+    res = (await hubPost("/connectors/connect", { provider, workspaceId }, cfg)) as Record<string, unknown>;
+    spinner.stop();
+  } catch (err) {
+    spinner.fail(chalk.red("Failed to resolve connection"));
+    log.error((err as Error).message);
+    return false;
+  }
+
+  const status = String(res.status);
+  if (status === "connected") {
+    log.success(`${res.displayName ?? provider} is already connected.`);
+    return true;
+  }
+  if (status === "provider_required") {
+    log.warn(`Couldn't resolve a single provider for ${card.name}.`);
+    log.dim(`Connect it directly:  synap cap connect "${card.name}"`);
+    return false;
+  }
+
+  // setup_required → open OAuth, then poll.
+  const redirectUrl = String(res.redirectUrl);
+  log.heading(`Connect ${res.displayName ?? provider}`);
+  console.log();
+  console.log(`  Opening OAuth flow in your browser…`);
+  console.log(`  ${chalk.dim("If it didn't open, paste this URL:")}`);
+  console.log(`  ${chalk.underline(chalk.cyan(redirectUrl))}`);
+  console.log();
+  openBrowser(redirectUrl);
+
+  const waitSpinner = ora({ text: "Waiting for you to finish in the browser…", color: "cyan" }).start();
+  const connected = await pollUntilConnected(cfg, provider, workspaceId);
+  if (connected) {
+    waitSpinner.succeed(chalk.green(`Connected ${chalk.bold(String(connected.displayName ?? provider))}!`));
+    return true;
+  }
+  waitSpinner.stop();
+  log.dim(`Didn't detect a connection yet — finish the browser flow, then re-run \`synap cap enable "${card.name}"\`.`);
+  return false;
+}
+
+// ── Public: capabilityAdd ────────────────────────────────────────────────────
+
+export interface CapAddOpts {
   workspace?: string;
 }
 
-export async function capabilityEnable(verbOrSkill: string, opts: CapEnableOpts): Promise<void> {
+export async function capabilityAdd(name: string, opts: CapAddOpts): Promise<void> {
   let cfg: HubCfg;
   try {
     cfg = await resolveHubConfig();
@@ -212,32 +471,320 @@ export async function capabilityEnable(verbOrSkill: string, opts: CapEnableOpts)
 
   const workspaceId = requireWorkspace(opts, cfg);
 
-  const spinner = ora({ text: `Resolving ${chalk.bold(verbOrSkill)}…`, color: "cyan" }).start();
-
-  let skillId: string | undefined;
+  const spinner = ora({ text: `Resolving ${chalk.bold(name)}…`, color: "cyan" }).start();
+  let cards: CapabilityCard[];
   try {
-    skillId = await resolveSkillId(cfg, workspaceId, verbOrSkill);
+    cards = await fetchCatalog(cfg, workspaceId);
+    spinner.stop();
   } catch (err) {
-    spinner.fail(chalk.red("Failed to resolve capability"));
+    spinner.stop();
+    if (isCatalogMissing(err)) {
+      catalogNeedsDeploy();
+      return;
+    }
+    spinner.fail(chalk.red("Failed to fetch catalog"));
     log.error((err as Error).message);
     process.exit(1);
   }
 
-  if (!skillId) {
-    spinner.fail(chalk.red(`No skill found for "${verbOrSkill}"`));
-    log.dim("Run `synap capability list` to see available verbs and skills.");
+  const card = findCard(cards, name);
+  if (!card) {
+    log.error(`No capability named "${name}" in the catalog.`);
+    log.dim("Run `synap cap list` to see what's available.");
     process.exit(1);
   }
 
-  spinner.text = `Enabling ${chalk.bold(verbOrSkill)}…`;
+  if (card.source === "installed") {
+    log.heading(`${card.name} is already installed`);
+    renderCard(card);
+    return;
+  }
+
+  const addSpinner = ora({ text: `Adding ${chalk.bold(card.name)}…`, color: "cyan" }).start();
   try {
-    await hubPost(`/skills/${skillId}/approve`, { approved: true }, cfg);
-    spinner.succeed(chalk.green(`Enabled ${chalk.bold(verbOrSkill)} — it can now run.`));
-    log.dim(`Launch it:  synap capability run ${verbOrSkill} --<param> <value>`);
+    await hubPost("/capabilities/apply", { templateKey: card.key, workspaceId }, cfg);
+    addSpinner.succeed(chalk.green(`Added ${chalk.bold(card.name)}.`));
   } catch (err) {
-    spinner.fail(chalk.red(`Failed to enable ${verbOrSkill}`));
+    addSpinner.fail(chalk.red(`Failed to add ${card.name}`));
     log.error((err as Error).message);
     process.exit(1);
+  }
+
+  // Re-fetch to show the resulting (installed) status.
+  try {
+    const after = findCard(await fetchCatalog(cfg, workspaceId), name);
+    if (after) {
+      console.log();
+      renderCard(after);
+    }
+  } catch {
+    // best-effort — the add already succeeded
+  }
+  console.log();
+  log.dim(`Turn it on:  synap cap enable "${card.name}"`);
+}
+
+// ── Public: capabilityEnable (the orchestrator) ──────────────────────────────
+
+export interface CapEnableOpts {
+  workspace?: string;
+}
+
+export async function capabilityEnable(name: string, opts: CapEnableOpts): Promise<void> {
+  let cfg: HubCfg;
+  try {
+    cfg = await resolveHubConfig();
+  } catch (err) {
+    log.error((err as Error).message);
+    process.exit(1);
+  }
+
+  const workspaceId = requireWorkspace(opts, cfg);
+
+  const spinner = ora({ text: `Resolving ${chalk.bold(name)}…`, color: "cyan" }).start();
+  let card: CapabilityCard | undefined;
+  try {
+    card = findCard(await fetchCatalog(cfg, workspaceId), name);
+    spinner.stop();
+  } catch (err) {
+    spinner.stop();
+    if (isCatalogMissing(err)) {
+      catalogNeedsDeploy();
+      return;
+    }
+    spinner.fail(chalk.red("Failed to fetch catalog"));
+    log.error((err as Error).message);
+    process.exit(1);
+  }
+
+  if (!card) {
+    log.error(`No capability named "${name}".`);
+    log.dim("Run `synap cap list` to see what's available, or `synap cap add <name>` first.");
+    process.exit(1);
+  }
+
+  // Not installed yet — add it first so it has verbs to enable.
+  if (card.source === "available") {
+    log.dim(`${card.name} isn't installed yet — adding it first…`);
+    await capabilityAdd(name, opts);
+    card = findCard(await fetchCatalog(cfg, workspaceId), name);
+    if (!card) return;
+  }
+
+  // (a) Ensure the connection FIRST when one is required and missing.
+  if (card.connection?.required && card.connection.state !== "connected") {
+    const ok = await ensureConnection(cfg, workspaceId, card);
+    if (!ok) return;
+    // Re-fetch so verb runnability reflects the new connection.
+    const after = findCard(await fetchCatalog(cfg, workspaceId), name);
+    if (after) card = after;
+  }
+
+  if (card.verbs.length === 0) {
+    log.heading(`${card.name} is on`);
+    log.dim("This capability has no selectable verbs yet.");
+    return;
+  }
+
+  // (b) Verb selection — reads pre-checked, writes unchecked; enabled stay checked.
+  const response = await prompts({
+    type: "multiselect",
+    name: "verbs",
+    message: `Select what ${chalk.bold(card.name)} can do`,
+    instructions: false,
+    hint: "↑/↓ move · space toggle · enter confirm",
+    choices: card.verbs.map((v) => ({
+      title:
+        v.type === "write"
+          ? `${v.label} (write · asks approval each run)`
+          : `${v.label} (read)`,
+      value: v.verbId,
+      selected: v.enabled || v.type === "read",
+    })),
+  });
+
+  // prompts returns undefined on ctrl-c.
+  if (response.verbs === undefined) {
+    log.dim("Cancelled.");
+    return;
+  }
+  const selected = new Set(response.verbs as string[]);
+
+  // (c) Approve newly-selected verbs; disable previously-enabled ones now unchecked
+  //     (so `enable` doubles as edit/heal). The explicit confirm IS the gate.
+  const toEnable = card.verbs.filter((v) => selected.has(v.verbId) && !v.enabled);
+  const toDisable = card.verbs.filter((v) => !selected.has(v.verbId) && v.enabled);
+
+  if (toEnable.length === 0 && toDisable.length === 0) {
+    log.success(`Nothing changed — ${card.name} is already set up that way.`);
+    return;
+  }
+
+  const work = ora({ text: "Applying your selection…", color: "cyan" }).start();
+  const enabledNames: string[] = [];
+  const disabledNames: string[] = [];
+  try {
+    for (const v of toEnable) {
+      const skillId = await resolveSkillId(cfg, workspaceId, v.verbId);
+      if (!skillId) continue;
+      await hubPost(`/skills/${skillId}/approve`, { approved: true }, cfg);
+      enabledNames.push(v.label);
+    }
+    for (const v of toDisable) {
+      const skillId = await resolveSkillId(cfg, workspaceId, v.verbId);
+      if (!skillId) continue;
+      await hubPost(`/skills/${skillId}/approve`, { approved: false }, cfg);
+      disabledNames.push(v.label);
+    }
+    work.stop();
+  } catch (err) {
+    work.fail(chalk.red("Failed while applying your selection"));
+    log.error((err as Error).message);
+    process.exit(1);
+  }
+
+  // (d) Report what changed + an example run.
+  if (enabledNames.length > 0) {
+    log.success(`Enabled ${enabledNames.length} verb${enabledNames.length === 1 ? "" : "s"}: ${enabledNames.join(", ")}`);
+  }
+  if (disabledNames.length > 0) {
+    log.dim(`Turned off: ${disabledNames.join(", ")}`);
+  }
+  const example = toEnable[0] ?? card.verbs.find((v) => selected.has(v.verbId));
+  if (example) {
+    log.dim(`Run it:  synap cap run ${example.verbId} --<param> <value>`);
+  }
+}
+
+// ── Public: capabilityConnect (connection sub-flow only) ─────────────────────
+
+export interface CapConnectOpts {
+  workspace?: string;
+}
+
+export async function capabilityConnect(name: string, opts: CapConnectOpts): Promise<void> {
+  let cfg: HubCfg;
+  try {
+    cfg = await resolveHubConfig();
+  } catch (err) {
+    log.error((err as Error).message);
+    process.exit(1);
+  }
+
+  const workspaceId = requireWorkspace(opts, cfg);
+
+  const spinner = ora({ text: `Resolving ${chalk.bold(name)}…`, color: "cyan" }).start();
+  let card: CapabilityCard | undefined;
+  try {
+    card = findCard(await fetchCatalog(cfg, workspaceId), name);
+    spinner.stop();
+  } catch (err) {
+    spinner.stop();
+    if (isCatalogMissing(err)) {
+      catalogNeedsDeploy();
+      return;
+    }
+    spinner.fail(chalk.red("Failed to fetch catalog"));
+    log.error((err as Error).message);
+    process.exit(1);
+  }
+
+  if (!card) {
+    log.error(`No capability named "${name}".`);
+    log.dim("Run `synap cap list` to see what's available.");
+    process.exit(1);
+  }
+
+  if (!card.connection?.required) {
+    log.heading(`${card.name} needs no connection`);
+    log.dim(`Enable its verbs:  synap cap enable "${card.name}"`);
+    return;
+  }
+
+  const ok = await ensureConnection(cfg, workspaceId, card);
+  if (ok) {
+    log.dim(`Now enable its verbs:  synap cap enable "${card.name}"`);
+  }
+}
+
+// ── Public: capabilityShow ───────────────────────────────────────────────────
+
+export interface CapShowOpts {
+  json?: boolean;
+  workspace?: string;
+}
+
+export async function capabilityShow(name: string, opts: CapShowOpts): Promise<void> {
+  let cfg: HubCfg;
+  try {
+    cfg = await resolveHubConfig();
+  } catch (err) {
+    log.error((err as Error).message);
+    process.exit(1);
+  }
+
+  const workspaceId = requireWorkspace(opts, cfg);
+
+  const spinner = opts.json ? null : ora({ text: `Fetching ${chalk.bold(name)}…`, color: "cyan" }).start();
+  let card: CapabilityCard | undefined;
+  try {
+    card = findCard(await fetchCatalog(cfg, workspaceId), name);
+    spinner?.stop();
+  } catch (err) {
+    spinner?.stop();
+    if (isCatalogMissing(err)) {
+      catalogNeedsDeploy();
+      return;
+    }
+    spinner?.fail(chalk.red("Failed to fetch catalog"));
+    log.error((err as Error).message);
+    process.exit(1);
+  }
+
+  if (!card) {
+    log.error(`No capability named "${name}".`);
+    log.dim("Run `synap cap list` to see what's available.");
+    process.exit(1);
+  }
+
+  if (opts.json) {
+    console.log(JSON.stringify(card, null, 2));
+    return;
+  }
+
+  log.heading(`${statusBadge(card.status)}  ${card.name}  ${chalk.dim(`[${card.status}]`)}`);
+  if (card.description) log.dim(card.description);
+  console.log();
+
+  // Connection
+  if (card.connection?.required) {
+    const c = card.connection;
+    const stateColor =
+      c.state === "connected" ? chalk.green : c.state === "expired" ? chalk.yellow : chalk.red;
+    const parts = [
+      c.kind ?? "connection",
+      c.provider ? chalk.dim(`(${c.provider})`) : "",
+      c.account ? chalk.dim(c.account) : "",
+      stateColor(c.state),
+    ].filter(Boolean);
+    console.log(`  ${chalk.bold("Connection")}  ${parts.join(" ")}`);
+  } else {
+    console.log(`  ${chalk.bold("Connection")}  ${chalk.dim("none required")}`);
+  }
+  console.log();
+
+  // Verbs
+  console.log(`  ${chalk.bold("Verbs")} (${card.verbs.length})`);
+  for (const v of card.verbs) {
+    const mark = v.runnable ? chalk.green("▸") : v.enabled ? chalk.yellow("◑") : chalk.dim("·");
+    const kind = v.type === "write" ? chalk.dim(`write · ${v.governance}`) : chalk.dim("read");
+    const state = v.runnable ? chalk.dim("runnable") : v.enabled ? chalk.dim("enabled") : chalk.dim("draft");
+    console.log(`    ${mark} ${v.label}  ${kind}  ${state}  ${chalk.dim(v.verbId)}`);
+  }
+  console.log();
+
+  if (card.nextAction.hint) {
+    log.dim(`Next:  ${card.nextAction.hint}`);
   }
 }
 

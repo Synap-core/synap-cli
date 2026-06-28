@@ -10,6 +10,7 @@ import prompts from "prompts";
 import { exec } from "child_process";
 import { mkdirSync, writeFileSync, existsSync } from "fs";
 import { resolveHubConfig, hubGet, hubPost } from "../lib/hub-client.js";
+import { capabilityList, capabilityConnect } from "./capability.js";
 import { log } from "../utils/logger.js";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -113,6 +114,14 @@ export interface ConnectOpts {
 }
 
 export async function toolsConnect(service: string | undefined, opts: ConnectOpts): Promise<void> {
+  // `synap tools` is deprecated — capabilities are the one root now. Forward the
+  // named-service connect to `cap connect` (the capability-first equivalent).
+  if (service) {
+    log.dim("`synap tools` is deprecated — use `synap cap`");
+    await capabilityConnect(service, { workspace: opts.workspace });
+    return;
+  }
+
   let cfg: HubCfg;
   try {
     cfg = await resolveHubConfig({ podUrl: opts.podUrl, apiKey: opts.apiKey });
@@ -226,52 +235,9 @@ export interface ListOpts {
 }
 
 export async function toolsList(opts: ListOpts): Promise<void> {
-  let cfg: HubCfg;
-  try {
-    cfg = await resolveHubConfig();
-  } catch (err) {
-    log.error((err as Error).message);
-    process.exit(1);
-  }
-
-  const workspaceId = opts.workspace ?? cfg.workspaceId;
-
-  const spinner = opts.json ? null : ora({ text: "Fetching tools…", color: "cyan" }).start();
-
-  let providers: ConnectorProvider[];
-  try {
-    providers = await fetchProviders(cfg, workspaceId);
-    spinner?.stop();
-  } catch (err) {
-    spinner?.fail(chalk.red("Failed to fetch tools"));
-    log.error((err as Error).message);
-    process.exit(1);
-  }
-
-  if (opts.json) {
-    console.log(JSON.stringify({ providers }, null, 2));
-    return;
-  }
-
-  if (providers.length === 0) {
-    log.warn("No tools configured on this pod.");
-    log.dim(`Centralized Nango is at https://nango.synap.live — connect a service first:`);
-    log.dim(`  synap tools connect <name>`);
-    return;
-  }
-
-  const connected = providers.filter((p) => p.connected);
-  log.heading(`Connected Services (${connected.length} connected / ${providers.length} total)`);
-  console.log();
-
-  for (const p of providers) {
-    const dot = p.connected ? chalk.green("●") : chalk.dim("○");
-    const name = p.connected ? chalk.bold(p.displayName) : chalk.dim(p.displayName);
-    const id = chalk.dim(`(${p.provider})`);
-    const connLine = p.connected && p.connectionId ? `  ${chalk.dim(p.connectionId)}` : "";
-    console.log(`  ${dot} ${name} ${id}${connLine}`);
-  }
-  console.log();
+  // `synap tools` is deprecated — `cap list` is the one capability-first view.
+  log.dim("`synap tools` is deprecated — use `synap cap`");
+  await capabilityList({ json: opts.json, workspace: opts.workspace });
 }
 
 // ── Public: toolsSync ────────────────────────────────────────────────────
