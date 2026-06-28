@@ -1543,6 +1543,67 @@ tools
     await toolsSchema(opts);
   });
 
+// ─── capability ───────────────────────────────────────────────────────────────
+
+const capability = program
+  .command("capability")
+  .description("Discover, enable, and launch capability verbs (runnable skill-backed actions)");
+
+capability
+  .command("list")
+  .description("List capabilities grouped by tool, with runnable verbs")
+  .option("--json", "Output as JSON")
+  .option("--workspace <id>", "Workspace context")
+  .action(async (opts) => {
+    const { capabilityList } = await import("./commands/capability.js");
+    await capabilityList(opts);
+  });
+
+capability
+  .command("enable <verb-or-skill>")
+  .description("Enable (approve) a draft skill so its verb can run")
+  .option("--workspace <id>", "Workspace context")
+  .action(async (verbOrSkill: string, opts) => {
+    const { capabilityEnable } = await import("./commands/capability.js");
+    await capabilityEnable(verbOrSkill, opts);
+  });
+
+capability
+  .command("run <verb> [params...]")
+  .description("Launch a verb — pass inputs as `--key value` flags")
+  .option("--workspace <id>", "Workspace context")
+  .allowUnknownOption()
+  .allowExcessArguments()
+  .action(async (verb: string, params: string[], opts) => {
+    const { capabilityRun } = await import("./commands/capability.js");
+    await capabilityRun(verb, params, opts);
+  });
+
+capability
+  .command("test <verb>")
+  .description("Dry-run a verb (preview side effects without executing)")
+  .option("--workspace <id>", "Workspace context")
+  .action(async (verb: string, opts) => {
+    const { capabilityTest } = await import("./commands/capability.js");
+    await capabilityTest(verb, opts);
+  });
+
+// ─── raycast ──────────────────────────────────────────────────────────────────
+
+const raycast = program
+  .command("raycast")
+  .description("Generate Raycast Script Commands from your enabled capabilities");
+
+raycast
+  .command("generate")
+  .description("Emit a Raycast Script Command per enabled runnable verb")
+  .option("--out <dir>", "Output directory (default: ~/.synap/raycast-commands)")
+  .option("--workspace <id>", "Workspace context")
+  .action(async (opts) => {
+    const { raycastGenerate } = await import("./commands/raycast.js");
+    await raycastGenerate(opts);
+  });
+
 // ─── providers ───────────────────────────────────────────────────────────────
 
 const providers = program
