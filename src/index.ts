@@ -64,8 +64,9 @@ program
   .option("--bridge-dir <path>", "Path to the telegram-discord-bridge repo")
   .option("--workspace-id <uuid>", "Target workspace (default: pod profile's)")
   .option("--proactive-channel <id>", "Discord channel id for the agent's proactive posts")
-  .option("--enable-ingest", "Turn on passive ingest of every message")
   .option("--enable-react", "Turn on ✅-react capture")
+  .option("--pod <name>", "Pod profile to connect the bridge to (default: prompt)")
+  .option("--governance <mode>", "Agent governance preset: safe | normal | crazy (default: prompt)")
   .option("--pod-url <url>", "Synap pod URL (override)")
   .option("--api-key <key>", "Hub Protocol API key (override)")
   .action(async (opts) => {
@@ -149,6 +150,15 @@ program
   .action(async () => {
     const { status } = await import("./commands/status.js");
     await status();
+  });
+
+// Hidden: compact ANSI line for the Claude Code statusLine (reads stdin JSON).
+program
+  .command("statusline", { hidden: true })
+  .description("(internal) Compact ANSI status line for Claude Code")
+  .action(async () => {
+    const { statusline } = await import("./commands/statusline.js");
+    await statusline();
   });
 
 program
