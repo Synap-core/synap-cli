@@ -74,6 +74,7 @@ function compact(n: number): string {
 interface PodCache {
   ts: number; // last SUCCESSFUL fetch
   ok: boolean; // last fetch reached the pod
+  activeWorkspaceId: string; // the workspace THIS connection is scoped to (cfg.workspaceId)
   workspaces: Array<{ id: string; name: string; count: number }>;
   projectName: string;
   projectId: string;
@@ -85,7 +86,7 @@ interface PodCache {
 }
 
 function emptyCache(): PodCache {
-  return { ts: 0, ok: false, workspaces: [], projectName: "", projectId: "", skillCount: 0, proposalCount: 0, sessionGoal: "", sessionId: "", totalEntities: 0 };
+  return { ts: 0, ok: false, activeWorkspaceId: "", workspaces: [], projectName: "", projectId: "", skillCount: 0, proposalCount: 0, sessionGoal: "", sessionId: "", totalEntities: 0 };
 }
 
 function readCache(): PodCache | null {
@@ -171,6 +172,7 @@ async function refresh(): Promise<void> {
     const out: PodCache = {
       ts: Date.now(),
       ok: true,
+      activeWorkspaceId: cfg.workspaceId ?? "", // the lens THIS connection resolves to
       workspaces,
       projectName: "", // deferred to aggregation endpoint
       projectId: "",
@@ -244,8 +246,12 @@ function render(): void {
     const stale = !pod.ok || Date.now() - pod.ts > REFRESH_TTL_MS * 3;
     dot = stale ? `${Y}●${X}` : `${G}●${X}`;
   }
-  const activeWs = pod.workspaces[0]?.name ?? "synap";
-  const activeWsId = pod.workspaces[0]?.id ?? "";
+  // Show the workspace THIS connection is scoped to — not the first in the list.
+  const activeWsEntry =
+    pod.workspaces.find((w) => w.id === pod.activeWorkspaceId) ?? pod.workspaces[0];
+  const activeWs = activeWsEntry?.name ?? "synap";
+  const activeWsId = activeWsEntry?.id ?? "";
+  const activeWsCount = activeWsEntry?.count ?? 0;
 
   // ─═─ LINE 1 — model · context bar · branch · vim ─═─────────────────────
   const l1: string[] = [];
@@ -260,7 +266,7 @@ function render(): void {
   // ─═─ LINE 2 — pod dot · workspace · project · session · metrics ─═──────
   const l2: string[] = [dot];
   l2.push(activeWsId ? osc8(`synap://workspace/${activeWsId}`, activeWs) : activeWs);
-  if (pod.totalEntities > 0) l2.push(`${compact(pod.totalEntities)} entities`);
+  if (activeWsCount > 0) l2.push(`${compact(activeWsCount)} entities`);
   if (pod.skillCount > 0) l2.push(`${pod.skillCount} skills`);
   if (pod.projectName) l2.push(`${D}▸${X} ${B}${pod.projectName}${X}`);
   if (pod.sessionGoal) {
