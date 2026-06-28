@@ -1572,6 +1572,15 @@ capability
   });
 
 capability
+  .command("create [file]")
+  .description("Create a capability from a JSON definition (file path, or pipe JSON via stdin)")
+  .option("--workspace <id>", "Workspace context")
+  .action(async (file: string | undefined, opts) => {
+    const { capabilityCreate } = await import("./commands/capability.js");
+    await capabilityCreate(file, opts);
+  });
+
+capability
   .command("enable <name>")
   .description("Turn on a capability — ensures its connection, then pick which verbs it can do")
   .option("--workspace <id>", "Workspace context")

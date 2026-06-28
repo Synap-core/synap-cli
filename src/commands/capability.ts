@@ -17,6 +17,7 @@ import chalk from "chalk";
 import ora from "ora";
 import prompts from "prompts";
 import { exec } from "child_process";
+import { readFileSync } from "node:fs";
 import { resolveHubConfig, hubGet, hubPost } from "../lib/hub-client.js";
 import { log } from "../utils/logger.js";
 
@@ -908,4 +909,103 @@ export async function capabilityTest(verb: string, opts: CapTestOpts): Promise<v
   if (effects.length > 0) {
     console.log(JSON.stringify(effects, null, 2));
   }
+}
+
+// ── Public: capabilityCreate (author a pack from a JSON definition) ──────────
+
+export interface CapCreateOpts {
+  workspace?: string;
+}
+
+/** Read the definition JSON from a file path, or from stdin when none is given. */
+async function readDefinitionInput(file?: string): Promise<string> {
+  if (file) return readFileSync(file, "utf-8");
+  const chunks: Buffer[] = [];
+  for await (const chunk of process.stdin) chunks.push(chunk as Buffer);
+  return Buffer.concat(chunks).toString("utf-8");
+}
+
+/**
+ * Create a full capability from a CapabilityDefinition JSON — a file path OR
+ * piped stdin text. The same `definition` door `POST /capabilities/apply`
+ * accepts, so an authored pack lands with its tools + skills (+ container) just
+ * like a catalog template. The shape mirrors templates/capabilities/*.json.
+ */
+export async function capabilityCreate(
+  file: string | undefined,
+  opts: CapCreateOpts
+): Promise<void> {
+  let cfg: HubCfg;
+  try {
+    cfg = await resolveHubConfig();
+  } catch (err) {
+    log.error((err as Error).message);
+    process.exit(1);
+  }
+  const workspaceId = requireWorkspace(opts, cfg);
+
+  let raw: string;
+  try {
+    raw = (await readDefinitionInput(file)).trim();
+  } catch (err) {
+    log.error(
+      `Could not read ${file ? `file ${file}` : "stdin"}: ${(err as Error).message}`
+    );
+    process.exit(1);
+  }
+  if (!raw) {
+    log.error("No definition provided. Pass a JSON file path or pipe JSON via stdin.");
+    log.dim("e.g.  synap cap create ./my-capability.json");
+    process.exit(1);
+  }
+
+  let definition: Record<string, unknown>;
+  try {
+    definition = JSON.parse(raw) as Record<string, unknown>;
+  } catch (err) {
+    log.error(`Invalid JSON: ${(err as Error).message}`);
+    process.exit(1);
+  }
+
+  // Minimal CapabilityDefinition shape — fail early with a helpful message.
+  if (
+    typeof definition.key !== "string" ||
+    typeof definition.name !== "string" ||
+    !Array.isArray(definition.tools) ||
+    !Array.isArray(definition.skills)
+  ) {
+    log.error(
+      "Not a capability definition. Expected JSON with: key (string), name (string), tools[], skills[]."
+    );
+    log.dim("See templates/capabilities/*.capability.json for the shape.");
+    process.exit(1);
+  }
+
+  const name = String(definition.name);
+  const spinner = ora({ text: `Creating ${chalk.bold(name)}…`, color: "cyan" }).start();
+  let res: Record<string, unknown>;
+  try {
+    res = (await hubPost(
+      "/capabilities/apply",
+      { definition, workspaceId },
+      cfg
+    )) as Record<string, unknown>;
+    spinner.stop();
+  } catch (err) {
+    spinner.fail(chalk.red("Failed to create capability"));
+    log.error((err as Error).message);
+    process.exit(1);
+  }
+
+  const created = (res.created ?? {}) as Record<string, unknown>;
+  const tools = (created.tools ?? []) as unknown[];
+  const skills = (created.skills ?? []) as unknown[];
+  log.success(
+    `Created ${chalk.bold(name)} — ${tools.length} tool${tools.length === 1 ? "" : "s"}, ${skills.length} skill${skills.length === 1 ? "" : "s"}.`
+  );
+  const proposals = (res.proposals ?? []) as unknown[];
+  if (proposals.length > 0) {
+    log.dim(`${proposals.length} part(s) await approval (proposals).`);
+  }
+  log.dim(`Enable it:  synap cap enable "${name}"`);
 }
