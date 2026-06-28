@@ -90,7 +90,18 @@ export async function orient(opts: BaseOpts): Promise<void> {
     log.heading("Pod Orientation");
     log.info(`User     : ${String(me.email ?? me.name ?? userId)}`);
     log.info(`Pod URL  : ${cfg.podUrl}`);
-    if (cfg.workspaceId) log.info(`Workspace: ${cfg.workspaceId} ${chalk.dim("(active — use 'synap use <id>' to change)")}`);
+    // Show the per-Claude-session lens (workspace + project + session) if we're
+    // inside a session — that's the "where am I right now" the agent should check.
+    const { getClaudeSessionId, resolveActiveLens } = await import("../lib/session-lens.js");
+    if (getClaudeSessionId()) {
+      const lens = resolveActiveLens();
+      const ws = lens?.workspaceId ?? cfg.workspaceId ?? chalk.dim("pod-wide");
+      const proj = lens?.projectId ?? chalk.dim("none");
+      const sess = lens?.focusSessionId ?? chalk.dim("none");
+      log.info(`Lens     : ${chalk.dim("ws")} ${ws} · ${chalk.dim("project")} ${proj} · ${chalk.dim("session")} ${sess}`);
+    } else if (cfg.workspaceId) {
+      log.info(`Workspace: ${cfg.workspaceId} ${chalk.dim("(active — use 'synap use <id>' to change)")}`);
+    }
     log.blank();
     log.heading("Workspaces");
     if (wsDetails.length === 0) {
@@ -117,7 +128,7 @@ export async function orient(opts: BaseOpts): Promise<void> {
       }
       if (!cfg.workspaceId) {
         log.blank();
-        log.dim("Tip: run 'synap use <workspaceId>' to set a default workspace.");
+        log.dim("Tip: lenses are optional & composable — 'synap use <ws>' (domain), 'synap project use <id>' (cross-cutting), 'synap session start' (the day-to-day move). Omit them to stay pod-wide.");
       }
     }
 

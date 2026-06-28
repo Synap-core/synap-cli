@@ -18,7 +18,7 @@ import { readFileSync, existsSync, readdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { log, banner } from "../utils/logger.js";
-import { resolveHubConfig, hubPost, resolveUserId } from "../lib/hub-client.js";
+import { resolveHubConfig, hubPost } from "../lib/hub-client.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -106,12 +106,10 @@ export async function launchAgentOs(opts: {
   podUrl?: string;
   apiKey?: string;
   json?: boolean;
-  yes?: boolean;
 }): Promise<void> {
   if (!opts.json) banner();
 
   const cfg = await resolveHubConfig(opts);
-  const userId = await resolveUserId(cfg);
 
   const packagesDir = resolvePackagesDir();
   if (!packagesDir) {
@@ -181,10 +179,18 @@ export async function launchAgentOs(opts: {
         name: projectName,
         description: description || undefined,
         status: "active",
-        userId,
       },
       cfg
-    )) as { id: string };
+    )) as { id?: string; status?: string; proposalId?: string };
+    // Governance may return a proposal (HTTP 202) instead of creating directly.
+    if (!project.id) {
+      spinner.warn(
+        project.proposalId
+          ? `Project needs approval (proposal ${project.proposalId.slice(0, 8)}…). Approve it in Synap, then re-run.`
+          : "Project was not created (governance proposal). Approve it in Synap, then re-run."
+      );
+      return;
+    }
     projectId = project.id;
     spinner.succeed(`Project created: ${chalk.bold(projectName)}`);
   } catch (e) {
@@ -204,12 +210,16 @@ export async function launchAgentOs(opts: {
       continue;
     }
     try {
-      const r = (await hubPost("/packages/apply", template, cfg)) as {
+      // Pass projectId so the endpoint links the workspace's seed entities to
+      // the project (belongs_to_project) — this is what unifies the OS.
+      const r = (await hubPost(
+        "/packages/apply",
+        { ...template, projectId },
+        cfg
+      )) as {
         workspace?: { workspaceId?: string };
       };
       const workspaceId = r.workspace?.workspaceId;
-      // Link the workspace's seed entities to the project happens server-side
-      // via the template; here we record the workspace for the summary.
       s.succeed(`${tmplName} ready`);
       results.push({ slug, workspaceId });
     } catch (e) {
