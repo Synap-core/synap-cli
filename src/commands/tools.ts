@@ -24,7 +24,60 @@ interface ConnectorProvider {
   connectionId?: string;
 }
 
+interface UnlockedCapability {
+  provider: string;
+  displayName: string;
+  skills: Array<{ name: string; description?: string }>;
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+/** Render the verbs a connection installed, e.g. after OAuth completes. */
+function printUnlocked(unlocked: UnlockedCapability[] | undefined): void {
+  const skills = (unlocked ?? []).flatMap((u) => u.skills);
+  if (skills.length === 0) return;
+  console.log();
+  log.heading("Capabilities installed");
+  for (const s of skills) {
+    const label = s.name.replace(/_/g, " ");
+    console.log(`  ${chalk.green("✓")} ${chalk.bold(label)}${s.description ? chalk.dim(` — ${s.description}`) : ""}`);
+  }
+  console.log();
+  // Code skills are seeded as DRAFT (a deliberate gate — code runs unreviewed
+  // only after an explicit enable). Be honest about the one-time step.
+  log.dim("Enable these in Synap → Settings → Capabilities to let your agent use them.");
+  log.dim("Once enabled, each action still asks for your approval before it runs.");
+}
+
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Poll the connect door until the provider flips to `connected` (the user
+ * finished OAuth in the browser). The door is self-completing: on `connected`
+ * it materializes the tool + family template server-side and returns `unlocked`.
+ * Bounded so the CLI never hangs forever.
+ */
+async function pollUntilConnected(
+  cfg: HubCfg,
+  provider: string,
+  workspaceId: string | undefined,
+  timeoutMs = 180_000,
+  intervalMs = 3_000
+): Promise<Record<string, unknown> | null> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    await sleep(intervalMs);
+    try {
+      const body: Record<string, unknown> = { provider };
+      if (workspaceId) body.workspaceId = workspaceId;
+      const res = (await hubPost("/connectors/connect", body, cfg)) as Record<string, unknown>;
+      if (String(res.status) === "connected") return res;
+    } catch {
+      // transient — keep polling until the deadline
+    }
+  }
+  return null;
+}
 
 function openBrowser(url: string): void {
   const platform = process.platform;
@@ -92,6 +145,7 @@ export async function toolsConnect(service: string | undefined, opts: ConnectOpt
 
   if (status === "connected") {
     log.heading(`${res.displayName ?? res.provider} is already connected`);
+    printUnlocked(res.unlocked as UnlockedCapability[] | undefined);
     log.dim(`Run \`synap tools list\` to see all tools and their credentials.`);
     return;
   }
@@ -134,6 +188,7 @@ export async function toolsConnect(service: string | undefined, opts: ConnectOpt
 
   // setup_required
   const redirectUrl = String(res.redirectUrl);
+  const matchedProvider = res.provider ? String(res.provider) : service;
   log.heading(`Connect to ${res.displayName ?? res.provider ?? service ?? "external service"}`);
   console.log();
   console.log(`  Opening OAuth flow in your browser…`);
@@ -143,6 +198,22 @@ export async function toolsConnect(service: string | undefined, opts: ConnectOpt
   console.log();
 
   openBrowser(redirectUrl);
+
+  // Wait for the user to finish OAuth, then confirm + show what unlocked. The
+  // connect door materializes the capability server-side on `connected`, so by
+  // the time this resolves the agent can already use the new verbs.
+  if (matchedProvider) {
+    const waitSpinner = ora({ text: "Waiting for you to finish in the browser…", color: "cyan" }).start();
+    const connected = await pollUntilConnected(cfg, matchedProvider, workspaceId);
+    if (connected) {
+      waitSpinner.succeed(chalk.green(`Connected ${chalk.bold(String(connected.displayName ?? matchedProvider))}!`));
+      printUnlocked(connected.unlocked as UnlockedCapability[] | undefined);
+      return;
+    }
+    waitSpinner.stop();
+    log.dim(`Didn't detect a connection yet — finish the browser flow, then run \`synap tools list\` to check status.`);
+    return;
+  }
 
   log.dim(`Once connected, records will import automatically. Run \`synap tools list\` to check status.`);
 }
