@@ -45,7 +45,12 @@ export type TargetName =
 export interface TargetConnectionConfig {
   podUrl: string;
   apiKey: string;
+  // Pinned lenses — set ONLY when the user explicitly pins (`--pin-workspace` /
+  // `--pin-project`). Default is undefined = pod-wide: the agent connects across
+  // the whole pod and scopes consciously per call. Workspace and project pins
+  // are composable (both may be set for a client-dedicated agent).
   workspaceId?: string;
+  projectId?: string;
   agentUserId?: string;
   skills?: string[]; // defaults to all three
 }
@@ -221,7 +226,7 @@ async function prepareMcpSurface(
 ): Promise<{ effectiveApiKey: string; agentUserId: string; mcpUrl: string }> {
   const { hubApiKey: effectiveApiKey, agentUserId } = await provisionAgentKey(cfg.podUrl, cfg.apiKey, agentType);
   await enrollAgentIfNeeded(cfg.podUrl, cfg.apiKey, agentUserId, cfg.workspaceId);
-  return { effectiveApiKey, agentUserId, mcpUrl: buildMcpUrl(cfg.podUrl, cfg.workspaceId) };
+  return { effectiveApiKey, agentUserId, mcpUrl: buildMcpUrl(cfg.podUrl, cfg.workspaceId, cfg.projectId) };
 }
 
 // ─── Agent context configuration ──────────────────────────────────────────────
@@ -496,7 +501,7 @@ export async function resolveWorkspaceId(cfg: TargetConnectionConfig): Promise<s
  * @param writeMcp — set false to skip the mcpServers entry (skills-only installs)
  */
 export async function writeClaudeCodeEnv(
-  cfg: Pick<TargetConnectionConfig, "podUrl" | "apiKey" | "workspaceId" | "agentUserId">,
+  cfg: Pick<TargetConnectionConfig, "podUrl" | "apiKey" | "workspaceId" | "projectId" | "agentUserId">,
   { writeMcp = true }: { writeMcp?: boolean } = {}
 ): Promise<void> {
   const settingsPath = path.join(os.homedir(), ".claude", "settings.json");
@@ -642,7 +647,7 @@ export async function writeClaudeCodeEnv(
   // which Claude Code ignores. This is what makes a relaunch actually load the
   // synap tools.
   if (writeMcp) {
-    const mcpUrl = buildMcpUrl(cfg.podUrl, cfg.workspaceId);
+    const mcpUrl = buildMcpUrl(cfg.podUrl, cfg.workspaceId, cfg.projectId);
     registerClaudeCodeMcp(mcpUrl, effectiveApiKey);
   }
 }
@@ -866,7 +871,7 @@ async function installClaudeDesktop(
   const { setSurfaceAgentKey: saveDesktopKey } = await import("./pod.js");
   saveDesktopKey("claude-desktop", { hubApiKey: effectiveApiKey, agentUserId });
   await enrollAgentIfNeeded(cfg.podUrl, cfg.apiKey, agentUserId, cfg.workspaceId);
-  const desktopMcpUrl = buildMcpUrl(cfg.podUrl, cfg.workspaceId);
+  const desktopMcpUrl = buildMcpUrl(cfg.podUrl, cfg.workspaceId, cfg.projectId);
   writeMcpServerEntry(mcpPath, "synap", {
     command: "npx",
     args: ["-y", "mcp-remote", desktopMcpUrl, "--header", `Authorization: Bearer ${effectiveApiKey}`],
@@ -927,7 +932,7 @@ async function installCursor(
   const { setSurfaceAgentKey: saveCursorKey } = await import("./pod.js");
   saveCursorKey("cursor", { hubApiKey: effectiveApiKey, agentUserId });
   await enrollAgentIfNeeded(cfg.podUrl, cfg.apiKey, agentUserId, cfg.workspaceId);
-  const cursorMcpUrl = buildMcpUrl(cfg.podUrl, cfg.workspaceId);
+  const cursorMcpUrl = buildMcpUrl(cfg.podUrl, cfg.workspaceId, cfg.projectId);
   writeMcpServerEntry(mcpPath, "synap", {
     url: cursorMcpUrl,
     headers: { Authorization: `Bearer ${effectiveApiKey}` },
@@ -1037,7 +1042,7 @@ async function installOpenclaw(cfg: TargetConnectionConfig): Promise<boolean> {
 // ─── Open WebUI ──────────────────────────────────────────────────────────────
 
 async function installOpenWebUI(cfg: TargetConnectionConfig): Promise<boolean> {
-  const mcpUrl = buildMcpUrl(cfg.podUrl, cfg.workspaceId);
+  const mcpUrl = buildMcpUrl(cfg.podUrl, cfg.workspaceId, cfg.projectId);
   const podHost = new URL(cfg.podUrl).host;
 
   log.info("Open WebUI connects to Synap in two ways:");
@@ -1229,7 +1234,7 @@ async function installVSCode(cfg: TargetConnectionConfig): Promise<boolean> {
 }
 
 async function installGeneric(cfg: TargetConnectionConfig): Promise<boolean> {
-  const mcpUrl = buildMcpUrl(cfg.podUrl, cfg.workspaceId);
+  const mcpUrl = buildMcpUrl(cfg.podUrl, cfg.workspaceId, cfg.projectId);
 
   const httpConfig = {
     synap: {
@@ -1286,7 +1291,7 @@ async function installCodex(
   // Build MCP server entry
   const { hubApiKey: effectiveApiKey, agentUserId } = await provisionAgentKey(cfg.podUrl, cfg.apiKey, "codex");
   await enrollAgentIfNeeded(cfg.podUrl, cfg.apiKey, agentUserId, cfg.workspaceId);
-  const mcpUrl = buildMcpUrl(cfg.podUrl, cfg.workspaceId);
+  const mcpUrl = buildMcpUrl(cfg.podUrl, cfg.workspaceId, cfg.projectId);
 
   // Inject/replace the synap mcpServers block using simple string manipulation
   // (avoid requiring a YAML parser dependency)
@@ -1413,7 +1418,7 @@ async function pickProvider(
   return withKeys.find((p) => p.providerId === choice) ?? null;
 }
 
-export async function installOpencode(cfg: ProviderInstallConfig & { workspaceId?: string }): Promise<boolean> {
+export async function installOpencode(cfg: ProviderInstallConfig & { workspaceId?: string; projectId?: string }): Promise<boolean> {
   const provider = await pickProvider(cfg.podUrl, cfg.apiKey);
   if (!provider || !provider.apiKey) return false;
 
@@ -1463,7 +1468,7 @@ export async function installOpencode(cfg: ProviderInstallConfig & { workspaceId
   const { hubApiKey: agentKey, agentUserId } = await provisionAgentKey(cfg.podUrl, cfg.apiKey, "opencode");
   await enrollAgentIfNeeded(cfg.podUrl, cfg.apiKey, agentUserId, cfg.workspaceId);
   const podBase = cfg.podUrl.replace(/\/$/, "");
-  const mcpUrl = buildMcpUrl(cfg.podUrl, cfg.workspaceId);
+  const mcpUrl = buildMcpUrl(cfg.podUrl, cfg.workspaceId, cfg.projectId);
 
   const mcpBlock = (existing.mcp ?? {}) as Record<string, unknown>;
   mcpBlock["synap"] = { type: "remote", url: mcpUrl, headers: { Authorization: `Bearer ${agentKey}` } };

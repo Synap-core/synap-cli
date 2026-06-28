@@ -106,6 +106,8 @@ program
     "--manual-key",
     "Skip the browser approval flow and paste a key (or provisioning token)"
   )
+  .option("--pin-workspace <id>", "Pin the connection to one workspace (default: pod-wide lens)")
+  .option("--pin-project <id>", "Pin the connection to one project (composable with --pin-workspace)")
   .action(async (opts) => {
     const { connect } = await import("./commands/connect.js");
     await connect(opts);

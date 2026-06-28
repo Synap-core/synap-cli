@@ -38,6 +38,9 @@ interface ConnectOptions {
   list?: boolean;
   name?: string;
   manualKey?: boolean;
+  // Pin lenses into the connection (default: pod-wide). Composable.
+  pinWorkspace?: string;
+  pinProject?: string;
 }
 
 export async function connect(opts: ConnectOptions): Promise<void> {
@@ -80,7 +83,18 @@ export async function connect(opts: ConnectOptions): Promise<void> {
   // ── Step 4: Install ─────────────────────────────────────────────────────
   log.heading(`Connecting ${TARGETS[target].label} → ${podUrl}`);
 
-  const ok = await installForTarget(target, { podUrl, apiKey, workspaceId, agentUserId });
+  // Default pod-wide: a workspace is a lens, not a container — don't weld the
+  // profile's workspace into the connection. Pin only when explicitly asked
+  // (`--pin-workspace` / `--pin-project`, composable). With no pin, the agent
+  // is enrolled across ALL the user's workspaces and scopes consciously per call.
+  void workspaceId; // profile default no longer scopes the connection
+  const ok = await installForTarget(target, {
+    podUrl,
+    apiKey,
+    workspaceId: opts.pinWorkspace,
+    projectId: opts.pinProject,
+    agentUserId,
+  });
 
   log.blank();
   if (ok) {

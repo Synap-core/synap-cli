@@ -33,13 +33,20 @@ interface McpBaseOpts {
   json?: boolean;
 }
 
-/** Resolve the scoped MCP URL + the lenses from config/flags. */
+/** Resolve the scoped MCP URL + the lenses from flags.
+ *
+ * Default is POD-WIDE: a workspace is a lens, not a container, so we do NOT
+ * weld one into the connection. The agent connects pod-wide, orients, and
+ * scopes consciously per tool-call (the URL param is only a fallback default
+ * the pod injects when a call omits scope). Pin a workspace and/or a project
+ * ONLY when explicitly asked (`--workspace` / `--project`) — e.g. an agent
+ * dedicated to one client. Both are composable. */
 function resolveMcpTarget(
   cfg: HubConfig,
   opts: McpBaseOpts
 ): { url: string; workspaceId?: string; projectId?: string } {
-  const workspaceId = opts.workspace || cfg.workspaceId;
-  const projectId = opts.project; // project focus is explicit (no config default)
+  const workspaceId = opts.workspace; // explicit pin only — no cfg fallback
+  const projectId = opts.project; // explicit pin only
   return {
     url: buildMcpUrl(cfg.podUrl, workspaceId, projectId),
     workspaceId,
