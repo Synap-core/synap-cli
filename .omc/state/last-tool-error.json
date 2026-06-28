@@ -1,7 +1,0 @@
-{
-  "tool_name": "Read",
-  "tool_input_preview": "{\"file_path\":\"/Users/antoine/Documents/Code/synap\"}",
-  "error": "EISDIR: illegal operation on a directory, read '/Users/antoine/Documents/Code/synap'",
-  "timestamp": "2026-06-20T19:08:04.579Z",
-  "retry_count": 1
-}

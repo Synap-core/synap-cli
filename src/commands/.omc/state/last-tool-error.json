@@ -1,0 +1,7 @@
+{
+  "tool_name": "Bash",
+  "tool_input_preview": "{\"command\":\"cd /Users/antoine/Documents/Code/synap/synap-backend && git push origin main\",\"description\":\"Push to origin\"}",
+  "error": "Exit code 1\n\n> synap-backend@1.0.0 typecheck /Users/antoine/Documents/Code/synap/synap-backend\n> turbo run typecheck\n\n• turbo 2.7.4\n• Packages in scope: @synap-core/api-types, @synap-core/auth-bootstrap, @synap-core/core, @synap-core/external-connect-client, @synap-core/hub-protocol, @synap-core/types, @synap/ai, @synap/ai-embeddings, @synap/api, @synap/auth, @synap/capability-gate, @synap/database, @synap/events, @synap/feed-service, @synap/governance-policy, @synap/hub-rest-client, @synap/inte...",
+  "timestamp": "2026-06-24T16:32:45.433Z",
+  "retry_count": 3
+}

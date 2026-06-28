@@ -54,6 +54,21 @@ program
     await init(opts);
   });
 
+// ── launch — orchestrate a complete company OS from templates ──────────────────
+const launch = program
+  .command("launch")
+  .description("Provision a complete workspace setup from templates");
+launch
+  .command("agent-os")
+  .description("Launch a company OS — project + domain workspaces, interactively")
+  .option("--json", "Output as JSON")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (opts) => {
+    const { launchAgentOs } = await import("./commands/launch.js");
+    await launchAgentOs(opts);
+  });
+
 // Hidden: one-shot Discord↔Synap bridge provisioning (dogfood/dev convenience).
 program
   .command("bridge-setup", { hidden: true })

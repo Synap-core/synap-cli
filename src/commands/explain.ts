@@ -13,7 +13,7 @@
  *   synap explain governance   # proposals & governance
  *   synap explain views        # views & bento
  *   synap explain events       # event chain
- *   synap explain connectors   # connectors
+ *   synap explain tools        # tools & external services
  */
 
 import chalk from "chalk";
@@ -118,8 +118,8 @@ function sectionGovernance(): void {
   console.log(chalk.dim("  Proposals are reversible — approve, reject, or revert after execution."));
 }
 
-function sectionConnectors(): void {
-  console.log(chalk.bold("\n## Connectors"));
+function sectionTools(): void {
+  console.log(chalk.bold("\n## Tools & External Services"));
   console.log(chalk.dim("  39 Nango-powered integrations: Google, GitHub, Notion, Linear, Slack, Jira, …"));
   console.log("");
   console.log(`  ${chalk.cyan("synap tools list")}            ${chalk.dim("→ available tools + connection status")}`);
@@ -222,7 +222,7 @@ export async function explain(opts: ExplainOpts): Promise<void> {
     case "connectors":
     case "connector":
     case "integrations":
-      sectionConnectors();
+      sectionTools();
       break;
     case "agents":
     case "agent":
@@ -245,7 +245,7 @@ export async function explain(opts: ExplainOpts): Promise<void> {
       // Full capability map
       console.log(chalk.bold.cyan("\nSynap Capability Map"));
       console.log(chalk.dim("  Sovereign personal data infrastructure. Run any section with: synap explain <topic>"));
-      console.log(chalk.dim("  Topics: entities | graph | memory | events | automation | views | governance | connectors | agents\n"));
+      console.log(chalk.dim("  Topics: entities | graph | memory | events | automation | views | governance | tools | agents\n"));
       sectionEntities();
       sectionGraph();
       sectionMemory();
@@ -253,14 +253,14 @@ export async function explain(opts: ExplainOpts): Promise<void> {
       sectionAutomation();
       sectionViews();
       sectionGovernance();
-      sectionConnectors();
+      sectionTools();
       sectionAgents();
       sectionQuickRef();
       break;
     }
     default:
       console.log(chalk.yellow(`  Unknown topic: "${opts.topic}". Valid topics:`));
-      console.log(chalk.dim("  entities | graph | memory | events | automation | views | governance | connectors | agents | commands"));
+      console.log(chalk.dim("  entities | graph | memory | events | automation | views | governance | tools | agents | commands"));
       process.exit(1);
   }
 

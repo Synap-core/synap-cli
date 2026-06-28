@@ -4,7 +4,9 @@
  * One-shot provisioning for the Discord ↔ Synap bridge — the terminal-native
  * "complete it all" flow. Automates everything that CAN be automated:
  *
- *   1. resolves a durable hub key + workspace from your saved pod profile
+ *   1. lets you CHOOSE which saved pod the bridge connects to (kept separate
+ *      from your global CLI pod via the "discord" surface override), then
+ *      resolves a durable hub key + workspace from it
  *   2. sanity-checks pod reachability + key scope (GET /capabilities)
  *   3. applies the bridge's OWN capability definition (POST /capabilities/apply)
  *      — read from the bridge repo so there is ONE source of truth
@@ -18,8 +20,9 @@
  *
  * Usage:
  *   synap bridge-setup --client-id <discord-app-id> [--bridge-dir <path>]
- *     [--workspace-id <uuid>] [--proactive-channel <discord-channel-id>]
- *     [--enable-ingest] [--enable-react] [--pod-url <url>] [--api-key <key>]
+ *     [--pod <profile-name>] [--workspace-id <uuid>]
+ *     [--proactive-channel <discord-channel-id>] [--enable-react]
+ *     [--pod-url <url>] [--api-key <key>]
  */
 
 import path from "node:path";
@@ -30,20 +33,30 @@ import { fileURLToPath } from "node:url";
 import chalk from "chalk";
 import ora from "ora";
 import prompts from "prompts";
-import { resolveHubConfig, hubGet, hubPost, hubPatch, resolveUserId } from "../lib/hub-client.js";
+import { resolveHubConfig, hubGet, hubPost, hubPatch, resolveUserId, type HubConfig } from "../lib/hub-client.js";
 import { discoverSkillDirs, parseSkillDir, importSkill } from "../lib/skill-import.js";
-import { checkPodHealth, getSurfaceAgentKey, setSurfaceAgentKey } from "../lib/pod.js";
-import { enrollAgentIfNeeded } from "../lib/targets.js";
+import {
+  checkPodHealth,
+  getSurfaceAgentKey,
+  setSurfaceAgentKey,
+  listPodProfiles,
+  getSurfacePodName,
+  setSurfacePod,
+} from "../lib/pod.js";
+import { enrollAgentIfNeeded, ensureAgentGovernance, type GovernancePreset } from "../lib/targets.js";
 import { log, banner } from "../utils/logger.js";
 
 export interface BridgeSetupOpts {
+  /** Saved pod profile to connect the bridge to (separate from the global CLI pod). */
+  pod?: string;
+  /** Governance preset for the agent — skips the interactive prompt when set. */
+  governance?: GovernancePreset;
   podUrl?: string;
   apiKey?: string;
   bridgeDir?: string;
   clientId?: string;
   workspaceId?: string;
   proactiveChannel?: string;
-  enableIngest?: boolean;
   enableReact?: boolean;
   /** Discord bot token — provisioned INTO the pod vault (not a loose env var). */
   botToken?: string;
@@ -83,14 +96,93 @@ const BOT_PERMISSIONS = Object.values(BOT_PERMISSION_BITS)
   .reduce((acc, bit) => acc | bit, 0n)
   .toString();
 
+/**
+ * Pick the pod the BRIDGE connects to — independent of the global CLI pod.
+ *
+ * The bridge is the "discord" surface, so we resolve/persist its pod via the
+ * per-surface override (setSurfacePod) and NEVER touch the global activePod.
+ * That lets the operator keep a personal pod as their CLI default while the
+ * Discord bridge points at a different (e.g. team / client) pod.
+ *
+ * Order: explicit --pod-url/--api-key escape hatch → --pod <name> →
+ * single saved profile (auto) → interactive picker (default = the pod already
+ * assigned to the discord surface, else the CLI-active one).
+ */
+async function resolveBridgePod(
+  opts: BridgeSetupOpts,
+): Promise<{ cfg: HubConfig; podName: string | null }> {
+  // 1. Raw URL+key escape hatch — bypasses profiles entirely.
+  if (opts.podUrl && opts.apiKey) {
+    return {
+      cfg: { podUrl: opts.podUrl, apiKey: opts.apiKey, userId: process.env.SYNAP_USER_ID ?? "cli" },
+      podName: null,
+    };
+  }
+
+  const profiles = listPodProfiles();
+  if (profiles.length === 0) {
+    throw new Error(
+      "No pod profiles saved. Run `synap pods add` first, or pass --pod-url and --api-key.",
+    );
+  }
+
+  // 2. Resolve which profile to use.
+  let chosen: { name: string; config: typeof profiles[number]["config"] } | undefined;
+  if (opts.pod) {
+    chosen = profiles.find((p) => p.name === opts.pod);
+    if (!chosen) {
+      throw new Error(
+        `Pod profile '${opts.pod}' not found. Saved profiles: ${profiles.map((p) => p.name).join(", ")}`,
+      );
+    }
+  } else if (profiles.length === 1) {
+    chosen = profiles[0];
+    log.dim(`Using your only saved pod profile: ${chosen.name}`);
+  } else {
+    const defaultName =
+      getSurfacePodName("discord") ?? profiles.find((p) => p.active)?.name ?? profiles[0].name;
+    const initial = Math.max(0, profiles.findIndex((p) => p.name === defaultName));
+    const { picked } = await prompts({
+      type: "select",
+      name: "picked",
+      message: "Which data pod should the bridge connect to?",
+      initial,
+      choices: profiles.map((p) => ({
+        title: `${p.name}${p.active ? " (CLI default)" : ""}`,
+        description: p.config.podUrl,
+        value: p.name,
+      })),
+    });
+    if (!picked) throw new Error("No pod selected — aborting.");
+    chosen = profiles.find((p) => p.name === picked)!;
+  }
+
+  // Remember the choice for the discord surface — without changing the CLI default.
+  setSurfacePod("discord", chosen.name);
+
+  const c = chosen.config;
+  return {
+    cfg: {
+      podUrl: c.podUrl,
+      apiKey: c.hubApiKey,
+      userId: c.agentUserId,
+      workspaceId: c.workspaceId || undefined,
+    },
+    podName: chosen.name,
+  };
+}
+
 export async function bridgeSetup(opts: BridgeSetupOpts): Promise<void> {
   banner();
   log.heading("Discord bridge — one-shot setup");
 
-  // ── 1. Resolve durable pod credentials ──────────────────────────────────
-  let cfg: Awaited<ReturnType<typeof resolveHubConfig>>;
+  // ── 1. Choose the pod the BRIDGE connects to (independent of the CLI pod) ──
+  let cfg: HubConfig;
+  let bridgePodName: string | null = null;
   try {
-    cfg = await resolveHubConfig({ podUrl: opts.podUrl, apiKey: opts.apiKey });
+    const resolved = await resolveBridgePod(opts);
+    cfg = resolved.cfg;
+    bridgePodName = resolved.podName;
   } catch (err) {
     log.error((err as Error).message);
     log.dim("Run `synap init` or `synap pods add` first to save a pod + key.");
@@ -107,7 +199,7 @@ export async function bridgeSetup(opts: BridgeSetupOpts): Promise<void> {
     log.error(`Pod not reachable at ${cfg.podUrl}`);
     process.exit(1);
   }
-  log.success(`Pod healthy: ${cfg.podUrl}`);
+  log.success(`Pod healthy: ${cfg.podUrl}${bridgePodName ? ` (profile: ${bridgePodName})` : ""}`);
 
   // ── 3. Resolve workspace ───────────────────────────────────────────────
   const workspaceId = await resolveWorkspaceId(opts.workspaceId, cfg.workspaceId, cfg);
@@ -147,10 +239,26 @@ export async function bridgeSetup(opts: BridgeSetupOpts): Promise<void> {
     botToken
   );
 
+  // ── 4. Choose agent governance mode ──────────────────────────────────
+  const discordAgentUserId = getSurfaceAgentKey("discord")?.agentUserId;
+  if (discordAgentUserId) {
+    await ensureAgentGovernance(cfg, discordAgentUserId, opts.governance);
+  }
+
   // ── 4b. Apply the agency capability templates (idempotent, self-healing) ────
-  await applyAgencyCapabilities(cfg);
+  await applyAgencyCapabilities(cfg, workspaceId);
 
   await applyAgencySkills(cfg);
+
+  // ── 4e. Seed automation templates (idempotent, event-driven) ────────────────
+  await applyAutomationTemplates(cfg, workspaceId);
+
+  // ── 4f. React-capture is POD CONFIG now (discord tool metadata), not an env
+  //        var. When --enable-react is passed, set it on the tool so the bridge
+  //        reads it back from the pod — changeable later in Studio / /configure.
+  if (opts.enableReact) {
+    await setDiscordToolConfig(cfg, workspaceId, { reactCapture: true });
+  }
 
   // ── 4d. Grant the bridge redeem access — token lives ONLY in the vault ─────
   let granted = false;
@@ -180,8 +288,6 @@ export async function bridgeSetup(opts: BridgeSetupOpts): Promise<void> {
   // if it didn't, we warn loudly rather than leaking the token to env.)
   if (vaultRef) managed.SYNAP_DISCORD_TOKEN_REF = vaultRef;
   if (opts.guildId) managed.DISCORD_GUILD_ID = opts.guildId;
-  if (opts.enableIngest) managed.SYNAP_INGEST_ENABLED = "true";
-  if (opts.enableReact) managed.SYNAP_REACT_CAPTURE_ENABLED = "true";
   if (opts.proactiveChannel) managed.SYNAP_PROACTIVE_CHANNEL_ID = opts.proactiveChannel;
 
   try {
@@ -276,6 +382,27 @@ function resolveTemplatesDir(): string | null {
 }
 
 /**
+ * Resolve the automations templates directory.
+ *
+ * Resolution order:
+ *   1. AUTOMATION_TEMPLATES_DIR env var (override for CI / custom installs)
+ *   2. Monorepo-relative default: <cli-package-root>/../../synap-backend/templates/automations
+ *
+ * Returns null when the directory is absent (e.g. published npx with no monorepo),
+ * or the backend hasn't created the templates yet — caller skips and warns.
+ */
+function resolveAutomationsTemplatesDir(): string | null {
+  if (process.env.AUTOMATION_TEMPLATES_DIR) {
+    const override = process.env.AUTOMATION_TEMPLATES_DIR;
+    return fs.existsSync(override) ? override : null;
+  }
+  const thisFile = fileURLToPath(import.meta.url);
+  const cliRoot = path.resolve(path.dirname(thisFile), "..", "..");
+  const candidate = path.resolve(cliRoot, "..", "synap-backend", "templates", "automations");
+  return fs.existsSync(candidate) ? candidate : null;
+}
+
+/**
  * Apply the agency capability templates idempotently.
  *
  * - Reads each *.capability.json from the templates dir.
@@ -286,7 +413,8 @@ function resolveTemplatesDir(): string | null {
  * - NEVER throws — errors are warned so the overall setup continues.
  */
 async function applyAgencyCapabilities(
-  cfg: Awaited<ReturnType<typeof resolveHubConfig>>
+  cfg: Awaited<ReturnType<typeof resolveHubConfig>>,
+  workspaceId: string
 ): Promise<void> {
   const templatesDir = resolveTemplatesDir();
   if (!templatesDir) {
@@ -319,14 +447,22 @@ async function applyAgencyCapabilities(
       continue;
     }
 
+    // Capabilities that bundle PLAYBOOKS are workspace-scoped (playbooks are
+    // workspace-scoped by design — the backend rejects a pod-wide apply with
+    // "playbooks require a workspaceId"). Everything else (pod-wide tools/skills,
+    // e.g. the nango connectors) seeds pod-wide so the browser's capabilities
+    // view and the agent see them everywhere. Only channels/entities belong to
+    // the chosen workspace.
+    const hasPlaybooks =
+      Array.isArray((definition as { playbooks?: unknown[] }).playbooks) &&
+      ((definition as { playbooks?: unknown[] }).playbooks?.length ?? 0) > 0;
+
     try {
-      // Seed POD-WIDE (no workspaceId): agency capabilities are the agent's
-      // pod-wide abilities (the tools/skills are pod-wide too), so the container
-      // must be pod-wide to match — and the browser's capabilities view reads the
-      // pod-wide set. Only channels/entities belong to the chosen workspace.
       const res = (await hubPost(
         "/capabilities/apply",
-        { definition, params: item.params },
+        hasPlaybooks
+          ? { definition, params: item.params, workspaceId }
+          : { definition, params: item.params },
         cfg
       )) as {
         capabilityKey?: string;
@@ -383,11 +519,200 @@ async function applyAgencySkills(
     const parsed = parseSkillDir(dir);
     if (!parsed) continue;
     const res = await importSkill(parsed, userId, cfg);
+    const marker =
+      res.status === "error" ? "!!" : res.status === "exists" ? "skip" : "ok";
     const tag =
-      res.status === "exists" ? "(already seeded)"
+      res.status === "exists" ? "already seeded"
       : res.status === "error" ? `[error] ${res.error}`
       : `imported${res.docs ? ` · ${res.docs} docs` : ""}`;
-    log.dim(`  [${res.status === "error" ? "!!" : "ok"}]   ${parsed.slug.padEnd(34)} ${tag}`);
+    const line = `  [${marker}]${" ".repeat(Math.max(1, 5 - marker.length))}${parsed.slug.padEnd(34)} ${tag}`;
+    if (res.status === "error") log.warn(line);
+    else log.dim(line);
+  }
+}
+
+// ── Automation template seeding ─────────────────────────────────────────────
+
+/**
+ * Automation template shape expected in each *.automation.json file.
+ */
+interface AutomationTemplate {
+  name: string;
+  triggerType: string;
+  status: string;
+  triggerConfig: Record<string, unknown>;
+  flowDefinition: {
+    nodes: Array<{ id: string; type: string; data: Record<string, unknown>; [k: string]: unknown }>;
+    edges: Array<Record<string, unknown>>;
+  };
+  metadata?: Record<string, unknown>;
+}
+
+/**
+ * Apply automation templates from synap-backend/templates/automations/*.automation.json.
+ *
+ * For each file:
+ *  - Find existing automation by name (GET /automations); skip if already present.
+ *  - If the flowDefinition contains a `skill` node, resolve its skillId by name
+ *    (GET /skills) and inject it into the node's data.skillId before POSTing.
+ *    If the skill is not found, logs a warning but still creates the automation.
+ *  - Never throws — errors are warned so setup continues.
+ */
+/**
+ * Set behavioral config on the `discord` tool's metadata (the pod-resident config
+ * home — read back by the bridge at runtime). Idempotent: merges into the existing
+ * metadata.discord. Best-effort — never throws (setup continues if the tool isn't
+ * found yet). Uses PATCH /tools/:id which does NOT reset tool approval for metadata.
+ */
+async function setDiscordToolConfig(
+  cfg: Awaited<ReturnType<typeof resolveHubConfig>>,
+  workspaceId: string,
+  patch: Record<string, unknown>
+): Promise<void> {
+  try {
+    const res = (await hubGet("/tools", { workspaceId }, cfg)) as {
+      tools?: Array<{ id: string; name?: string; metadata?: Record<string, unknown> }>;
+    };
+    const tool = (res?.tools ?? []).find((t) => t?.name === "discord");
+    if (!tool?.id) {
+      log.dim("  [skip] discord tool not found — config will use defaults");
+      return;
+    }
+    const meta = (tool.metadata ?? {}) as Record<string, unknown>;
+    const discord = (meta.discord ?? {}) as Record<string, unknown>;
+    const nextMeta = { ...meta, discord: { ...discord, ...patch } };
+    await hubPatch(`/tools/${tool.id}`, { metadata: nextMeta }, cfg);
+    log.success(`Discord config updated (${Object.keys(patch).join(", ")})`);
+  } catch (err) {
+    log.warn(`Could not set discord tool config: ${(err as Error).message}`);
+  }
+}
+
+async function applyAutomationTemplates(
+  cfg: Awaited<ReturnType<typeof resolveHubConfig>>,
+  workspaceId: string
+): Promise<void> {
+  const templatesDir = resolveAutomationsTemplatesDir();
+  if (!templatesDir) {
+    log.warn(
+      "Automation templates dir not found — skipping. " +
+      "Set AUTOMATION_TEMPLATES_DIR=<path> to seed from a custom location."
+    );
+    return;
+  }
+
+  const files = fs.readdirSync(templatesDir).filter((f) => f.endsWith(".automation.json"));
+  if (files.length === 0) {
+    log.dim("No *.automation.json templates found — skipping automation seeding.");
+    return;
+  }
+
+  log.dim(`Seeding ${files.length} automation template(s) from ${templatesDir}…`);
+
+  const userId = await resolveUserId(cfg);
+
+  // Fetch existing automations once (avoid N+1 round-trips).
+  let existingAutos: Array<{ id: string; name: string }> = [];
+  try {
+    const res: unknown = await hubGet("/automations", { userId, workspaceId }, cfg);
+    existingAutos = Array.isArray(res) ? res : ((res as { automations?: typeof existingAutos })?.automations ?? []);
+  } catch (err) {
+    log.warn(`Could not fetch existing automations: ${(err as Error).message}`);
+  }
+
+  // Fetch existing skills once — needed for skill-node injection.
+  let existingSkills: Array<{ id: string; name: string }> = [];
+  try {
+    const res: unknown = await hubGet("/skills", { userId, workspaceId }, cfg);
+    existingSkills = Array.isArray(res) ? res : ((res as { skills?: typeof existingSkills })?.skills ?? []);
+  } catch (err) {
+    log.warn(`Could not fetch existing skills: ${(err as Error).message}`);
+  }
+
+  for (const file of files) {
+    const filePath = path.join(templatesDir, file);
+    let tpl: AutomationTemplate;
+    try {
+      tpl = JSON.parse(fs.readFileSync(filePath, "utf-8")) as AutomationTemplate;
+    } catch (err) {
+      log.warn(`  [error] ${file} — could not parse: ${(err as Error).message}`);
+      continue;
+    }
+
+    // Idempotent: skip if already exists by name.
+    const existing = existingAutos.find((a) => a.name === tpl.name);
+    if (existing) {
+      log.dim(`  [skip]  ${tpl.name} — already seeded (id=${existing.id})`);
+      continue;
+    }
+
+    // Inject skillId into any skill nodes that reference a skill by name.
+    // Skills are seeded by applyAgencySkills() BEFORE this runs, so a missing
+    // skill means seeding failed — creating a skill-less automation would be a
+    // silent runtime failure. Skip the automation loudly instead.
+    const flow = tpl.flowDefinition;
+    let missingSkill: string | null = null;
+    for (const node of flow.nodes) {
+      if (node.type === "skill") {
+        const skillName = (node.data as { skillName?: string }).skillName;
+        if (skillName) {
+          const match = existingSkills.find((s) => s.name === skillName);
+          if (match) {
+            node.data = { ...node.data, skillId: match.id };
+          } else {
+            missingSkill = skillName;
+          }
+        }
+      }
+    }
+    if (missingSkill) {
+      log.warn(
+        `  [skip]  ${tpl.name} — required skill "${missingSkill}" not seeded; ` +
+        "skipping (re-run after the skill is created, else the automation would fail at runtime).",
+      );
+      continue;
+    }
+
+    try {
+      const newAuto: unknown = await hubPost("/automations/create", {
+        userId,
+        workspaceId,
+        name: tpl.name,
+        triggerType: tpl.triggerType,
+        status: tpl.status,
+        triggerConfig: tpl.triggerConfig,
+        flowDefinition: flow,
+        metadata: { ...(tpl.metadata ?? {}), source: "bridge-setup" },
+      }, cfg);
+      const autoId = (newAuto as { id?: string })?.id;
+      if (autoId) {
+        log.dim(`  [ok]    ${tpl.name} — created (id=${autoId})`);
+      } else if ((newAuto as { status?: string })?.status === "proposed") {
+        // These are operator-installed TEMPLATES, not AI-authored automations —
+        // so apply them directly as the user instead of leaving a proposal. The
+        // operator is the one running bridge-setup, so we approve their own
+        // template-install proposal (POST /proposals/:id/approve runs as the
+        // caller = the operator), materializing the automation attributed to them.
+        const proposalId = (newAuto as { proposalId?: string }).proposalId;
+        if (proposalId) {
+          try {
+            await hubPost(`/proposals/${proposalId}/approve`, {}, cfg);
+            log.dim(`  [ok]    ${tpl.name} — applied (template)`);
+          } catch (approveErr) {
+            log.warn(
+              `  [proposed] ${tpl.name} (${proposalId}) — auto-approve failed ` +
+              `(${(approveErr as Error).message}); approve it in Synap Studio.`,
+            );
+          }
+        } else {
+          log.warn(`  [proposed] ${tpl.name} — no proposalId returned; approve it in Synap Studio.`);
+        }
+      } else {
+        log.warn(`  [warn]  ${tpl.name} — unexpected response: ${JSON.stringify(newAuto)}`);
+      }
+    } catch (err) {
+      log.warn(`  [error] ${tpl.name} — ${(err as Error).message}`);
+    }
   }
 }
 
@@ -639,8 +964,21 @@ async function applyBridgeCapability(
     );
     return { vaultRef, secretId };
   } catch (err) {
-    spinner.fail("Capability apply failed (pod creds still written below)");
-    log.dim(`  ${(err as Error).message}`);
+    const msg = (err as Error).message;
+    spinner.fail("Capability apply failed");
+    log.error(`  ${msg}`);
+    if (botToken) {
+      // The bot token MUST be vaulted for the bridge to run — continuing to write
+      // a .env and printing "Done" would leave a crash-looping bridge (redeem
+      // 404). A frequent cause is a missing/empty VAULT_SERVER_KEY on the target
+      // pod's backend (the vault can't encrypt). Fail loud at SETUP time instead.
+      if (/VAULT_SERVER_KEY/i.test(msg)) {
+        log.dim("  The target pod's secret vault is not configured.");
+        log.dim("  Set a durable VAULT_SERVER_KEY (openssl rand -hex 32) in the pod's");
+        log.dim("  deploy/.env, redeploy the backend, then re-run bridge-setup.");
+      }
+      process.exit(1);
+    }
     return {};
   }
 }

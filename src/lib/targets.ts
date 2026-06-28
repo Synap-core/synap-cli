@@ -18,6 +18,13 @@ import ora from "ora";
 import prompts from "prompts";
 import { log } from "../utils/logger.js";
 import { installSkills, SKILL_NAMES } from "./skills-installer.js";
+import {
+  resolveHubConfig,
+  resolveUserId,
+  hubGet,
+  hubPatch,
+  type HubConfig,
+} from "./hub-client.js";
 
 export type TargetName =
   | "claude-code"
@@ -597,6 +604,11 @@ export async function writeClaudeCodeEnv(
   // Enroll the new agent user into the caller's workspaces using the HUMAN key
   // (before switching to the agent key). Scoped to one workspace when chosen.
   await enrollAgentIfNeeded(cfg.podUrl, cfg.apiKey, agentSetup.agentUserId ?? "", cfg.workspaceId);
+
+  // Set per-agent governance — prompt once per agent, idempotent.
+  if (agentSetup.agentUserId) {
+    await ensureAgentGovernance(cfg, agentSetup.agentUserId);
+  }
 
   const env = (settings.env ?? {}) as Record<string, string>;
   env["SYNAP_POD_URL"] = cfg.podUrl;
@@ -1544,4 +1556,105 @@ export function writeMcpServerEntry(
   fs.writeFileSync(configPath, JSON.stringify(config, null, 2) + "\n", {
     mode: 0o600,
   });
+}
+
+/**
+ * Idempotent workspace governance prompt. Checks if the workspace already has
+ * aiGovernance configured — skips if set. Otherwise prompts for safe/normal/crazy
+ * and applies via PATCH /workspaces/:id/governance.
+ */
+export type GovernancePreset = "safe" | "normal" | "crazy";
+
+// Governance presets — MUST stay in sync with GOVERNANCE_MODES in the backend
+// `@synap/governance-policy`. (Single-source TODO: have the backend resolve a
+// mode NAME so the CLI never re-states the autoApproveFor list — until then,
+// this is the one place to mirror when the backend presets change.)
+const GOVERNANCE_PRESETS: Record<
+  GovernancePreset,
+  { autoApproveFor: string[]; writesRequireProposal: boolean }
+> = {
+  safe: {
+    autoApproveFor: [
+      "search.*", "memory.recall", "entity.read", "document.read",
+      "context.*", "filesystem.read", "bento.arrange",
+    ],
+    writesRequireProposal: true,
+  },
+  normal: {
+    autoApproveFor: [
+      "search.*", "memory.recall", "entity.read", "document.read",
+      "context.*", "filesystem.read", "bento.arrange",
+      "entity.create", "document.create", "relation.create",
+      "view.create", "profile.create", "property_def.create",
+      "channel.create",
+      // Capability-substrate creates — "creates are instant" (mirrors backend).
+      "automation.create", "playbook.create", "link.create",
+      "tool.create", "skill.create",
+      "playbook.read", "tool.read", "link.read", "capability.read",
+      "terminal.read_logs", "filesystem.write_workspace",
+    ],
+    writesRequireProposal: false,
+  },
+  crazy: {
+    autoApproveFor: ["*"],
+    writesRequireProposal: false,
+  },
+};
+
+export async function ensureAgentGovernance(
+  cfg: { podUrl: string; apiKey: string },
+  agentUserId: string,
+  presetMode?: GovernancePreset
+): Promise<void> {
+  const userId = await resolveUserId(cfg as HubConfig);
+  const hubCfg: HubConfig = { ...cfg, userId };
+
+  // Non-interactive when a preset is passed (e.g. `--governance normal`);
+  // otherwise prompt (Normal pre-selected, Enter = <1s).
+  let mode = presetMode;
+  if (!mode) {
+    const res = await prompts({
+      type: "select",
+      name: "mode",
+      message: "Governance — how should this agent's actions be gated?",
+      choices: [
+        {
+          title: "Safe — every change requires your approval in Synap Studio",
+          description:
+            "Creates, updates, and deletes all go through proposals. Maximum control.",
+          value: "safe",
+        },
+        {
+          title: "Normal — creates are instant, updates & deletes need approval (recommended)",
+          description:
+            "Agents create things immediately — you approve changes to existing data.",
+          value: "normal",
+        },
+        {
+          title: "Crazy — everything is instant; revert in Studio if needed",
+          description:
+            "All actions auto-execute. You can revert anything in Synap Studio.",
+          value: "crazy",
+        },
+      ],
+      initial: 1,
+    });
+    if (!res.mode) return;
+    mode = res.mode as GovernancePreset;
+  }
+
+  const profile = GOVERNANCE_PRESETS[mode] ?? GOVERNANCE_PRESETS.normal;
+  try {
+    await hubPatch(
+      `/agent-users/${agentUserId}/governance`,
+      {
+        autoApproveFor: profile.autoApproveFor,
+        writesRequireProposal: profile.writesRequireProposal,
+      },
+      hubCfg
+    );
+    log.success(`Agent governance set to "${mode}"`);
+  } catch (err) {
+    log.warn(`Could not apply agent governance: ${(err as Error).message}`);
+  }
 }

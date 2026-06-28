@@ -197,11 +197,18 @@ export async function importSkill(
       error: res.error ?? "unknown",
     };
   } catch (err) {
+    // Idempotent re-seed: the hub returns HTTP 409 ("already exists") when the
+    // skill slug is present. hubPost throws on non-2xx, so the 409 lands here —
+    // treat it as a no-op success, not an error.
+    const msg = err instanceof Error ? err.message : String(err);
+    if (/already exists/i.test(msg) || /\b409\b/.test(msg)) {
+      return { slug: parsed.slug, status: "exists", docs: 0 };
+    }
     return {
       slug: parsed.slug,
       status: "error",
       docs: 0,
-      error: err instanceof Error ? err.message : String(err),
+      error: msg,
     };
   }
 }

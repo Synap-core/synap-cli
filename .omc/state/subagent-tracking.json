@@ -1,71 +1,7 @@
 {
-  "agents": [
-    {
-      "agent_id": "adc03f05f092a098e",
-      "agent_type": "general-purpose",
-      "started_at": "2026-06-15T13:27:44.908Z",
-      "parent_mode": "none",
-      "status": "completed",
-      "completed_at": "2026-06-15T13:28:45.449Z",
-      "duration_ms": 60541
-    },
-    {
-      "agent_id": "ad40e2a8da8bfb51c",
-      "agent_type": "general-purpose",
-      "started_at": "2026-06-15T13:27:47.334Z",
-      "parent_mode": "none",
-      "status": "completed",
-      "completed_at": "2026-06-15T13:29:04.027Z",
-      "duration_ms": 76693
-    },
-    {
-      "agent_id": "a5c56bbd97d3bc174",
-      "agent_type": "general-purpose",
-      "started_at": "2026-06-15T13:27:49.527Z",
-      "parent_mode": "none",
-      "status": "completed",
-      "completed_at": "2026-06-15T13:29:05.111Z",
-      "duration_ms": 75584
-    },
-    {
-      "agent_id": "aa171b05e4825a6bc",
-      "agent_type": "general-purpose",
-      "started_at": "2026-06-15T13:27:51.508Z",
-      "parent_mode": "none",
-      "status": "completed",
-      "completed_at": "2026-06-15T13:28:48.261Z",
-      "duration_ms": 56753
-    },
-    {
-      "agent_id": "ae82aacd21987453d",
-      "agent_type": "oh-my-claudecode:verifier",
-      "started_at": "2026-06-18T18:12:37.584Z",
-      "parent_mode": "none",
-      "status": "completed",
-      "completed_at": "2026-06-18T18:16:33.556Z",
-      "duration_ms": 235972
-    },
-    {
-      "agent_id": "acq-f0504d560aec8d68",
-      "agent_type": "cq",
-      "started_at": "2026-06-20T19:07:49.421Z",
-      "parent_mode": "none",
-      "status": "completed",
-      "completed_at": "2026-06-20T19:11:17.785Z",
-      "duration_ms": 208364
-    },
-    {
-      "agent_id": "aslopsweep-50df597cc54c30a9",
-      "agent_type": "slopsweep",
-      "started_at": "2026-06-20T19:08:01.357Z",
-      "parent_mode": "none",
-      "status": "completed",
-      "completed_at": "2026-06-20T19:10:15.131Z",
-      "duration_ms": 133774
-    }
-  ],
-  "total_spawned": 11,
-  "total_completed": 90,
+  "agents": [],
+  "total_spawned": 0,
+  "total_completed": 0,
   "total_failed": 0,
-  "last_updated": "2026-06-20T19:11:32.850Z"
+  "last_updated": "2026-06-26T13:33:41.746Z"
 }
