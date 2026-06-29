@@ -18,7 +18,7 @@ import ora from "ora";
 import prompts from "prompts";
 import { exec } from "child_process";
 import { readFileSync } from "node:fs";
-import { resolveHubConfig, hubGet, hubPost } from "../lib/hub-client.js";
+import { resolveHubConfig, hubGet, hubPost, hubDelete } from "../lib/hub-client.js";
 import { log } from "../utils/logger.js";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -1163,4 +1163,49 @@ export async function capabilityCreate(
     log.dim(`${proposals.length} part(s) await approval (proposals).`);
   }
   log.dim(`Enable it:  synap cap enable "${name}"`);
+}
+
+// ── rm ──────────────────────────────────────────────────────────────────────
+
+interface CapRemoveOpts {
+  podUrl?: string;
+  apiKey?: string;
+}
+
+/**
+ * synap cap rm <id...> — delete one or more capability CONTAINERS by id.
+ *
+ * Removes the container + its member_of links only — the underlying tools and
+ * skills are untouched (they may belong to other capabilities). Use this to
+ * clean up stale or duplicate containers (e.g. workspace-scoped leftovers from
+ * an older seed). Get ids from `synap cap list`.
+ */
+export async function capabilityRemove(
+  ids: string[],
+  opts: CapRemoveOpts
+): Promise<void> {
+  const cfg = await resolveHubConfig(opts);
+  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+  let removed = 0;
+  let failed = 0;
+  for (const id of ids) {
+    if (!uuid.test(id)) {
+      log.warn(`  ${chalk.yellow("skip")} ${id} — not a UUID (pass a container id from \`synap cap list\`)`);
+      failed++;
+      continue;
+    }
+    try {
+      await hubDelete(`/capabilities/containers/${id}`, cfg);
+      log.dim(`  ${chalk.green("✓")} removed ${id.slice(0, 8)}`);
+      removed++;
+    } catch (err) {
+      log.warn(`  ${chalk.red("✗")} ${id.slice(0, 8)} — ${(err as Error).message}`);
+      failed++;
+    }
+  }
+  log.success(
+    `Removed ${removed} container(s)${failed ? chalk.red(`, ${failed} failed`) : ""}. ` +
+      `Member tools/skills were left intact.`
+  );
 }
