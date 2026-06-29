@@ -322,23 +322,25 @@ export async function bridgeSetup(opts: BridgeSetupOpts): Promise<void> {
  * Secret-gating plan for agency capability templates.
  *
  * Each entry:
- *   key    — filename stem (<key>.capability.json)
- *   needs  — env var that must be present to apply (null = unconditional)
- *   params — values to pass as the `params` body field (mirrors seed-agency-capabilities.mjs)
+ *   key            — CP catalog templateKey (the pod loads the definition from there)
+ *   needs          — env var that must be present to apply (null = unconditional)
+ *   params         — values to pass as the `params` body field
+ *   workspaceScoped — true if the capability bundles PLAYBOOKS (which require a
+ *                     workspaceId); false seeds pod-wide tools/skills.
  *
- * discord-bot is intentionally absent: applyBridgeCapability already handles it
- * from the live bridge repo (ONE source of truth) — don't double-apply.
+ * Google is ONE capability — `nango-google` (Gmail + Calendar + Drive through a
+ * single OAuth connection). discord-bot is intentionally absent: applyBridgeCapability
+ * already handles it from the live bridge repo (ONE source of truth) — don't double-apply.
  */
 const AGENCY_CAPABILITY_PLAN: Array<{
   key: string;
   needs: string | null;
   params: Record<string, string | undefined>;
+  workspaceScoped: boolean;
 }> = [
-  { key: "nango-gmail",    needs: null,              params: {} },
-  { key: "nango-gdrive",   needs: null,              params: {} },
-  { key: "nango-calendar", needs: null,              params: {} },
-  { key: "agency-skills",  needs: null,              params: {} },
-  { key: "generic-apikey", needs: null,              params: {} },
+  { key: "nango-google",   needs: null,              params: {}, workspaceScoped: false },
+  { key: "agency-skills",  needs: null,              params: {}, workspaceScoped: true  },
+  { key: "generic-apikey", needs: null,              params: {}, workspaceScoped: false },
   {
     key: "unipile-linkedin",
     needs: "UNIPILE_API_KEY",
@@ -347,39 +349,15 @@ const AGENCY_CAPABILITY_PLAN: Array<{
       ...(process.env.UNIPILE_BASE_URL    && { unipileBaseUrl:    process.env.UNIPILE_BASE_URL }),
       ...(process.env.UNIPILE_ACCOUNT_ID  && { unipileAccountId:  process.env.UNIPILE_ACCOUNT_ID }),
     },
+    workspaceScoped: false,
   },
   {
     key: "telegram-bridge",
     needs: "TELEGRAM_BOT_TOKEN",
     params: { telegramBotToken: process.env.TELEGRAM_BOT_TOKEN },
+    workspaceScoped: false,
   },
 ];
-
-/**
- * Resolve the canonical templates directory.
- *
- * Resolution order:
- *   1. CAPABILITY_TEMPLATES_DIR env var (override for CI / custom installs)
- *   2. Monorepo-relative default: <cli-package-root>/../../synap-backend/templates/capabilities
- *      Works when the CLI is run from source (pnpm dev / npx tsx) inside the monorepo.
- *
- * If the resolved dir does not exist (e.g. published `npx @synap/cli` with no monorepo),
- * returns null — caller must skip and warn rather than fail.
- */
-function resolveTemplatesDir(): string | null {
-  if (process.env.CAPABILITY_TEMPLATES_DIR) {
-    const override = process.env.CAPABILITY_TEMPLATES_DIR;
-    return fs.existsSync(override) ? override : null;
-  }
-  // __dirname is not available in ESM; derive from import.meta.url
-  const thisFile = fileURLToPath(import.meta.url);
-  // Compiled output lands in dist/commands/; source lives in src/commands/.
-  // Either way, two levels up reaches the cli package root, then we navigate
-  // to the sibling synap-backend repo.
-  const cliRoot = path.resolve(path.dirname(thisFile), "..", "..");
-  const candidate = path.resolve(cliRoot, "..", "synap-backend", "templates", "capabilities");
-  return fs.existsSync(candidate) ? candidate : null;
-}
 
 /**
  * Resolve the automations templates directory.
@@ -403,10 +381,15 @@ function resolveAutomationsTemplatesDir(): string | null {
 }
 
 /**
- * Apply the agency capability templates idempotently.
+ * Apply the agency capability templates idempotently via the Control Plane catalog.
  *
- * - Reads each *.capability.json from the templates dir.
- * - POSTs to /capabilities/apply with { definition, params, workspaceId }.
+ * - POSTs to /capabilities/apply with { templateKey, params, workspaceId? }; the
+ *   pod loads the definition from the CP catalog (the single source of truth — no
+ *   local template files anymore).
+ * - workspaceScoped capabilities (those bundling PLAYBOOKS, which the backend
+ *   rejects pod-wide with "playbooks require a workspaceId") pass workspaceId so
+ *   the playbooks land in the chosen workspace. Pod-wide tools/skills omit it so
+ *   the browser's capabilities view and the agent see them everywhere.
  * - Skips secret-backed templates when the required env var is absent.
  * - Skips discord-bot (already applied via applyBridgeCapability).
  * - Logs a concise per-template result line (applied / reused / skipped).
@@ -416,53 +399,20 @@ async function applyAgencyCapabilities(
   cfg: Awaited<ReturnType<typeof resolveHubConfig>>,
   workspaceId: string
 ): Promise<void> {
-  const templatesDir = resolveTemplatesDir();
-  if (!templatesDir) {
-    log.warn(
-      "Agency capability templates not found — skipping. " +
-      "Set CAPABILITY_TEMPLATES_DIR=<path> to seed them from a custom location."
-    );
-    return;
-  }
-
-  log.dim(`Seeding agency capabilities from ${templatesDir}…`);
+  log.dim("Seeding agency capabilities from the Control Plane catalog…");
 
   for (const item of AGENCY_CAPABILITY_PLAN) {
-    const filePath = path.join(templatesDir, `${item.key}.capability.json`);
-    if (!fs.existsSync(filePath)) {
-      log.dim(`  [skip] ${item.key} — template file not found`);
-      continue;
-    }
-
     if (item.needs && !process.env[item.needs]) {
       log.dim(`  [skip] ${item.key} — set ${item.needs} to seed it`);
       continue;
     }
 
-    let definition: unknown;
-    try {
-      definition = JSON.parse(fs.readFileSync(filePath, "utf-8"));
-    } catch (err) {
-      log.warn(`  [error] ${item.key} — could not parse template: ${(err as Error).message}`);
-      continue;
-    }
-
-    // Capabilities that bundle PLAYBOOKS are workspace-scoped (playbooks are
-    // workspace-scoped by design — the backend rejects a pod-wide apply with
-    // "playbooks require a workspaceId"). Everything else (pod-wide tools/skills,
-    // e.g. the nango connectors) seeds pod-wide so the browser's capabilities
-    // view and the agent see them everywhere. Only channels/entities belong to
-    // the chosen workspace.
-    const hasPlaybooks =
-      Array.isArray((definition as { playbooks?: unknown[] }).playbooks) &&
-      ((definition as { playbooks?: unknown[] }).playbooks?.length ?? 0) > 0;
-
     try {
       const res = (await hubPost(
         "/capabilities/apply",
-        hasPlaybooks
-          ? { definition, params: item.params, workspaceId }
-          : { definition, params: item.params },
+        item.workspaceScoped
+          ? { templateKey: item.key, params: item.params, workspaceId }
+          : { templateKey: item.key, params: item.params },
         cfg
       )) as {
         capabilityKey?: string;
