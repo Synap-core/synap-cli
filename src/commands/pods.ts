@@ -246,7 +246,10 @@ export async function podsUse(name: string, opts: { surface?: SurfaceName } = {}
   // Claude Code
   const claudeSettings = path.join(os.homedir(), ".claude", "settings.json");
   if (fs.existsSync(claudeSettings)) {
-    await writeClaudeCodeEnv({ podUrl: podConfig.podUrl, apiKey: podConfig.hubApiKey, workspaceId: podConfig.workspaceId, agentUserId: podConfig.agentUserId });
+    // Pod-wide: a workspace is a lens, not a container — don't weld the profile's
+    // workspace into the MCP URL (matches the Desktop/Cursor entries above and
+    // the `synap connect` default). Pins are set only via `synap connect --pin-*`.
+    await writeClaudeCodeEnv({ podUrl: podConfig.podUrl, apiKey: podConfig.hubApiKey, agentUserId: podConfig.agentUserId });
     updated.push("Claude Code");
   }
 
@@ -292,7 +295,9 @@ async function applySurfaceConfig(surface: SurfaceName, podConfig: import("../li
     case "claude-code": {
       const p = path.join(os.homedir(), ".claude", "settings.json");
       if (fs.existsSync(p)) {
-        await writeClaudeCodeEnv({ podUrl: podConfig.podUrl, apiKey: podConfig.hubApiKey, workspaceId: podConfig.workspaceId, agentUserId: podConfig.agentUserId });
+        // Pod-wide: don't weld the profile's workspace into the MCP URL (see note
+        // in `podsUse` above and the `synap connect` default).
+        await writeClaudeCodeEnv({ podUrl: podConfig.podUrl, apiKey: podConfig.hubApiKey, agentUserId: podConfig.agentUserId });
         log.success("Claude Code env updated (~/.claude/settings.json).");
       } else {
         log.dim("Claude Code settings not found — run `synap connect --target=claude-code` first.");
