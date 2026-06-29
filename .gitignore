@@ -4,6 +4,10 @@ dist/
 !src/
 skills/
 .synap-session
+*.tsbuildinfo
+
+# oh-my-claudecode session state — tooling artifact, never source
+.omc/
 
 # Bundled skill templates (the "skills/" rule above is for ~/.claude-style local skills)
 !templates/skills/
