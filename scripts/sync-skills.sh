@@ -30,7 +30,18 @@ if [ -f "$SRC/build.mjs" ]; then
   node "$SRC/build.mjs" "$SRC"
 fi
 
-for name in synap synap-schema synap-ui; do
+# Derive skill list from manifest.json (baseline ++ workflow)
+if [ -f "$SRC/manifest.json" ]; then
+  SKILL_LIST=$(node -e "
+    const m = JSON.parse(require('fs').readFileSync('$SRC/manifest.json', 'utf8'));
+    console.log([...(m.baseline||[]), ...(m.workflow||[])].join(' '));
+  ")
+else
+  SKILL_LIST="synap synap-schema synap-ui onboard agent-os"
+  echo "sync-skills: manifest.json not found at $SRC/manifest.json, using fallback list" >&2
+fi
+
+for name in $SKILL_LIST; do
   if [ ! -f "$SRC/$name/SKILL.md" ]; then
     echo "sync-skills: missing skill $name at $SRC/$name/SKILL.md" >&2
     exit 1
@@ -40,7 +51,13 @@ done
 rm -rf "$DEST"
 mkdir -p "$DEST"
 
-for name in synap synap-schema synap-ui; do
+# Copy manifest.json into the bundle so the published CLI can read it at runtime
+if [ -f "$SRC/manifest.json" ]; then
+  cp "$SRC/manifest.json" "$DEST/manifest.json"
+  echo "  synced manifest.json"
+fi
+
+for name in $SKILL_LIST; do
   cp -R "$SRC/$name" "$DEST/$name"
   echo "  synced $name"
 done

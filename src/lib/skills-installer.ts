@@ -15,15 +15,34 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { log } from "../utils/logger.js";
 
-export const SKILL_NAMES = ["synap", "synap-schema", "synap-ui", "autonomous-dev"] as const;
+export const SKILL_NAMES = ["synap", "synap-schema", "synap-ui", "onboard", "agent-os"] as const;
 export type SkillName = (typeof SKILL_NAMES)[number];
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+/** Full deliverable set from manifest.json (baseline ++ workflow), with fallback to SKILL_NAMES. */
+export function getDeliverableSkills(): string[] {
+  const srcDir = resolveSkillsSource();
+  if (srcDir) {
+    const manifestPath = path.join(srcDir, "manifest.json");
+    try {
+      const raw = fs.readFileSync(manifestPath, "utf8");
+      const manifest = JSON.parse(raw) as { baseline?: string[]; workflow?: string[] };
+      const baseline = Array.isArray(manifest.baseline) ? manifest.baseline : [];
+      const workflow = Array.isArray(manifest.workflow) ? manifest.workflow : [];
+      const all = [...baseline, ...workflow];
+      if (all.length > 0) return all;
+    } catch {
+      // manifest absent or malformed — fall through to hardcoded list
+    }
+  }
+  return [...SKILL_NAMES];
+}
+
 export interface InstallOpts {
   destDir: string;
-  skills: readonly string[];
+  skills?: readonly string[];
 }
 
 export async function installSkills(opts: InstallOpts): Promise<boolean> {
@@ -36,8 +55,9 @@ export async function installSkills(opts: InstallOpts): Promise<boolean> {
     return false;
   }
 
+  const skills = opts.skills ?? getDeliverableSkills();
   let installed = 0;
-  for (const name of opts.skills) {
+  for (const name of skills) {
     const src = path.join(srcDir, name);
     if (!fs.existsSync(src)) {
       log.warn(`Skill '${name}' not found in source (skipping)`);

@@ -17,7 +17,7 @@ import chalk from "chalk";
 import ora from "ora";
 import prompts from "prompts";
 import { log } from "../utils/logger.js";
-import { installSkills, SKILL_NAMES } from "./skills-installer.js";
+import { installSkills, getDeliverableSkills } from "./skills-installer.js";
 import {
   resolveHubConfig,
   resolveUserId,
@@ -447,7 +447,7 @@ async function installClaudeCode(
     if (dir) {
       const installed = await installSkills({
         destDir: dir,
-        skills: cfg.skills ?? SKILL_NAMES,
+        skills: cfg.skills ?? getDeliverableSkills(),
       });
       if (installed) {
         log.success(`Skills installed to ~/.claude/skills/`);
@@ -928,11 +928,11 @@ async function installClaudeDesktop(
   if (skillsDir) {
     const installed = await installSkills({
       destDir: skillsDir,
-      skills: cfg.skills ?? SKILL_NAMES,
+      skills: cfg.skills ?? getDeliverableSkills(),
     });
     if (installed) {
       log.success(
-        `Synap skills installed to ${path.relative(os.homedir(), skillsDir)}/ (${(cfg.skills ?? SKILL_NAMES).join(", ")})`,
+        `Synap skills installed to ${path.relative(os.homedir(), skillsDir)}/ (${(cfg.skills ?? getDeliverableSkills()).join(", ")})`,
       );
     } else {
       log.warn(
@@ -1088,7 +1088,7 @@ async function installOpenclaw(cfg: TargetConnectionConfig): Promise<boolean> {
   log.success("Wrote OpenClaw config");
   log.blank();
   log.info("Install the skills:");
-  for (const name of cfg.skills ?? SKILL_NAMES) {
+  for (const name of cfg.skills ?? getDeliverableSkills()) {
     log.dim(`  openclaw skills install ${name}`);
   }
   return true;
