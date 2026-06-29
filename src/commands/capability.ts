@@ -65,6 +65,7 @@ type CardStatus =
 
 interface CardVerb {
   verbId: string;
+  skillId?: string | null;
   label: string;
   type: "read" | "write";
   enabled: boolean;
@@ -698,14 +699,26 @@ export async function capabilityEnable(name: string, opts: CapEnableOpts): Promi
   const enabledNames: string[] = [];
   const disabledNames: string[] = [];
   try {
+    // The catalog card already carries each verb's skillId — use it directly so we
+    // never touch the slow GET /skills. Resolve by name only as a fallback (older
+    // pods without skillId in the catalog) — and then fetch /skills ONCE, not per
+    // verb (per-verb resolution made `enable` look like it hangs).
+    const needsLookup = [...toEnable, ...toDisable].some((v) => !v.skillId);
+    const idByName = needsLookup
+      ? new Map(
+          (await fetchSkills(cfg, workspaceId)).map((s) => [s.name, s.id])
+        )
+      : new Map<string, string>();
+    const resolve = (v: CardVerb) => v.skillId ?? idByName.get(v.verbId);
+
     for (const v of toEnable) {
-      const skillId = await resolveSkillId(cfg, workspaceId, v.verbId);
+      const skillId = resolve(v);
       if (!skillId) continue;
       await hubPost(`/skills/${skillId}/approve`, { approved: true }, cfg);
       enabledNames.push(v.label);
     }
     for (const v of toDisable) {
-      const skillId = await resolveSkillId(cfg, workspaceId, v.verbId);
+      const skillId = resolve(v);
       if (!skillId) continue;
       await hubPost(`/skills/${skillId}/approve`, { approved: false }, cfg);
       disabledNames.push(v.label);
