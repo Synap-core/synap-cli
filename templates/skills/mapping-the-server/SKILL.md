@@ -21,13 +21,14 @@ You receive the server structure as input: `categories` (each with its `channels
 - **Members** in a client/partner room are the **people** at that org → propose `person` entities and relate them to the company/client. A company name in the room or a member's email domain → propose a `company` entity.
 
 ## 3. Build ONE proposed graph (not N separate ones)
-Assemble a single reviewable graph the operator accepts in one go:
-- **Entities**: clients, partners, companies, people — each with the evidence-backed properties you could infer (name, domain, role). Don't invent fields you don't have.
-- **Channel bindings**: each real client/partner channel → its entity, with the correct `branchPurpose`.
-- **Relations**: `person → company`, `person → client`, `client → company`, `channel → entity`, and an `assignee` relation if a team member clearly owns the room.
-- **Team threads**: for every client room that has a `client-comms` channel but **no** `team` channel, propose creating the missing `team` thread — that's where the team (and you) collaborate with full context without the client seeing it.
+Call `propose_entity_graph` ONCE with the full structure:
+- **`entities`**: clients, partners, companies, people — each with a stable `ref` (e.g. `"acme"`, `"jane"`), a `profileSlug`, and the evidence-backed `title`/`properties` you could infer. Use `existingEntityId` to LINK an entity the pod already has instead of duplicating it.
+- **`relations`**: between your refs — `person → company` (`works_at`), `person → client`, `client → company`, and an `assignee` relation if a team member clearly owns the room.
+- **`bindings`**: each real client/partner channel → its entity. Set `externalChannelId` to the channel id from the structure, `entityRef` to the entity's ref, and `branchPurpose` to its firewall role (`client-comms` for the mirrored/external channel, `team` for the internal one). On accept these bind the channels so `/whois` and the firewall light up immediately.
 
-Propose all of this as **one graph proposal** so the operator reviews and accepts the whole structure at once — never spray dozens of single-entity proposals at them.
+Propose ALL of this as **one** `propose_entity_graph` call so the operator reviews and accepts the whole structure at once — never spray dozens of single-entity proposals at them.
+
+(Missing `team` threads — rooms that have a `client-comms` channel but no `team` channel — note them in your summary for the operator to create; thread creation is not yet part of the one-accept apply.)
 
 ## 4. The firewall is absolute
 NEVER propose a write, binding, post, or thread that would put bot/team activity into a `client-comms` channel — those mirror to the client. All collaboration lands in `team` channels/threads. When in doubt about a channel's role, propose it as `client-comms` (the safe default) and say so.
