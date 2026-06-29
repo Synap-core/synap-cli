@@ -155,12 +155,25 @@ async function resolveSkillId(
   return undefined;
 }
 
-/** Turn a variadic `--key value` token array into a parameters object. */
-function parseParams(tokens: string[]): Record<string, unknown> {
+/**
+ * Turn a variadic token array into a parameters object. Accepts both
+ * `--key value` flags AND bare positional args. Positionals map onto the verb's
+ * declared params (in declaration order), skipping any already set by a flag —
+ * so `gmail_search enzo 5` ≡ `gmail_search --query enzo --maxResults 5`.
+ * Values stay strings; the IS coerces them to the skill's declared types.
+ */
+function parseParams(
+  tokens: string[],
+  paramNames?: string[]
+): Record<string, unknown> {
   const params: Record<string, unknown> = {};
+  const positionals: string[] = [];
   for (let i = 0; i < tokens.length; i++) {
     const tok = tokens[i];
-    if (!tok.startsWith("--")) continue;
+    if (!tok.startsWith("--")) {
+      positionals.push(tok);
+      continue;
+    }
     const key = tok.slice(2);
     const next = tokens[i + 1];
     if (next === undefined || next.startsWith("--")) {
@@ -170,7 +183,33 @@ function parseParams(tokens: string[]): Record<string, unknown> {
       i++;
     }
   }
+  // Fill the verb's still-unset params from positionals, in declared order.
+  if (paramNames?.length && positionals.length) {
+    const unset = paramNames.filter((n) => !(n in params));
+    positionals.forEach((val, idx) => {
+      if (idx < unset.length) params[unset[idx]] = val;
+    });
+  }
   return params;
+}
+
+/**
+ * Bare positional tokens — those NOT consumed as a `--flag value` pair. Used to
+ * decide whether `cap run` must resolve the verb's param names (a catalog
+ * round-trip) at all: with only flags there's nothing to map, so skip it.
+ */
+function barePositionals(tokens: string[]): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < tokens.length; i++) {
+    const tok = tokens[i];
+    if (!tok.startsWith("--")) {
+      out.push(tok);
+      continue;
+    }
+    const next = tokens[i + 1];
+    if (next !== undefined && !next.startsWith("--")) i++; // skip the flag's value
+  }
+  return out;
 }
 
 // ── Catalog (the pack-grouped spine) ─────────────────────────────────────────
@@ -909,7 +948,22 @@ export async function capabilityRun(
   }
 
   const workspaceId = requireWorkspace(opts, cfg);
-  const parameters = parseParams(params);
+
+  // Resolve the verb's declared param names ONLY when positional args are
+  // present (so the common `--flag value` form pays no extra round-trip). Lets
+  // `cap run gmail_search enzo 5` map onto query/maxResults positionally.
+  let paramNames: string[] | undefined;
+  if (barePositionals(params).length > 0) {
+    try {
+      const cards = await fetchCatalog(cfg, workspaceId);
+      paramNames = cards
+        .flatMap((c) => c.verbs)
+        .find((v) => v.verbId === verb)?.params;
+    } catch {
+      // Catalog unavailable (e.g. 404 on an older pod) — fall back to flags-only.
+    }
+  }
+  const parameters = parseParams(params, paramNames);
 
   const spinner = ora({ text: `Running ${chalk.bold(verb)}…`, color: "cyan" }).start();
 
@@ -918,7 +972,8 @@ export async function capabilityRun(
     res = (await hubPost(
       "/capabilities/execute",
       { verbId: verb, parameters, workspaceId },
-      cfg
+      cfg,
+      90_000 // provider-backed skills run several external calls — give them room
     )) as Record<string, unknown>;
     spinner.stop();
   } catch (err) {

@@ -138,12 +138,20 @@ export async function hubGet(
   return res.json();
 }
 
-export async function hubPost(path: string, body: unknown, cfg: HubConfig): Promise<unknown> {
+export async function hubPost(
+  path: string,
+  body: unknown,
+  cfg: HubConfig,
+  // Default 15s suits CRUD doors. Capability runs invoke external provider APIs
+  // (often several sequential calls) and legitimately take longer — callers
+  // override (e.g. `cap run` passes 90s).
+  timeoutMs = 15_000
+): Promise<unknown> {
   const res = await fetch(`${cfg.podUrl}/api/hub${path}`, {
     method: "POST",
     headers: { Authorization: `Bearer ${cfg.apiKey}`, "Content-Type": "application/json", ...sessionHeaders() },
     body: JSON.stringify(body),
-    signal: AbortSignal.timeout(15_000),
+    signal: AbortSignal.timeout(timeoutMs),
   });
   if (!res.ok) {
     const bodyText = await res.text().catch(() => "");
