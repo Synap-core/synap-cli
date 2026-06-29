@@ -70,6 +70,7 @@ interface CardVerb {
   enabled: boolean;
   governance: "auto" | "propose";
   runnable: boolean;
+  params?: string[];
 }
 
 interface CardConnection {
@@ -237,30 +238,78 @@ function statusSummary(card: CapabilityCard): string {
   }
 }
 
-/** Render one verb inline: ▸ read / ✋ write·approval, dim when not enabled. */
-function renderVerb(v: CardVerb): string {
-  if (v.type === "write") {
-    const txt = `✋ ${v.label} (write·approval)`;
-    return v.enabled ? chalk.bold(txt) : chalk.dim(txt);
-  }
-  const txt = `▸ ${v.label} (read)`;
-  return v.enabled || v.runnable ? txt : chalk.dim(txt);
+/** Which display group a card belongs to. */
+function statusGroup(card: CapabilityCard): "usable" | "setup" | "available" {
+  if (card.status === "available") return "available";
+  if (card.verbs.some((v) => v.runnable)) return "usable";
+  return "setup";
 }
 
-/** Render a full pack row: badge · name · summary · [status] + verbs + hint. */
-function renderCard(card: CapabilityCard): void {
-  const badge = statusBadge(card.status);
-  const name = card.status === "available" ? chalk.dim(card.name) : chalk.bold(card.name);
-  const summary = chalk.dim(statusSummary(card));
-  const tag = chalk.dim(`[${card.status}]`);
-  console.log(`  ${badge}  ${name}  ${summary}  ${tag}`);
+/** Strip un-interpolated template placeholders ({{name}}) for display. */
+function cleanLabel(s: string): string {
+  return s.replace(/\{\{[^}]+\}\}/g, "").replace(/\s+/g, " ").trim() || s;
+}
 
-  if (card.verbs.length > 0) {
-    console.log(`       ${card.verbs.map(renderVerb).join("   ")}`);
+/** The copy-pasteable run command for a verb, with its params as placeholders. */
+function runCommand(v: CardVerb): string {
+  const flags = (v.params ?? []).map((p) => `--${p} <${p}>`).join(" ");
+  return `synap cap run ${v.verbId}${flags ? " " + flags : ""}`;
+}
+
+/** A USABLE pack: name + each runnable verb as a ready-to-run command. */
+function renderUsable(card: CapabilityCard): void {
+  const acct = card.connection?.account
+    ? chalk.dim(` · ${card.connection.account}`)
+    : card.connection?.provider
+      ? chalk.dim(` · ${card.connection.provider} connected`)
+      : "";
+  console.log(`  ${chalk.green("●")} ${chalk.bold(card.name)}${acct}`);
+  for (const v of card.verbs.filter((x) => x.runnable)) {
+    const mark = v.type === "write" ? chalk.yellow("✋") : chalk.green("▸");
+    const note =
+      v.type === "write"
+        ? chalk.yellow(" — asks approval")
+        : chalk.dim(" — instant");
+    console.log(`      ${mark} ${chalk.cyan(runCommand(v))}${note}`);
   }
-  if (card.nextAction.hint) {
-    console.log(`       ${chalk.cyan("→")} ${chalk.dim(card.nextAction.hint)}`);
+  const off = card.verbs.filter((v) => !v.runnable);
+  if (off.length > 0) {
+    console.log(
+      chalk.dim(
+        `      ○ off: ${off.map((v) => cleanLabel(v.label)).join(", ")}  ` +
+          `→ synap cap enable "${card.name}"`
+      )
+    );
   }
+}
+
+/** A SETUP pack: name + why + the single next action. */
+function renderSetup(card: CapabilityCard): void {
+  console.log(
+    `  ${chalk.yellow("◌")} ${chalk.bold(card.name)}  ${chalk.dim(statusSummary(card))}`
+  );
+  console.log(
+    `      ${chalk.cyan("→")} ${card.nextAction.hint || `synap cap enable "${card.name}"`}`
+  );
+}
+
+/** An AVAILABLE pack: one line — name · what it offers · add command. */
+function renderAvailable(card: CapabilityCard): void {
+  const n = card.verbs.length;
+  const offers = chalk.dim(
+    n > 0 ? `${n} verb${n === 1 ? "" : "s"}` : "no verbs yet"
+  );
+  console.log(
+    `  ${chalk.dim("○")} ${card.name}  ${offers}  ${chalk.dim(`→ synap cap add "${card.name}"`)}`
+  );
+}
+
+/** Render a single card by whichever group it belongs to. */
+function renderCardAny(card: CapabilityCard): void {
+  const g = statusGroup(card);
+  if (g === "usable") renderUsable(card);
+  else if (g === "setup") renderSetup(card);
+  else renderAvailable(card);
 }
 
 // ── Public: capabilityList ──────────────────────────────────────────────────
@@ -309,15 +358,39 @@ export async function capabilityList(opts: CapListOpts): Promise<void> {
     return;
   }
 
-  const installed = cards.filter((c) => c.source === "installed");
-  log.heading(`Capabilities (${installed.length} installed / ${cards.length} total)`);
-  console.log();
+  const usable = cards.filter((c) => statusGroup(c) === "usable");
+  const setup = cards.filter((c) => statusGroup(c) === "setup");
+  const available = cards.filter((c) => statusGroup(c) === "available");
 
-  for (const card of cards) {
-    renderCard(card);
+  log.heading(
+    `Capabilities — ${usable.length} ready · ${setup.length} need a step · ${available.length} available`
+  );
+
+  if (usable.length > 0) {
     console.log();
+    console.log(chalk.green.bold("  READY — run these now"));
+    for (const card of usable) {
+      console.log();
+      renderUsable(card);
+    }
   }
-  log.dim("Add:  synap cap add <name>   ·   Enable:  synap cap enable <name>   ·   Run:  synap cap run <verb> --<param> <value>");
+
+  if (setup.length > 0) {
+    console.log();
+    console.log(chalk.yellow.bold("  NEEDS A STEP"));
+    for (const card of setup) renderSetup(card);
+  }
+
+  if (available.length > 0) {
+    console.log();
+    console.log(chalk.dim.bold("  AVAILABLE — add to install"));
+    for (const card of available) renderAvailable(card);
+  }
+
+  console.log();
+  log.dim(
+    "Details:  synap cap show <name>   ·   Run a verb:  synap cap run <verb> --<param> <value>"
+  );
 }
 
 // ── Connection sub-flow (shared by enable + connect) ────────────────────────
@@ -497,7 +570,7 @@ export async function capabilityAdd(name: string, opts: CapAddOpts): Promise<voi
 
   if (card.source === "installed") {
     log.heading(`${card.name} is already installed`);
-    renderCard(card);
+    renderCardAny(card);
     return;
   }
 
@@ -516,7 +589,7 @@ export async function capabilityAdd(name: string, opts: CapAddOpts): Promise<voi
     const after = findCard(await fetchCatalog(cfg, workspaceId), name);
     if (after) {
       console.log();
-      renderCard(after);
+      renderCardAny(after);
     }
   } catch {
     // best-effort — the add already succeeded
@@ -777,10 +850,24 @@ export async function capabilityShow(name: string, opts: CapShowOpts): Promise<v
   // Verbs
   console.log(`  ${chalk.bold("Verbs")} (${card.verbs.length})`);
   for (const v of card.verbs) {
-    const mark = v.runnable ? chalk.green("▸") : v.enabled ? chalk.yellow("◑") : chalk.dim("·");
-    const kind = v.type === "write" ? chalk.dim(`write · ${v.governance}`) : chalk.dim("read");
-    const state = v.runnable ? chalk.dim("runnable") : v.enabled ? chalk.dim("enabled") : chalk.dim("draft");
-    console.log(`    ${mark} ${v.label}  ${kind}  ${state}  ${chalk.dim(v.verbId)}`);
+    const mark = v.runnable
+      ? chalk.green("▸")
+      : v.enabled
+        ? chalk.yellow("◑")
+        : chalk.dim("·");
+    const kind =
+      v.type === "write" ? chalk.dim("write · asks approval") : chalk.dim("read");
+    console.log(`    ${mark} ${chalk.bold(cleanLabel(v.label))}  ${kind}`);
+    // For a runnable verb, show the exact command; otherwise show what unblocks it.
+    if (v.runnable) {
+      console.log(`        ${chalk.cyan(runCommand(v))}`);
+    } else {
+      console.log(
+        chalk.dim(
+          `        ${v.enabled ? "needs the connection" : "draft — enable this capability first"}`
+        )
+      );
+    }
   }
   console.log();
 
