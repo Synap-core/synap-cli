@@ -117,6 +117,12 @@ export async function orient(opts: BaseOpts): Promise<void> {
           : chalk.dim("empty");
         log.info(`${marker}${name}  ${id}  ${count}`);
         if (ws.description) log.dim(`     ${String(ws.description)}`);
+        // Onboarding hint: a sparse workspace that declares an onboarding spec
+        // can be set up via the `onboard` skill ("set up my <X> workspace").
+        const onboarding = (ws as { onboarding?: { goal?: string } }).onboarding;
+        if (onboarding?.goal && entityTotal === 0) {
+          log.dim(`     ${chalk.cyan("→ onboard:")} ${String(onboarding.goal)}`);
+        }
         if (profileList.length > 0) {
           const slugs = profileList
             .map((p) => String(p.slug ?? p.name ?? ""))
