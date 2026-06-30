@@ -1,5 +1,5 @@
 /**
- * `synap launch agent-os` — orchestrate a complete company OS.
+ * `synap launch agent-os` — orchestrate a complete Company OS.
  *
  * Interactive flow:
  *   1. Ask the company/project name → create a PROJECT (cross-cutting lens)
@@ -7,20 +7,20 @@
  *   3. For each domain → POST /packages/apply with that template
  *   4. Link each workspace to the project
  *
- * Templates live in synap-backend/templates/packages/*.package.json and are
- * applied via POST /api/hub/packages/apply (the unified provisioning endpoint).
+ * Templates come from the canonical @synap-core/workspace-templates package
+ * (single source of truth, via toPackageDefinition) and are applied via
+ * POST /api/hub/packages/apply (the unified provisioning endpoint).
  */
 
 import prompts from "prompts";
 import ora from "ora";
 import chalk from "chalk";
-import { readFileSync, existsSync, readdirSync } from "node:fs";
-import { join, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
+import {
+  listWorkspaceTemplates,
+  toPackageDefinition,
+} from "@synap-core/workspace-templates";
 import { log, banner } from "../utils/logger.js";
-import { resolveHubConfig, hubPost } from "../lib/hub-client.js";
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
+import { resolveHubConfig, hubGet, hubPost } from "../lib/hub-client.js";
 
 /** Domain catalog — what each template provides, for the picker + AI inference. */
 const DOMAIN_CATALOG: Array<{
@@ -48,8 +48,8 @@ const DOMAIN_CATALOG: Array<{
     keywords: ["project", "sprint", "okr", "task", "team", "agile"],
   },
   {
-    slug: "agent-os",
-    title: "Agent OS",
+    slug: "agent-fleet",
+    title: "Agent Fleet",
     description: "AI agents, skills, providers — the agent fleet",
     keywords: ["agent", "ai", "automation", "bot", "fleet"],
   },
@@ -65,28 +65,36 @@ const DOMAIN_CATALOG: Array<{
     description: "Notes, books, goals, knowledge management",
     keywords: ["personal", "knowledge", "notes", "pkm", "life", "second brain"],
   },
+  {
+    slug: "foundation",
+    title: "Foundation",
+    description: "Strategic DNA — mission, audience, positioning, principles",
+    keywords: ["strategy", "mission", "vision", "positioning", "brand strategy", "foundation"],
+  },
+  {
+    slug: "radar",
+    title: "Radar",
+    description: "Competitors, market segments, trends, inspirations",
+    keywords: ["market", "competitor", "research", "trend", "landscape", "radar"],
+  },
+  {
+    slug: "brand-library",
+    title: "Brand Library",
+    description: "Brand voice, assets, tokens, components, rules",
+    keywords: ["brand", "voice", "assets", "design", "identity", "tokens"],
+  },
+  {
+    slug: "marketing-campaign",
+    title: "Marketing Campaigns",
+    description: "Campaigns, leads, channels",
+    keywords: ["marketing", "campaign", "lead", "growth", "ads"],
+  },
 ];
 
-/** Find the templates/packages directory (bundled with the backend). */
-function resolvePackagesDir(): string | null {
-  // Candidate locations relative to the CLI install + monorepo dev layout.
-  const candidates = [
-    join(__dirname, "../../../synap-backend/templates/packages"),
-    join(__dirname, "../../templates/packages"),
-    join(process.cwd(), "synap-backend/templates/packages"),
-    join(process.cwd(), "templates/packages"),
-  ];
-  for (const c of candidates) {
-    if (existsSync(c)) return c;
-  }
-  return null;
-}
-
-function loadTemplate(packagesDir: string, slug: string): Record<string, unknown> | null {
-  const path = join(packagesDir, `${slug}.package.json`);
-  if (!existsSync(path)) return null;
+/** Load a template as a PackageDefinition from the canonical package. */
+function loadTemplate(slug: string): Record<string, unknown> | null {
   try {
-    return JSON.parse(readFileSync(path, "utf-8"));
+    return toPackageDefinition(slug) as unknown as Record<string, unknown>;
   } catch {
     return null;
   }
@@ -111,17 +119,8 @@ export async function launchAgentOs(opts: {
 
   const cfg = await resolveHubConfig(opts);
 
-  const packagesDir = resolvePackagesDir();
-  if (!packagesDir) {
-    log.error(
-      "Could not find templates/packages — run from the synap monorepo, or ensure the backend templates are installed."
-    );
-    process.exit(1);
-  }
-
-  const available = readdirSync(packagesDir)
-    .filter((f) => f.endsWith(".package.json"))
-    .map((f) => f.replace(".package.json", ""));
+  // Templates come from the canonical @synap-core/workspace-templates package.
+  const available = listWorkspaceTemplates().map((t) => t.meta.slug);
 
   // ── 1. Project name ─────────────────────────────────────────────────────
   const { projectName } = await prompts({
@@ -132,6 +131,51 @@ export async function launchAgentOs(opts: {
   if (!projectName) {
     log.warn("Cancelled.");
     return;
+  }
+
+  // ── 1b. Attach to an existing project, or create a new one? ──────────────
+  // GET /projects returns a raw array of project rows (no envelope).
+  let existingProjects: Array<{ id: string; name: string }> = [];
+  try {
+    const res = (await hubGet("/projects", {}, cfg)) as unknown;
+    const list = (Array.isArray(res)
+      ? res
+      : ((res as Record<string, unknown>)?.projects as unknown[]) ?? []) as Record<string, unknown>[];
+    existingProjects = list
+      .filter((p) => p.id)
+      .map((p) => ({ id: String(p.id), name: String(p.name ?? p.id) }));
+  } catch {
+    // Non-fatal: if we can't list, fall back to create-new only.
+  }
+
+  const NEW_PROJECT = "__new__";
+  let attachProjectId: string | undefined;
+  if (existingProjects.length > 0) {
+    const { choice } = await prompts({
+      type: "select",
+      name: "choice",
+      message: "Attach to an existing project, or create a new one?",
+      choices: [
+        ...existingProjects.map((p) => ({
+          title: `${p.name} ${chalk.dim(p.id.slice(0, 8))}`,
+          value: p.id,
+        })),
+        { title: chalk.cyan("＋ Create a new project"), value: NEW_PROJECT },
+      ],
+    });
+    if (!choice) {
+      log.warn("Cancelled.");
+      return;
+    }
+    if (choice !== NEW_PROJECT) {
+      attachProjectId = choice as string;
+      const chosen = existingProjects.find((p) => p.id === attachProjectId);
+      log.blank();
+      log.info(`Attaching new workspaces to ${chalk.bold(chosen?.name ?? attachProjectId)}.`);
+      log.dim(
+        `Tip: review what's already there first — 'synap digest --project ${attachProjectId.slice(0, 8)}'`
+      );
+    }
   }
 
   // ── 2. Describe → infer domains ─────────────────────────────────────────
@@ -169,9 +213,12 @@ export async function launchAgentOs(opts: {
     return;
   }
 
-  // ── 4. Create the project ───────────────────────────────────────────────
-  const spinner = ora("Creating project…").start();
+  // ── 4. Resolve the project — attach to the chosen one, or create new ─────
   let projectId: string;
+  if (attachProjectId) {
+    projectId = attachProjectId;
+  } else {
+  const spinner = ora("Creating project…").start();
   try {
     const project = (await hubPost(
       "/projects",
@@ -197,13 +244,14 @@ export async function launchAgentOs(opts: {
     spinner.fail(`Project creation failed: ${(e as Error).message}`);
     return;
   }
+  }
 
   // ── 5. Provision each workspace + link to project ───────────────────────
   const results: Array<{ slug: string; workspaceId?: string; error?: string }> = [];
   for (const slug of domains as string[]) {
     const tmplName = DOMAIN_CATALOG.find((d) => d.slug === slug)?.title ?? slug;
     const s = ora(`Provisioning ${tmplName}…`).start();
-    const template = loadTemplate(packagesDir, slug);
+    const template = loadTemplate(slug);
     if (!template) {
       s.fail(`Template ${slug} not found`);
       results.push({ slug, error: "template not found" });
@@ -231,14 +279,23 @@ export async function launchAgentOs(opts: {
   // ── 6. Summary ──────────────────────────────────────────────────────────
   log.blank();
   const ok = results.filter((r) => r.workspaceId);
+  const projectLabel = attachProjectId
+    ? existingProjects.find((p) => p.id === attachProjectId)?.name ?? projectName
+    : projectName;
   log.success(
-    `Agent OS ready — ${ok.length}/${results.length} workspaces under project ${chalk.bold(
-      projectName
+    `Company OS ready — ${ok.length}/${results.length} workspaces under project ${chalk.bold(
+      projectLabel
     )}.`
   );
 
   if (opts.json) {
-    console.log(JSON.stringify({ projectId, projectName, results }, null, 2));
+    console.log(
+      JSON.stringify(
+        { projectId, projectName: projectLabel, attached: Boolean(attachProjectId), results },
+        null,
+        2
+      )
+    );
   } else {
     log.dim("Run 'synap orient' to see your new workspaces and project.");
     log.dim(

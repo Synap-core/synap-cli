@@ -17,6 +17,7 @@
   },
   "dependencies": {
     "@synap/hub-rest-client": "file:../synap-backend/packages/hub-rest-client",
+    "@synap-core/workspace-templates": "^0.2.0",
     "chalk": "^5.4.0",
     "commander": "^13.0.0",
     "ora": "^8.0.0",
