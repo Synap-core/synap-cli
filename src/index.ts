@@ -17,6 +17,7 @@ import { Command } from "commander";
 import { readFileSync } from "fs";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
+import { bootstrapPodOverride } from "./lib/pod.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -39,7 +40,11 @@ program
     "Synap CLI — connect AI agents to your data pod"
   )
   .version(version)
-  .showSuggestionAfterError(true);
+  .showSuggestionAfterError(true)
+  // Global, position-independent: target a saved pod profile for THIS command
+  // only (see `synap pods`). Consumed pre-parse by bootstrapPodOverride so it
+  // works in any position and overrides the default/env pod for one invocation.
+  .option("--pod <name>", "Run this command against a saved pod profile (overrides the default pod for this invocation only)");
 
 program
   .command("init")
@@ -1694,5 +1699,14 @@ keys
     const { keysRotate } = await import("./commands/keys.js");
     await keysRotate({});
   });
+
+// Resolve a global `--pod <name>` before commander parses (it isn't registered
+// per-command). Fails fast with a clear message on an unknown profile name.
+try {
+  bootstrapPodOverride(process.argv);
+} catch (err) {
+  console.error(err instanceof Error ? err.message : String(err));
+  process.exit(1);
+}
 
 program.parse();

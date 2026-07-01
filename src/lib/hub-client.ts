@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
-import { getActivePodConfig, getActiveWorkspaceId, listPodProfiles } from "./pod.js";
+import { getActivePodConfig, getActiveWorkspaceId, listPodProfiles, getPodOverride } from "./pod.js";
 import { resolveAgentOverride } from "./agents-config.js";
 import { resolveActiveLens } from "./session-lens.js";
 import { HubRestClient } from "@synap/hub-rest-client";
@@ -38,6 +38,21 @@ export function assertScope(cfg: HubConfig, required: string): void {
 }
 
 export async function resolveHubConfig(opts?: { podUrl?: string; apiKey?: string }): Promise<HubConfig> {
+  // 0. Per-invocation `--pod <name>` override (highest precedence): a single
+  //    command targets another saved pod while other agents keep their default.
+  //    Beats the env vars deliberately — that is the whole point of the flag.
+  const podOverride = getPodOverride();
+  if (podOverride) {
+    return {
+      podUrl: podOverride.podUrl,
+      apiKey: podOverride.hubApiKey,
+      // A profile's agentUserId may be empty; "cli" makes resolveUserId fetch /users/me.
+      userId: podOverride.agentUserId || "cli",
+      // Use the TARGET pod's own workspace — NOT this session's lens, which
+      // belongs to the default pod and would be meaningless on the target.
+      workspaceId: podOverride.workspaceId || undefined,
+    };
+  }
   // 1. Explicit flags (escape hatch)
   if (opts?.podUrl && opts?.apiKey) {
     return {

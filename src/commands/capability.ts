@@ -82,6 +82,16 @@ interface CardConnection {
   account?: string;
 }
 
+/** A template's INSTALL parameter — supplied to `apply` (e.g. a vault key). */
+interface CardInstallParam {
+  name: string;
+  label?: string;
+  type?: string;
+  required?: boolean;
+  description?: string;
+  secret?: boolean;
+}
+
 interface CapabilityCard {
   id: string | null;
   key: string;
@@ -91,6 +101,8 @@ interface CapabilityCard {
   status: CardStatus;
   connection?: CardConnection;
   verbs: CardVerb[];
+  /** Install params the caller must supply (vault key, baseUrl, …). May be absent on older pods. */
+  installParams?: CardInstallParam[];
   nextAction: { kind: "add" | "connect" | "enable" | "run" | "none"; hint: string };
 }
 
@@ -492,8 +504,20 @@ async function ensureConnection(
   const conn = card.connection;
   if (!conn || !conn.required || conn.state === "connected") return true;
 
-  // ── Vault credential — prompt + store server-side ─────────────────────────
+  // ── Vault credential — prompt + re-apply WITH params ──────────────────────
+  // The correct wiring: apply the template with the credential as a param, so the
+  // governed applier stores the secret AND links it into the connection tool's
+  // credentialRef (pod-wide, for a pod-scoped cap). A bare /vault/secrets write
+  // creates an orphan secret that is NOT linked to the tool — the old bug.
   if (conn.kind === "vault") {
+    const hasParams = (card.installParams ?? []).some((p) => p.required);
+    if (hasParams) {
+      const collected = await collectInstallParams(card);
+      if (!collected) return false;
+      return applyTemplateWithParams(cfg, card, workspaceId, collected, "Connecting");
+    }
+    // Fallback (older pod without install-params on the card): store the secret
+    // directly. May need manual linking if the tool's credentialRef doesn't match.
     const service = conn.provider ?? card.key;
     const answer = await prompts({
       type: "password",
@@ -513,8 +537,6 @@ async function ensureConnection(
         cfg
       );
       spinner.succeed(chalk.green(`Stored ${chalk.bold(service)} credential.`));
-      // NOTE: the catalog computes connection.state from the tool's credentialRef.
-      // If a verb still won't run after this, the ref may need manual linking.
       return true;
     } catch (err) {
       spinner.fail(chalk.red("Failed to store credential"));
@@ -568,6 +590,58 @@ async function ensureConnection(
   return false;
 }
 
+/**
+ * Prompt for a template's REQUIRED install params (masked for secrets). Returns
+ * the params map, or null if the user cancelled. Empty map when nothing required.
+ */
+async function collectInstallParams(
+  card: CapabilityCard
+): Promise<Record<string, unknown> | null> {
+  const required = (card.installParams ?? []).filter((p) => p.required);
+  const out: Record<string, unknown> = {};
+  for (const p of required) {
+    const answer = await prompts({
+      type: p.secret ? "password" : "text",
+      name: "value",
+      message: p.label
+        ? `${p.label}${p.secret ? "" : ""}`
+        : `Enter ${p.name}`,
+    });
+    const value = answer.value as string | undefined;
+    if (value === undefined || value === "") {
+      log.dim("Cancelled — no value entered.");
+      return null;
+    }
+    out[p.name] = value;
+  }
+  return out;
+}
+
+/**
+ * Apply a template WITH its params through the governed applier — which creates
+ * the vault secret AND wires it into the connection tool (pod-wide, for a
+ * pod-scoped cap). This is the ONE correct way to attach a vault credential;
+ * a post-hoc /vault/secrets write is NOT linked to the tool's credentialRef.
+ */
+async function applyTemplateWithParams(
+  cfg: HubCfg,
+  card: CapabilityCard,
+  workspaceId: string,
+  params: Record<string, unknown>,
+  verb: "Adding" | "Connecting"
+): Promise<boolean> {
+  const spinner = ora({ text: `${verb} ${chalk.bold(card.name)}…`, color: "cyan" }).start();
+  try {
+    await hubPost("/capabilities/apply", { templateKey: card.key, params, workspaceId }, cfg);
+    spinner.succeed(chalk.green(`${verb === "Adding" ? "Added" : "Connected"} ${chalk.bold(card.name)}.`));
+    return true;
+  } catch (err) {
+    spinner.fail(chalk.red(`Failed to ${verb.toLowerCase()} ${card.name}`));
+    log.error((err as Error).message);
+    return false;
+  }
+}
+
 // ── Public: capabilityAdd ────────────────────────────────────────────────────
 
 export interface CapAddOpts {
@@ -614,14 +688,28 @@ export async function capabilityAdd(name: string, opts: CapAddOpts): Promise<voi
     return;
   }
 
-  const addSpinner = ora({ text: `Adding ${chalk.bold(card.name)}…`, color: "cyan" }).start();
-  try {
-    await hubPost("/capabilities/apply", { templateKey: card.key, workspaceId }, cfg);
-    addSpinner.succeed(chalk.green(`Added ${chalk.bold(card.name)}.`));
-  } catch (err) {
-    addSpinner.fail(chalk.red(`Failed to add ${card.name}`));
-    log.error((err as Error).message);
-    process.exit(1);
+  // A template with REQUIRED install params (a vault-generic connector needs its
+  // key) must be applied WITH them — the applier stores the secret AND wires it
+  // into the connection tool. Prompt (masked for secrets) before applying.
+  const requiredParams = (card.installParams ?? []).filter((p) => p.required);
+  let params: Record<string, unknown> = {};
+  if (requiredParams.length > 0) {
+    log.dim(`${card.name} needs a credential to connect.`);
+    const collected = await collectInstallParams(card);
+    if (!collected) return; // cancelled
+    params = collected;
+    const ok = await applyTemplateWithParams(cfg, card, workspaceId, params, "Adding");
+    if (!ok) process.exit(1);
+  } else {
+    const addSpinner = ora({ text: `Adding ${chalk.bold(card.name)}…`, color: "cyan" }).start();
+    try {
+      await hubPost("/capabilities/apply", { templateKey: card.key, workspaceId }, cfg);
+      addSpinner.succeed(chalk.green(`Added ${chalk.bold(card.name)}.`));
+    } catch (err) {
+      addSpinner.fail(chalk.red(`Failed to add ${card.name}`));
+      log.error((err as Error).message);
+      process.exit(1);
+    }
   }
 
   // Re-fetch to show the resulting (installed) status.

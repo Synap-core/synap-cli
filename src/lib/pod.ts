@@ -155,6 +155,62 @@ export function listPodProfiles(): Array<{ name: string; config: LocalPodConfig;
   }));
 }
 
+// ─── Per-invocation pod override (the global `--pod <name>` flag) ──────────────
+// Lets a SINGLE command target another saved pod without mutating any config
+// file or affecting other agents/shells. Highest precedence in resolveHubConfig,
+// so it beats even the env vars that pin an agent session to its default pod.
+let _podOverride: LocalPodConfig | null = null;
+
+export function getPodOverride(): LocalPodConfig | null {
+  return _podOverride;
+}
+
+/** Resolve a saved pod profile by name and set it as this invocation's override. */
+export function setPodOverrideByName(name: string): LocalPodConfig {
+  const config = readMultiConfig();
+  const pod = config.pods[name];
+  if (!pod) {
+    const known = Object.keys(config.pods).join(", ") || "(none configured)";
+    throw new Error(
+      `Pod profile '${name}' not found. Known pods: ${known}. Add one with: synap pods add`
+    );
+  }
+  _podOverride = pod;
+  return pod;
+}
+
+/** Top-level commands that declare their OWN `--pod <name>` — their native handling must win. */
+const NATIVE_POD_FLAG_COMMANDS = new Set(["agents", "bridge-setup"]);
+
+/**
+ * Consume a position-independent `--pod <name>` (or `--pod=<name>`) from argv and
+ * register it as the per-invocation override. Mutates `argv` in place so commander
+ * never sees the flag (it isn't registered per-command). No-op when the argv
+ * targets a command that owns `--pod` itself (agents, bridge-setup). Throws with a
+ * helpful message when the named profile is unknown.
+ */
+export function bootstrapPodOverride(argv: string[]): void {
+  for (const c of NATIVE_POD_FLAG_COMMANDS) {
+    if (argv.includes(c)) return;
+  }
+  let name: string | undefined;
+  for (let i = 2; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === "--") break; // end-of-options marker
+    if (a === "--pod") {
+      name = argv[i + 1];
+      if (name) argv.splice(i, 2);
+      break;
+    }
+    if (a.startsWith("--pod=")) {
+      name = a.slice("--pod=".length);
+      argv.splice(i, 1);
+      break;
+    }
+  }
+  if (name) setPodOverrideByName(name);
+}
+
 export function addPodProfile(name: string, podConfig: LocalPodConfig): void {
   const config = readMultiConfig();
   config.pods[name] = podConfig;
