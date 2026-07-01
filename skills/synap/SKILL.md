@@ -45,6 +45,8 @@ Synap is a typed knowledge graph. **Reading is one verb (`synap ask`) — it rou
 
 Ask yourself: _who does this knowledge serve?_ **There is no private AI scratchpad** — structuring knowledge into a real lane IS your job. Never write a `note` (that's the human's raw inbox); always `capture` into a lane.
 
+**Known fields → typed create.** If you already know the profileSlug and the values, use `synap create entity` / `synap_create_entity` (or typed `capture --type` for a knowledge entry). Reach for free-text `capture "…"` only for an unstructured blob you haven't parsed — it runs an AI pipeline that can degrade to one flat `note`. 'Always capture into a lane' means _don't leave it unstructured_, not _always use the free-text pipeline_.
+
 | If it…                                                                                                                          | Lane                 | Where it goes                                                                            | Governance                                                                                                 |
 | ------------------------------------------------------------------------------------------------------------------------------- | -------------------- | ---------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
 | **is about the CURRENT WORK** — domain know-how for the project/task you're on (incl. a domain-specific gotcha/lesson/decision) | **Work** _(default)_ | a `knowledge` entity in the **active workspace** (`synap capture --type …`)              | proposal-gated (it's the user's real data; the workspace IS the domain — Builder ≠ marketing)              |
@@ -155,27 +157,39 @@ Call this once at session start. The response includes every system profile and 
 
 You don't work "inside a workspace" the way you'd work inside a folder. You operate **across the whole pod**, and you **focus** through up to three composable lenses. **Lenses narrow; they never silo.** Omitting them is legal and common — that's pod-wide.
 
-| Lens | What it is | Granularity | How to set (this session) |
-| ---- | ---------- | ----------- | -------------------------- |
-| **Workspace** | a **domain** (Builder, Marketing, a client) — the home for domain `knowledge` + workspace-scoped profiles | usually one, **not necessarily** | `synap use <name-or-id>` |
-| **Project** | a **cross-cutting** dimension (a client, an initiative) — orthogonal to workspace, composable with it | optional | `synap project use <id>` / `clear` |
-| **Session** | the **work room** for the current goal (holds goal, deliverables, progress) | **the day-to-day move** | `synap session start --goal "…"` / `attach <id>` |
+| Lens          | What it is                                                                                                                                           | How to set (this session)                        |
+| ------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------ |
+| **Project**   | a **company or initiative** — the thing that ties the work together (Synap, a client, a launch). The lens you usually _organize by_.                 | `synap project use <id>` / `clear`               |
+| **Workspace** | an **operational domain** — where data lives (Foundation, CRM, Marketing, Finance, Builder). How the work is separated; the default home for writes. | `synap use <name-or-id>`                         |
+| **Session**   | the **work room** for the current goal (holds goal, deliverables, progress)                                                                          | `synap session start --goal "…"` / `attach <id>` |
 
-- **The connection is pod-wide by design.** Your MCP/CLI link is *not* welded to a workspace — reads default pod-wide, writes default to a sensible workspace. Pass a lens to narrow a single call; the lens is a focus, not a fence.
-- **These are per-Claude-session.** Two concurrent Claude sessions can sit on different workspaces/projects/sessions without colliding. `synap use` here rebinds **this** session only.
-- **Inspect anytime:** `synap lens` → the workspace + project + session this session resolves to.
+**How they compose — this is the whole model:**
+
+- A **project spans workspaces**: one company/initiative has a Foundation, a CRM, a Marketing, a Finance… each a different operational lens on the _same_ project.
+- A **workspace spans projects**: the Marketing workspace can hold work for several clients/projects at once.
+- Compose either way, or both. That's why they're lenses, not folders: **workspaces exist so that development, finance, marketing, and operations don't pile into one undifferentiated place** — they're the separation that makes the work legible.
+
+- **The connection is pod-wide by design.** Your MCP/CLI link is _not_ welded to a workspace — reads default pod-wide, writes default to a sensible workspace. Pass a lens to narrow a single call; the lens is a focus, not a fence.
+- **These are per-Claude-session.** Two concurrent Claude sessions can sit on different projects/workspaces/sessions without colliding. `synap use` here rebinds **this** session only.
+- **Inspect anytime:** `synap lens` → the project + workspace + session this session resolves to.
 
 ### The "am I in the right place?" reflex
 
 **Before the FIRST write of a new unit of work**, check your lens and orient if you're unsure:
 
 1. `synap lens` — am I scoped where this work belongs?
-2. If unsure what exists → `synap orient` (lists workspaces **and** projects) — never guess IDs.
-3. **Connect or create:** if the right workspace / project / session doesn't exist yet, create it (workspaces/projects are rare; **a session is the normal per-task move**). If it exists, attach to it.
+2. If unsure what exists → `synap orient` — it returns a **light lens map**: the projects and the workspaces (names + ids), so you see the shape without a data dump. Never guess IDs. Drill into a workspace's profiles or a project's contents only when you actually need them.
+3. **Connect or create:** if the right project / workspace / session doesn't exist yet, create it. A **session is the normal per-task move**. Creating a **workspace (a new operational domain) is a deliberate, expected move as the work grows** — not something to avoid.
 
-**Don't re-orient mid-flow.** Once you've oriented and you're in a run of related writes, keep going — re-check only when you **start a new piece of work** or switch domains. The reflex guards the *start* of work, not every call.
+**Don't re-orient mid-flow.** Once you've oriented and you're in a run of related writes, keep going — re-check only when you **start a new piece of work** or switch domains. The reflex guards the _start_ of work, not every call.
 
-> Sessions are the everyday primitive: opening/attaching one is routine. Changing workspace or project is occasional — do it deliberately, when the work's domain genuinely changes.
+### Notice a missing domain — and offer it
+
+Because workspaces are how a company separates its operations, a project is sometimes **missing an operational domain it clearly needs**. If the conversation is squarely about an area — sales, content, finance, hiring, ops — and the active project has **no workspace for it**, say so **once, at the end, in one line**, and offer to set it up:
+
+> _"This project doesn't have a Marketing workspace yet — want me to spin one up and capture the essentials?"_
+
+If they say yes, provision that **one** domain, link it to the project, and run its onboarding interview (see the `agent-os` skill — it handles both the whole-company setup and adding a single domain to an existing project). **Offer, don't auto-build.** One nudge per response, and only when the gap is real — never a checklist of everything the project "could" have. **If the user has already declined a domain (this session or before), drop it — don't re-offer.**
 
 ---
 
@@ -185,7 +199,7 @@ You don't work "inside a workspace" the way you'd work inside a folder. You oper
 
 These five rules override default assistant behavior when connected to a Synap pod:
 
-**1. Orient before acting** *(and check your lens — see "am I in the right place?" above)*  
+**1. Orient before acting** _(and check your lens — see "am I in the right place?" above)_  
 Run `scripts/orient.sh` or call these endpoints at the start of every session — before searching, before creating, before answering any question about the user's data:
 
 ```
@@ -1011,6 +1025,8 @@ This model enables renewals (new deal linking to existing client), multi-stakeho
 6. **Not knowing your userId.** Use `{SYNAP_USER_ID}` from the env (set by `synap connect`). Or call `GET /api/hub/users/me` → `.id` once and cache it. Never hardcode or guess.
 7. **Skipping the search step.** Duplicates degrade the graph more than missing data.
 8. **Forgetting that `GET /channels/personal` needs `hub-protocol.write`** scope — it's get-or-create, not a pure read.
+9. **Routing known-structure data through free-text capture.** If you already know the profileSlug + fields, create the entity directly — smart capture can degrade to a single flat note.
+10. **Paragraph session goals.** The goal is one line; put detail and deliverables in expectedOutputs.
 
 ---
 

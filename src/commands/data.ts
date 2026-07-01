@@ -88,10 +88,10 @@ export async function orient(opts: BaseOpts): Promise<void> {
       const out = opts.details
         ? { userId, podUrl: cfg.podUrl, workspaceId: cfg.workspaceId, projects, workspaces: wsDetails, me }
         : {
-            userId, podUrl: cfg.podUrl, workspaceId: cfg.workspaceId,
+            userId, podUrl: cfg.podUrl, workspaceId: cfg.workspaceId, me,
             projects,
             workspaces: wsList.map((ws) => ({
-              id: ws.id, name: ws.name, domain: ws.domain,
+              id: ws.id, name: ws.name, domain: ws.workspaceSubtype ?? ws.workspaceType,
               entityCount: typeof ws.entityCount === "number" ? ws.entityCount : undefined,
             })),
           };
@@ -122,13 +122,16 @@ export async function orient(opts: BaseOpts): Promise<void> {
     if (projList.length === 0) {
       log.dim("No projects yet — a project is a company/initiative that ties workspaces together.");
     } else {
+      const wsNameById = new Map(wsList.map((ws) => [ws.id, String(ws.name ?? "")]));
       for (const p of projList) {
         const isActive = p.id === activeProjectId;
         const marker = isActive ? chalk.green("▶ ") : "  ";
         const name = chalk.bold(String(p.name ?? p.id));
         const id = chalk.dim(String(p.id ?? "").slice(0, 8) + "…");
         const status = p.status ? chalk.dim(String(p.status)) : "";
-        log.info(`${marker}${name}  ${id}  ${status}`);
+        const home = p.workspaceId ? wsNameById.get(String(p.workspaceId)) : undefined;
+        const homePart = home ? chalk.dim(`· ${home}`) : "";
+        log.info(`${marker}${name}  ${id}  ${status}${homePart ? "  " + homePart : ""}`);
       }
     }
 
@@ -162,13 +165,16 @@ export async function orient(opts: BaseOpts): Promise<void> {
         }
       }
     } else {
-      // Light: name + id + domain, no per-workspace fanout.
+      // Light: name + id + domain, no per-workspace fanout. The operational
+      // domain label = workspaceSubtype (set by templates: crm, brand-library…),
+      // falling back to workspaceType; the `domain` column is unused/empty.
       for (const ws of wsList) {
         const isActive = ws.id === cfg.workspaceId;
         const marker = isActive ? chalk.green("▶ ") : "  ";
         const name = chalk.bold(String(ws.name ?? ws.id));
         const id = chalk.dim(String(ws.id ?? "").slice(0, 8) + "…");
-        const domain = ws.domain ? chalk.dim(String(ws.domain)) : "";
+        const domainLabel = ws.workspaceSubtype ?? ws.workspaceType;
+        const domain = domainLabel ? chalk.dim(String(domainLabel)) : "";
         log.info(`${marker}${name}  ${id}  ${domain}`);
       }
       log.blank();
