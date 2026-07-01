@@ -398,13 +398,31 @@ program
 
 program
   .command("orient")
-  .description("Show pod orientation: who you are, workspaces, profiles, and entity counts")
+  .description("Show a lightweight lens map: who you are, your projects (companies/initiatives), and workspaces (operational domains)")
   .option("--json", "Output as JSON")
+  .option("--details", "Include per-workspace profiles + entity counts (heavier)")
   .option("--pod-url <url>", "Pod URL override")
   .option("--api-key <key>", "API key override")
   .action(async (opts) => {
     const { orient } = await import("./commands/data.js");
     await orient(opts);
+  });
+
+// ─── digest ─────────────────────────────────────────────────────────────────
+// A quick read of what's already in a workspace or project (counts + key
+// entities + summary). Default = the active workspace lens.
+
+program
+  .command("digest")
+  .description("Summarize what's in a workspace or project (counts + key entities)")
+  .option("--workspace <id|name>", "Workspace to digest (defaults to active workspace lens)")
+  .option("--project <id|name>", "Project to digest (cross-cutting lens)")
+  .option("--json", "Output raw JSON")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (opts) => {
+    const { digest } = await import("./commands/digest.js");
+    await digest(opts);
   });
 
 // ─── use ──────────────────────────────────────────────────────────────────────
@@ -441,6 +459,18 @@ project
   .action(async (opts) => {
     const { clearProject } = await import("./commands/lens.js");
     await clearProject(opts);
+  });
+project
+  .command("purge <target>")
+  .description("HARD teardown: delete a project + its pod-wide-exclusive entities (owner-only, irreversible)")
+  .option("--confirm <name>", "Confirm non-interactively by passing the exact project name")
+  .option("--yes", "Skip the interactive name prompt (uses the resolved name)")
+  .option("--json", "Output raw JSON")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (target: string, opts) => {
+    const { projectPurge } = await import("./commands/purge.js");
+    await projectPurge(target, opts);
   });
 
 program
@@ -509,6 +539,27 @@ program
   .action(async (text, opts) => {
     const { captureKnowledge } = await import("./commands/knowledge.js");
     await captureKnowledge({ ...opts, text });
+  });
+
+// ─── import ─────────────────────────────────────────────────────────────────
+// "capture, but for files and URLs." Each input (file/folder/URL) routes through
+// the SAME AI capture pipeline (/capture/structure → /capture/execute), so it
+// inherits entity extraction, the relation graph, and workspace/project routing.
+
+program
+  .command("import <inputs...>")
+  .description("Import files, folders, or URLs into the pod via the AI capture pipeline")
+  .option("--workspace <id|name>", "Override AI workspace routing")
+  .option("--project <id|name>", "Override AI project routing")
+  .option("--dry-run", "Structure + print proposals only — do not write")
+  .option("--yes", "Skip the per-item y/N confirmation")
+  .option("--session", "Link created entities to the active session")
+  .option("--json", "Output as JSON")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (inputs: string[], opts) => {
+    const { importData } = await import("./commands/import.js");
+    await importData(inputs, opts);
   });
 
 program
@@ -580,6 +631,19 @@ workspace
   .action(async (opts) => {
     const { provisionAgentWorkspace } = await import("./commands/knowledge.js");
     await provisionAgentWorkspace({ ...opts, agentUserId: opts.agentUserId });
+  });
+
+workspace
+  .command("purge <target>")
+  .description("HARD teardown: delete a workspace + all its entities and blobs (owner-only, irreversible)")
+  .option("--confirm <name>", "Confirm non-interactively by passing the exact workspace name")
+  .option("--yes", "Skip the interactive name prompt (uses the resolved name)")
+  .option("--json", "Output raw JSON")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (target: string, opts) => {
+    const { workspacePurge } = await import("./commands/purge.js");
+    await workspacePurge(target, opts);
   });
 
 // ─── list ─────────────────────────────────────────────────────────────────────
