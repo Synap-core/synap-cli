@@ -23,7 +23,7 @@ import {
 import {
   checkPodHealth,
   setupAgent,
-  setupAgentViaCp,
+  setupAgentViaPod,
   provisionUserOnPod,
   installSynapSkill,
   enableOpenClawAddonManaged,
@@ -692,19 +692,27 @@ async function connectStep(
       // The pod trusts the user's session to create agent credentials
       const spinner = ora("Generating API key for OpenClaw agent...").start();
       try {
-        // Provision the user on the pod (creates Kratos identity + pod user account)
-        // This is idempotent — safe to call on every init
+        // Provision the user on the pod (creates Kratos identity + pod user
+        // account) AND capture the Kratos session the handshake mints. This is
+        // idempotent — safe to call on every init.
+        let sessionToken: string | null = null;
         try {
-          await provisionUserOnPod(podUrl, creds!.token);
+          ({ sessionToken } = await provisionUserOnPod(podUrl, creds!.token));
         } catch (err) {
-          // Non-fatal: log warning, proceed anyway (user may already exist from Browser/Relay login)
+          // Non-fatal here — the missing-session guard below decides what to do.
           log.warn(`Could not provision user on pod: ${err instanceof Error ? err.message : String(err)}`);
         }
 
-        // Try using the user's CP session token to call the pod directly
-        // The pod's setup/agent endpoint accepts PROVISIONING_TOKEN,
-        // but for managed pods we can also use the CP to relay the request
-        const result = await setupAgentViaCp(podUrl, creds!.token, "openclaw");
+        if (!sessionToken) {
+          throw new Error(
+            "Could not establish a pod session to issue an agent key."
+          );
+        }
+
+        // Canonical key issuance: mint a scoped Hub Protocol key via the pod's
+        // apiKeys.connectIntegration tRPC procedure — the same path the pod-admin
+        // /connect page and the browser use (replaces the removed CP relay).
+        const result = await setupAgentViaPod(podUrl, sessionToken, "openclaw");
         apiKey = result.hubApiKey;
         opts.apiKey = apiKey;
         spinner.succeed("API key generated");

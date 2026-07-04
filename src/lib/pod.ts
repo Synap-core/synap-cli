@@ -374,13 +374,18 @@ export function startSelfHostedPod(): void {
 /**
  * Provision the CP-authenticated user on their pod.
  * Calls the CP to get a handshake JWT, then calls /api/handshake on the pod.
- * This ensures the user exists in the pod's users table before setup/agent runs.
+ * This ensures the user exists in the pod's users table before key issuance runs.
  * Safe to call multiple times — idempotent (Kratos upserts by email).
+ *
+ * Returns the Kratos session token the pod mints on a successful handshake.
+ * That token authenticates subsequent pod tRPC calls (e.g.
+ * `apiKeys.connectIntegration`) as the pod user, via the X-Session-Token header.
+ * `sessionToken` is null only if the pod handshake returned no token (e.g. 409).
  */
 export async function provisionUserOnPod(
   podUrl: string,
   cpToken: string
-): Promise<void> {
+): Promise<{ sessionToken: string | null }> {
   // Step 1: Get handshake JWT from CP
   const jwtRes = await fetch(`${CP_URL}/pods/handshake-jwt`, {
     method: "POST",
@@ -412,41 +417,76 @@ export async function provisionUserOnPod(
     const body = await handshakeRes.text().catch(() => "");
     throw new Error(`Pod handshake failed (HTTP ${handshakeRes.status}): ${body.slice(0, 200)}`);
   }
+
+  // The pod returns the Kratos session token in the handshake body (the same
+  // value the browser receives as the ory_kratos_session cookie).
+  let sessionToken: string | null = null;
+  try {
+    const data = (await handshakeRes.json()) as { session_token?: string };
+    sessionToken = data.session_token ?? null;
+  } catch {
+    // 409 or an empty body — no token to capture.
+  }
+  return { sessionToken };
 }
 
 /**
- * Generate an API key via the Control Plane (for authenticated users).
- * The CP relays the request to the pod using its own authority.
+ * Issue a scoped Hub Protocol API key on the pod for an authenticated user.
+ *
+ * Canonical path: the pod's `apiKeys.connectIntegration` tRPC procedure — the
+ * same one the pod-admin `/connect` page and the browser's LocalCliRow use.
+ * Auth is the Kratos session token minted by {@link provisionUserOnPod},
+ * forwarded as the `X-Session-Token` header. (Replaces the removed CP relay
+ * `POST /pods/setup-agent`, which now returns 410.)
+ *
+ * Backend tRPC uses the superjson transformer, so the input rides in a
+ * `{ json: ... }` envelope and the output is unwrapped from `result.data.json`.
  */
-export async function setupAgentViaCp(
+export async function setupAgentViaPod(
   podUrl: string,
-  cpToken: string,
-  agentType = "openclaw"
+  sessionToken: string,
+  integration: "cli" | "openclaw" | "raycast" | "custom" = "openclaw"
 ): Promise<{
   hubApiKey: string;
   agentUserId: string;
   workspaceId: string;
 }> {
-  // Call the CP which will relay to the pod
-  // The CP knows the pod's PROVISIONING_TOKEN (it provisioned the pod)
-  const res = await fetch(`${CP_URL}/pods/setup-agent`, {
+  const res = await fetch(`${podUrl}/trpc/apiKeys.connectIntegration`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${cpToken}`,
+      "X-Session-Token": sessionToken,
     },
-    body: JSON.stringify({ podUrl, agentType }),
+    // strategy: "replace_existing" makes re-running `synap init` idempotent —
+    // it revokes any prior key for this integration and mints a fresh one.
+    body: JSON.stringify({
+      json: { integration, strategy: "replace_existing" },
+    }),
+    signal: AbortSignal.timeout(15000),
   });
 
-  if (!res.ok) {
-    const body = await res.text();
-    throw new Error(`CP relay failed (HTTP ${res.status}): ${body}`);
+  const body = (await res.json().catch(() => null)) as {
+    result?: { data?: { json?: { apiKey?: string; workspaceId?: string | null } } };
+    error?: { message?: string };
+  } | null;
+
+  if (!res.ok || !body || body.error) {
+    const msg = body?.error?.message ?? `HTTP ${res.status}`;
+    throw new Error(`Pod key issuance failed: ${msg}`);
   }
 
-  return (await res.json()) as {
-    hubApiKey: string;
-    agentUserId: string;
-    workspaceId: string;
+  const data = body.result?.data?.json;
+  if (!data?.apiKey) {
+    throw new Error("Pod returned no API key from connectIntegration");
+  }
+
+  return {
+    hubApiKey: data.apiKey,
+    // The connectIntegration key is owned by the human pod user directly — there
+    // is no separate agent user in this model (same as the browser flow). Left
+    // empty; the hub client resolves the acting user via /users/me at runtime.
+    agentUserId: "",
+    workspaceId: data.workspaceId ?? "",
   };
 }
 
