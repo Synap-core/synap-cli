@@ -1647,6 +1647,10 @@ const GOVERNANCE_PRESETS: Record<
       "entity.create", "document.create", "relation.create",
       "view.create", "profile.create", "property_def.create",
       "channel.create",
+      // Non-destructive edits are instant too (merge / field-level partial —
+      // mirrors backend NORMAL). Full-REPLACE writes (document.update,
+      // view.update) + destructive ops stay proposal-gated.
+      "entity.update", "relation.update", "profile.update", "property_def.update",
       // Capability-substrate creates — "creates are instant" (mirrors backend).
       "automation.create", "playbook.create", "link.create",
       "tool.create", "skill.create",
@@ -1685,9 +1689,9 @@ export async function ensureAgentGovernance(
           value: "safe",
         },
         {
-          title: "Normal — creates are instant, updates & deletes need approval (recommended)",
+          title: "Normal — creating & editing are instant, deletes need approval (recommended)",
           description:
-            "Agents create things immediately — you approve changes to existing data.",
+            "Agents create and edit data immediately (edits merge, never wipe fields); deletes and full-content rewrites go through proposals.",
           value: "normal",
         },
         {
