@@ -716,7 +716,9 @@ async function connectStep(
         apiKey = result.hubApiKey;
         opts.apiKey = apiKey;
         spinner.succeed("API key generated");
-        log.dim(`Agent user: ${result.agentUserId}`);
+        if (result.agentUserId) {
+          log.dim(`Agent user: ${result.agentUserId}`);
+        }
         log.dim(`Workspace: ${result.workspaceId}`);
         log.blank();
         log.info("This key lets OpenClaw read/write your knowledge graph.");
