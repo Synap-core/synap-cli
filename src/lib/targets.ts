@@ -267,12 +267,12 @@ async function prepareMcpSurface(
 
 // ─── Agent context configuration ──────────────────────────────────────────────
 
-async function configureAgentContext(
+export async function configureAgentContext(
   podUrl: string,
   apiKey: string,
   agentType: string,
   agentUserId: string,
-  info: TargetInfo
+  info?: TargetInfo
 ): Promise<void> {
   const { AGENT_TEMPLATES, getTemplate } = await import("./agent-templates.js");
 
@@ -295,15 +295,21 @@ async function configureAgentContext(
   log.dim("The template sets the agent's default behaviour and routing rules.");
   log.blank();
 
-  const { templateId } = await prompts({
-    type: "select",
-    name: "templateId",
-    message: "Pick a template:",
-    choices: AGENT_TEMPLATES.map((t) => ({
-      title: `${t.label}  ${chalk.dim(t.description)}`,
-      value: t.id,
-    })),
-  });
+  // Non-interactive callers (bridge-setup, pods/init provisioning, `agents
+  // create`) still get a routing file — just with the MINIMAL default template,
+  // since there's no TTY to prompt on.
+  let templateId: string | undefined;
+  if (process.stdin.isTTY) {
+    ({ templateId } = await prompts({
+      type: "select",
+      name: "templateId",
+      message: "Pick a template:",
+      choices: AGENT_TEMPLATES.map((t) => ({
+        title: `${t.label}  ${chalk.dim(t.description)}`,
+        value: t.id,
+      })),
+    }));
+  }
 
   const template = getTemplate(templateId as string);
 
@@ -328,7 +334,7 @@ async function configureAgentContext(
   fs.writeFileSync(globalContextPath, content, { mode: 0o600 });
 
   // For skills-capable surfaces, also write alongside SKILL.md
-  const skillsDir = info.skillsDir?.();
+  const skillsDir = info?.skillsDir?.();
   if (skillsDir) {
     const synapSkillDir = path.join(skillsDir, "synap");
     if (!fs.existsSync(synapSkillDir)) fs.mkdirSync(synapSkillDir, { recursive: true });
@@ -640,7 +646,7 @@ export async function writeClaudeCodeEnv(
   // Persist the provisioned key to agentKeys["claude-code"] so SYNAP_AGENT=claude-code
   // works in CLI sessions outside of this env (e.g. terminal, not just inside Claude Code).
   const { setSurfaceAgentKey: saveSurfaceKey } = await import("./pod.js");
-  saveSurfaceKey("claude-code", { hubApiKey: effectiveApiKey, agentUserId: agentSetup.agentUserId ?? "" });
+  saveSurfaceKey("claude-code", { hubApiKey: effectiveApiKey, agentUserId: agentSetup.agentUserId ?? "", podUrl: cfg.podUrl });
 
   // Enroll the new agent user into the caller's workspaces using the HUMAN key
   // (before switching to the agent key). Scoped to one workspace when chosen.
@@ -658,6 +664,8 @@ export async function writeClaudeCodeEnv(
   delete env["SYNAP_AGENT_USER_ID"];
   if (cfg.workspaceId) env["SYNAP_WORKSPACE_ID"] = cfg.workspaceId;
   else delete env["SYNAP_WORKSPACE_ID"];
+  if (cfg.projectId) env["SYNAP_PROJECT_ID"] = cfg.projectId;
+  else delete env["SYNAP_PROJECT_ID"];
   if (me.scopes?.length) env["SYNAP_KEY_SCOPES"] = me.scopes.join(",");
   settings.env = env;
 
@@ -787,8 +795,16 @@ export async function provisionAgentKey(
   podUrl: string,
   humanApiKey: string,
   agentType: string,
-  { requireApproval = true }: { requireApproval?: boolean } = {}
-): Promise<{ hubApiKey: string; agentUserId: string }> {
+  {
+    requireApproval = true,
+    idempotent = false,
+  }: { requireApproval?: boolean; idempotent?: boolean } = {}
+): Promise<{ hubApiKey: string; agentUserId: string; reused: boolean }> {
+  // `idempotent: true` reuses the pod's existing valid key for this agentType
+  // instead of minting a fresh one + revoking the old — required by callers whose
+  // running process holds a long-lived key (e.g. `bridge-setup`), so re-running
+  // setup doesn't break a live bridge. Default false preserves the mint-fresh
+  // behavior every other caller (connect / pods / init) already relied on.
   const podBase = podUrl.replace(/\/$/, "");
   let res: Response;
   try {
@@ -798,7 +814,7 @@ export async function provisionAgentKey(
         "Content-Type": "application/json",
         Authorization: `Bearer ${humanApiKey}`,
       },
-      body: JSON.stringify({ agentType, idempotent: false, requireApproval }),
+      body: JSON.stringify({ agentType, idempotent, requireApproval }),
       signal: AbortSignal.timeout(30000),
     });
   } catch (err) {
@@ -817,7 +833,61 @@ export async function provisionAgentKey(
     requiresApproval?: boolean;
     pendingToken?: string;
     reviewUrl?: string;
+    alreadyValid?: boolean;
   };
+  // Idempotent-reuse response: the pod already has a valid key for this agentType
+  // and returns { alreadyValid: true } WITHOUT a hubApiKey — the plaintext exists
+  // only at mint time and is never recoverable from the stored hash.
+  //
+  // The whole POINT of idempotent reuse is to NOT rotate: a live service (e.g. the
+  // Discord bridge) holds the plaintext in its .env and would 401 on every request
+  // until redeployed if we minted a fresh key + revoked the old one. So on reuse we
+  // recover the plaintext from LOCAL storage (where the last successful provision
+  // saved it), verify it still resolves to this agent, and hand it back untouched —
+  // no rotation, no redeploy. We mint fresh ONLY when no valid local key exists
+  // (e.g. a brand-new machine). This generalizes the claude-code self-heal.
+  if (!body.hubApiKey && body.alreadyValid && idempotent) {
+    const { getSurfaceAgentKey } = await import("./pod.js");
+    const stored = getSurfaceAgentKey(agentType as import("./pod.js").SurfaceName);
+    const candidate = stored?.hubApiKey;
+    const expectedAgentUserId = body.agentUserId ?? stored?.agentUserId;
+    if (candidate && expectedAgentUserId) {
+      // auth/status returns the KEY's owner userId (the agent's, for agent keys).
+      const verify = await fetch(`${podBase}/api/hub/auth/status`, {
+        headers: { Authorization: `Bearer ${candidate}` },
+        signal: AbortSignal.timeout(30000),
+      }).catch(() => null);
+      // Rotate ONLY on POSITIVE invalidation. A transient failure (network blip,
+      // timeout, 5xx) must NOT trigger a rotate — that would revoke the live
+      // service's working key and 401 it until redeploy, the exact harm this
+      // reuse path exists to avoid. So:
+      //   • ok + userId matches   → reuse (definitely valid)
+      //   • 401/403               → key is dead → rotate
+      //   • ok + userId MISMATCH  → wrong identity → rotate
+      //   • unreachable / 5xx / ambiguous → reuse as-is (a blip ≠ a dead key)
+      if (verify?.ok) {
+        const st = (await verify.json().catch(() => ({}))) as { userId?: string };
+        if (st.userId === expectedAgentUserId) {
+          return { hubApiKey: candidate, agentUserId: expectedAgentUserId, reused: true };
+        }
+        // userId mismatch → fall through to rotate (positive invalidation).
+      } else if (verify && (verify.status === 401 || verify.status === 403)) {
+        // Pod actively rejected the key → dead → fall through to rotate.
+      } else {
+        // Unreachable or ambiguous (5xx/timeout) — do not revoke a probably-live
+        // key on a transient pod hiccup. Reuse; the operator will notice a real
+        // 401 later and can force a fresh provision.
+        return { hubApiKey: candidate, agentUserId: expectedAgentUserId, reused: true };
+      }
+    }
+    // No candidate, OR positive invalidation above — rotate (mint fresh, revoke
+    // old). The caller MUST persist + redeploy the new key. idempotent:false can't
+    // re-enter this branch (the server gates alreadyValid on idempotent===true).
+    return provisionAgentKey(podUrl, humanApiKey, agentType, {
+      requireApproval,
+      idempotent: false,
+    });
+  }
   if (!body.hubApiKey) {
     throw new Error(
       `setup/agent succeeded but returned no hubApiKey for ${agentType}. ` +
@@ -838,7 +908,7 @@ export async function provisionAgentKey(
     }
     log.success(`  Approved! Writing ${agentType} agent key.`);
   }
-  return { hubApiKey: body.hubApiKey, agentUserId: body.agentUserId ?? "" };
+  return { hubApiKey: body.hubApiKey, agentUserId: body.agentUserId ?? "", reused: false };
 }
 
 /**
@@ -848,16 +918,19 @@ export async function provisionAgentKey(
  * @param callerKey  The key of the user whose workspaces to enroll into (pod profile key).
  * @param agentUserId  The agent user to enroll.
  * @param workspaceId  When set, enroll in that one workspace only; omit for all.
+ * @param opts.role  Workspace role to grant the agent. Defaults to "editor" — the
+ *   one safe default callers get unless they explicitly ask for another role.
  */
 export async function enrollAgentIfNeeded(
   podUrl: string,
   callerKey: string,
   agentUserId: string,
   workspaceId?: string,
-  opts?: { quiet?: boolean }
+  opts?: { quiet?: boolean; role?: string }
 ): Promise<void> {
   if (!agentUserId) return;
   const quiet = opts?.quiet === true; // suppress status logs (e.g. --json callers)
+  const role = opts?.role ?? "editor";
   const podBase = podUrl.replace(/\/$/, "");
   try {
     const res = await fetch(`${podBase}/api/hub/workspaces/enroll-agent`, {
@@ -866,7 +939,7 @@ export async function enrollAgentIfNeeded(
       body: JSON.stringify({
         agentUserId,
         ...(workspaceId ? { workspaceId } : {}),
-        role: "editor",
+        role,
       }),
       signal: AbortSignal.timeout(30000),
     });
@@ -905,7 +978,7 @@ async function installClaudeDesktop(
   // Reference: https://www.npmjs.com/package/mcp-remote
   const { hubApiKey: effectiveApiKey, agentUserId } = await provisionAgentKey(cfg.podUrl, cfg.apiKey, "claude-desktop");
   const { setSurfaceAgentKey: saveDesktopKey } = await import("./pod.js");
-  saveDesktopKey("claude-desktop", { hubApiKey: effectiveApiKey, agentUserId });
+  saveDesktopKey("claude-desktop", { hubApiKey: effectiveApiKey, agentUserId, podUrl: cfg.podUrl });
   await enrollAgentIfNeeded(cfg.podUrl, cfg.apiKey, agentUserId, cfg.workspaceId);
   const desktopMcpUrl = buildMcpUrl(cfg.podUrl, cfg.workspaceId, cfg.projectId);
   writeMcpServerEntry(mcpPath, "synap", {
@@ -966,7 +1039,7 @@ async function installCursor(
 
   const { hubApiKey: effectiveApiKey, agentUserId } = await provisionAgentKey(cfg.podUrl, cfg.apiKey, "cursor");
   const { setSurfaceAgentKey: saveCursorKey } = await import("./pod.js");
-  saveCursorKey("cursor", { hubApiKey: effectiveApiKey, agentUserId });
+  saveCursorKey("cursor", { hubApiKey: effectiveApiKey, agentUserId, podUrl: cfg.podUrl });
   await enrollAgentIfNeeded(cfg.podUrl, cfg.apiKey, agentUserId, cfg.workspaceId);
   const cursorMcpUrl = buildMcpUrl(cfg.podUrl, cfg.workspaceId, cfg.projectId);
   writeMcpServerEntry(mcpPath, "synap", {
@@ -1000,7 +1073,7 @@ async function installRaycast(cfg: TargetConnectionConfig): Promise<boolean> {
   // Provision a dedicated "raycast" agent identity + resolve the scoped MCP URL.
   const { effectiveApiKey, agentUserId, mcpUrl } = await prepareMcpSurface(cfg, "raycast");
   const { setSurfaceAgentKey } = await import("./pod.js");
-  setSurfaceAgentKey("raycast", { hubApiKey: effectiveApiKey, agentUserId });
+  setSurfaceAgentKey("raycast", { hubApiKey: effectiveApiKey, agentUserId, podUrl: cfg.podUrl });
 
   // ── Write the Raycast MCP server config (merge, never clobber) ─────────────
   // Raycast's native MCP is stdio-only — bridge the HTTP /mcp endpoint with the
@@ -1142,7 +1215,7 @@ async function installWindsurf(
   writeMcpServerEntry(configPath, "synap", { url: mcpUrl, headers: { Authorization: `Bearer ${effectiveApiKey}` } });
 
   const { setSurfaceAgentKey: save } = await import("./pod.js");
-  save("windsurf", { hubApiKey: effectiveApiKey, agentUserId });
+  save("windsurf", { hubApiKey: effectiveApiKey, agentUserId, podUrl: cfg.podUrl });
 
   log.success(`Windsurf MCP config updated: ${configPath}`);
   log.dim("Restart Windsurf to pick up the new MCP server.");
@@ -1188,7 +1261,7 @@ async function installGoose(cfg: TargetConnectionConfig): Promise<boolean> {
   fs.writeFileSync(configPath, updated, { mode: 0o600 });
 
   const { setSurfaceAgentKey: save } = await import("./pod.js");
-  save("goose", { hubApiKey: effectiveApiKey, agentUserId });
+  save("goose", { hubApiKey: effectiveApiKey, agentUserId, podUrl: cfg.podUrl });
 
   log.success(`Goose config updated: ${configPath}`);
   log.dim("Run `goose session` to pick up the new MCP extension.");
@@ -1239,7 +1312,7 @@ async function installZed(cfg: TargetConnectionConfig): Promise<boolean> {
   fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + "\n", { mode: 0o600 });
 
   const { setSurfaceAgentKey: save } = await import("./pod.js");
-  save("zed", { hubApiKey: effectiveApiKey, agentUserId });
+  save("zed", { hubApiKey: effectiveApiKey, agentUserId, podUrl: cfg.podUrl });
 
   log.success(`Zed settings updated: ${settingsPath}`);
   log.dim("Note: Zed settings are JSONC — any existing // comments were removed during rewrite.");
@@ -1280,7 +1353,7 @@ async function installVSCode(cfg: TargetConnectionConfig): Promise<boolean> {
   fs.writeFileSync(mcpJsonPath, JSON.stringify(existing, null, 2) + "\n", { mode: 0o600 });
 
   const { setSurfaceAgentKey: save } = await import("./pod.js");
-  save("vscode", { hubApiKey: effectiveApiKey, agentUserId });
+  save("vscode", { hubApiKey: effectiveApiKey, agentUserId, podUrl: cfg.podUrl });
 
   log.success(`VS Code MCP config updated: ${mcpJsonPath}`);
   log.dim("Picked up automatically by Kilo Code, Cline, Continue, and GitHub Copilot.");
@@ -1539,7 +1612,7 @@ export async function installOpencode(cfg: ProviderInstallConfig & { workspaceId
   fs.writeFileSync(configPath, JSON.stringify(updated, null, 2) + "\n", { mode: 0o600 });
 
   const { setSurfaceAgentKey: save } = await import("./pod.js");
-  save("opencode", { hubApiKey: agentKey, agentUserId });
+  save("opencode", { hubApiKey: agentKey, agentUserId, podUrl: cfg.podUrl });
 
   log.success(`opencode configured: ~/.config/opencode/opencode.json`);
   log.dim(`  AI provider: ${provider.name}  (${Object.keys(models).length} model(s))`);
@@ -1656,6 +1729,10 @@ const GOVERNANCE_PRESETS: Record<
       "tool.create", "skill.create",
       "playbook.read", "tool.read", "link.read", "capability.read",
       "terminal.read_logs", "filesystem.write_workspace",
+      // Kind + Facets — additive role attach/update/detach (detach is a
+      // reversible soft-delete), same tier as entity.create/update (mirrors
+      // backend DEFAULT_AUTO_APPROVE / GOVERNANCE_MODES.normal).
+      "facet.attach", "facet.update", "facet.detach",
     ],
     writesRequireProposal: false,
   },
