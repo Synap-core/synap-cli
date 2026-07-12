@@ -231,8 +231,16 @@ function barePositionals(tokens: string[]): string[] {
  * GET /capabilities/catalog — one CapabilityCard per pack. Throws on transport
  * errors; the 404 ("endpoint not deployed yet") is surfaced by the caller.
  */
-async function fetchCatalog(cfg: HubCfg, workspaceId: string): Promise<CapabilityCard[]> {
-  const res = await hubGet("/capabilities/catalog", { workspaceId }, cfg);
+async function fetchCatalog(
+  cfg: HubCfg,
+  workspaceId: string,
+  extraKey?: string
+): Promise<CapabilityCard[]> {
+  const res = await hubGet(
+    "/capabilities/catalog",
+    extraKey ? { workspaceId, extraKey } : { workspaceId },
+    cfg
+  );
   return unwrapList<CapabilityCard>(res, ["capabilities"]);
 }
 
@@ -835,6 +843,16 @@ export async function capabilityAdd(
     }
   } else {
     card = findCard(cards, name);
+    // Not in the default catalog — it may still be a real, installable
+    // template that's just excluded from the default sync (e.g. a paid
+    // third-party connector like Unipile). One extra lookup by the exact
+    // name before giving up.
+    if (!card) {
+      const augmented = await fetchCatalog(cfg, workspaceId, name).catch(
+        () => cards
+      );
+      card = findCard(augmented, name);
+    }
   }
 
   if (!card) {
