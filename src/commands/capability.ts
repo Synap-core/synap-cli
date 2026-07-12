@@ -19,6 +19,7 @@ import prompts from "prompts";
 import { exec } from "child_process";
 import { readFileSync } from "node:fs";
 import { resolveHubConfig, hubGet, hubPost, hubDelete } from "../lib/hub-client.js";
+import { unwrapList } from "../lib/unwrapList.js";
 import { log } from "../utils/logger.js";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -123,12 +124,12 @@ function requireWorkspace(opts: { workspace?: string }, cfg: HubCfg): string {
 
 async function fetchCapabilities(cfg: HubCfg, workspaceId: string): Promise<Capability[]> {
   const res = await hubGet("/capabilities", { workspaceId }, cfg);
-  return ((res as Record<string, unknown>).capabilities ?? []) as Capability[];
+  return unwrapList<Capability>(res, ["capabilities"]);
 }
 
 async function fetchSkills(cfg: HubCfg, workspaceId: string): Promise<SkillRow[]> {
   const res = await hubGet("/skills", { workspaceId }, cfg);
-  return ((res as Record<string, unknown>).skills ?? []) as SkillRow[];
+  return unwrapList<SkillRow>(res, ["skills"]);
 }
 
 /**
@@ -232,7 +233,7 @@ function barePositionals(tokens: string[]): string[] {
  */
 async function fetchCatalog(cfg: HubCfg, workspaceId: string): Promise<CapabilityCard[]> {
   const res = await hubGet("/capabilities/catalog", { workspaceId }, cfg);
-  return ((res as Record<string, unknown>).capabilities ?? []) as CapabilityCard[];
+  return unwrapList<CapabilityCard>(res, ["capabilities"]);
 }
 
 /** True when the thrown hub error is the "catalog door not deployed" 404. */
@@ -464,6 +465,15 @@ function openBrowser(url: string): void {
   }
 }
 
+/** Short host label for a pod (for picker headers: "→ pod.perso…"). */
+function podHostLabel(cfg: HubCfg): string {
+  try {
+    return new URL(cfg.podUrl).host;
+  } catch {
+    return cfg.podUrl;
+  }
+}
+
 /**
  * Poll /connectors/connect until the provider flips to `connected` (the user
  * finished OAuth in the browser). Same self-completing door + bounded loop as
@@ -617,11 +627,25 @@ async function collectInstallParams(
   return out;
 }
 
+/** Shape of the bits of `/capabilities/apply`'s response this command reads. */
+interface ApplyCapabilityResponse {
+  created?: {
+    tools?: { name: string; status: "created" | "proposed"; toolId: string | null }[];
+  };
+}
+
 /**
  * Apply a template WITH its params through the governed applier — which creates
  * the vault secret AND wires it into the connection tool (pod-wide, for a
  * pod-scoped cap). This is the ONE correct way to attach a vault credential;
  * a post-hoc /vault/secrets write is NOT linked to the tool's credentialRef.
+ *
+ * Typing in a real credential here IS the user's explicit consent for that
+ * connection to be used — so auto-approve any tool the applier just created
+ * (status "created", not "proposed" — a proposed one still needs its own
+ * review). Without this, the tool stays a silent, undiscoverable "draft" that
+ * every run rejects with "Capability is not approved" even after `cap enable`
+ * has approved its verbs — a real gap this dogfooded (fal.ai capability, 2026-07-12).
  */
 async function applyTemplateWithParams(
   cfg: HubCfg,
@@ -632,7 +656,24 @@ async function applyTemplateWithParams(
 ): Promise<boolean> {
   const spinner = ora({ text: `${verb} ${chalk.bold(card.name)}…`, color: "cyan" }).start();
   try {
-    await hubPost("/capabilities/apply", { templateKey: card.key, params, workspaceId }, cfg);
+    const res = (await hubPost(
+      "/capabilities/apply",
+      { templateKey: card.key, params, workspaceId },
+      cfg
+    )) as ApplyCapabilityResponse;
+    const newlyCreatedTools = (res.created?.tools ?? []).filter(
+      (t) => t.status === "created" && t.toolId
+    );
+    for (const t of newlyCreatedTools) {
+      try {
+        await hubPost(`/tools/${t.toolId}/approve`, { approved: true }, cfg);
+      } catch (err) {
+        // Non-fatal — the connection itself succeeded; surface so it isn't
+        // silently stuck in the old "not approved" trap.
+        log.warn(`Connected, but couldn't auto-approve tool "${t.name}": ${(err as Error).message}`);
+        log.dim(`Approve it manually if runs fail with "Capability is not approved".`);
+      }
+    }
     spinner.succeed(chalk.green(`${verb === "Adding" ? "Added" : "Connected"} ${chalk.bold(card.name)}.`));
     return true;
   } catch (err) {
@@ -642,13 +683,67 @@ async function applyTemplateWithParams(
   }
 }
 
+/**
+ * Connect a RAW provider chosen from the discovery picker (not tied to a
+ * capability card): start OAuth via `/connectors/connect`, open the browser, and
+ * poll until it flips to connected. Same door + poll the card flow uses.
+ */
+async function connectProviderFlow(
+  cfg: HubCfg,
+  provider: string,
+  displayName: string,
+  workspaceId: string | undefined
+): Promise<void> {
+  const spinner = ora({ text: `Connecting ${chalk.bold(displayName)}…`, color: "cyan" }).start();
+  let res: Record<string, unknown>;
+  try {
+    const body: Record<string, unknown> = { provider };
+    if (workspaceId) body.workspaceId = workspaceId;
+    res = (await hubPost("/connectors/connect", body, cfg)) as Record<string, unknown>;
+    spinner.stop();
+  } catch (err) {
+    spinner.stop();
+    log.error((err as Error).message);
+    return;
+  }
+
+  if (String(res.status) === "connected") {
+    log.success(`${res.displayName ?? displayName} is already connected.`);
+    return;
+  }
+  const redirectUrl = res.redirectUrl ? String(res.redirectUrl) : null;
+  if (!redirectUrl) {
+    log.warn(`Couldn't start a connection for ${displayName}.`);
+    return;
+  }
+  log.heading(`Connect ${displayName}`);
+  console.log();
+  console.log(`  Opening OAuth flow in your browser…`);
+  console.log(`  ${chalk.dim("If it didn't open, paste this URL:")}`);
+  console.log(`  ${chalk.underline(chalk.cyan(redirectUrl))}`);
+  console.log();
+  openBrowser(redirectUrl);
+
+  const waitSpinner = ora({ text: "Waiting for you to finish in the browser…", color: "cyan" }).start();
+  const connected = await pollUntilConnected(cfg, provider, workspaceId);
+  if (connected) {
+    waitSpinner.succeed(chalk.green(`Connected ${chalk.bold(displayName)}!`));
+  } else {
+    waitSpinner.stop();
+    log.dim(`Didn't detect a connection yet — finish the browser flow, then re-run.`);
+  }
+}
+
 // ── Public: capabilityAdd ────────────────────────────────────────────────────
 
 export interface CapAddOpts {
   workspace?: string;
 }
 
-export async function capabilityAdd(name: string, opts: CapAddOpts): Promise<void> {
+export async function capabilityAdd(
+  name: string | undefined,
+  opts: CapAddOpts
+): Promise<void> {
   let cfg: HubCfg;
   try {
     cfg = await resolveHubConfig();
@@ -659,7 +754,10 @@ export async function capabilityAdd(name: string, opts: CapAddOpts): Promise<voi
 
   const workspaceId = requireWorkspace(opts, cfg);
 
-  const spinner = ora({ text: `Resolving ${chalk.bold(name)}…`, color: "cyan" }).start();
+  const spinner = ora({
+    text: name ? `Resolving ${chalk.bold(name)}…` : "Fetching catalog…",
+    color: "cyan",
+  }).start();
   let cards: CapabilityCard[];
   try {
     cards = await fetchCatalog(cfg, workspaceId);
@@ -675,7 +773,70 @@ export async function capabilityAdd(name: string, opts: CapAddOpts): Promise<voi
     process.exit(1);
   }
 
-  const card = findCard(cards, name);
+  // No name given → open an interactive picker over the AVAILABLE (not-yet-
+  // installed) catalog, so the user can browse + choose instead of having to
+  // know the exact name. A name still resolves directly (scripts, muscle memory).
+  let card: CapabilityCard | undefined;
+  if (!name || !name.trim()) {
+    // Hide the generic demo connector — it's a template-shape DEMONSTRATION, not a
+    // real service — from the browse list. It stays installable by name for experts.
+    const available = cards.filter(
+      (c) => statusGroup(c) === "available" && c.key !== "generic-apikey"
+    );
+    const installed = cards.filter((c) => c.source === "installed");
+
+    if (available.length === 0) {
+      // available=0 can mean "all installed" OR "the pod's marketplace catalog is
+      // empty" (e.g. CONTROL_PLANE_URL unset → nothing ever synced). Don't claim
+      // everything is installed — say what's true and hint at the catalog.
+      log.heading("No capabilities available to add on this pod.");
+      if (installed.length > 0) {
+        log.dim("Installed here:");
+        for (const c of installed) log.dim(`  ${chalk.green("✓")} ${c.name}`);
+      }
+      log.dim(
+        "If you expected a catalog, this pod's marketplace sync may not be configured yet."
+      );
+      log.dim("See what you have:  synap cap list");
+      return;
+    }
+
+    const answer = await prompts({
+      type: "select",
+      name: "key",
+      // Header shows which pod we're adding to (respects --pod; else active pod).
+      message: `Add a capability ${chalk.dim(`→ ${podHostLabel(cfg)}`)}`,
+      choices: [
+        ...available.map((c) => ({
+          title: c.name,
+          description:
+            (c.description ? `${c.description.slice(0, 64)} · ` : "") +
+            `${c.verbs.length} verb${c.verbs.length === 1 ? "" : "s"}`,
+          value: c.key,
+        })),
+        // Already-installed capabilities, shown (disabled) at the end so you can
+        // see what you already have without them cluttering the choices.
+        ...installed.map((c) => ({
+          title: `${c.name} ${chalk.green("✓ installed")}`,
+          description: "already added",
+          value: c.key,
+          disabled: true,
+        })),
+      ],
+    });
+    if (!answer.key) {
+      log.dim("Cancelled.");
+      return;
+    }
+    card = available.find((c) => c.key === answer.key);
+    if (!card) {
+      log.dim("That one's already installed.");
+      return;
+    }
+  } else {
+    card = findCard(cards, name);
+  }
+
   if (!card) {
     log.error(`No capability named "${name}" in the catalog.`);
     log.dim("Run `synap cap list` to see what's available.");
@@ -714,7 +875,7 @@ export async function capabilityAdd(name: string, opts: CapAddOpts): Promise<voi
 
   // Re-fetch to show the resulting (installed) status.
   try {
-    const after = findCard(await fetchCatalog(cfg, workspaceId), name);
+    const after = findCard(await fetchCatalog(cfg, workspaceId), card.name);
     if (after) {
       console.log();
       renderCardAny(after);
@@ -732,7 +893,10 @@ export interface CapEnableOpts {
   workspace?: string;
 }
 
-export async function capabilityEnable(name: string, opts: CapEnableOpts): Promise<void> {
+export async function capabilityEnable(
+  name: string | undefined,
+  opts: CapEnableOpts
+): Promise<void> {
   let cfg: HubCfg;
   try {
     cfg = await resolveHubConfig();
@@ -742,6 +906,69 @@ export async function capabilityEnable(name: string, opts: CapEnableOpts): Promi
   }
 
   const workspaceId = requireWorkspace(opts, cfg);
+
+  // No name → discovery picker: list the capabilities and let the user choose the
+  // one to enable (better UX + discoverability than erroring on a missing arg).
+  // `cap enable <name>` still targets a specific one.
+  if (!name || !name.trim()) {
+    const spin = ora({ text: "Fetching capabilities…", color: "cyan" }).start();
+    let cards: CapabilityCard[];
+    try {
+      cards = await fetchCatalog(cfg, workspaceId);
+      spin.stop();
+    } catch (err) {
+      spin.stop();
+      if (isCatalogMissing(err)) {
+        catalogNeedsDeploy();
+        return;
+      }
+      log.error((err as Error).message);
+      process.exit(1);
+    }
+    if (cards.length === 0) {
+      log.warn("No capabilities available on this pod.");
+      log.dim("Deploy the Control Plane catalog, then retry.");
+      return;
+    }
+    const statusLabel = (c: CapabilityCard): string => {
+      switch (c.status) {
+        case "ready":
+          return chalk.green("✓ on");
+        case "partial":
+          return chalk.yellow("partially on");
+        case "needs_connection":
+          return chalk.yellow("needs connection");
+        case "connected":
+          return chalk.cyan("connected · pick verbs");
+        case "draft":
+          return chalk.dim("draft");
+        case "available":
+          return chalk.dim("not installed");
+        default:
+          return "";
+      }
+    };
+    // Actionable (not fully on) first; already-on ones last — a re-enable still
+    // lets you adjust which verbs are active, so keep them selectable.
+    const ordered = [...cards].sort(
+      (a, b) => (a.status === "ready" ? 1 : 0) - (b.status === "ready" ? 1 : 0)
+    );
+    const answer = await prompts({
+      type: "select",
+      name: "name",
+      message: `Enable a capability ${chalk.dim(`→ ${podHostLabel(cfg)}`)}`,
+      choices: ordered.map((c) => ({
+        title: `${c.name}  ${statusLabel(c)}`,
+        description: c.description ?? undefined,
+        value: c.name,
+      })),
+    });
+    if (!answer.name) {
+      log.dim("Cancelled.");
+      return;
+    }
+    name = answer.name as string;
+  }
 
   const spinner = ora({ text: `Resolving ${chalk.bold(name)}…`, color: "cyan" }).start();
   let card: CapabilityCard | undefined;
@@ -876,7 +1103,10 @@ export interface CapConnectOpts {
   workspace?: string;
 }
 
-export async function capabilityConnect(name: string, opts: CapConnectOpts): Promise<void> {
+export async function capabilityConnect(
+  name: string | undefined,
+  opts: CapConnectOpts
+): Promise<void> {
   let cfg: HubCfg;
   try {
     cfg = await resolveHubConfig();
@@ -886,6 +1116,64 @@ export async function capabilityConnect(name: string, opts: CapConnectOpts): Pro
   }
 
   const workspaceId = requireWorkspace(opts, cfg);
+
+  // No name → discovery picker: list connectable services (Nango providers) with
+  // their status, pick one, run the OAuth flow. `connect <name>` still connects a
+  // specific capability's provider.
+  if (!name || !name.trim()) {
+    const spin = ora({ text: "Fetching connectable services…", color: "cyan" }).start();
+    let providers: Array<{ id: string; provider: string; displayName?: string; connected: boolean }>;
+    try {
+      const res = (await hubGet("/connectors/providers", {}, cfg)) as {
+        providers?: typeof providers;
+      };
+      providers = res.providers ?? [];
+      spin.stop();
+    } catch (err) {
+      spin.stop();
+      log.error((err as Error).message);
+      log.dim("Nango may not be configured on this pod.");
+      return;
+    }
+    if (providers.length === 0) {
+      log.warn("No connectable services available on this pod.");
+      log.dim("Nango may not be configured on this pod.");
+      return;
+    }
+    const connectable = providers.filter((p) => !p.connected);
+    const connected = providers.filter((p) => p.connected);
+    if (connectable.length === 0) {
+      log.heading("Everything connectable here is already connected.");
+      for (const p of connected) log.dim(`  ${chalk.green("✓")} ${p.displayName ?? p.provider}`);
+      return;
+    }
+    const answer = await prompts({
+      type: "select",
+      name: "id",
+      message: `Connect a service ${chalk.dim(`→ ${podHostLabel(cfg)}`)}`,
+      // Connectable first; already-connected (disabled) grouped at the end —
+      // mirrors the `cap add` picker so the disabled rows don't scatter.
+      choices: [
+        ...connectable.map((p) => ({
+          title: p.displayName ?? p.provider,
+          value: p.id,
+        })),
+        ...connected.map((p) => ({
+          title: `${p.displayName ?? p.provider} ${chalk.green("✓ connected")}`,
+          description: "already connected",
+          value: p.id,
+          disabled: true,
+        })),
+      ],
+    });
+    if (!answer.id) {
+      log.dim("Cancelled.");
+      return;
+    }
+    const chosen = providers.find((p) => p.id === answer.id)!;
+    await connectProviderFlow(cfg, chosen.id, chosen.displayName ?? chosen.provider, workspaceId);
+    return;
+  }
 
   const spinner = ora({ text: `Resolving ${chalk.bold(name)}…`, color: "cyan" }).start();
   let card: CapabilityCard | undefined;
@@ -1020,6 +1308,8 @@ export async function capabilityShow(name: string, opts: CapShowOpts): Promise<v
 
 export interface CapRunOpts {
   workspace?: string;
+  connection?: string;
+  for?: string;
 }
 
 export async function capabilityRun(
@@ -1059,7 +1349,15 @@ export async function capabilityRun(
   try {
     res = (await hubPost(
       "/capabilities/execute",
-      { verbId: verb, parameters, workspaceId },
+      {
+        verbId: verb,
+        parameters,
+        workspaceId,
+        connectionSelector:
+          opts.connection || opts.for
+            ? { connectionId: opts.connection, contextObjectId: opts.for }
+            : undefined,
+      },
       cfg,
       90_000 // provider-backed skills run several external calls — give them room
     )) as Record<string, unknown>;
@@ -1083,8 +1381,18 @@ export async function capabilityRun(
 
   // 202 → a reviewable proposal was created instead of running.
   if (res.proposed === true) {
+    const proposalId = String(res.proposalId);
     log.heading(`⏳ Queued for approval`);
-    log.dim(`Approve in Synap (proposalId: ${String(res.proposalId)})`);
+    log.dim(`Verb: ${verb}`);
+    if (Object.keys(parameters).length > 0) {
+      for (const [key, value] of Object.entries(parameters)) {
+        log.dim(`  ${key}: ${typeof value === "string" ? value : JSON.stringify(value)}`);
+      }
+    }
+    console.log();
+    log.dim(`Approve:  synap proposals approve ${proposalId}`);
+    log.dim(`Reject:   synap proposals reject ${proposalId}`);
+    log.dim(`(Approving prints the actual outcome — success + returned data, or the exact failure reason.)`);
     return;
   }
 
@@ -1277,6 +1585,8 @@ export async function capabilityRemove(
 
   let removed = 0;
   let failed = 0;
+  let tools = 0;
+  let skills = 0;
   for (const id of ids) {
     if (!uuid.test(id)) {
       log.warn(`  ${chalk.yellow("skip")} ${id} — not a UUID (pass a container id from \`synap cap list\`)`);
@@ -1284,7 +1594,11 @@ export async function capabilityRemove(
       continue;
     }
     try {
-      await hubDelete(`/capabilities/containers/${id}`, cfg);
+      const res = (await hubDelete(`/capabilities/containers/${id}`, cfg)) as {
+        deleted?: { tools?: number; skills?: number };
+      };
+      tools += res?.deleted?.tools ?? 0;
+      skills += res?.deleted?.skills ?? 0;
       log.dim(`  ${chalk.green("✓")} removed ${id.slice(0, 8)}`);
       removed++;
     } catch (err) {
@@ -1294,6 +1608,6 @@ export async function capabilityRemove(
   }
   log.success(
     `Removed ${removed} container(s)${failed ? chalk.red(`, ${failed} failed`) : ""}. ` +
-      `Member tools/skills were left intact.`
+      `Cleaned up ${tools} orphaned tool(s) + ${skills} skill(s) (shared members kept).`
   );
 }
