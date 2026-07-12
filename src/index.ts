@@ -1652,7 +1652,8 @@ capability
 capability
   .command("rm <ids...>")
   .alias("remove")
-  .description("Remove capability container(s) by id — member tools/skills untouched (get ids from `cap list`)")
+  .description("Remove capability container(s) by id or name — member tools/skills untouched")
+  .option("--workspace <id>", "Workspace context")
   .action(async (ids: string[], opts) => {
     const { capabilityRemove } = await import("./commands/capability.js");
     await capabilityRemove(ids, opts);

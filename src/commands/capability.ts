@@ -864,6 +864,10 @@ export async function capabilityAdd(
   if (card.source === "installed") {
     log.heading(`${card.name} is already installed`);
     renderCardAny(card);
+    console.log();
+    log.dim("Bad or expired credential? Fix it in place — no need to remove/re-add:");
+    log.dim(`  synap cap connections list "${card.name}"`);
+    log.dim(`  synap cap connections update "${card.name}" <id> --rotate`);
     return;
   }
 
@@ -1584,15 +1588,19 @@ export async function capabilityCreate(
 interface CapRemoveOpts {
   podUrl?: string;
   apiKey?: string;
+  workspace?: string;
 }
 
 /**
- * synap cap rm <id...> — delete one or more capability CONTAINERS by id.
+ * synap cap rm <id-or-name...> — delete one or more capability CONTAINERS.
  *
  * Removes the container + its member_of links only — the underlying tools and
  * skills are untouched (they may belong to other capabilities). Use this to
  * clean up stale or duplicate containers (e.g. workspace-scoped leftovers from
- * an older seed). Get ids from `synap cap list`.
+ * an older seed). Accepts either a raw container id (from `synap cap list
+ * --json`) or the capability's display name/key (resolved against the
+ * installed catalog, like every other `cap` subcommand) — consistent with
+ * `add`/`show`/`enable`/`connect`, which all take a friendly name.
  */
 export async function capabilityRemove(
   ids: string[],
@@ -1605,11 +1613,20 @@ export async function capabilityRemove(
   let failed = 0;
   let tools = 0;
   let skills = 0;
-  for (const id of ids) {
+  for (const rawId of ids) {
+    let id = rawId;
     if (!uuid.test(id)) {
-      log.warn(`  ${chalk.yellow("skip")} ${id} — not a UUID (pass a container id from \`synap cap list\`)`);
-      failed++;
-      continue;
+      const workspaceId = requireWorkspace(opts, cfg);
+      const cards = await fetchCatalog(cfg, workspaceId).catch(() => [] as CapabilityCard[]);
+      const card = findCard(cards, rawId);
+      if (!card || card.source !== "installed" || !card.id) {
+        log.warn(
+          `  ${chalk.yellow("skip")} ${rawId} — no installed capability matches this name (pass a container id from \`synap cap list --json\`, or check \`synap cap list\`)`
+        );
+        failed++;
+        continue;
+      }
+      id = card.id;
     }
     try {
       const res = (await hubDelete(`/capabilities/containers/${id}`, cfg)) as {
