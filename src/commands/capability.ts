@@ -318,9 +318,9 @@ function renderUsable(card: CapabilityCard): void {
       : "";
   console.log(`  ${chalk.green("●")} ${chalk.bold(card.name)}${acct}`);
   for (const v of card.verbs.filter((x) => x.runnable)) {
-    const mark = v.type === "write" ? chalk.yellow("✋") : chalk.green("▸");
+    const mark = v.type !== "read" ? chalk.yellow("✋") : chalk.green("▸");
     const note =
-      v.type === "write"
+      v.type !== "read"
         ? chalk.yellow(" — asks approval")
         : chalk.dim(" — instant");
     console.log(`      ${mark} ${chalk.cyan(runCommand(v))}${note}`);
@@ -1024,7 +1024,7 @@ export async function capabilityEnable(
     hint: "↑/↓ move · space toggle · enter confirm",
     choices: card.verbs.map((v) => ({
       title:
-        v.type === "write"
+        v.type !== "read"
           ? `${v.label} (write · asks approval each run)`
           : `${v.label} (read)`,
       value: v.verbId,
@@ -1284,7 +1284,7 @@ export async function capabilityShow(name: string, opts: CapShowOpts): Promise<v
         ? chalk.yellow("◑")
         : chalk.dim("·");
     const kind =
-      v.type === "write" ? chalk.dim("write · asks approval") : chalk.dim("read");
+      v.type !== "read" ? chalk.dim("write · asks approval") : chalk.dim("read");
     console.log(`    ${mark} ${chalk.bold(cleanLabel(v.label))}  ${kind}`);
     // For a runnable verb, show the exact command; otherwise show what unblocks it.
     if (v.runnable) {
