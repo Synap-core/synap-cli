@@ -9,6 +9,7 @@ import ora from "ora";
 import prompts from "prompts";
 import { readFileSync, mkdirSync, writeFileSync, existsSync } from "fs";
 import { resolveHubConfig, resolveUserId, hubGet, hubPost } from "../lib/hub-client.js";
+import { unwrapList } from "../lib/unwrapList.js";
 import { log } from "../utils/logger.js";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -287,7 +288,7 @@ export async function automationList(opts: ListOpts): Promise<void> {
     if (workspaceId) input.workspaceId = workspaceId;
     if (opts.status) input.status = opts.status;
     const data = await trpcQuery("automations.listAutomations", input, cfg);
-    automations = (Array.isArray(data) ? data : (data as Record<string, unknown>).automations ?? []) as Automation[];
+    automations = unwrapList<Automation>(data, ["automations"]);
     spinner.stop();
   } catch (err) {
     spinner.fail(chalk.red("Failed to fetch automations"));

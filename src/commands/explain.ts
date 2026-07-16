@@ -53,9 +53,8 @@ function sectionGraph(): void {
 
 function sectionMemory(): void {
   console.log(chalk.bold("\n## Memory & Knowledge"));
-  console.log(chalk.dim("  Canonical verbs: ask (read) · capture (structured write) · note (quick)."));
+  console.log(chalk.dim("  Canonical verbs: ask (read) · capture (structured write)."));
   console.log("");
-  console.log(`  ${chalk.cyan("synap note <text>")}          ${chalk.dim("→ save a quick note (creates a note entity)")}`);
   console.log(`  ${chalk.cyan("synap ask <query>")}          ${chalk.dim("→ the one read verb — routes semantic/procedural/episodic")}`);
   console.log(`  ${chalk.cyan("synap capture")}              ${chalk.dim("→ structured knowledge: --type gotcha|lesson|decision|reference")}`);
   console.log(`                              ${chalk.dim("     --claim 'text' --why 'context' --tags 'repo:x'")}`);
@@ -155,7 +154,7 @@ function sectionQuickRef(): void {
   console.log(chalk.dim("  Data"));
   console.log(`  ${chalk.cyan("synap browse [profile]")}  ${chalk.cyan("synap show <id>")}  ${chalk.cyan("synap ask <q>")}`);
   console.log(`  ${chalk.cyan("synap create entity")}  ${chalk.cyan("synap set entity <id>")}`);
-  console.log(`  ${chalk.cyan("synap note <text>")}  ${chalk.cyan("synap capture --type lesson")}`);
+  console.log(`  ${chalk.cyan("synap capture --type lesson")}`);
   console.log("");
   console.log(chalk.dim("  Graph"));
   console.log(`  ${chalk.cyan("synap graph --entity <id> [--depth 2]")}`);

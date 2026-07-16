@@ -15,6 +15,7 @@ import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { resolveHubConfig, hubGet } from "../lib/hub-client.js";
+import { unwrapList } from "../lib/unwrapList.js";
 import { log } from "../utils/logger.js";
 
 // ── Types (mirror the capability read-model) ────────────────────────────────
@@ -140,7 +141,7 @@ export async function raycastGenerate(opts: RaycastGenerateOpts): Promise<void> 
   let skills: SkillRow[] = [];
   try {
     const capRes = await hubGet("/capabilities", { workspaceId }, cfg);
-    caps = ((capRes as Record<string, unknown>).capabilities ?? []) as Capability[];
+    caps = unwrapList<Capability>(capRes, ["capabilities"]);
     spinner.stop();
   } catch (err) {
     spinner.fail(chalk.red("Failed to fetch capabilities"));
@@ -149,7 +150,7 @@ export async function raycastGenerate(opts: RaycastGenerateOpts): Promise<void> 
   }
   try {
     const skillRes = await hubGet("/skills", { workspaceId }, cfg);
-    skills = ((skillRes as Record<string, unknown>).skills ?? []) as SkillRow[];
+    skills = unwrapList<SkillRow>(skillRes, ["skills"]);
   } catch {
     // Best-effort enrichment only — proceed with the capability read-model's schemas.
   }

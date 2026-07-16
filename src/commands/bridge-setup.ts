@@ -34,6 +34,7 @@ import chalk from "chalk";
 import ora from "ora";
 import prompts from "prompts";
 import { resolveHubConfig, hubGet, hubPost, hubPatch, resolveUserId, type HubConfig } from "../lib/hub-client.js";
+import { unwrapList } from "../lib/unwrapList.js";
 import { discoverSkillDirs, parseSkillDir, importSkill } from "../lib/skill-import.js";
 import {
   checkPodHealth,
@@ -43,7 +44,13 @@ import {
   getSurfacePodName,
   setSurfacePod,
 } from "../lib/pod.js";
-import { enrollAgentIfNeeded, ensureAgentGovernance, type GovernancePreset } from "../lib/targets.js";
+import {
+  enrollAgentIfNeeded,
+  ensureAgentGovernance,
+  provisionAgentKey,
+  configureAgentContext,
+  type GovernancePreset,
+} from "../lib/targets.js";
 import { log, banner } from "../utils/logger.js";
 
 export interface BridgeSetupOpts {
@@ -86,6 +93,7 @@ const BOT_PERMISSION_BITS: Record<string, bigint> = {
   MANAGE_THREADS: 1n << 34n, // archive / rename / reuse threads
   MANAGE_CHANNELS: 1n << 4n, // /link-client creates the per-client room (the missing one)
   MANAGE_MESSAGES: 1n << 13n, // pin context (Google Drive links, key messages)
+  MANAGE_EVENTS: 1n << 33n, // create native Discord scheduled events (calendar → events sync)
   READ_MESSAGE_HISTORY: 1n << 16n, // read channel context for the agent
   ADD_REACTIONS: 1n << 6n, // react-capture
   EMBED_LINKS: 1n << 14n, // rich link/button embeds (open-in-browser deep links)
@@ -251,7 +259,10 @@ export async function bridgeSetup(opts: BridgeSetupOpts): Promise<void> {
   await applyAgencySkills(cfg);
 
   // ── 4e. Seed automation templates (idempotent, event-driven) ────────────────
-  await applyAutomationTemplates(cfg, workspaceId);
+  // Thread the operator's chosen proactive channel through — output nodes pin
+  // their post target with it when it's a Synap channels.id (see the note in
+  // applyAutomationTemplates on the two id spaces).
+  await applyAutomationTemplates(cfg, workspaceId, opts.proactiveChannel);
 
   // ── 4f. React-capture is POD CONFIG now (discord tool metadata), not an env
   //        var. When --enable-react is passed, set it on the tool so the bridge
@@ -283,6 +294,9 @@ export async function bridgeSetup(opts: BridgeSetupOpts): Promise<void> {
     SYNAP_HUB_API_KEY: agentKey,
     SYNAP_WORKSPACE_ID: workspaceId,
   };
+  // Project is a peer lens to workspace — only injected when the resolved
+  // config carries one (e.g. via the durable `activeProjectId` or session lens).
+  if (cfg.projectId) managed.SYNAP_PROJECT_ID = cfg.projectId;
   // The token is NEVER written to .env — it lives in the pod vault and the
   // bridge redeems it on boot via this ref. (Requires the grant below to land;
   // if it didn't, we warn loudly rather than leaking the token to env.)
@@ -314,6 +328,8 @@ export async function bridgeSetup(opts: BridgeSetupOpts): Promise<void> {
     vaultRef,
     granted,
   });
+
+  await printSynapNextSteps(cfg, workspaceId);
 }
 
 // ── Agency capability seeding ────────────────────────────────────────────────
@@ -338,9 +354,18 @@ const AGENCY_CAPABILITY_PLAN: Array<{
   params: Record<string, string | undefined>;
   workspaceScoped: boolean;
 }> = [
-  { key: "nango-google",   needs: null,              params: {}, workspaceScoped: false },
-  { key: "agency-skills",  needs: null,              params: {}, workspaceScoped: true  },
-  { key: "generic-apikey", needs: null,              params: {}, workspaceScoped: false },
+  { key: "nango-google",        needs: null,         params: {}, workspaceScoped: false },
+  { key: "agency-skills",       needs: null,         params: {}, workspaceScoped: true  },
+  { key: "stellar-grant-client", needs: null,        params: {}, workspaceScoped: true  },
+  // Cal.com scheduling connector — requires a `calApiKey` param (a `cal_live_...`
+  // token), so gate it like the other keyed connectors: skip gracefully unless
+  // CALCOM_API_KEY is set. Seeds the `cal_com` tool + booking skills + vault key,
+  // which the Cal.com booking→CRM webhook/backfill pipeline depends on.
+  { key: "cal-com",             needs: "CALCOM_API_KEY", params: { calApiKey: process.env.CALCOM_API_KEY }, workspaceScoped: false },
+  // Generic API-key connector — requires an `apiKey` param, so gate it like the
+  // other keyed connectors: skip gracefully unless GENERIC_API_KEY is set (else
+  // the applier 500s with "requires parameter apiKey").
+  { key: "generic-apikey",      needs: "GENERIC_API_KEY", params: { apiKey: process.env.GENERIC_API_KEY }, workspaceScoped: false },
   {
     key: "unipile-linkedin",
     needs: "UNIPILE_API_KEY",
@@ -360,14 +385,13 @@ const AGENCY_CAPABILITY_PLAN: Array<{
 ];
 
 /**
- * Resolve the automations templates directory.
+ * Resolve the automations templates directory — CLI-BUNDLED (like the skills at
+ * templates/skills). The backend stays agnostic: it ships no feature templates;
+ * automation config is bundled with the CLI that seeds it.
  *
  * Resolution order:
  *   1. AUTOMATION_TEMPLATES_DIR env var (override for CI / custom installs)
- *   2. Monorepo-relative default: <cli-package-root>/../../synap-backend/templates/automations
- *
- * Returns null when the directory is absent (e.g. published npx with no monorepo),
- * or the backend hasn't created the templates yet — caller skips and warns.
+ *   2. CLI-bundled default: <cli-package-root>/templates/automations
  */
 function resolveAutomationsTemplatesDir(): string | null {
   if (process.env.AUTOMATION_TEMPLATES_DIR) {
@@ -376,7 +400,7 @@ function resolveAutomationsTemplatesDir(): string | null {
   }
   const thisFile = fileURLToPath(import.meta.url);
   const cliRoot = path.resolve(path.dirname(thisFile), "..", "..");
-  const candidate = path.resolve(cliRoot, "..", "synap-backend", "templates", "automations");
+  const candidate = path.resolve(cliRoot, "templates", "automations");
   return fs.existsSync(candidate) ? candidate : null;
 }
 
@@ -496,18 +520,105 @@ interface AutomationTemplate {
     edges: Array<Record<string, unknown>>;
   };
   metadata?: Record<string, unknown>;
+  /** Per-automation persistent config — seeded into the automation's `state`. */
+  state?: Record<string, unknown>;
 }
 
 /**
- * Apply automation templates from synap-backend/templates/automations/*.automation.json.
- *
- * For each file:
- *  - Find existing automation by name (GET /automations); skip if already present.
- *  - If the flowDefinition contains a `skill` node, resolve its skillId by name
- *    (GET /skills) and inject it into the node's data.skillId before POSTing.
- *    If the skill is not found, logs a warning but still creates the automation.
- *  - Never throws — errors are warned so setup continues.
+ * Static structural validation of an automation flow, run at seed time. Catches
+ * the silent-failure class the engine can't warn about at runtime: a template
+ * reference to a step that doesn't exist (resolves to ""), a condition node
+ * whose out-edges carry no sourceHandle (the branch prune becomes a no-op — both
+ * branches run, the exact link-gate bug), and a cycle (throws at runtime).
+ * Returns human-readable issue strings; the caller logs them warn-only.
  */
+export function validateFlowStructure(flow: {
+  nodes: Array<{ id: string; type: string; data: Record<string, unknown> }>;
+  edges: Array<Record<string, unknown>>;
+}): string[] {
+  const issues: string[] = [];
+  const nodeIds = new Set(flow.nodes.map((n) => n.id));
+  const ROOTS = new Set(["trigger", "steps", "automation", "loop", "item"]);
+
+  // 1. Every {{ ... }} reference has a known root, and steps.<id> targets a real node.
+  const collect = (v: unknown, acc: string[]): void => {
+    if (typeof v === "string") {
+      for (const m of v.matchAll(/\{\{([^}]+)\}\}/g)) acc.push(m[1].trim());
+    } else if (Array.isArray(v)) {
+      for (const x of v) collect(x, acc);
+    } else if (v && typeof v === "object") {
+      for (const x of Object.values(v as Record<string, unknown>)) collect(x, acc);
+    }
+  };
+  for (const node of flow.nodes) {
+    const refs: string[] = [];
+    collect(node.data, refs);
+    // condition/switch expressions use BARE paths (no {{ }}), e.g.
+    // `steps.detect.output.x === true` — scan them for step refs too.
+    if (node.type === "condition" || node.type === "switch") {
+      const expr = (node.data as { expression?: string }).expression;
+      if (typeof expr === "string") {
+        for (const m of expr.matchAll(/\b(steps\.[\w-]+(?:\.[\w-]+)*)/g)) refs.push(m[1]);
+      }
+    }
+    for (const ref of refs) {
+      const [root, stepId] = ref.split(".");
+      if (!ROOTS.has(root)) {
+        issues.push(
+          `node "${node.id}" references unknown root {{${ref}}} (expected ${[...ROOTS].join("/")})`,
+        );
+      } else if (root === "steps" && stepId && !nodeIds.has(stepId)) {
+        issues.push(`node "${node.id}" references missing step "${ref}" — no node "${stepId}"`);
+      }
+    }
+  }
+
+  // 2. Condition out-edges must carry a sourceHandle, else pruning is a silent no-op.
+  for (const node of flow.nodes) {
+    if (node.type !== "condition") continue;
+    const out = flow.edges.filter((e) => (e as { source?: string }).source === node.id);
+    const handled = out.filter((e) => typeof (e as { sourceHandle?: string }).sourceHandle === "string");
+    if (out.length > 0 && handled.length === 0) {
+      issues.push(
+        `condition node "${node.id}" has out-edges but none carry a sourceHandle ("yes"/"no") — the branch prune is a silent no-op (both branches run)`,
+      );
+    }
+  }
+
+  // 3. Cycle detection (Kahn) — a cycle throws at runtime.
+  const inDeg = new Map<string, number>();
+  const adj = new Map<string, string[]>();
+  for (const n of flow.nodes) {
+    inDeg.set(n.id, 0);
+    adj.set(n.id, []);
+  }
+  for (const e of flow.edges) {
+    const s = (e as { source?: string }).source;
+    const t = (e as { target?: string }).target;
+    if (s && t && adj.has(s) && inDeg.has(t)) {
+      adj.get(s)!.push(t);
+      inDeg.set(t, (inDeg.get(t) ?? 0) + 1);
+    }
+  }
+  const queue = [...inDeg.entries()].filter(([, d]) => d === 0).map(([id]) => id);
+  let visited = 0;
+  while (queue.length) {
+    const id = queue.shift()!;
+    visited++;
+    for (const t of adj.get(id) ?? []) {
+      inDeg.set(t, inDeg.get(t)! - 1);
+      if (inDeg.get(t) === 0) queue.push(t);
+    }
+  }
+  if (visited < flow.nodes.length) {
+    issues.push(
+      `flow has a cycle — ${flow.nodes.length - visited} node(s) cannot be ordered (would throw at runtime)`,
+    );
+  }
+
+  return issues;
+}
+
 /**
  * Set behavioral config on the `discord` tool's metadata (the pod-resident config
  * home — read back by the bridge at runtime). Idempotent: merges into the existing
@@ -523,7 +634,7 @@ async function setDiscordToolConfig(
     const res = (await hubGet("/tools", { workspaceId }, cfg)) as {
       tools?: Array<{ id: string; name?: string; metadata?: Record<string, unknown> }>;
     };
-    const tool = (res?.tools ?? []).find((t) => t?.name === "discord");
+    const tool = unwrapList<{ id: string; name?: string; metadata?: Record<string, unknown> }>(res, ["tools"]).find((t) => t?.name === "discord");
     if (!tool?.id) {
       log.dim("  [skip] discord tool not found — config will use defaults");
       return;
@@ -538,9 +649,61 @@ async function setDiscordToolConfig(
   }
 }
 
-async function applyAutomationTemplates(
+/** Matches a Synap channels.id / connection id (a UUID) — distinct from a raw
+ *  Discord snowflake, which is a numeric string. */
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Best-effort: resolve the pod's Google/Nango connection id — the `secrets` row
+ * id the automation executor expects in `connectionSelector.connectionId` (it
+ * verifies the id belongs to the nango-google capability + the acting user).
+ *
+ * Finds the nango-google capability container (by name) then its default (or
+ * first) connection. Returns null when Google isn't connected yet or the door
+ * isn't deployed — capability nodes then fall back to default-connection
+ * resolution at runtime. Never throws.
+ */
+async function resolveGoogleConnectionId(
   cfg: Awaited<ReturnType<typeof resolveHubConfig>>,
   workspaceId: string
+): Promise<string | null> {
+  try {
+    const res = await hubGet("/capabilities/containers", { workspaceId }, cfg);
+    const containers = unwrapList<{ id: string; name?: string }>(res, ["capabilities"]);
+    const google = containers.find((c) => /google/i.test(c.name ?? ""));
+    if (!google?.id) return null;
+    const connRes = await hubGet(`/capabilities/${google.id}/connections`, {}, cfg);
+    const conns = unwrapList<{ id: string; isDefault?: boolean }>(connRes, ["connections"]);
+    if (conns.length === 0) return null;
+    return (conns.find((c) => c.isDefault) ?? conns[0]).id;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Apply automation templates from the CLI-bundled templates/automations/*.automation.json.
+ *
+ * For each file:
+ *  - Fill placeholders + validate references in the flowDefinition:
+ *      · `skill`      node → resolve data.skillId by data.skillName (GET /skills).
+ *      · `capability` node → validate data.verbId against the seeded skills (a verb
+ *        IS a skill name); fill an empty/placeholder connectionSelector.connectionId
+ *        with the pod's Google connection id (dropped when Google isn't connected).
+ *      · `output`     node → fill config.channelId only with a Synap channels.id
+ *        (UUID); the Discord snowflake goes elsewhere, so a non-UUID drops the
+ *        placeholder for the channelType fallback.
+ *    A required skill or verb that isn't seeded → WARN + skip that automation (a
+ *    dangling reference would fail at runtime), mirroring the skill-node handling.
+ *  - UPSERT by name: PATCH /automations/:id when it already exists, else
+ *    POST /automations/create. Idempotent — re-running updates in place.
+ *  - Aborts (never partial) if the prerequisite skills/automations fetch fails.
+ */
+async function applyAutomationTemplates(
+  cfg: Awaited<ReturnType<typeof resolveHubConfig>>,
+  workspaceId: string,
+  feedChannelId?: string
 ): Promise<void> {
   const templatesDir = resolveAutomationsTemplatesDir();
   if (!templatesDir) {
@@ -565,19 +728,34 @@ async function applyAutomationTemplates(
   let existingAutos: Array<{ id: string; name: string }> = [];
   try {
     const res: unknown = await hubGet("/automations", { userId, workspaceId }, cfg);
-    existingAutos = Array.isArray(res) ? res : ((res as { automations?: typeof existingAutos })?.automations ?? []);
+    existingAutos = unwrapList<{ id: string; name: string }>(res, ["automations"]);
   } catch (err) {
-    log.warn(`Could not fetch existing automations: ${(err as Error).message}`);
+    // Abort rather than proceed on an empty list: a transient fetch error would
+    // make every template take the create path → duplicate automations on re-run.
+    log.warn(
+      `Could not fetch existing automations — aborting seeding: ${(err as Error).message}`
+    );
+    return;
   }
 
   // Fetch existing skills once — needed for skill-node injection.
   let existingSkills: Array<{ id: string; name: string }> = [];
   try {
     const res: unknown = await hubGet("/skills", { userId, workspaceId }, cfg);
-    existingSkills = Array.isArray(res) ? res : ((res as { skills?: typeof existingSkills })?.skills ?? []);
+    existingSkills = unwrapList<{ id: string; name: string }>(res, ["skills"]);
   } catch (err) {
-    log.warn(`Could not fetch existing skills: ${(err as Error).message}`);
+    // Abort rather than proceed on an empty list: every skill/verb reference would
+    // resolve to "missing" and ALL automations would be wrongly skipped.
+    log.warn(
+      `Could not fetch existing skills — aborting seeding: ${(err as Error).message}`
+    );
+    return;
   }
+
+  // Resolve the Google/Nango connection id once — capability nodes pin their
+  // mailbox/drive with it. Null when Google isn't connected yet (nodes then use
+  // the default connection at runtime).
+  const googleConnectionId = await resolveGoogleConnectionId(cfg, workspaceId);
 
   for (const file of files) {
     const filePath = path.join(templatesDir, file);
@@ -589,54 +767,133 @@ async function applyAutomationTemplates(
       continue;
     }
 
-    // Idempotent: skip if already exists by name.
-    const existing = existingAutos.find((a) => a.name === tpl.name);
-    if (existing) {
-      log.dim(`  [skip]  ${tpl.name} — already seeded (id=${existing.id})`);
-      continue;
-    }
-
-    // Inject skillId into any skill nodes that reference a skill by name.
-    // Skills are seeded by applyAgencySkills() BEFORE this runs, so a missing
-    // skill means seeding failed — creating a skill-less automation would be a
-    // silent runtime failure. Skip the automation loudly instead.
+    // ── Fill placeholders + validate references ──────────────────────────────
+    // A "placeholder" is an empty string or an <angle-bracket> token. Skill/verb
+    // references are seeded BEFORE this runs (applyAgencySkills / applyAgency-
+    // Capabilities), so a missing one means seeding failed — a dangling reference
+    // would fail at runtime, so we skip that automation loudly instead of seeding
+    // a dead one (mirrors the original skill-node handling).
     const flow = tpl.flowDefinition;
-    let missingSkill: string | null = null;
+    const isPlaceholder = (v: unknown): boolean =>
+      typeof v === "string" && (v.trim() === "" || /^<.*>$/.test(v.trim()));
+    let missing: string | null = null;
+
     for (const node of flow.nodes) {
+      // `skill` node → resolve skillId by name.
       if (node.type === "skill") {
         const skillName = (node.data as { skillName?: string }).skillName;
         if (skillName) {
           const match = existingSkills.find((s) => s.name === skillName);
-          if (match) {
-            node.data = { ...node.data, skillId: match.id };
+          if (match) node.data = { ...node.data, skillId: match.id };
+          else missing ??= `skill "${skillName}"`;
+        }
+      }
+
+      // `capability` node → validate verbId (a verb IS a seeded skill NAME) and
+      // fill an empty/placeholder connection id with the Google/Nango connection.
+      if (node.type === "capability") {
+        const data = node.data as {
+          verbId?: string;
+          connectionSelector?: { connectionId?: string };
+        };
+        if (data.verbId && !existingSkills.some((s) => s.name === data.verbId)) {
+          missing ??= `verb "${data.verbId}"`;
+        }
+        const sel = data.connectionSelector;
+        if (sel && isPlaceholder(sel.connectionId)) {
+          if (googleConnectionId) {
+            node.data = {
+              ...node.data,
+              connectionSelector: { ...sel, connectionId: googleConnectionId },
+            };
           } else {
-            missingSkill = skillName;
+            // No Google connected yet — DROP the placeholder key so the executor's
+            // default-connection resolution kicks in. Leaving a `<...>` literal
+            // would be treated as a real id and rejected. Symmetric with channelId.
+            const { connectionId: _drop, ...restSel } = sel;
+            node.data = { ...node.data, connectionSelector: restSel };
+          }
+        }
+      }
+
+      // `output` node → fill an empty/placeholder config.channelId. NOTE: the
+      // executor treats config.channelId as a Synap `channels.id` (UUID), NOT a
+      // Discord snowflake — so only a UUID `feedChannelId` is pinned here. When
+      // it isn't one, drop the placeholder so the node's `channelType` fallback
+      // ('proactive'/'personal_thread') auto-resolves the user's feed channel,
+      // which mirrors out to the bound Discord channel. Keeps the automation LIVE.
+      if (node.type === "output") {
+        const data = node.data as {
+          config?: { channelId?: string; channelType?: string };
+        };
+        const config = data.config;
+        if (config && isPlaceholder(config.channelId)) {
+          if (feedChannelId && UUID_RE.test(feedChannelId)) {
+            node.data = { ...node.data, config: { ...config, channelId: feedChannelId } };
+          } else if (config.channelType) {
+            const { channelId: _drop, ...restConfig } = config;
+            node.data = { ...node.data, config: restConfig };
+          } else {
+            log.warn(
+              `  [warn]  ${tpl.name} — output node "${node.id}" has a placeholder ` +
+              "channelId and no channelType fallback; its post target is unresolved.",
+            );
           }
         }
       }
     }
-    if (missingSkill) {
+
+    if (missing) {
       log.warn(
-        `  [skip]  ${tpl.name} — required skill "${missingSkill}" not seeded; ` +
-        "skipping (re-run after the skill is created, else the automation would fail at runtime).",
+        `  [skip]  ${tpl.name} — required ${missing} not seeded; skipping ` +
+        "(re-run after it exists, else the automation would fail at runtime).",
       );
       continue;
     }
 
+    // Structural validation (warn-only): surface silent-failure footguns the
+    // runtime can't warn about — dangling step refs, handle-less condition
+    // edges, cycles. Warn (don't skip) so a valid-but-imperfect template still
+    // seeds; a genuinely broken one is now visible at seed time, not silently.
+    for (const issue of validateFlowStructure(flow)) {
+      log.warn(`  [warn]  ${tpl.name} — ${issue}`);
+    }
+
+    // ── UPSERT by name (idempotent — re-running updates in place) ─────────────
+    const body = {
+      userId,
+      workspaceId,
+      name: tpl.name,
+      triggerType: tpl.triggerType,
+      status: tpl.status,
+      triggerConfig: tpl.triggerConfig,
+      flowDefinition: flow,
+      metadata: { ...(tpl.metadata ?? {}), source: "bridge-setup" },
+      ...(tpl.state ? { state: tpl.state } : {}),
+    };
+
+    const existing = existingAutos.find((a) => a.name === tpl.name);
+    if (existing) {
+      try {
+        await hubPatch(`/automations/${existing.id}`, body, cfg);
+        log.dim(`  [ok]    ${tpl.name} — updated (id=${existing.id})`);
+        log.dim(
+          `           ${tpl.status === "draft" ? "review + activate" : "open"} → ${cfg.podUrl}/open/${existing.id}`
+        );
+      } catch (err) {
+        log.warn(`  [error] ${tpl.name} — update failed: ${(err as Error).message}`);
+      }
+      continue;
+    }
+
     try {
-      const newAuto: unknown = await hubPost("/automations/create", {
-        userId,
-        workspaceId,
-        name: tpl.name,
-        triggerType: tpl.triggerType,
-        status: tpl.status,
-        triggerConfig: tpl.triggerConfig,
-        flowDefinition: flow,
-        metadata: { ...(tpl.metadata ?? {}), source: "bridge-setup" },
-      }, cfg);
+      const newAuto: unknown = await hubPost("/automations/create", body, cfg);
       const autoId = (newAuto as { id?: string })?.id;
       if (autoId) {
         log.dim(`  [ok]    ${tpl.name} — created (id=${autoId})`);
+        log.dim(
+          `           ${tpl.status === "draft" ? "review + activate" : "open"} → ${cfg.podUrl}/open/${autoId}`
+        );
       } else if ((newAuto as { status?: string })?.status === "proposed") {
         // These are operator-installed TEMPLATES, not AI-authored automations —
         // so apply them directly as the user instead of leaving a proposal. The
@@ -669,18 +926,19 @@ async function applyAutomationTemplates(
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
 /**
- * Provision (or reuse) a Discord AGENT key linked to the operator.
- *
- * Mirrors the claude-code flow in `lib/targets.ts` (writeClaudeCodeEnv) which
- * handles the write-once-key reality of POST /api/hub/setup/agent:
- *   - First mint (idempotent:true, no prior agent) → returns { hubApiKey }.
- *   - Re-run (agent already exists)               → returns { alreadyValid:true }
- *     with NO key (the key is never re-transmitted).
- *
- * So on the idempotent path we must reuse the previously stored agent key, and
- * self-heal (reprovision) only if it's missing or no longer resolves to the
- * agent. The resulting key carries linkedUserId=<operator>, so the backend
+ * Provision a Discord AGENT key linked to the operator, via the shared
+ * `provisionAgentKey()` wrapper (same door every target in `lib/targets.ts`
+ * uses). The resulting key carries linkedUserId=<operator>, so the backend
  * remaps its reads/redeems to the operator's data floor.
+ *
+ * NOTE — behavior change from the previous hand-rolled version: this always
+ * mints a FRESH key (provisionAgentKey sends `idempotent: false`), whereas the
+ * old code reused the stored key across re-runs (`idempotent: true`) and only
+ * reprovisioned when it no longer validated. Re-running `bridge-setup` now
+ * rotates the Discord agent's key every time — a running bridge process must
+ * be restarted to pick up the new key. `requireApproval: false` (mirroring
+ * `mcp.ts`'s `mcp url` provisioning) keeps this a one-shot, non-interactive
+ * mint rather than opening a browser approval wait on every run.
  *
  * @param podUrl      Pod base URL.
  * @param operatorKey The operator's raw hub key (authorizes the provisioning).
@@ -693,102 +951,48 @@ async function provisionDiscordAgentKey(
   workspaceId: string | undefined
 ): Promise<string> {
   const spinner = ora("Provisioning Discord agent key…").start();
-  const podBase = podUrl.replace(/\/$/, "");
 
-  const setupRes = await fetch(`${podBase}/api/hub/setup/agent`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${operatorKey}` },
-    body: JSON.stringify({ agentType: "discord", idempotent: true }),
-    signal: AbortSignal.timeout(30000),
-  });
-  if (!setupRes.ok) {
+  let hubApiKey: string;
+  let agentUserId: string;
+  try {
+    // idempotent: true — REUSE the existing valid key rather than rotate it. A live
+    // bridge holds this key in its .env; minting fresh would revoke it and 401 the
+    // bridge until it's redeployed. provisionAgentKey now handles the pod's
+    // { alreadyValid: true } reuse response by recovering the plaintext from local
+    // storage (verified), so re-running bridge-setup does NOT force a redeploy. It
+    // only mints fresh when there's no valid local key to reuse (new machine).
+    const result = await provisionAgentKey(podUrl, operatorKey, "discord", {
+      requireApproval: false,
+      idempotent: true,
+    });
+    hubApiKey = result.hubApiKey;
+    agentUserId = result.agentUserId;
+    spinner.succeed(
+      result.reused
+        ? "Discord agent key reused (same key — no rotation, no bridge restart needed)"
+        : "Discord agent key minted (new key — redeploy the bridge to pick it up)"
+    );
+  } catch (err) {
     spinner.fail("Could not provision the Discord agent key");
-    const text = await setupRes.text().catch(() => setupRes.statusText);
-    log.error(`POST /api/hub/setup/agent failed (HTTP ${setupRes.status}): ${text.slice(0, 300)}`);
-    log.dim("The operator key may be expired or missing scope. Run `synap keys rotate` or `synap init`.");
+    log.error(err instanceof Error ? err.message : String(err));
     process.exit(1);
   }
-  const setup = (await setupRes.json()) as {
-    hubApiKey?: string;
-    agentUserId?: string;
-    alreadyValid?: boolean;
-  };
 
-  let effectiveKey: string;
-  let agentUserId = setup.agentUserId ?? "";
-
-  if (setup.alreadyValid) {
-    // Idempotent path — pod says the agent exists but does NOT re-transmit the
-    // key. Reuse the stored Discord agent key; verify it resolves to the agent.
-    const stored = getSurfaceAgentKey("discord");
-    const candidate = stored?.hubApiKey ?? null;
-    const expectedAgentUserId = setup.agentUserId ?? stored?.agentUserId;
-    let candidateIsValid = false;
-
-    if (candidate && expectedAgentUserId) {
-      try {
-        // auth/status returns the key's actual owner userId; for an agent key
-        // this is the agent userId (users/me would return the operator).
-        const verifyRes = await fetch(`${podBase}/api/hub/auth/status`, {
-          headers: { Authorization: `Bearer ${candidate}` },
-          signal: AbortSignal.timeout(30000),
-        });
-        if (verifyRes.ok) {
-          const status = (await verifyRes.json()) as { userId?: string };
-          candidateIsValid = status.userId === expectedAgentUserId;
-        }
-      } catch { /* reprovision below */ }
-    }
-
-    if (candidateIsValid && candidate) {
-      effectiveKey = candidate;
-      agentUserId = expectedAgentUserId ?? agentUserId;
-      spinner.succeed("Reusing existing Discord agent key");
-    } else {
-      // Stored key is stale, wrong identity, or never persisted → reprovision
-      // (no idempotent flag) to mint a fresh agent key.
-      const reproRes = await fetch(`${podBase}/api/hub/setup/agent`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${operatorKey}` },
-        body: JSON.stringify({ agentType: "discord" }),
-        signal: AbortSignal.timeout(30000),
-      });
-      if (reproRes.ok) {
-        const repro = (await reproRes.json()) as { hubApiKey?: string; agentUserId?: string };
-        if (!repro.hubApiKey) {
-          spinner.fail("Reprovision returned no key");
-          log.error("setup/agent reprovision succeeded but returned no hubApiKey — check pod logs.");
-          process.exit(1);
-        }
-        effectiveKey = repro.hubApiKey;
-        agentUserId = repro.agentUserId ?? agentUserId;
-        spinner.succeed("Reprovisioned a fresh Discord agent key (stored key was stale)");
-      } else {
-        spinner.fail("Could not reprovision the Discord agent key");
-        const text = await reproRes.text().catch(() => reproRes.statusText);
-        log.error(`POST /api/hub/setup/agent failed (HTTP ${reproRes.status}): ${text.slice(0, 300)}`);
-        process.exit(1);
-      }
-    }
-  } else {
-    // First mint — the key is only ever returned here.
-    if (!setup.hubApiKey) {
-      spinner.fail("Provisioning returned no key");
-      log.error("setup/agent succeeded but returned no hubApiKey — check pod logs.");
-      process.exit(1);
-    }
-    effectiveKey = setup.hubApiKey;
-    spinner.succeed("Discord agent key provisioned");
-  }
-
-  // Persist so a re-run can reuse it (the key is never re-transmitted).
-  setSurfaceAgentKey("discord", { hubApiKey: effectiveKey, agentUserId });
+  // Persist so downstream steps (governance lookup, .env write) can read it back.
+  setSurfaceAgentKey("discord", { hubApiKey, agentUserId });
 
   // Enroll the agent user into the operator's workspace(s) using the OPERATOR
   // key (before the bridge ever uses the agent key).
   await enrollAgentIfNeeded(podUrl, operatorKey, agentUserId, workspaceId);
 
-  return effectiveKey;
+  // Same CONTEXT.md routing file every other provisioned agent gets.
+  try {
+    await configureAgentContext(podUrl, operatorKey, "discord", agentUserId);
+  } catch (err) {
+    log.warn(`Agent context wizard failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
+  return hubApiKey;
 }
 
 async function resolveWorkspaceId(
@@ -804,10 +1008,8 @@ async function resolveWorkspaceId(
   let list: Array<{ id: string; name?: string }> = [];
   try {
     const res = (await hubGet("/workspaces", {}, cfg)) as unknown;
-    const arr = Array.isArray(res)
-      ? res
-      : ((res as { workspaces?: unknown[] })?.workspaces ?? []);
-    list = (arr as Array<{ id: string; name?: string }>).filter((w) => w?.id);
+    const arr = unwrapList<{ id: string; name?: string }>(res, ["workspaces"]);
+    list = arr.filter((w) => w?.id);
   } catch {
     return defaultWs;
   }
@@ -1037,6 +1239,56 @@ function upsertEnv(
   }
 
   fs.writeFileSync(filePath, out.join("\n"), { mode: 0o600 });
+}
+
+/**
+ * Data-aware "what you must do next INSIDE Synap" — the discoverability layer:
+ * setup seeds everything it can, but a few things are the operator's call
+ * (approving proposals, activating drafts, turning on feeds). Surface them
+ * explicitly so nothing is silently waiting. Best-effort: never throws.
+ */
+async function printSynapNextSteps(
+  cfg: Awaited<ReturnType<typeof resolveHubConfig>>,
+  workspaceId: string
+): Promise<void> {
+  log.blank();
+  log.heading("Next in Synap — review + activate (nothing else auto-runs until you do)");
+  log.blank();
+
+  // 1. Pending proposals awaiting the operator's approval.
+  let pending = 0;
+  try {
+    const res = await hubGet(
+      "/proposals",
+      { workspaceId, status: "pending" },
+      cfg
+    );
+    pending = unwrapList<{ id: string }>(res, ["proposals"]).length;
+  } catch {
+    /* best-effort — fall through to the generic pointer */
+  }
+  if (pending > 0) {
+    console.log(
+      `  ${chalk.bold("1.")} ${chalk.yellow(`${pending} proposal(s) await your approval`)} — approve them in the app:`
+    );
+  } else {
+    console.log(`  ${chalk.bold("1.")} Approve any pending proposals in the app:`);
+  }
+  console.log(`     ${chalk.cyan(`${cfg.podUrl}/proposals`)}`);
+
+  console.log(
+    `  ${chalk.bold("2.")} Automations seed as ${chalk.bold("draft")} — open each ${chalk.dim("review + activate")} link above to turn on the ones you want.`
+  );
+  console.log(
+    `  ${chalk.bold("3.")} Feeds are ${chalk.bold("OFF by default")} — turn them on ${chalk.bold("in Discord")} (the bridge hot-reloads, no restart):`
+  );
+  console.log(
+    `     mail feed → ${chalk.green("/mail-feed enable:true channel:#your-channel")} · Discord events → ${chalk.green("/events enable:true")}`
+  );
+  console.log(
+    `  ${chalk.bold("4.")} Connect Google if you haven't: ${chalk.green(`synap cap enable "Nango — Google Workspace"`)}`
+  );
+  log.blank();
 }
 
 function printNextSteps(

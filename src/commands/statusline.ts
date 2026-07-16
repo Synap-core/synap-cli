@@ -25,12 +25,16 @@ import os from "node:os";
 import { execSync, spawn } from "node:child_process";
 import { resolveHubConfig, hubGet } from "../lib/hub-client.js";
 import { resolveActiveLens } from "../lib/session-lens.js";
+import { describeLens } from "../lib/describe-lens.js";
+import { getSurfaceAgentKey, SURFACE_NAMES } from "../lib/pod.js";
 
 const CACHE_FILE = "/tmp/synap-statusline-cache.json";
 const LOCK_FILE = "/tmp/synap-statusline-refresh.lock";
 // The pod sits behind a strict edge rate-limiter (15-min window) shared with
 // the agent's own traffic on the same key. Keep statusline cost minimal:
-// refresh at most once per 120s, and only 3 GETs per refresh.
+// refresh at most once per 120s; the burst is ~4-6 GETs (workspaces, skills,
+// session, proposals, + conditional project/identity). Fold new fields into an
+// existing call rather than adding to the burst.
 const REFRESH_TTL_MS = 120_000;
 const LOCK_STALE_MS = 30_000; // a lock older than this is considered dead
 
@@ -40,7 +44,7 @@ const G = "\x1b[01;32m"; // green bold
 const Y = "\x1b[01;33m"; // yellow bold
 const R = "\x1b[01;31m"; // red bold
 const C = "\x1b[36m"; // cyan
-const B = "\x1b[34m"; // blue
+const BB = "\x1b[01;34m"; // bold blue — used for the pinned PROJECT (prominence)
 const M = "\x1b[35m"; // magenta
 const D = "\x1b[2m"; // dim
 const X = "\x1b[0m"; // reset
@@ -75,19 +79,37 @@ function compact(n: number): string {
 interface PodCache {
   ts: number; // last SUCCESSFUL fetch
   ok: boolean; // last fetch reached the pod
+  podUrl: string; // this connection's pod — lets render() build /open bounce links with no network
   activeWorkspaceId: string; // the workspace THIS connection is scoped to (cfg.workspaceId)
   workspaces: Array<{ id: string; name: string; count: number }>;
   projectName: string;
   projectId: string;
   skillCount: number;
   proposalCount: number;
+  proposalsFetched: boolean; // false only until the first successful refresh ever completes
   sessionGoal: string;
   sessionId: string;
   totalEntities: number;
+  // Identity safety (Task: agent-identity visibility). Computed once per
+  // refresh so render() stays pod-call-free. See findSurfaceLabelForKey below.
+  actingAgentLabel: string; // friendly label for the ACTING agent, only set when it differs from the expected claude-code identity
+  identityMismatch: boolean; // true iff we have an expected identity AND the acting one diverges from it
 }
 
 function emptyCache(): PodCache {
-  return { ts: 0, ok: false, activeWorkspaceId: "", workspaces: [], projectName: "", projectId: "", skillCount: 0, proposalCount: 0, sessionGoal: "", sessionId: "", totalEntities: 0 };
+  return {
+    ts: 0, ok: false, podUrl: "", activeWorkspaceId: "", workspaces: [], projectName: "", projectId: "",
+    skillCount: 0, proposalCount: 0, proposalsFetched: false, sessionGoal: "", sessionId: "", totalEntities: 0,
+    actingAgentLabel: "", identityMismatch: false,
+  };
+}
+
+/** Find which known surface (if any) owns this hub API key — for a friendly acting-agent label. */
+function findSurfaceLabelForKey(hubApiKey: string): string | null {
+  for (const s of SURFACE_NAMES) {
+    if (getSurfaceAgentKey(s)?.hubApiKey === hubApiKey) return s;
+  }
+  return null;
 }
 
 function readCache(): PodCache | null {
@@ -155,15 +177,49 @@ async function refresh(): Promise<void> {
     const sessionReq = lens?.focusSessionId
       ? hubGet(`/focus-sessions/${lens.focusSessionId}`, cfg.workspaceId ? { workspaceId: cfg.workspaceId } : {}, cfg)
       : hubGet("/focus-sessions?status=active&limit=1", {}, cfg);
-    const projectReq = lens?.projectId
-      ? hubGet(`/projects?ids=${encodeURIComponent(lens.projectId)}`, {}, cfg)
+    // Use the FULLY-RESOLVED project id (cfg.projectId = session-lens ?? env ??
+    // durable activeProjectId), NOT just the session lens — so a durable
+    // `synap project use` shows even in a fresh session with no lens file yet.
+    // Mirrors how activeWorkspaceId already uses cfg.workspaceId below.
+    const resolvedProjectId = cfg.projectId;
+    // Resolve the NAME via the single-project route. `GET /projects` returns a
+    // bare array and ignores `?ids=` (only status/limit) — the old call read a
+    // nonexistent `.projects` field, so the name never resolved and the line
+    // showed the raw UUID. `/projects/:id` returns the row directly ({id,name}).
+    const projectReq = resolvedProjectId
+      ? hubGet(`/projects/${encodeURIComponent(resolvedProjectId)}`, {}, cfg)
       : Promise.resolve(null);
 
-    const [ws, skills, session, project] = await Promise.allSettled([
+    // Identity safety: compare the AMBIENT SYNAP_HUB_API_KEY against the
+    // claude-code surface key pinned to this pod. A cheap string compare
+    // covers the common case (no pod call). Only when they diverge do we pay
+    // for one extra `/users/me` call — resolved with the RAW ambient key
+    // (not `cfg`, which resolveHubConfig may already have self-corrected to
+    // the pinned key) so the acting identity we show reflects what this
+    // session's environment actually carries, not the corrected value.
+    const surfaceKey = getSurfaceAgentKey("claude-code");
+    const expectedAgentUserId = surfaceKey?.podUrl === cfg.podUrl ? surfaceKey.agentUserId : "";
+    const ambientKey = process.env.SYNAP_HUB_API_KEY;
+    const ambientMatchesExpected = Boolean(ambientKey && surfaceKey && ambientKey === surfaceKey.hubApiKey);
+    const needsIdentityCheck = Boolean(expectedAgentUserId && ambientKey && !ambientMatchesExpected);
+    const identityReq = needsIdentityCheck
+      ? hubGet("/users/me", {}, { podUrl: cfg.podUrl, apiKey: ambientKey as string, userId: "cli" })
+      : Promise.resolve(null);
+
+    // Pending proposals — the one actionable ambient signal. No dedicated
+    // count endpoint exists yet (verified: `/proposals` returns `{ proposals: [] }`,
+    // no `total`); a high `limit` on the pending-only list is the cheapest
+    // accurate count within the burst budget (a personal pod won't realistically
+    // clear 1000 pending proposals before this undercounts).
+    const proposalsReq = hubGet("/proposals", { status: "pending", limit: 1000 }, cfg);
+
+    const [ws, skills, session, project, identity, proposals] = await Promise.allSettled([
       hubGet("/workspaces", {}, cfg),
       hubGet("/agent-skills?limit=1", {}, cfg),
       sessionReq,
       projectReq,
+      identityReq,
+      proposalsReq,
     ]);
 
     // Reached the pod iff /workspaces returned a well-formed payload.
@@ -194,26 +250,52 @@ async function refresh(): Promise<void> {
       sessionId = "";
     }
 
-    // Bound project (only when the lens has one).
-    let projectName = lens?.projectId ? prev?.projectName ?? "" : "";
-    let projectId = lens?.projectId ?? "";
+    // Bound project (from the fully-resolved id — durable or session).
+    let projectName = resolvedProjectId ? prev?.projectName ?? "" : "";
+    let projectId = resolvedProjectId ?? "";
     if (project.status === "fulfilled" && project.value) {
-      const p = (project.value as { projects?: Array<{ id: string; name: string }> })?.projects?.find((x) => x.id === lens?.projectId);
+      const p = (project.value as { projects?: Array<{ id: string; name: string }> })?.projects?.find((x) => x.id === resolvedProjectId);
       projectName = p?.name?.slice(0, 30) ?? "";
     }
+
+    // Acting identity: clean unless we detected a real divergence.
+    let actingAgentLabel = "";
+    let identityMismatch = false;
+    if (expectedAgentUserId && !ambientMatchesExpected && identity.status === "fulfilled" && identity.value) {
+      const actingId = (identity.value as { id?: string })?.id ?? "";
+      if (actingId && actingId !== expectedAgentUserId) {
+        identityMismatch = true;
+        actingAgentLabel = (ambientKey && findSurfaceLabelForKey(ambientKey)) || actingId.slice(0, 8);
+      }
+    }
+
+    // Only a well-shaped array counts as "fetched" — a malformed 200 must not
+    // masquerade as "0 pending"; it falls back to the last-good count instead.
+    const proposalsRaw =
+      proposals.status === "fulfilled"
+        ? (proposals.value as { proposals?: unknown[] })?.proposals
+        : undefined;
+    const proposalsFetched = Array.isArray(proposalsRaw);
+    const proposalCount = Array.isArray(proposalsRaw)
+      ? proposalsRaw.length
+      : prev?.proposalCount ?? 0;
 
     const out: PodCache = {
       ts: Date.now(),
       ok: true,
+      podUrl: cfg.podUrl,
       activeWorkspaceId: cfg.workspaceId ?? "", // the lens THIS connection resolves to
       workspaces,
       projectName,
       projectId,
       skillCount,
-      proposalCount: prev?.proposalCount ?? 0, // deferred to aggregation endpoint
+      proposalCount,
+      proposalsFetched: proposalsFetched || (prev?.proposalsFetched ?? false),
       sessionGoal,
       sessionId,
       totalEntities,
+      actingAgentLabel,
+      identityMismatch,
     };
 
     fs.writeFileSync(CACHE_FILE, JSON.stringify(out));
@@ -283,11 +365,21 @@ function render(): void {
     const stale = !pod.ok || Date.now() - pod.ts > REFRESH_TTL_MS * 3;
     dot = stale ? `${Y}●${X}` : `${G}●${X}`;
   }
-  // Show the workspace THIS connection is scoped to — not the first in the list.
-  const activeWsEntry =
-    pod.workspaces.find((w) => w.id === pod.activeWorkspaceId) ?? pod.workspaces[0];
-  const activeWs = activeWsEntry?.name ?? "synap";
-  const activeWsId = activeWsEntry?.id ?? "";
+  // Show the workspace THIS connection is scoped to. No fallback to
+  // workspaces[0] — an unset activeWorkspaceId means pod-wide, and faking an
+  // "active" workspace would hide that state from the 4-state lens (pod /
+  // project / project×workspace / workspace).
+  const activeWsEntry = pod.activeWorkspaceId
+    ? pod.workspaces.find((w) => w.id === pod.activeWorkspaceId)
+    : undefined;
+  const described = describeLens({
+    workspace: pod.activeWorkspaceId ? { id: pod.activeWorkspaceId, name: activeWsEntry?.name } : undefined,
+    project: pod.projectId ? { id: pod.projectId, name: pod.projectName } : undefined,
+  });
+  const hasWs = Boolean(described.structured.workspace);
+  const hasProject = Boolean(described.structured.project);
+  const activeWs = described.structured.workspace?.name;
+  const activeWsId = described.structured.workspace?.id ?? "";
   const activeWsCount = activeWsEntry?.count ?? 0;
 
   // ─═─ LINE 1 — model · context bar · branch · vim ─═─────────────────────
@@ -300,17 +392,47 @@ function render(): void {
   if (ctxPct !== undefined) l1.push(` ${bar(ctxPct)} ${ctxColor(ctxPct)}${Math.round(ctxPct)}%${X}`);
   if (l1.length) console.log(l1.join("  "));
 
-  // ─═─ LINE 2 — pod dot · workspace · project · session · metrics ─═──────
+  // ─═─ LINE 2 — pod dot · identity warning · lens state (pod/project/project×ws/ws) · session · metrics ─═──
   const l2: string[] = [dot];
-  l2.push(activeWsId ? osc8(`synap://workspace/${activeWsId}`, activeWs) : activeWs);
-  if (activeWsCount > 0) l2.push(`${compact(activeWsCount)} entities`);
+  // Identity safety: an inherited/foreign SYNAP_HUB_API_KEY (e.g. another
+  // agent's key) is otherwise invisible — surface it loudly, not clean.
+  if (pod.identityMismatch) l2.push(`${R}⚠ as ${pod.actingAgentLabel || "unknown"}${X}`);
+  // PROJECT leads the lens fields — it's the "what am I working on" answer.
+  // cmd/ctrl-click opens the project home in the Synap app via the /open bounce
+  // (`project` is registered in apps/api/src/index.ts ALLOWED + handled by the
+  // browser deep-link handler, which switches the lens + lands on home).
+  // OSC 8 degrades to plain text where the terminal/renderer doesn't support it.
+  if (hasProject) {
+    const projectLink = pod.podUrl ? `${pod.podUrl}/open/project/${pod.projectId}` : "";
+    l2.push(`${BB}${osc8(projectLink, described.structured.project?.name ?? pod.projectId)}${X}`);
+  }
+  if (hasWs) {
+    // Same /open bounce — `workspace` switches the workspace lens + lands on home.
+    const wsLink = pod.podUrl && activeWsId ? `${pod.podUrl}/open/workspace/${activeWsId}` : "";
+    l2.push(activeWsId ? osc8(wsLink, activeWs ?? "") : activeWs ?? "");
+    if (activeWsCount > 0) l2.push(`${compact(activeWsCount)} entities`);
+  } else if (described.structured.podWide) {
+    l2.push(`${D}pod-wide${X}`);
+  }
   if (pod.skillCount > 0) l2.push(`${pod.skillCount} skills`);
-  if (pod.projectName) l2.push(`${D}▸${X} ${B}${pod.projectName}${X}`);
   if (pod.sessionGoal) {
     const sg = pod.sessionId ? osc8(`synap://open/session/${pod.sessionId}`, pod.sessionGoal) : pod.sessionGoal;
     l2.push(`${D}▸${X} ${Y}${sg}${X}`);
   }
-  if (pod.proposalCount > 0) l2.push(`${D}↳${X} ${Y}${pod.proposalCount} proposals${X}`);
+  if (pod.proposalCount > 0) {
+    // cmd/ctrl-click opens the Proposals review app via the /open bounce
+    // (bare `proposals` keyword → synap://open/proposals → browser opens the app).
+    const proposalsLink = pod.podUrl ? `${pod.podUrl}/open/proposals` : "";
+    const label = `${pod.proposalCount} proposals`;
+    l2.push(`${D}↳${X} ${Y}${proposalsLink ? osc8(proposalsLink, label) : label}${X}`);
+  } else if (pod.proposalsFetched) {
+    // Genuinely fetched and empty — distinct from "never fetched" so the line
+    // never silently omits a signal a user might mistake for "not checked yet".
+    l2.push(`${D}↳ 0 proposals${X}`);
+  } else {
+    // No successful refresh has completed yet (fresh cache / all refreshes failed).
+    l2.push(`${D}↳ proposals —${X}`);
+  }
   console.log(l2.join(" · "));
 
   // ─═─ LINE 3 — cost · rate limits · session stats ─═─────────────────────

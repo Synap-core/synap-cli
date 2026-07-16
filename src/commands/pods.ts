@@ -16,7 +16,6 @@ import os from "node:os";
 import { log } from "../utils/logger.js";
 import {
   checkPodHealth,
-  setupAgent,
   addPodProfile,
   setActivePod,
   setSurfacePod,
@@ -28,6 +27,8 @@ import {
   TARGETS,
   writeMcpServerEntry,
   writeClaudeCodeEnv,
+  provisionAgentKey,
+  configureAgentContext,
 } from "../lib/targets.js";
 import { runBrowserAuth } from "../lib/browser-auth.js";
 
@@ -151,9 +152,14 @@ export async function podsAdd(name?: string, podUrlArg?: string): Promise<void> 
     if (!token) return;
     const genSpinner = ora("Creating agent credentials...").start();
     try {
-      const result = await setupAgent(podUrl, token as string, "cli");
+      // Agents are pod-wide singletons now — no per-agent workspaceId comes back
+      // from setup (the old setupAgent() never passed one either, so this was
+      // already always null/"" in practice). Provision via the shared wrapper.
+      // No enrollAgentIfNeeded here: a PROVISIONING_TOKEN isn't a Hub Protocol
+      // API key, so it can't authorize /workspaces/enroll-agent (hub-protocol.write
+      // scope) — same as before this consolidation.
+      const result = await provisionAgentKey(podUrl, token as string, "cli");
       apiKey = result.hubApiKey;
-      workspaceId = result.workspaceId;
       agentUserId = result.agentUserId;
       genSpinner.succeed("Credentials created");
     } catch (err) {
@@ -172,6 +178,14 @@ export async function podsAdd(name?: string, podUrlArg?: string): Promise<void> 
     label: (label as string | undefined) || undefined,
     savedAt: new Date().toISOString(),
   });
+
+  if (agentUserId) {
+    try {
+      await configureAgentContext(podUrl, apiKey, "cli", agentUserId);
+    } catch (err) {
+      log.warn(`Agent context wizard failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
 
   log.blank();
   log.success(`Pod '${profileName}' saved.`);

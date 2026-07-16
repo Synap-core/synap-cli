@@ -20,6 +20,7 @@ import {
   hubGet,
   hubDelete,
 } from "../lib/hub-client.js";
+import { unwrapList } from "../lib/unwrapList.js";
 import {
   discoverSkillDirs,
   parseSkillDir,
@@ -181,7 +182,14 @@ export async function listSkills(opts: SkillManageOpts & { debug?: boolean }): P
     body?: string;
     code?: string;
   }>;
-  const skills = Array.isArray(res) ? res : [];
+  const skills = unwrapList<{
+    name: string;
+    description?: string;
+    kind?: string;
+    metadata?: { autoLoad?: boolean };
+    body?: string;
+    code?: string;
+  }>(res);
   const core = skills.filter((s) => s.metadata?.autoLoad === true);
   const onDemand = skills.filter((s) => s.metadata?.autoLoad !== true);
 

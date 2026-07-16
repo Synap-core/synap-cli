@@ -24,23 +24,49 @@ export interface LocalPodConfig {
   savedAt: string;
 }
 
-export type SurfaceName =
-  | "raycast"
-  | "claude-code"
-  | "claude-desktop"
-  | "cursor"
-  | "codex"
-  | "opencode"
-  | "aider"
-  | "windsurf"
-  | "goose"
-  | "zed"
-  | "vscode"
-  | "discord";
+/** SSOT for every connect/surface agent identity. The type is derived from this
+ *  array so the two can't drift. */
+export const SURFACE_NAMES = [
+  "raycast",
+  "claude-code",
+  "claude-desktop",
+  "cursor",
+  "codex",
+  "opencode",
+  "aider",
+  "windsurf",
+  "goose",
+  "zed",
+  "vscode",
+  "discord",
+] as const;
+export type SurfaceName = (typeof SURFACE_NAMES)[number];
+
+/**
+ * agentTypes already owned by OTHER doors — `POST /setup/agent` treats agentType
+ * as a POD-WIDE SINGLETON, so `agents create` deriving a slug that collides with
+ * one of these would silently hijack that door's agent + key. Superset of the
+ * surfaces above plus the non-surface provisioning types (generic/openwebui MCP
+ * mappings; openclaw/cli/memory). Single source of truth for the collision guard.
+ */
+export const RESERVED_AGENT_TYPES: ReadonlySet<string> = new Set<string>([
+  ...SURFACE_NAMES,
+  "generic",
+  "openwebui",
+  "openclaw",
+  "cli",
+  "memory",
+]);
 
 export interface SurfaceAgentKey {
   hubApiKey: string;
   agentUserId: string;
+  /**
+   * Pod the key was provisioned against. Consumers (e.g. the Raycast extension)
+   * must only use the key when this matches the pod they're talking to —
+   * a surface pointed at another pod falls back to that pod's own profile key.
+   */
+  podUrl?: string;
 }
 
 /** Agent workspace routing — persisted by `synap connect` wizard. */
@@ -58,6 +84,8 @@ export interface MultiPodConfig {
   pods: Record<string, LocalPodConfig>;
   /** Active workspace override — set by `synap use <workspaceId>`. Takes priority over the pod's default workspaceId. */
   activeWorkspaceId?: string;
+  /** Active project override — set by `synap project use <projectId>`. Peer of activeWorkspaceId; independent (composable). */
+  activeProjectId?: string;
   /** Per-surface dedicated agent keys (provisioned with named agentType). Separate from pod profile keys. */
   agentKeys?: Partial<Record<SurfaceName, SurfaceAgentKey>>;
   /** Workspace routing set by `synap connect` wizard — drives capture/recall defaults. */
@@ -75,7 +103,7 @@ function readMultiConfig(): MultiPodConfig {
   try {
     if (fs.existsSync(CONFIG_FILE)) {
       const parsed = JSON.parse(fs.readFileSync(CONFIG_FILE, "utf-8")) as Partial<MultiPodConfig>;
-      if (parsed.pods) return { activePod: parsed.activePod ?? "", pods: parsed.pods, activeWorkspaceId: parsed.activeWorkspaceId, surfaces: parsed.surfaces, agentKeys: parsed.agentKeys, agentWorkspaceRouting: parsed.agentWorkspaceRouting };
+      if (parsed.pods) return { activePod: parsed.activePod ?? "", pods: parsed.pods, activeWorkspaceId: parsed.activeWorkspaceId, activeProjectId: parsed.activeProjectId, surfaces: parsed.surfaces, agentKeys: parsed.agentKeys, agentWorkspaceRouting: parsed.agentWorkspaceRouting };
       // File exists but has old/unrecognized shape — fall through to migration
     }
   } catch { /* fall through */ }
@@ -241,6 +269,26 @@ export function setActiveWorkspaceId(workspaceId: string): void {
   writeMultiConfig(config);
 }
 
+/** Get the active project ID: durable override set by `synap project use`. */
+export function getActiveProjectId(): string | undefined {
+  const config = readMultiConfig();
+  return config.activeProjectId || undefined;
+}
+
+/** Persist a project as the active context for all subsequent commands. */
+export function setActiveProjectId(projectId: string): void {
+  const config = readMultiConfig();
+  config.activeProjectId = projectId;
+  writeMultiConfig(config);
+}
+
+/** Remove the active project override — subsequent commands see all projects. */
+export function clearActiveProjectId(): void {
+  const config = readMultiConfig();
+  delete config.activeProjectId;
+  writeMultiConfig(config);
+}
+
 // ─── Surface agent keys ───────────────────────────────────────────────────────
 
 /** Store a dedicated agent key for a specific surface (e.g. "raycast", "claude-code"). */
@@ -325,40 +373,6 @@ export async function checkPodHealth(podUrl: string): Promise<PodStatus> {
 }
 
 /**
- * Create an agent user and API key on the pod.
- * Uses the PROVISIONING_TOKEN for auth.
- */
-export async function setupAgent(
-  podUrl: string,
-  provisioningToken: string,
-  agentType = "openclaw"
-): Promise<{
-  hubApiKey: string;
-  agentUserId: string;
-  workspaceId: string;
-}> {
-  const res = await fetch(`${podUrl}/api/hub/setup/agent`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${provisioningToken}`,
-    },
-    body: JSON.stringify({ agentType }),
-  });
-
-  if (!res.ok) {
-    const body = await res.text();
-    throw new Error(`Setup failed (HTTP ${res.status}): ${body}`);
-  }
-
-  return (await res.json()) as {
-    hubApiKey: string;
-    agentUserId: string;
-    workspaceId: string;
-  };
-}
-
-/**
  * Install Docker and start a self-hosted Synap pod.
  */
 export function startSelfHostedPod(): void {
@@ -372,12 +386,11 @@ export function startSelfHostedPod(): void {
  * Install the synap skill into OpenClaw.
  */
 /**
- * Provision the CP-authenticated user on their pod.
- * Calls the CP to get a handshake JWT, then calls /api/handshake on the pod.
- * This ensures the user exists in the pod's users table before key issuance runs.
- * Safe to call multiple times — idempotent (Kratos upserts by email).
+ * Open a Pod session for the CP-authenticated user.
+ * Calls the issuer for a short-lived generic assertion, then exchanges that
+ * assertion directly with the Pod. The issuer never receives a Pod session.
  *
- * Returns the Kratos session token the pod mints on a successful handshake.
+ * Returns the Kratos session token the Pod mints after its own membership check.
  * That token authenticates subsequent pod tRPC calls (e.g.
  * `apiKeys.connectIntegration`) as the pod user, via the X-Session-Token header.
  * `sessionToken` is null only if the pod handshake returned no token (e.g. 409).
@@ -386,8 +399,8 @@ export async function provisionUserOnPod(
   podUrl: string,
   cpToken: string
 ): Promise<{ sessionToken: string | null }> {
-  // Step 1: Get handshake JWT from CP
-  const jwtRes = await fetch(`${CP_URL}/pods/handshake-jwt`, {
+  // Step 1: get an issuer assertion for this Pod.
+  const assertionRes = await fetch(`${CP_URL}/pods/federation/assertion`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -397,32 +410,39 @@ export async function provisionUserOnPod(
     signal: AbortSignal.timeout(10000),
   });
 
-  if (!jwtRes.ok) {
-    const body = await jwtRes.text().catch(() => "");
-    throw new Error(`Could not get handshake JWT (HTTP ${jwtRes.status}): ${body.slice(0, 200)}`);
+  if (!assertionRes.ok) {
+    const body = await assertionRes.text().catch(() => "");
+    throw new Error(
+      `Could not get Pod issuer assertion (HTTP ${assertionRes.status}): ${body.slice(0, 200)}`,
+    );
   }
 
-  const { token } = (await jwtRes.json()) as { token: string };
+  const { assertion } = (await assertionRes.json()) as { assertion?: string };
+  if (!assertion) {
+    throw new Error("Control Plane did not return a Pod issuer assertion");
+  }
 
-  // Step 2: Call /api/handshake on the pod
-  const handshakeRes = await fetch(`${podUrl}/api/handshake`, {
+  // Step 2: exchange only with the Pod. It derives the issuer from `iss` and
+  // verifies its own trusted-issuer registry and local membership.
+  const exchangeRes = await fetch(`${podUrl}/api/federation/exchange`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ token }),
+    body: JSON.stringify({ assertion }),
     signal: AbortSignal.timeout(15000),
   });
 
-  // 200 = created/logged in, 409 = already exists (both are fine)
-  if (!handshakeRes.ok && handshakeRes.status !== 409) {
-    const body = await handshakeRes.text().catch(() => "");
-    throw new Error(`Pod handshake failed (HTTP ${handshakeRes.status}): ${body.slice(0, 200)}`);
+  if (!exchangeRes.ok) {
+    const body = await exchangeRes.text().catch(() => "");
+    throw new Error(
+      `Pod issuer assertion exchange failed (HTTP ${exchangeRes.status}): ${body.slice(0, 200)}`,
+    );
   }
 
   // The pod returns the Kratos session token in the handshake body (the same
   // value the browser receives as the ory_kratos_session cookie).
   let sessionToken: string | null = null;
   try {
-    const data = (await handshakeRes.json()) as { session_token?: string };
+    const data = (await exchangeRes.json()) as { session_token?: string };
     sessionToken = data.session_token ?? null;
   } catch {
     // 409 or an empty body — no token to capture.
@@ -493,12 +513,19 @@ export async function setupAgentViaPod(
 /**
  * Enable OpenClaw as a free addon on a SELF-HOSTED pod.
  * Uses the PROVISIONING_TOKEN directly against the pod.
+ *
+ * Routes through the shared `provisionAgentKey()` wrapper (dynamic import to
+ * avoid a circular pod.ts <-> targets.ts static import). `workspaceId` is no
+ * longer part of the response — agents are pod-wide singletons now; scope is
+ * granted separately via `enrollAgentIfNeeded()`, not returned from setup.
  */
 export async function enableOpenClawAddon(
   podUrl: string,
   provisioningToken: string
 ): Promise<{ hubApiKey: string; agentUserId: string; workspaceId: string }> {
-  return await setupAgent(podUrl, provisioningToken, "openclaw");
+  const { provisionAgentKey } = await import("./targets.js");
+  const { hubApiKey, agentUserId } = await provisionAgentKey(podUrl, provisioningToken, "openclaw");
+  return { hubApiKey, agentUserId, workspaceId: "" };
 }
 
 /**
@@ -684,7 +711,8 @@ export function startOpenClawOnServer(
   hubApiKey: string,
   agentUserId: string,
   workspaceId: string,
-  podUrl: string
+  podUrl: string,
+  projectId?: string
 ): string {
   const deployDir = findSynapDeployDir();
 
@@ -703,6 +731,8 @@ export function startOpenClawOnServer(
     SYNAP_WORKSPACE_ID: workspaceId,
     SYNAP_POD_URL: podUrl,
   };
+  // Project is a peer lens to workspace — only injected when one is resolved.
+  if (projectId) envVars.SYNAP_PROJECT_ID = projectId;
 
   let envContent = "";
   try {

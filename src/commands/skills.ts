@@ -6,6 +6,7 @@ import {
   hubPatch,
   hubPost,
 } from "../lib/hub-client.js";
+import { unwrapList } from "../lib/unwrapList.js";
 import { type BaseOpts } from "./data.js";
 import { readFileSync, existsSync } from "fs";
 import { resolve } from "path";
@@ -56,7 +57,7 @@ export async function gatherContext(opts: SkillOpts & { session: string }): Prom
       )) as {
         entities?: Array<{ id: string; title?: string; profileSlug?: string }>;
       };
-      const entities = recallRes?.entities ?? [];
+      const entities = unwrapList<{ id: string; title?: string; profileSlug?: string }>(recallRes, ["entities"]);
 
       if (entities.length > 0) {
         contextReport += "### Recent Entities\n\n";

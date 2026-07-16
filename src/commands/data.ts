@@ -1,6 +1,7 @@
 import chalk from "chalk";
 import { log } from "../utils/logger.js";
 import { resolveHubConfig, resolveUserId, hubGet, hubPost, hubPatch, readActiveSessionId } from "../lib/hub-client.js";
+import { unwrapList } from "../lib/unwrapList.js";
 import { reportWrite } from "../lib/capture-lane.js";
 
 export interface BaseOpts {
@@ -28,81 +29,68 @@ export function formatHit(hit: Record<string, unknown>): { title: string; type: 
 
 // ─── orient ───────────────────────────────────────────────────────────────────
 
+interface OrientWorkspace {
+  id: string;
+  name: string;
+  domain: string | null;
+  entityCount: number;
+  onboarding?: { goal?: string };
+  description?: string | null;
+  profiles?: Array<{ slug: string; name: string }>;
+}
+interface OrientProject {
+  id: string;
+  name: string;
+  status: string | null;
+  homeWorkspace: string | null;
+}
+interface OrientResult {
+  me?: { userId: string; scopes: string[] };
+  detail: "light" | "full";
+  projects: OrientProject[];
+  workspaces: OrientWorkspace[];
+  profiles: Array<{ slug: string; name: string }>;
+  note: string;
+}
+
 export async function orient(opts: BaseOpts): Promise<void> {
   try {
     const cfg = await resolveHubConfig(opts);
-    // Lens map: projects (companies/initiatives) + workspaces (operational
-    // domains). Both cheap list calls; NO per-workspace fanout by default —
-    // that's what --details is for.
-    const [workspacesRes, projectsRes, meRes] = await Promise.all([
-      hubGet("/workspaces", {}, cfg),
-      hubGet("/projects", {}, cfg).catch(() => [] as unknown),
-      hubGet("/users/me", {}, cfg),
-    ]);
-    const workspaces = (workspacesRes as { workspaces?: unknown[] }).workspaces ?? (workspacesRes as unknown[]);
-    const me = meRes as Record<string, unknown>;
-    const userId = String(me.id ?? cfg.userId);
-    const wsList = Array.isArray(workspaces) ? workspaces as Record<string, unknown>[] : [];
-    const projRaw = (projectsRes as { projects?: unknown[] }).projects ?? (projectsRes as unknown[]);
-    const projList = Array.isArray(projRaw) ? projRaw as Record<string, unknown>[] : [];
-
-    // --details only: fetch profiles + a real entity count per workspace (N+1).
-    // Newer pods return `entityCount` directly on GET /workspaces; for older
-    // pods fall back to counting a real page (GET /entities is a bare array —
-    // no `total` on the wire).
-    const FALLBACK_PAGE = 100;
-    const wsDetails = opts.details
-      ? await Promise.all(
-          wsList.map(async (ws) => {
-            const wsId = String(ws.id ?? "");
-            const declaredCount =
-              typeof ws.entityCount === "number" ? ws.entityCount : undefined;
-            const [profilesRes, entitiesRes] = await Promise.allSettled([
-              hubGet("/profiles", { userId, workspaceId: wsId }, cfg),
-              declaredCount === undefined
-                ? hubGet("/entities", { userId, workspaceId: wsId, limit: FALLBACK_PAGE }, cfg)
-                : Promise.resolve(null),
-            ]);
-            const profiles = profilesRes.status === "fulfilled"
-              ? ((profilesRes.value as { profiles?: unknown[] }).profiles ?? (profilesRes.value as unknown[]))
-              : [];
-            const profileList = Array.isArray(profiles) ? profiles as Record<string, unknown>[] : [];
-            let entityTotal = declaredCount ?? 0;
-            let countIsLowerBound = false;
-            if (declaredCount === undefined && entitiesRes.status === "fulfilled" && entitiesRes.value) {
-              const v = entitiesRes.value as Record<string, unknown> | unknown[];
-              const arr = Array.isArray(v) ? v : ((v as Record<string, unknown>).entities as unknown[] ?? []);
-              entityTotal = Array.isArray(arr) ? arr.length : 0;
-              countIsLowerBound = entityTotal === FALLBACK_PAGE;
-            }
-            return { ws, profileList, entityTotal, countIsLowerBound };
-          })
-        )
-      : [];
+    // ONE canonical shape: the backend `discover()` service (via GET /orient)
+    // assembles the lens map — workspaces + projects + profile sample +
+    // disclosure (onboarding→goal, entity counts, per-ws profiles under full).
+    // The CLI only RENDERS it; `--details` maps to detail:'full'. No client-side
+    // assembly, no N+1 fanout — the server does the shaping.
+    const res = (await hubGet(
+      "/orient",
+      opts.details ? { detail: "full" } : {},
+      cfg
+    )) as OrientResult;
+    const userId = String(res.me?.userId ?? cfg.userId);
+    const projList = res.projects ?? [];
+    const wsList = res.workspaces ?? [];
 
     if (opts.json) {
-      const projects = projList.map((p) => ({
-        id: p.id, name: p.name, description: p.description,
-        status: p.status, workspaceId: p.workspaceId,
-      }));
-      const out = opts.details
-        ? { userId, podUrl: cfg.podUrl, workspaceId: cfg.workspaceId, projects, workspaces: wsDetails, me }
-        : {
-            userId, podUrl: cfg.podUrl, workspaceId: cfg.workspaceId, me,
-            projects,
-            workspaces: wsList.map((ws) => ({
-              id: ws.id, name: ws.name, domain: ws.workspaceSubtype ?? ws.workspaceType,
-              entityCount: typeof ws.entityCount === "number" ? ws.entityCount : undefined,
-            })),
-          };
-      console.log(JSON.stringify(out, null, 2));
+      console.log(
+        JSON.stringify(
+          { ...res, podUrl: cfg.podUrl, workspaceId: cfg.workspaceId },
+          null,
+          2
+        )
+      );
       return;
     }
 
+    // Render content rows with console.log (default terminal fg) rather than
+    // log.info — log.info wraps every line in chalk.blue, and that blue fg
+    // persists through inner bold/dim (they reset weight, not color), flattening
+    // the hierarchy. We keep only targeted accents: bold=name, dim=metadata,
+    // green ▶ = active.
     log.heading("Pod Orientation");
-    log.info(`User     : ${String(me.email ?? me.name ?? userId)}`);
-    log.info(`Pod URL  : ${cfg.podUrl}`);
+    console.log(`  User     : ${userId}`);
+    console.log(`  Pod URL  : ${cfg.podUrl}`);
     // The per-Claude-session lens (project + workspace + session) — "where am I".
+    // Full ids so they can be pasted into 'synap project use' / 'synap use'.
     const { getClaudeSessionId, resolveActiveLens } = await import("../lib/session-lens.js");
     let activeProjectId: string | undefined;
     if (getClaudeSessionId()) {
@@ -111,9 +99,9 @@ export async function orient(opts: BaseOpts): Promise<void> {
       const proj = lens?.projectId ?? chalk.dim("none");
       const ws = lens?.workspaceId ?? cfg.workspaceId ?? chalk.dim("pod-wide");
       const sess = lens?.focusSessionId ?? chalk.dim("none");
-      log.info(`Lens     : ${chalk.dim("project")} ${proj} · ${chalk.dim("ws")} ${ws} · ${chalk.dim("session")} ${sess}`);
+      console.log(`  Lens     : ${chalk.dim("project")} ${proj} · ${chalk.dim("ws")} ${ws} · ${chalk.dim("session")} ${sess}`);
     } else if (cfg.workspaceId) {
-      log.info(`Workspace: ${cfg.workspaceId} ${chalk.dim("(active — use 'synap use <id>' to change)")}`);
+      console.log(`  Workspace: ${cfg.workspaceId} ${chalk.dim("(active — use 'synap use <id>' to change)")}`);
     }
 
     // ── Projects (companies / initiatives) — the primary lens ───────────────
@@ -122,16 +110,14 @@ export async function orient(opts: BaseOpts): Promise<void> {
     if (projList.length === 0) {
       log.dim("No projects yet — a project is a company/initiative that ties workspaces together.");
     } else {
-      const wsNameById = new Map(wsList.map((ws) => [ws.id, String(ws.name ?? "")]));
       for (const p of projList) {
         const isActive = p.id === activeProjectId;
         const marker = isActive ? chalk.green("▶ ") : "  ";
         const name = chalk.bold(String(p.name ?? p.id));
-        const id = chalk.dim(String(p.id ?? "").slice(0, 8) + "…");
+        const id = chalk.dim(String(p.id ?? ""));
         const status = p.status ? chalk.dim(String(p.status)) : "";
-        const home = p.workspaceId ? wsNameById.get(String(p.workspaceId)) : undefined;
-        const homePart = home ? chalk.dim(`· ${home}`) : "";
-        log.info(`${marker}${name}  ${id}  ${status}${homePart ? "  " + homePart : ""}`);
+        const homePart = p.homeWorkspace ? chalk.dim(`· ${p.homeWorkspace}`) : "";
+        console.log(`  ${marker}${name}  ${id}  ${status}${homePart ? "  " + homePart : ""}`);
       }
     }
 
@@ -141,48 +127,50 @@ export async function orient(opts: BaseOpts): Promise<void> {
     if (wsList.length === 0) {
       log.dim("No workspaces found.");
     } else if (opts.details) {
-      for (const { ws, profileList, entityTotal, countIsLowerBound } of wsDetails) {
-        const isActive = ws.id === cfg.workspaceId;
-        const marker = isActive ? chalk.green("▶ ") : "  ";
-        const name = chalk.bold(String(ws.name ?? ws.id));
-        const id = chalk.dim(String(ws.id ?? "").slice(0, 8) + "…");
-        const count = entityTotal > 0
-          ? chalk.dim(`${entityTotal}${countIsLowerBound ? "+" : ""} entities`)
-          : chalk.dim("empty");
-        log.info(`${marker}${name}  ${id}  ${count}`);
-        if (ws.description) log.dim(`     ${String(ws.description)}`);
-        const onboarding = (ws as { onboarding?: { goal?: string } }).onboarding;
-        if (onboarding?.goal && entityTotal === 0) {
-          log.dim(`     ${chalk.cyan("→ onboard:")} ${String(onboarding.goal)}`);
-        }
-        if (profileList.length > 0) {
-          const slugs = profileList
-            .map((p) => String(p.slug ?? p.name ?? ""))
-            .filter(Boolean)
-            .slice(0, 8)
-            .join(chalk.dim(", "));
-          log.dim(`     profiles: ${slugs}${profileList.length > 8 ? chalk.dim(" …") : ""}`);
-        }
-      }
-    } else {
-      // Light: name + id + domain, no per-workspace fanout. The operational
-      // domain label = workspaceSubtype (set by templates: crm, brand-library…),
-      // falling back to workspaceType; the `domain` column is unused/empty.
       for (const ws of wsList) {
         const isActive = ws.id === cfg.workspaceId;
         const marker = isActive ? chalk.green("▶ ") : "  ";
         const name = chalk.bold(String(ws.name ?? ws.id));
-        const id = chalk.dim(String(ws.id ?? "").slice(0, 8) + "…");
-        const domainLabel = ws.workspaceSubtype ?? ws.workspaceType;
-        const domain = domainLabel ? chalk.dim(String(domainLabel)) : "";
-        log.info(`${marker}${name}  ${id}  ${domain}`);
+        const id = chalk.dim(String(ws.id ?? ""));
+        const count = ws.entityCount > 0
+          ? chalk.dim(`${ws.entityCount} entities`)
+          : chalk.dim("empty");
+        console.log(`  ${marker}${name}  ${id}  ${count}`);
+        if (ws.description) log.dim(`     ${String(ws.description)}`);
+        if (ws.onboarding?.goal && ws.entityCount === 0) {
+          log.dim(`     ${chalk.cyan("→ onboard:")} ${String(ws.onboarding.goal)}`);
+        }
+        const profiles = ws.profiles ?? [];
+        if (profiles.length > 0) {
+          const slugs = profiles
+            .map((p) => p.slug)
+            .filter(Boolean)
+            .slice(0, 8)
+            .join(chalk.dim(", "));
+          log.dim(`     profiles: ${slugs}${profiles.length > 8 ? chalk.dim(" …") : ""}`);
+        }
+      }
+    } else {
+      // Light: name + id + domain (operational-domain label = workspaceSubtype
+      // falling back to workspaceType, resolved server-side).
+      for (const ws of wsList) {
+        const isActive = ws.id === cfg.workspaceId;
+        const marker = isActive ? chalk.green("▶ ") : "  ";
+        const name = chalk.bold(String(ws.name ?? ws.id));
+        const id = chalk.dim(String(ws.id ?? ""));
+        const domain = ws.domain ? chalk.dim(String(ws.domain)) : "";
+        console.log(`  ${marker}${name}  ${id}  ${domain}`);
       }
       log.blank();
       log.dim("Workspaces are operational domains; run 'synap orient --details' for profiles + entity counts.");
     }
 
     log.blank();
-    log.dim("Tip: lenses compose — 'synap project use <id>' (the company/initiative), 'synap use <ws>' (an operational domain), 'synap session start' (the day-to-day move). Omit them to stay pod-wide. A project spans workspaces; a workspace spans projects.");
+    log.dim("Lenses compose — omit them to stay pod-wide:");
+    log.dim("  synap project use <id>   the company / initiative (cross-cutting)");
+    log.dim("  synap use <ws>           an operational domain");
+    log.dim("  synap session start      the day-to-day move");
+    log.dim("A project spans workspaces; a workspace spans projects.");
   } catch (e) {
     console.error(chalk.red("Error: " + (e as Error).message));
     process.exit(1);
@@ -200,8 +188,7 @@ export async function useWorkspace(
     const userId = await resolveUserId(cfg);
     // Verify the workspace exists and is accessible
     const res = await hubGet("/workspaces", {}, cfg);
-    const workspaces = (res as { workspaces?: unknown[] }).workspaces ?? (res as unknown[]);
-    const list = Array.isArray(workspaces) ? workspaces as Record<string, unknown>[] : [];
+    const list = unwrapList<Record<string, unknown>>(res, ["workspaces"]);
     const match = list.find((w) => w.id === workspaceId || String(w.name).toLowerCase() === workspaceId.toLowerCase());
 
     if (!match) {
@@ -240,8 +227,7 @@ export async function listWorkspaces(opts: BaseOpts): Promise<void> {
   try {
     const cfg = await resolveHubConfig(opts);
     const res = await hubGet("/workspaces", {}, cfg);
-    const workspaces = (res as { workspaces?: unknown[] }).workspaces ?? (res as unknown[]);
-    const list = Array.isArray(workspaces) ? workspaces : [];
+    const list = unwrapList<Record<string, unknown>>(res, ["workspaces"]);
 
     if (opts.json) {
       console.log(JSON.stringify({ workspaces: list }, null, 2));
@@ -265,20 +251,31 @@ export async function listWorkspaces(opts: BaseOpts): Promise<void> {
 // ─── listEntities ─────────────────────────────────────────────────────────────
 
 export async function listEntities(
-  opts: BaseOpts & { workspace?: string; profile?: string; limit?: string }
+  opts: BaseOpts & { workspace?: string; profile?: string; limit?: string; role?: string }
 ): Promise<void> {
   try {
     const cfg = await resolveHubConfig(opts);
     const userId = await resolveUserId(cfg);
     const limit = parseLimit(opts.limit, 20);
+    const workspaceId = opts.workspace ?? cfg.workspaceId;
+    // --role needs a workspace to resolve facet scope (see browseEntities);
+    // without one the filter is silently dropped and "no entities" would lie.
+    if (opts.role && !workspaceId) {
+      throw new Error(
+        "--role needs an active workspace to resolve the role. Run 'synap use <workspace>' or pass --workspace <id>."
+      );
+    }
     const res = await hubGet("/entities", {
       userId,
-      workspaceId: opts.workspace ?? cfg.workspaceId,
+      workspaceId,
       profileSlug: opts.profile,
+      // Browse-by-role: the list route resolves facet scope from the
+      // `workspaceId` QUERY PARAM (already threaded above), not the
+      // X-Workspace-Id header — verified against the live pod.
+      facetSlug: opts.role,
       limit,
     }, cfg);
-    const entities = (res as { entities?: unknown[] }).entities ?? (res as unknown[]);
-    const list = Array.isArray(entities) ? entities : [];
+    const list = unwrapList<Record<string, unknown>>(res, ["entities"]);
 
     if (opts.json) {
       console.log(JSON.stringify({ entities: list, count: list.length, limit, truncated: list.length === limit }, null, 2));
@@ -296,8 +293,7 @@ export async function listEntities(
             workspaceId: opts.workspace ?? cfg.workspaceId,
             type: opts.profile,
           }, cfg);
-          const views = ((viewsRes as Record<string, unknown>).views as unknown[])
-            ?? (Array.isArray(viewsRes) ? viewsRes as unknown[] : []);
+          const views = unwrapList(viewsRes, ["views"]);
           if (views.length > 0) {
             log.blank();
             log.info(`'${opts.profile}' is a ${chalk.bold("view type")}, not an entity profile — found ${views.length} view${views.length !== 1 ? "s" : ""}.`);
@@ -362,52 +358,6 @@ export async function getEntity(
   }
 }
 
-// ─── noteData ─────────────────────────────────────────────────────────────────
-
-export async function noteData(
-  text: string,
-  opts: BaseOpts & { context?: string; json?: boolean }
-): Promise<void> {
-  try {
-    const cfg = await resolveHubConfig(opts);
-    const userId = await resolveUserId(cfg);
-
-    // A `note` is the human raw-inbox primitive ("dump now, structure later") —
-    // it lands in the active workspace, NOT a private agent-memory ws (that lane
-    // was removed). The AI should never write a note: structuring is its job, so
-    // it uses `synap capture` (structured) instead.
-    const workspaceId = cfg.workspaceId;
-    if (!workspaceId) {
-      console.error(chalk.red("No workspace set. Run: synap use <workspace-id>"));
-      process.exit(1);
-    }
-
-    const res = await hubPost("/entities", {
-      userId,
-      profileSlug: "note",
-      title: text.slice(0, 200),
-      workspaceId,
-      // The `note` profile requires a `content` property — carry the full text
-      // (title is truncated). Without this the hub rejects the write (HTTP 500).
-      properties: {
-        content: text,
-        ...(opts.context ? { sourceEntityId: opts.context } : {}),
-      },
-    }, cfg) as Record<string, unknown>;
-
-    await reportWrite(res, {
-      label: `Note saved: "${text.slice(0, 80)}"`,
-      lane: "work",
-      workspaceId,
-      cfg,
-      json: opts.json,
-    });
-  } catch (e) {
-    console.error(chalk.red("Error: " + (e as Error).message));
-    process.exit(1);
-  }
-}
-
 // ─── ask (unified knowledge access) ────────────────────────────────────────────
 // The ONE read door. Routes a natural-language query to the right substrate(s)
 // — semantic (entities), procedural (how-to docs), episodic (captures) — and
@@ -418,6 +368,23 @@ interface AskAnswer {
   items: Record<string, unknown>[];
   status?: "ok" | "error";
 }
+interface RankedItem {
+  id: string;
+  title: string;
+  score: number;
+  rank: number;
+}
+interface MovedItem {
+  id: string;
+  title: string;
+  baselineRank: number;
+  horizonRank: number;
+}
+interface RankComparison {
+  baseline: RankedItem[];
+  horizon: RankedItem[];
+  diff: { overlapAtN: number; moved: MovedItem[] };
+}
 interface AskResponse {
   query: string;
   routedTo: string[];
@@ -426,6 +393,8 @@ interface AskResponse {
   answers: AskAnswer[];
   degraded?: string[];
   verdict?: string;
+  /** Present only when `--compare` was requested. */
+  comparison?: RankComparison;
 }
 
 /** Render one item according to its substrate. */
@@ -467,9 +436,60 @@ function formatAskItem(substrate: string, item: Record<string, unknown>): string
   return `${title} ${chalk.dim(`[${type}]`)} ${chalk.dim(id)}${snippet}`;
 }
 
+/**
+ * Render the A/B ranker diagnostic: baseline vs Horizon top-N side-by-side,
+ * then the diff. Comparison is by RANK POSITION (not score magnitude) — the two
+ * strategies score on different scales, so only the ordering is comparable.
+ */
+function renderComparison(query: string, comparison?: RankComparison): void {
+  if (!comparison) {
+    log.dim(`"${query}" → no ranker comparison returned (semantic pool empty?).`);
+    return;
+  }
+  const { baseline, horizon, diff } = comparison;
+  const n = Math.max(baseline.length, horizon.length);
+
+  log.dim(`"${query}" → A/B ranker comparison (by RANK, not score magnitude)`);
+  log.blank();
+
+  // Side-by-side: rank · title for each column.
+  const trunc = (s: string, w: number): string =>
+    (s.length > w ? s.slice(0, w - 1) + "…" : s).padEnd(w, " ");
+  const COL = 38;
+  log.info(
+    "  " + chalk.bold("BASELINE".padEnd(COL + 5)) + chalk.bold("HORIZON")
+  );
+  for (let i = 0; i < n; i++) {
+    const b = baseline[i];
+    const h = horizon[i];
+    const bCell = b ? `${chalk.dim(`#${b.rank}`)} ${trunc(b.title, COL)}` : "".padEnd(COL + 4);
+    const hCell = h ? `${chalk.dim(`#${h.rank}`)} ${trunc(h.title, COL)}` : "";
+    log.info("  " + bCell + " " + hCell);
+  }
+  log.blank();
+
+  // Diff — overlap@N + items that moved rank between the two strategies.
+  const topN = Math.max(baseline.length, horizon.length);
+  log.info(
+    chalk.bold("DIFF") +
+      chalk.dim(` · overlap@${topN}: ${diff.overlapAtN}/${topN} shared ids`)
+  );
+  if (diff.moved.length === 0) {
+    log.dim("  No shared item changed rank between the two rankers.");
+  } else {
+    for (const m of diff.moved) {
+      const dir = m.horizonRank < m.baselineRank ? chalk.green("↑") : chalk.red("↓");
+      log.info(
+        `  ${dir} ${m.title} ${chalk.dim(`(baseline #${m.baselineRank} → horizon #${m.horizonRank})`)}`
+      );
+    }
+  }
+  log.blank();
+}
+
 export async function askKnowledge(
   query: string,
-  opts: BaseOpts & { workspace?: string; limit?: string; json?: boolean; session?: boolean }
+  opts: BaseOpts & { workspace?: string; limit?: string; json?: boolean; session?: boolean; compare?: boolean }
 ): Promise<void> {
   try {
     const cfg = await resolveHubConfig(opts);
@@ -479,12 +499,26 @@ export async function askKnowledge(
 
     const res = (await hubPost(
       "/knowledge/ask",
-      { query, ...(workspaceId ? { workspaceId } : {}), ...(sessionId ? { sessionId } : {}), limit },
+      {
+        query,
+        ...(workspaceId ? { workspaceId } : {}),
+        ...(sessionId ? { sessionId } : {}),
+        limit,
+        ...(opts.compare ? { compare: true } : {}),
+      },
       cfg
     )) as AskResponse;
 
     if (opts.json) {
       console.log(JSON.stringify(res, null, 2));
+      return;
+    }
+
+    // A/B ranker diagnostic — render the comparison and STOP. This is a
+    // ranking diff (baseline vs Horizon on the same candidate pool), not the
+    // normal answer, so it replaces the substrate listing when requested.
+    if (opts.compare) {
+      renderComparison(query, res.comparison);
       return;
     }
 
@@ -630,8 +664,12 @@ export async function listProfiles(
       console.error(chalk.red("No workspace set. Run: synap use <workspace-id>"));
       process.exit(1);
     }
-    const res = await hubGet("/profiles", { userId, workspaceId }, cfg);
-    const profiles = ((res as Record<string, unknown>).profiles as unknown[] ?? (Array.isArray(res) ? res : [])) as Record<string, unknown>[];
+    const res = await hubGet(
+      "/profiles",
+      { userId, workspaceId, ...(opts.json ? { detail: "full" } : {}) },
+      cfg
+    );
+    const profiles = unwrapList<Record<string, unknown>>(res, ["profiles"]);
 
     if (opts.json) {
       console.log(JSON.stringify(profiles, null, 2));
@@ -647,7 +685,14 @@ export async function listProfiles(
     for (const p of profiles) {
       const scope = String(p.entityScope ?? "workspace");
       const desc = p.description ? chalk.dim(` — ${String(p.description).slice(0, 60)}`) : "";
-      log.info(`${chalk.bold(String(p.slug ?? ""))}  ${chalk.dim(scope)}${desc}`);
+      // A role-profile (client, partner, …) is a hat an existing entity wears
+      // via `synap facet attach` — never created as its own entity. Label it
+      // distinctly so it's never confused with a primary kind.
+      const applicableKinds = p.applicableKinds as string[] | undefined;
+      const kindLabel = p.profileKind === "role"
+        ? chalk.magenta(`[Role${applicableKinds?.length ? ` of ${applicableKinds.join("/")}` : ""}]`)
+        : chalk.green("[Kind]");
+      log.info(`${chalk.bold(String(p.slug ?? ""))}  ${kindLabel}  ${chalk.dim(scope)}${desc}`);
     }
   } catch (e) {
     console.error(chalk.red("Error: " + (e as Error).message));

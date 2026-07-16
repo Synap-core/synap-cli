@@ -20,6 +20,7 @@
 import chalk from "chalk";
 import { log } from "../utils/logger.js";
 import { resolveHubConfig, hubGet } from "../lib/hub-client.js";
+import { unwrapList } from "../lib/unwrapList.js";
 
 export interface ListEventsOpts {
   entity?: string;
@@ -38,7 +39,7 @@ export async function listEvents(opts: ListEventsOpts): Promise<void> {
     if (opts.entity) params.subjectId = opts.entity;
 
     const res = await hubGet("/events", params, cfg) as Record<string, unknown>;
-    const events = (res.events ?? res.items ?? (Array.isArray(res) ? res : [])) as Record<string, unknown>[];
+    const events = unwrapList<Record<string, unknown>>(res, ["events", "items"]);
 
     if (opts.json) {
       console.log(JSON.stringify(events, null, 2));

@@ -169,9 +169,10 @@ pods
 program
   .command("status")
   .description("Show Synap pod health and API status")
-  .action(async () => {
+  .option("--json", "Dump raw status (incl. release/migration detail) as JSON")
+  .action(async (opts: { json?: boolean }) => {
     const { status } = await import("./commands/status.js");
-    await status();
+    await status({ json: opts.json });
   });
 
 // Hidden: compact ANSI line for the Claude Code statusLine (reads stdin JSON).
@@ -425,6 +426,24 @@ program
     await digest(opts);
   });
 
+// ─── diagnose ────────────────────────────────────────────────────────────────
+// See what an AI did across flows: the unified run feed, or one run's activity
+// timeline (for a capture: WHY a facet/entity dropped, with a fixHint).
+
+program
+  .command("diagnose [runId]")
+  .description("See what an AI did — the run feed, or one run's activity (why it did what it did)")
+  .option("--flow <automation|playbook|capture|session>", "Restrict the feed, or the run's flow (default capture for a runId)")
+  .option("--flow-id <id>", "Restrict the feed to one flow's runs (automationId / playbookId)")
+  .option("--limit <n>", "Max runs in the feed")
+  .option("--json", "Output raw JSON")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (runId: string | undefined, opts) => {
+    const { diagnose } = await import("./commands/diagnose.js");
+    await diagnose(runId, opts);
+  });
+
 // ─── use ──────────────────────────────────────────────────────────────────────
 
 program
@@ -444,7 +463,8 @@ const project = program
   .description("Focus this Claude session on a project (cross-cutting lens)");
 project
   .command("use <projectId>")
-  .description("Scope this session to a project — narrows scoped calls + statusline")
+  .description("Pin the active project (durable, like `synap use <workspace>`) — narrows scoped calls + statusline")
+  .option("--session", "Ephemeral: scope only this Claude Code session, don't persist")
   .option("--json", "Output as JSON")
   .option("--pod-url <url>", "Pod URL override")
   .option("--api-key <key>", "API key override")
@@ -454,7 +474,8 @@ project
   });
 project
   .command("clear")
-  .description("Clear this session's project focus")
+  .description("Clear the active project focus (durable by default)")
+  .option("--session", "Ephemeral: clear only this Claude Code session's project")
   .option("--json", "Output as JSON")
   .action(async (opts) => {
     const { clearProject } = await import("./commands/lens.js");
@@ -482,23 +503,6 @@ program
     await showLens(opts);
   });
 
-// ─── note ─────────────────────────────────────────────────────────────────────
-// Quick `note` entity. The one canonical READ verb is `ask`; the one canonical
-// structured-WRITE verb is `capture`. (search / recall / remember removed — they
-// were redundant doors `ask`/`capture`/`note` already cover.)
-
-program
-  .command("note <text>")
-  .description("Quick freeform note → note entity (for structured learnings use `synap capture`)")
-  .option("--context <entity-id>", "Link this note to an entity")
-  .option("--json", "Output as JSON")
-  .option("--pod-url <url>", "Pod URL override")
-  .option("--api-key <key>", "API key override")
-  .action(async (text: string, opts) => {
-    const { noteData } = await import("./commands/data.js");
-    await noteData(text, opts);
-  });
-
 // ─── ask (unified knowledge access) ─────────────────────────────────────────────
 // The ONE read verb. Routes to the right substrate(s) — semantic (entities),
 // procedural (how-to docs), episodic (captures) — and returns a glass-box answer.
@@ -510,6 +514,7 @@ program
   .option("--limit <n>", "Max results per substrate", "10")
   .option("--json", "Output as JSON")
   .option("--session", "Scope retrieval to the active session context")
+  .option("--compare", "A/B diagnostic: show baseline vs Horizon rankers side-by-side (read-only, does not change the answer)")
   .option("--pod-url <url>", "Pod URL override")
   .option("--api-key <key>", "API key override")
   .action(async (query: string, opts) => {
@@ -548,15 +553,30 @@ program
 
 program
   .command("import <inputs...>")
-  .description("Import files, folders, or URLs into the pod via the AI capture pipeline")
+  .description(
+    "Import files, folders, or URLs into the pod (AI capture pipeline, or Superwhisper store-first)"
+  )
   .option("--workspace <id|name>", "Override AI workspace routing")
   .option("--project <id|name>", "Override AI project routing")
-  .option("--dry-run", "Structure + print proposals only — do not write")
-  .option("--yes", "Skip the per-item y/N confirmation")
+  .option("--dry-run", "Preview only — do not write")
+  .option("--yes", "Skip confirmation / auto-confirm store-first")
   .option("--session", "Link created entities to the active session")
   .option("--json", "Output as JSON")
   .option("--pod-url <url>", "Pod URL override")
   .option("--api-key <key>", "API key override")
+  .option(
+    "--source <name>",
+    "Adapter: superwhisper (paired meta.json+output.wav store-first)"
+  )
+  .option(
+    "--store-first",
+    "Skip AI structure; store units as pod-wide notes (+ optional audio)"
+  )
+  .option("--with-audio", "Upload WAV provenance (default on for --source superwhisper --store-first)")
+  .option("--no-with-audio", "Transcript-only (no WAV upload)")
+  .option("--limit <n>", "Max Superwhisper units to process", (v) => parseInt(v, 10))
+  .option("--concurrency <n>", "Parallel unit uploads (1–4)", (v) => parseInt(v, 10))
+  .option("--no-resume", "Ignore local import ledger (re-import all)")
   .action(async (inputs: string[], opts) => {
     const { importData } = await import("./commands/import.js");
     await importData(inputs, opts);
@@ -607,6 +627,8 @@ program
   .option("--json", "Output as JSON (default: human-readable)")
   .option("--profiles", "Show only profiles (use with --json for machine-readable schema)")
   .option("--commands", "Show only the command tree")
+  .option("--summary", "List profile kinds without property schemas")
+  .option("--profile-slugs <slugs>", "Comma-separated profile slugs to load in full")
   .option("--workspace <id>", "Workspace to query (defaults to active workspace)")
   .action(async (opts) => {
     const { discover } = await import("./commands/discover.js");
@@ -691,6 +713,7 @@ list
   .description("List entities on the pod")
   .option("--workspace <id>", "Scope to a workspace (omit for pod-wide)")
   .option("--profile <slug>", "Filter by profile slug (e.g. person, task, note)")
+  .option("--role <slug>", "Filter to entities carrying this role (e.g. client, partner)")
   .option("--limit <n>", "Max results", "50")
   .option("--json", "Output as JSON")
   .option("--pod-url <url>", "Pod URL override")
@@ -712,6 +735,56 @@ program
   .action(async (id: string, opts) => {
     const { showEntity } = await import("./commands/data-extra.js");
     await showEntity(id, opts);
+  });
+
+// ─── facet ────────────────────────────────────────────────────────────────────
+// Roles — one identity, many roles. A role-profile (client, partner, contact…)
+// attached to an existing entity, never a second entity. Governed writes: an
+// attach/detach may come back "proposed for review" instead of applying live.
+
+const facet = program
+  .command("facet")
+  .description("Manage roles attached to an entity (client, partner, contact, …)");
+
+facet
+  .command("attach <entityId> <roleSlug>")
+  .description("Attach a role to an entity")
+  .option("--property <kv>", "Role property as key=value (repeatable)", collect, [] as string[])
+  .option("--workspace <id>", "Role's lens (defaults to the active workspace)")
+  .option("--json", "Output as JSON")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (entityId: string, roleSlug: string, opts) => {
+    const { attachFacet } = await import("./commands/facet.js");
+    await attachFacet(entityId, roleSlug, opts);
+  });
+
+facet
+  .command("list <entityId>")
+  .description("List the roles attached to an entity")
+  .option("--json", "Output as JSON")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (entityId: string, opts) => {
+    const { listFacets } = await import("./commands/facet.js");
+    await listFacets(entityId, opts);
+  });
+
+facet
+  .command("detach [facetId]")
+  .description("Detach a role — pass the facet id, or --entity <id> --role <slug>")
+  .option("--entity <id>", "Entity id (with --role, resolves the facet to detach)")
+  .option("--role <slug>", "Role slug (with --entity)")
+  .option("--json", "Output as JSON")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (facetId: string | undefined, opts) => {
+    if (!facetId && !(opts.entity && opts.role)) {
+      console.error("Provide a facet id, or both --entity <id> and --role <slug>.");
+      process.exit(1);
+    }
+    const { detachFacet } = await import("./commands/facet.js");
+    await detachFacet(facetId ?? "", opts);
   });
 
 // ─── proposals ────────────────────────────────────────────────────────────────
@@ -974,8 +1047,9 @@ skillCmd
 
 program
   .command("browse [profile]")
-  .description("Browse entities in the active workspace, optionally filtered by profile type")
+  .description("Browse entities in the active workspace, optionally filtered by profile type or role")
   .option("--workspace <id>", "Scope to a specific workspace")
+  .option("--role <slug>", "Filter to entities carrying this role (e.g. client, partner)")
   .option("--limit <n>", "Max results", "20")
   .option("--json", "Output as JSON")
   .option("--pod-url <url>", "Pod URL override")
@@ -1165,6 +1239,37 @@ const agent = program
   .description("Run autonomous agent loops against the IS, or schedule recurring goals");
 
 agent
+  .command("ask <message>")
+  .description("Send one message to the workspace's deployed agent and print its reply (multi-turn: reuses one thread)")
+  .option("--workspace <id|name>", "Workspace to talk to (uses active workspace/lens if omitted)")
+  .option("--thread <id>", "Target an existing thread/channel id instead of the default CLI chat thread")
+  .option("--new", "Start a fresh thread instead of continuing the persistent CLI chat thread")
+  .option("--agent-type <type>", "Requested agent type hint (backend currently routes to the orchestrator)")
+  .option("--timeout <seconds>", "How long to wait for the agent's reply (default: 90)")
+  .option("--json", "Machine-readable output { ok, reply, threadId, workspaceId }")
+  .option("--pod-url <url>", "Override pod URL")
+  .option("--api-key <key>", "Override API key")
+  .action(async (message: string, opts: Record<string, unknown>) => {
+    const { agentAsk } = await import("./commands/agent-chat.js");
+    await agentAsk({ ...opts, message } as Parameters<typeof agentAsk>[0]);
+  });
+
+agent
+  .command("chat")
+  .description("Interactive REPL conversation with the workspace's deployed agent")
+  .option("--workspace <id|name>", "Workspace to talk to (uses active workspace/lens if omitted)")
+  .option("--thread <id>", "Target an existing thread/channel id instead of the default CLI chat thread")
+  .option("--new", "Start a fresh thread instead of continuing the persistent CLI chat thread")
+  .option("--agent-type <type>", "Requested agent type hint (backend currently routes to the orchestrator)")
+  .option("--timeout <seconds>", "How long to wait for each reply (default: 90)")
+  .option("--pod-url <url>", "Override pod URL")
+  .option("--api-key <key>", "Override API key")
+  .action(async (opts: Record<string, unknown>) => {
+    const { agentChat } = await import("./commands/agent-chat.js");
+    await agentChat(opts as Parameters<typeof agentChat>[0]);
+  });
+
+agent
   .command("run")
   .description("Run an autonomous agent toward a goal using the Intelligence Service")
   .requiredOption("--goal <text>", "What the agent should accomplish")
@@ -1308,6 +1413,36 @@ program
   .action(async (opts) => {
     const { graphTraverse } = await import("./commands/graph.js");
     await graphTraverse(opts);
+  });
+
+// ─── centrality ────────────────────────────────────────────────────────────────
+// Window onto the Phase-3 PageRank centrality signal (entity_centrality):
+// see if it has populated, and trigger a recompute on demand.
+
+const centrality = program
+  .command("centrality")
+  .description("Inspect PageRank centrality (entity_centrality) and trigger a recompute");
+
+centrality
+  .command("status", { isDefault: true })
+  .description("Show whether PageRank centrality has populated + the top central entities")
+  .option("--json", "Output as JSON")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (opts) => {
+    const { centralityStatus } = await import("./commands/centrality.js");
+    await centralityStatus(opts);
+  });
+
+centrality
+  .command("recompute")
+  .description("Enqueue a PageRank centrality recompute (runs in the background)")
+  .option("--json", "Output as JSON")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (opts) => {
+    const { centralityRecompute } = await import("./commands/centrality.js");
+    await centralityRecompute(opts);
   });
 
 // ─── events ───────────────────────────────────────────────────────────────────
@@ -1632,10 +1767,10 @@ capability
   });
 
 capability
-  .command("add <name>")
-  .description("Install a capability from the catalog (materialize its tools + skills)")
+  .command("add [name]")
+  .description("Install a capability from the catalog — omit the name to pick from a list")
   .option("--workspace <id>", "Workspace context")
-  .action(async (name: string, opts) => {
+  .action(async (name: string | undefined, opts) => {
     const { capabilityAdd } = await import("./commands/capability.js");
     await capabilityAdd(name, opts);
   });
@@ -1660,19 +1795,19 @@ capability
   });
 
 capability
-  .command("enable <name>")
-  .description("Turn on a capability — ensures its connection, then pick which verbs it can do")
+  .command("enable [name]")
+  .description("Turn on a capability — omit the name to pick from a list; ensures its connection, then pick which verbs it can do")
   .option("--workspace <id>", "Workspace context")
-  .action(async (name: string, opts) => {
+  .action(async (name: string | undefined, opts) => {
     const { capabilityEnable } = await import("./commands/capability.js");
     await capabilityEnable(name, opts);
   });
 
 capability
-  .command("connect <name>")
-  .description("Run just the connection sub-flow for a capability (OAuth or paste a key)")
+  .command("connect [name]")
+  .description("Connect a service — omit the name to pick from connectable services")
   .option("--workspace <id>", "Workspace context")
-  .action(async (name: string, opts) => {
+  .action(async (name: string | undefined, opts) => {
     const { capabilityConnect } = await import("./commands/capability.js");
     await capabilityConnect(name, opts);
   });
@@ -1691,6 +1826,8 @@ capability
   .command("run <verb> [params...]")
   .description("Launch a verb — pass inputs as `--key value` flags")
   .option("--workspace <id>", "Workspace context")
+  .option("--connection <id>", "Run against a specific stored connection id")
+  .option("--for <objId>", "Run against the connection bound to this context object id")
   .allowUnknownOption()
   .allowExcessArguments()
   .action(async (verb: string, params: string[], opts) => {
@@ -1705,6 +1842,66 @@ capability
   .action(async (verb: string, opts) => {
     const { capabilityTest } = await import("./commands/capability.js");
     await capabilityTest(verb, opts);
+  });
+
+// ─── cap connections ──────────────────────────────────────────────────────────
+// Manage a capability's stored connections (credentials / OAuth accounts /
+// context bindings). Nested under `cap` — distinct from the top-level
+// `synap connections`, which shows agent-surface → pod wiring.
+
+const capConnections = capability
+  .command("connections")
+  .alias("conn")
+  .description("Manage a capability's connections: list, add, update, rm");
+
+capConnections
+  .command("list <capability>")
+  .description("List a capability's connections (label, kind, default, context, id)")
+  .option("--workspace <id>", "Workspace context")
+  .action(async (capability: string, opts) => {
+    const { capabilityConnectionsList } = await import("./commands/cap-connections.js");
+    await capabilityConnectionsList(capability, opts);
+  });
+
+capConnections
+  .command("add <capability>")
+  .description("Add a connection — prompts for label + masked value unless provided as flags")
+  .option("--label <label>", "Connection label")
+  .option("--value <value>", "Secret / credential value (else prompted, masked)")
+  .option("--context-type <type>", "Context type this connection binds to")
+  .option("--context-id <id>", "Context object id this connection binds to")
+  .option("--account-hint <hint>", "Human-readable account hint (e.g. an email)")
+  .option("--default", "Mark this connection as the capability's default")
+  .option("--workspace <id>", "Workspace context")
+  .action(async (capability: string, opts) => {
+    const { capabilityConnectionsAdd } = await import("./commands/cap-connections.js");
+    await capabilityConnectionsAdd(capability, opts);
+  });
+
+capConnections
+  .command("update <capability> <connectionId>")
+  .description("Update a connection's fields; --rotate (or --value) rotates its secret")
+  .option("--label <label>", "New connection label")
+  .option("--value <value>", "New secret / credential value")
+  .option("--rotate", "Prompt (masked) for a new secret value")
+  .option("--context-type <type>", "New context type")
+  .option("--context-id <id>", "New context object id")
+  .option("--account-hint <hint>", "New account hint")
+  .option("--default", "Mark this connection as the capability's default")
+  .option("--workspace <id>", "Workspace context")
+  .action(async (capability: string, connectionId: string, opts) => {
+    const { capabilityConnectionsUpdate } = await import("./commands/cap-connections.js");
+    await capabilityConnectionsUpdate(capability, connectionId, opts);
+  });
+
+capConnections
+  .command("rm <capability> <connectionId>")
+  .alias("remove")
+  .description("Remove a connection by id (confirms first)")
+  .option("--workspace <id>", "Workspace context")
+  .action(async (capability: string, connectionId: string, opts) => {
+    const { capabilityConnectionsRemove } = await import("./commands/cap-connections.js");
+    await capabilityConnectionsRemove(capability, connectionId, opts);
   });
 
 // ─── raycast ──────────────────────────────────────────────────────────────────

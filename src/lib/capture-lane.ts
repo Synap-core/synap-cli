@@ -20,6 +20,7 @@
 import chalk from "chalk";
 import { log } from "../utils/logger.js";
 import { hubGet, type HubConfig } from "./hub-client.js";
+import { unwrapList } from "./unwrapList.js";
 
 // "ai-self" retained as a deprecated union member only; the lane was removed
 // (no private agent scratchpad) — nothing routes there anymore. "user" and
@@ -58,8 +59,7 @@ export async function resolveWorkspaceName(
 ): Promise<string | undefined> {
   try {
     const res = (await hubGet("/workspaces", {}, cfg)) as Record<string, unknown>;
-    const list = ((res.workspaces as unknown[]) ??
-      (Array.isArray(res) ? (res as unknown[]) : [])) as Record<string, unknown>[];
+    const list = unwrapList<Record<string, unknown>>(res, ["workspaces"]);
     const match = list.find((w) => String(w.id ?? "") === workspaceId);
     return match ? String(match.name ?? match.id ?? "") : undefined;
   } catch {

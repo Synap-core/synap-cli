@@ -44,6 +44,43 @@ function getCliVersion(): string {
   }
 }
 
+interface ReleaseStatus {
+  status?: string;
+  version?: string | null;
+  migrations?: {
+    lastApplied: string | null;
+    lastAppliedAt: string | null;
+    count: number;
+    note?: string;
+  };
+  schemaCoherence?: {
+    ok: boolean | null;
+    drift: Array<{ table: string; column: string; addedBy: string }>;
+    checked?: number;
+    note?: string;
+  };
+  buildStamp?: string | null;
+}
+
+/**
+ * Fetch the pod's deploy-verification detail (version + migration + schema
+ * coherence). Degrades to null on any error — an older pod without the route,
+ * or an unreachable pod, simply omits the extra detail from `synap status`.
+ */
+async function fetchReleaseStatus(
+  podUrl: string
+): Promise<ReleaseStatus | null> {
+  try {
+    const res = await fetch(`${podUrl}/status/release`, {
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!res.ok) return null;
+    return (await res.json()) as ReleaseStatus;
+  } catch {
+    return null;
+  }
+}
+
 function timeAgo(isoDate: string): string {
   const diff = Date.now() - new Date(isoDate).getTime();
   const minutes = Math.floor(diff / 60_000);
@@ -55,7 +92,21 @@ function timeAgo(isoDate: string): string {
   return `${days} day${days === 1 ? "" : "s"} ago`;
 }
 
-export async function status(): Promise<void> {
+export async function status(opts: { json?: boolean } = {}): Promise<void> {
+  // ── JSON mode: raw dump, no banner/pretty output ─────────────────────────
+  // Focused on the "is the latest actually deployed?" question — pod health +
+  // release/migration/coherence detail as one machine-readable object.
+  if (opts.json) {
+    const cfg = getActivePodConfig();
+    const url = cfg?.podUrl ?? process.env.SYNAP_POD_URL ?? null;
+    const health = url ? await checkPodHealth(url) : null;
+    const release = url ? await fetchReleaseStatus(url) : null;
+    process.stdout.write(
+      JSON.stringify({ podUrl: url, health, release }, null, 2) + "\n"
+    );
+    return;
+  }
+
   banner();
 
   // CLI version + update hint
@@ -118,6 +169,50 @@ export async function status(): Promise<void> {
     );
     if (pod.version) log.info(`Version: ${pod.version}`);
     if (localConfig?.workspaceId) log.dim(`Workspace: ${localConfig.workspaceId}`);
+
+    // ── Release / deploy verification ──────────────────────────────────────
+    // Answers "is the latest actually deployed, and did the migration apply?"
+    // from the pod's own runtime state. Older pods without the route just skip.
+    if (pod.healthy) {
+      const release = await fetchReleaseStatus(podUrl);
+      if (release) {
+        if (release.version) {
+          log.info(`API build: ${chalk.bold(release.version)} ${chalk.dim("(@synap/api)")}`);
+        }
+        if (release.buildStamp) {
+          log.dim(`Build stamp: ${release.buildStamp}`);
+        }
+
+        const mig = release.migrations;
+        if (mig?.note) {
+          log.dim(`Migrations: ${mig.note}`);
+        } else if (mig) {
+          const when = mig.lastAppliedAt ? ` ${chalk.dim(`(${timeAgo(mig.lastAppliedAt)})`)}` : "";
+          log.info(
+            `Last migration: ${chalk.bold(mig.lastApplied ?? "none")}  ${chalk.dim(`[${mig.count} applied]`)}${when}`
+          );
+        }
+
+        const sc = release.schemaCoherence;
+        if (sc?.note) {
+          log.dim(`Schema: ${sc.note}`);
+        } else if (sc) {
+          if (sc.ok === true) {
+            log.info(`Schema: ${chalk.green("OK")}${sc.checked ? chalk.dim(` (${sc.checked} columns checked)`) : ""}`);
+          } else if (sc.ok === false) {
+            log.warn(
+              `Schema: ${chalk.red(`DRIFT — ${sc.drift.length} missing column${sc.drift.length === 1 ? "" : "s"}`)}`
+            );
+            for (const d of sc.drift.slice(0, 10)) {
+              log.dim(`  • ${d.table}.${d.column}  ← ${d.addedBy}`);
+            }
+            if (sc.drift.length > 10) log.dim(`  … and ${sc.drift.length - 10} more`);
+          } else {
+            log.dim("Schema: unknown");
+          }
+        }
+      }
+    }
   }
 
   // ── Workspace Config ───────────────────────────────────────────────────

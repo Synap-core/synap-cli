@@ -12,6 +12,7 @@
 import chalk from "chalk";
 import { log } from "../utils/logger.js";
 import { resolveHubConfig, resolveUserId, hubGet } from "../lib/hub-client.js";
+import { unwrapList } from "../lib/unwrapList.js";
 
 export interface GraphTraverseOpts {
   entity: string;
@@ -44,7 +45,7 @@ export async function graphTraverse(opts: GraphTraverseOpts): Promise<void> {
     const nodes: Record<string, unknown>[] = [];
     const edges: Record<string, unknown>[] = [];
 
-    for (const row of (Array.isArray(results) ? results : [])) {
+    for (const row of unwrapList<Record<string, unknown>>(results)) {
       if (row.sourceEntityId || row.targetEntityId) {
         edges.push(row);
       } else {

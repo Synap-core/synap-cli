@@ -12,6 +12,7 @@
 
 import { log } from "../utils/logger.js";
 import { resolveHubConfig, hubGet } from "../lib/hub-client.js";
+import { unwrapList } from "../lib/unwrapList.js";
 
 export interface SubscribeOpts {
   event?: string;
@@ -62,8 +63,7 @@ export async function subscribeEvents(opts: SubscribeOpts): Promise<void> {
       const res = await hubGet("/subscriptions", params, cfg) as Record<string, unknown>;
       consecutiveErrors = 0;
 
-      const rawEvents = (res.events ?? res.items ?? []) as Record<string, unknown>[];
-      const events = Array.isArray(rawEvents) ? rawEvents : [];
+      const events = unwrapList<Record<string, unknown>>(res, ["events", "items"]);
 
       for (const event of events) {
         const id = String(event.id ?? "");

@@ -1,6 +1,7 @@
 import chalk from "chalk";
 import { log } from "../utils/logger.js";
 import { resolveHubConfig, hubGet, hubPost } from "../lib/hub-client.js";
+import { unwrapList } from "../lib/unwrapList.js";
 import { reportWrite } from "../lib/capture-lane.js";
 import { type BaseOpts, parseLimit } from "./data.js";
 
@@ -85,9 +86,7 @@ export async function observeRecall(
     };
 
     const res = await hubGet("/entities", params, cfg) as Record<string, unknown>;
-    let entities = (
-      res.entities ?? res.items ?? (Array.isArray(res) ? res : [])
-    ) as Record<string, unknown>[];
+    let entities = unwrapList<Record<string, unknown>>(res, ["entities", "items"]);
 
     if (opts.category) {
       entities = entities.filter((e) => {

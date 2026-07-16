@@ -32,7 +32,7 @@ Call `propose_entity_graph` ONCE. For EACH organization (room), build this chain
 
 So per org the graph is: **`contact → company ← client/partner`**, with channels bound and firewall roles set. Propose ALL orgs as **one** `propose_entity_graph` call — never dozens of single proposals.
 
-(Missing `team` threads — rooms with a `client-comms` channel but no `team` channel — note them in your summary for the operator to create; thread creation isn't part of the one-accept apply yet.)
+(Missing `team` threads — rooms with a `client-comms` channel but no `team` channel — note them in your summary. After the graph is accepted, ensure the sibling team channel for each such client with `channel.ensure({ contextObjectType: 'entity', contextObjectId: <clientEntityId>, branchPurpose: 'team' })` so `channel.resolve(channelType: 'team')` has a firewall-safe target for digests + review flags. See the `routing-to-channels` skill for the full bind/ensure lifecycle.)
 
 ## 4. The firewall is absolute
 NEVER propose a write, binding, post, or thread that would put bot/team activity into a `client-comms` channel — those mirror to the client. All collaboration lands in `team` channels/threads. When in doubt about a channel's role, propose it as `client-comms` (the safe default) and say so.

@@ -21,6 +21,7 @@ import {
 } from "@synap-core/workspace-templates";
 import { log, banner } from "../utils/logger.js";
 import { resolveHubConfig, hubGet, hubPost } from "../lib/hub-client.js";
+import { unwrapList } from "../lib/unwrapList.js";
 
 /** Domain catalog — what each template provides, for the picker + AI inference. */
 const DOMAIN_CATALOG: Array<{
@@ -34,12 +35,6 @@ const DOMAIN_CATALOG: Array<{
     title: "CRM",
     description: "Contacts, companies, deals, pipeline",
     keywords: ["sales", "client", "customer", "deal", "lead", "agency"],
-  },
-  {
-    slug: "content-os",
-    title: "Content OS",
-    description: "Posts, campaigns, content calendar, brand",
-    keywords: ["content", "marketing", "social", "creator", "brand", "post"],
   },
   {
     slug: "project-management",
@@ -72,10 +67,10 @@ const DOMAIN_CATALOG: Array<{
     keywords: ["strategy", "mission", "vision", "positioning", "brand strategy", "foundation"],
   },
   {
-    slug: "radar",
-    title: "Radar",
+    slug: "ecosystem",
+    title: "Ecosystem",
     description: "Competitors, market segments, trends, inspirations",
-    keywords: ["market", "competitor", "research", "trend", "landscape", "radar"],
+    keywords: ["market", "competitor", "research", "trend", "landscape", "radar", "ecosystem", "partners"],
   },
   {
     slug: "brand-library",
@@ -138,9 +133,7 @@ export async function launchAgentOs(opts: {
   let existingProjects: Array<{ id: string; name: string }> = [];
   try {
     const res = (await hubGet("/projects", {}, cfg)) as unknown;
-    const list = (Array.isArray(res)
-      ? res
-      : ((res as Record<string, unknown>)?.projects as unknown[]) ?? []) as Record<string, unknown>[];
+    const list = unwrapList<Record<string, unknown>>(res, ["projects"]);
     existingProjects = list
       .filter((p) => p.id)
       .map((p) => ({ id: String(p.id), name: String(p.name ?? p.id) }));

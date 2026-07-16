@@ -1,6 +1,8 @@
 import chalk from "chalk";
 import { log } from "../utils/logger.js";
 import { resolveHubConfig, resolveUserId, hubGet } from "../lib/hub-client.js";
+import { unwrapList } from "../lib/unwrapList.js";
+import { fetchFacets, renderRoles } from "./facet.js";
 import { type BaseOpts, parseLimit } from "./data.js";
 
 // ─── showEntity ───────────────────────────────────────────────────────────────
@@ -14,9 +16,10 @@ export async function showEntity(
     const cfg = await resolveHubConfig(opts);
     const userId = await resolveUserId(cfg);
 
-    const [entityRes, relationsRes] = await Promise.allSettled([
+    const [entityRes, relationsRes, facetsRes] = await Promise.allSettled([
       hubGet(`/entities/${id}`, { userId }, cfg),
       hubGet(`/entities/${id}/relations`, { userId, limit: 50 }, cfg),
+      fetchFacets(id, cfg),
     ]);
 
     if (entityRes.status === "rejected") {
@@ -28,10 +31,11 @@ export async function showEntity(
     const relData = relationsRes.status === "fulfilled"
       ? relationsRes.value as Record<string, unknown>
       : {};
-    const relations = (relData.relations ?? relData.items ?? (Array.isArray(relData) ? relData : [])) as Record<string, unknown>[];
+    const relations = unwrapList<Record<string, unknown>>(relData, ["relations", "items"]);
+    const facets = facetsRes.status === "fulfilled" ? facetsRes.value : [];
 
     if (opts.json) {
-      console.log(JSON.stringify({ entity, relations }, null, 2));
+      console.log(JSON.stringify({ entity, relations, facets }, null, 2));
       return;
     }
 
@@ -48,6 +52,14 @@ export async function showEntity(
           log.info(`${k}: ${String(v)}`);
         }
       }
+    }
+
+    // Roles — one identity, many roles. A role-profile (client, partner, …)
+    // attached to this entity, never a second entity — omit the section
+    // entirely when there are none rather than print an empty heading.
+    if (facets.length > 0) {
+      log.blank();
+      renderRoles(facets);
     }
 
     if (relations.length > 0) {
@@ -88,7 +100,7 @@ export async function listProposals(
       limit,
     }, cfg) as Record<string, unknown>;
 
-    const proposals = (res.proposals ?? res.items ?? (Array.isArray(res) ? res : [])) as Record<string, unknown>[];
+    const proposals = unwrapList<Record<string, unknown>>(res, ["proposals", "items"]);
 
     if (opts.json) {
       console.log(JSON.stringify({ proposals }, null, 2));
@@ -128,20 +140,31 @@ export async function listProposals(
 // Paginated entity list — cleaner than `list entities`, shows title + date.
 
 export async function browseEntities(
-  opts: BaseOpts & { workspace?: string; profile?: string; limit?: string }
+  opts: BaseOpts & { workspace?: string; profile?: string; limit?: string; role?: string }
 ): Promise<void> {
   try {
     const cfg = await resolveHubConfig(opts);
     const userId = await resolveUserId(cfg);
     const limit = parseLimit(opts.limit, 20);
     const workspaceId = opts.workspace ?? cfg.workspaceId;
+    // --role resolves facet scope from the workspaceId query param; without a
+    // workspace the server can't apply the filter, and an empty result would
+    // falsely read as "no entities carry this role". Fail clearly instead.
+    if (opts.role && !workspaceId) {
+      throw new Error(
+        "--role needs an active workspace to resolve the role. Run 'synap use <workspace>' or pass --workspace <id>."
+      );
+    }
 
     const params: Record<string, string | number> = { userId, limit };
     if (workspaceId) params.workspaceId = workspaceId;
     if (opts.profile) params.profileSlug = opts.profile;
+    // Browse-by-role: the list route resolves facet scope from the
+    // `workspaceId` QUERY PARAM (already set above), not the X-Workspace-Id header.
+    if (opts.role) params.facetSlug = opts.role;
 
     const res = await hubGet("/entities", params, cfg) as Record<string, unknown>;
-    const entities = (res.entities ?? res.items ?? (Array.isArray(res) ? res : [])) as Record<string, unknown>[];
+    const entities = unwrapList<Record<string, unknown>>(res, ["entities", "items"]);
     const total = Number(res.total ?? entities.length);
 
     if (opts.json) {
@@ -152,12 +175,14 @@ export async function browseEntities(
     if (entities.length === 0) {
       log.dim("Nothing here yet.");
       if (opts.profile) log.dim(`  Profile: ${opts.profile} — no entities of this type.`);
+      if (opts.role) log.dim(`  Role: ${opts.role} — no entities carry this role in this workspace.`);
       return;
     }
 
     const scope = workspaceId ? chalk.dim(` [ws: ${workspaceId.slice(0, 8)}…]`) : chalk.dim(" [pod-wide]");
     const profileFilter = opts.profile ? chalk.dim(` profile: ${opts.profile}`) : "";
-    log.dim(`${total} total${scope}${profileFilter} — showing ${entities.length}:`);
+    const roleFilter = opts.role ? chalk.dim(` role: ${opts.role}`) : "";
+    log.dim(`${total} total${scope}${profileFilter}${roleFilter} — showing ${entities.length}:`);
     log.blank();
 
     for (const e of entities) {

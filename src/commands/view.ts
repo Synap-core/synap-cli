@@ -22,6 +22,7 @@ import { readFileSync } from "fs";
 import chalk from "chalk";
 import { log } from "../utils/logger.js";
 import { resolveHubConfig, resolveUserId, hubGet, hubPost } from "../lib/hub-client.js";
+import { unwrapList } from "../lib/unwrapList.js";
 
 export interface ViewCreateOpts {
   type: string;
@@ -53,7 +54,7 @@ export async function viewCreate(opts: ViewCreateOpts): Promise<void> {
     let profileId: string | undefined;
     if (opts.profile) {
       const profilesRes = await hubGet("/profiles", { userId, workspaceId: workspaceId ?? "" }, cfg) as Record<string, unknown>;
-      const profiles = (profilesRes.profiles ?? profilesRes.items ?? (Array.isArray(profilesRes) ? profilesRes : [])) as Record<string, unknown>[];
+      const profiles = unwrapList<Record<string, unknown>>(profilesRes, ["profiles", "items"]);
       const match = profiles.find((p) => p.slug === opts.profile || p.id === opts.profile);
       if (!match) {
         log.error(`Profile "${opts.profile}" not found. Run: synap list profiles`);
@@ -103,7 +104,7 @@ export async function viewList(opts: ViewListOpts): Promise<void> {
     if (opts.type) params.type = opts.type;
 
     const res = await hubGet("/views", params, cfg) as Record<string, unknown>;
-    const views = (res.views ?? res.items ?? (Array.isArray(res) ? res : [])) as Record<string, unknown>[];
+    const views = unwrapList<Record<string, unknown>>(res, ["views", "items"]);
 
     if (opts.json) {
       console.log(JSON.stringify(views, null, 2));

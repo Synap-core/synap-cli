@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
-import { getActivePodConfig, getActiveWorkspaceId, listPodProfiles, getPodOverride } from "./pod.js";
+import { getActivePodConfig, getActiveWorkspaceId, getActiveProjectId, listPodProfiles, getPodOverride, getSurfaceAgentKey } from "./pod.js";
 import { resolveAgentOverride } from "./agents-config.js";
 import { resolveActiveLens } from "./session-lens.js";
 import { HubRestClient } from "@synap/hub-rest-client";
@@ -11,6 +11,8 @@ export interface HubConfig {
   userId: string;
   /** Active workspace — from `synap use`, pod default, or env var. Undefined if none configured. */
   workspaceId?: string;
+  /** Active project — from `synap project use`, pod default, or env var. Peer of workspaceId; independent. */
+  projectId?: string;
   scopes?: string[];
 }
 
@@ -81,14 +83,35 @@ export async function resolveHubConfig(opts?: { podUrl?: string; apiKey?: string
   const envUser = process.env.SYNAP_USER_ID;
   const envScopes = process.env.SYNAP_KEY_SCOPES;
   const envWorkspace = process.env.SYNAP_WORKSPACE_ID;
+  const envProject = process.env.SYNAP_PROJECT_ID;
   if (envPod && envKey && envUser) {
+    // Surface-bound resolution guard: if this pod has a `claude-code` surface
+    // key pinned to it (via `synap connect --target=claude-code`) and the
+    // ambient SYNAP_HUB_API_KEY doesn't match it, the session inherited a
+    // FOREIGN key (e.g. another agent's, like the Discord bridge's) — prefer
+    // the pinned key so a leaked/inherited env var can't silently redefine
+    // which agent this session acts as. Conservative: only applies here, in
+    // step 3 — steps 0-2 (--pod, explicit flags, SYNAP_AGENT) still win
+    // outright, untouched.
+    const surfaceKey = getSurfaceAgentKey("claude-code");
+    let apiKey = envKey;
+    let userId = envUser;
+    if (surfaceKey && surfaceKey.podUrl === envPod && surfaceKey.hubApiKey && surfaceKey.hubApiKey !== envKey) {
+      process.stderr.write(
+        `[synap] warning: ambient SYNAP_HUB_API_KEY does not match the claude-code surface key pinned to ${envPod} — using the pinned key instead of the inherited one.\n`
+      );
+      apiKey = surfaceKey.hubApiKey;
+      userId = surfaceKey.agentUserId || envUser;
+    }
     return {
       podUrl: envPod,
-      apiKey: envKey,
-      userId: envUser,
+      apiKey,
+      userId,
       // Per-Claude-session lens wins over the global env var, so concurrent
       // sessions can each be scoped to a different workspace.
       workspaceId: resolveActiveLens()?.workspaceId || envWorkspace || getActiveWorkspaceId(),
+      // Project is a peer lens, threaded exactly like workspaceId.
+      projectId: resolveActiveLens()?.projectId || envProject || getActiveProjectId(),
       scopes: envScopes ? envScopes.split(",") : undefined,
     };
   }
@@ -100,6 +123,7 @@ export async function resolveHubConfig(opts?: { podUrl?: string; apiKey?: string
     apiKey: config.hubApiKey,
     userId: config.agentUserId,
     workspaceId: resolveActiveLens()?.workspaceId || getActiveWorkspaceId(),
+    projectId: resolveActiveLens()?.projectId || getActiveProjectId(),
   };
 }
 
@@ -133,6 +157,112 @@ function sessionHeaders(): Record<string, string> {
   return id ? { "X-Session-Id": id } : {};
 }
 
+/** Max 429 retries for bulk import (each waits up to the rate-limit window). */
+const HUB_429_MAX_RETRIES = 12;
+/** Default wait when server gives no Retry-After (API-key window is 60s). */
+const HUB_429_DEFAULT_WAIT_MS = 62_000;
+/** Never sleep more than this on a single 429 (proxies sometimes send 180+). */
+const HUB_429_MAX_WAIT_MS = 75_000;
+
+/**
+ * Client-side request budget — stay UNDER the server limit so we rarely 429.
+ * Default 80/min is safe for pods still on the old 100/min auth limit.
+ * After deploying 1200/min server budget: `export SYNAP_HUB_RPM=1000`.
+ */
+function hubRpmBudget(): number {
+  const raw = process.env.SYNAP_HUB_RPM;
+  if (raw) {
+    const n = parseInt(raw, 10);
+    if (Number.isFinite(n) && n >= 10) return Math.min(n, 5000);
+  }
+  return 80;
+}
+
+const hubRequestTimestamps: number[] = [];
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+/**
+ * Pace Hub calls so we never burst past hubRpmBudget() in any 60s window.
+ * This is the primary bulk-import fix — reactive 429 sleep is the backup.
+ */
+async function acquireHubSlot(): Promise<void> {
+  const rpm = hubRpmBudget();
+  for (;;) {
+    const now = Date.now();
+    while (
+      hubRequestTimestamps.length > 0 &&
+      hubRequestTimestamps[0]! < now - 60_000
+    ) {
+      hubRequestTimestamps.shift();
+    }
+    if (hubRequestTimestamps.length < rpm) {
+      hubRequestTimestamps.push(now);
+      return;
+    }
+    const wait = hubRequestTimestamps[0]! + 60_000 - now + 25;
+    if (wait > 500) {
+      console.error(
+        `[hub] pacing: ${hubRequestTimestamps.length}/${rpm} req in last 60s — wait ${Math.ceil(wait / 1000)}s`
+      );
+    }
+    await sleep(Math.max(wait, 50));
+  }
+}
+
+/**
+ * Parse Retry-After from headers or a Hub 429 body. Caps at 75s so a bad
+ * proxy header never parks the importer for 3 minutes.
+ */
+function retryAfterMs(res: Response, bodyText: string): number {
+  const h = res.headers.get("retry-after");
+  if (h) {
+    const sec = parseInt(h, 10);
+    if (Number.isFinite(sec) && sec > 0) {
+      return Math.min(Math.max(sec * 1000, 1_000), HUB_429_MAX_WAIT_MS);
+    }
+  }
+  const m = bodyText.match(/retry after\s+(\d+)\s*s/i);
+  if (m) {
+    const sec = parseInt(m[1], 10);
+    if (Number.isFinite(sec) && sec > 0) {
+      return Math.min(Math.max(sec * 1000, 1_000), HUB_429_MAX_WAIT_MS);
+    }
+  }
+  return HUB_429_DEFAULT_WAIT_MS;
+}
+
+/**
+ * fetch with client pacing + automatic 429 backoff.
+ */
+async function hubFetchWithRetry(
+  url: string,
+  init: RequestInit,
+  label: string
+): Promise<Response> {
+  let attempt = 0;
+  for (;;) {
+    await acquireHubSlot();
+    const res = await fetch(url, init);
+    if (res.status !== 429) return res;
+    attempt++;
+    if (attempt > HUB_429_MAX_RETRIES) {
+      const bodyText = await res.text().catch(() => "");
+      throw new Error(
+        `Hub API error (HTTP 429) after ${HUB_429_MAX_RETRIES} retries (${label}): ${bodyText.slice(0, 200)}`
+      );
+    }
+    const bodyText = await res.text().catch(() => "");
+    const wait = retryAfterMs(res, bodyText);
+    console.error(
+      `[hub] 429 rate limit on ${label} — waiting ${Math.ceil(wait / 1000)}s (retry ${attempt}/${HUB_429_MAX_RETRIES})`
+    );
+    await sleep(wait);
+  }
+}
+
 export async function hubGet(
   path: string,
   params: Record<string, string | number | undefined>,
@@ -142,10 +272,14 @@ export async function hubGet(
   for (const [k, v] of Object.entries(params)) {
     if (v !== undefined) url.searchParams.set(k, String(v));
   }
-  const res = await fetch(url.toString(), {
-    headers: { Authorization: `Bearer ${cfg.apiKey}`, ...sessionHeaders() },
-    signal: AbortSignal.timeout(15_000),
-  });
+  const res = await hubFetchWithRetry(
+    url.toString(),
+    {
+      headers: { Authorization: `Bearer ${cfg.apiKey}`, ...sessionHeaders() },
+      signal: AbortSignal.timeout(15_000),
+    },
+    `GET ${path}`
+  );
   if (!res.ok) {
     const body = await res.text().catch(() => "");
     throw new Error(`Hub API error (HTTP ${res.status}): ${body.slice(0, 300)}`);
@@ -162,17 +296,100 @@ export async function hubPost(
   // override (e.g. `cap run` passes 90s).
   timeoutMs = 15_000
 ): Promise<unknown> {
-  const res = await fetch(`${cfg.podUrl}/api/hub${path}`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${cfg.apiKey}`, "Content-Type": "application/json", ...sessionHeaders() },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(timeoutMs),
-  });
+  const res = await hubFetchWithRetry(
+    `${cfg.podUrl}/api/hub${path}`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${cfg.apiKey}`,
+        "Content-Type": "application/json",
+        ...sessionHeaders(),
+      },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(timeoutMs),
+    },
+    `POST ${path}`
+  );
   if (!res.ok) {
     const bodyText = await res.text().catch(() => "");
     throw new Error(`Hub API error (HTTP ${res.status}): ${bodyText.slice(0, 300)}`);
   }
   return res.json();
+}
+
+/**
+ * Multipart POST for Hub doors that accept file uploads (e.g. source-file).
+ * Do NOT set Content-Type — fetch sets the boundary for FormData.
+ *
+ * Note: on 429 retry we cannot re-use a consumed FormData body in all runtimes.
+ * Callers that hit 429 mid-bulk should rebuild FormData — see hubPostMultipartRetryable.
+ */
+export async function hubPostMultipart(
+  path: string,
+  form: FormData,
+  cfg: HubConfig,
+  timeoutMs = 120_000
+): Promise<unknown> {
+  const res = await hubFetchWithRetry(
+    `${cfg.podUrl}/api/hub${path}`,
+    {
+      method: "POST",
+      headers: { Authorization: `Bearer ${cfg.apiKey}`, ...sessionHeaders() },
+      body: form,
+      signal: AbortSignal.timeout(timeoutMs),
+    },
+    `POST multipart ${path}`
+  );
+  if (!res.ok) {
+    const bodyText = await res.text().catch(() => "");
+    throw new Error(`Hub API error (HTTP ${res.status}): ${bodyText.slice(0, 300)}`);
+  }
+  return res.json();
+}
+
+/**
+ * Multipart POST that rebuilds the body on each 429 retry (FormData streams
+ * can only be read once).
+ */
+export async function hubPostMultipartRetryable(
+  path: string,
+  buildForm: () => FormData,
+  cfg: HubConfig,
+  timeoutMs = 120_000
+): Promise<unknown> {
+  let attempt = 0;
+  for (;;) {
+    await acquireHubSlot();
+    const form = buildForm();
+    const res = await fetch(`${cfg.podUrl}/api/hub${path}`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${cfg.apiKey}`, ...sessionHeaders() },
+      body: form,
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (res.status !== 429) {
+      if (!res.ok) {
+        const bodyText = await res.text().catch(() => "");
+        throw new Error(
+          `Hub API error (HTTP ${res.status}): ${bodyText.slice(0, 300)}`
+        );
+      }
+      return res.json();
+    }
+    attempt++;
+    if (attempt > HUB_429_MAX_RETRIES) {
+      const bodyText = await res.text().catch(() => "");
+      throw new Error(
+        `Hub API error (HTTP 429) after ${HUB_429_MAX_RETRIES} retries (POST multipart ${path}): ${bodyText.slice(0, 200)}`
+      );
+    }
+    const bodyText = await res.text().catch(() => "");
+    const wait = retryAfterMs(res, bodyText);
+    console.error(
+      `[hub] 429 rate limit on POST multipart ${path} — waiting ${Math.ceil(wait / 1000)}s (retry ${attempt}/${HUB_429_MAX_RETRIES})`
+    );
+    await sleep(wait);
+  }
 }
 
 export async function hubPatch(path: string, body: unknown, cfg: HubConfig): Promise<unknown> {

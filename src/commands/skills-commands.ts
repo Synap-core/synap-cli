@@ -17,6 +17,7 @@ import os from "node:os";
 import { readFile } from "node:fs/promises";
 import { log } from "../utils/logger.js";
 import { resolveHubConfig, hubGet, hubPost } from "../lib/hub-client.js";
+import { unwrapList } from "../lib/unwrapList.js";
 import type { HubConfig } from "../lib/hub-client.js";
 import ora from "ora";
 
@@ -52,7 +53,7 @@ export async function suggestSkills(topic: string, opts: SkillOpts): Promise<voi
       cfg
     ) as { skills: AgentSkill[]; total: number };
 
-    const skills = result.skills ?? [];
+    const skills = unwrapList<AgentSkill>(result, ["skills"]);
 
     if (skills.length === 0) {
       log.info(`No skills found for topic "${topic}".`);

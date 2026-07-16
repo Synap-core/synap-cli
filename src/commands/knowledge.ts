@@ -175,16 +175,33 @@ interface StructureRelation {
   relationType: string;
 }
 
+// Mirrors @synap/hub-rest-client's StructuredFollowUp/FollowUpChip. Kept local
+// (the CLI resolves the SDK via its built dist); the chip is an OBJECT, not a
+// string — a `string[]` here rendered chips as "[object Object]".
+interface FollowUpChip {
+  label: string;
+  value: string;
+  action?: "link_entity" | "set_property" | "add_relation" | "confirm" | "dismiss";
+  entityId?: string;
+  propertyKey?: string;
+}
+
 interface FollowUp {
   question: string;
-  suggestions?: string[];
+  suggestions?: FollowUpChip[];
 }
 
 interface StructureResult {
   proposals: StructureProposal[];
   relations: StructureRelation[];
-  followUp?: FollowUp | null;
+  // May be a plain string OR a structured { question, suggestions[] } object.
+  followUp?: string | FollowUp | null;
   targetWorkspaceId?: string | null;
+  targetWorkspaceConfidence?: number | null;
+  targetWorkspaceReason?: string | null;
+  targetProjectId?: string | null;
+  targetProjectConfidence?: number | null;
+  targetProjectReason?: string | null;
   degraded?: boolean;
 }
 
@@ -230,12 +247,41 @@ function renderStructureResult(result: StructureResult): void {
     log.dim(`  ${relations.length} relation${relations.length !== 1 ? "s" : ""} will be created.`);
   }
 
-  if (followUp?.question) {
+  if (result.targetWorkspaceId || result.targetProjectId) {
     log.blank();
-    log.info(`Follow-up: ${followUp.question}`);
-    if (followUp.suggestions && followUp.suggestions.length > 0) {
-      for (const s of followUp.suggestions) {
-        log.dim(`  · ${s}`);
+    if (result.targetWorkspaceId) {
+      const conf =
+        typeof result.targetWorkspaceConfidence === "number"
+          ? ` (${Math.round(result.targetWorkspaceConfidence * 100)}%)`
+          : "";
+      log.dim(`  → workspace: ${result.targetWorkspaceId}${conf}`);
+      if (result.targetWorkspaceReason) {
+        log.dim(`      ${result.targetWorkspaceReason.slice(0, 90)}`);
+      }
+    }
+    if (result.targetProjectId) {
+      const conf =
+        typeof result.targetProjectConfidence === "number"
+          ? ` (${Math.round(result.targetProjectConfidence * 100)}%)`
+          : "";
+      log.dim(`  → project:   ${result.targetProjectId}${conf}`);
+      if (result.targetProjectReason) {
+        log.dim(`      ${result.targetProjectReason.slice(0, 90)}`);
+      }
+    }
+  }
+
+  // followUp may be a bare string (previously dropped — the `.question` guard
+  // never matched) or a { question, suggestions[] } object (chips previously
+  // rendered as "[object Object]"). Handle both; render each chip by its label.
+  if (followUp) {
+    const question = typeof followUp === "string" ? followUp : followUp.question;
+    if (question) {
+      log.blank();
+      log.info(`Follow-up: ${question}`);
+      const chips = typeof followUp === "string" ? [] : followUp.suggestions ?? [];
+      for (const c of chips) {
+        log.dim(`  · ${c.label ?? c.value}`);
       }
     }
   }
@@ -262,6 +308,23 @@ async function runSmartCapture(text: string, opts: CaptureOpts): Promise<void> {
   const structureBody: Record<string, unknown> = { userId, text, workspaceId, ...(smartSessionId ? { sessionId: smartSessionId } : {}) };
   const structureRes = await hubPost("/capture/structure", structureBody, cfg) as StructureResult;
 
+  // Explicit --workspace is a deliberate pin: send it as-is, no AI routing hints.
+  // Otherwise forward the AI's routing signal and let the backend decide
+  // (auto = AI target wins over ambient when confidence is high enough AND the
+  // user is a member). Project from structure is forwarded when present.
+  const isExplicitOverride = Boolean(opts.workspace);
+  const routingFields: Record<string, unknown> = isExplicitOverride
+    ? {}
+    : {
+        workspaceRouting: "auto",
+        aiWorkspaceId: structureRes.targetWorkspaceId,
+        aiWorkspaceConfidence: structureRes.targetWorkspaceConfidence,
+        aiWorkspaceReason: structureRes.targetWorkspaceReason,
+      };
+  if (structureRes.targetProjectId) {
+    routingFields.projectId = structureRes.targetProjectId;
+  }
+
   if (opts.json) {
     // --json without --yes: print structure result and exit
     if (!opts.yes) {
@@ -273,6 +336,7 @@ async function runSmartCapture(text: string, opts: CaptureOpts): Promise<void> {
       userId,
       workspaceId,
       ...(smartSessionId ? { sessionId: smartSessionId } : {}),
+      ...routingFields,
       entities: structureRes.proposals,
       relations: structureRes.relations ?? [],
     }, cfg) as Record<string, unknown>;
@@ -312,6 +376,7 @@ async function runSmartCapture(text: string, opts: CaptureOpts): Promise<void> {
     userId,
     workspaceId,
     ...(smartSessionId ? { sessionId: smartSessionId } : {}),
+    ...routingFields,
     entities: structureRes.proposals,
     relations: structureRes.relations ?? [],
   }, cfg) as Record<string, unknown>;
@@ -322,6 +387,9 @@ async function runSmartCapture(text: string, opts: CaptureOpts): Promise<void> {
   log.success(`${created} entr${created !== 1 ? "ies" : "y"} created.`);
   if (executeRes.relationsCreated) {
     log.dim(`  ${executeRes.relationsCreated} relation${Number(executeRes.relationsCreated) !== 1 ? "s" : ""} created.`);
+  }
+  if (executeRes.movedToWorkspace) {
+    log.dim(`  → filed into workspace ${String(executeRes.movedToWorkspace)}`);
   }
 
   const report = await buildSmartLaneReport(executeRes, workspaceId, source, cfg);

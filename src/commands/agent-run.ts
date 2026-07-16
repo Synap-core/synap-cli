@@ -17,6 +17,7 @@
 import chalk from "chalk";
 import ora from "ora";
 import { resolveHubConfig, hubGet, hubPost, hubPatch } from "../lib/hub-client.js";
+import { unwrapList } from "../lib/unwrapList.js";
 import { log } from "../utils/logger.js";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -159,10 +160,8 @@ async function listScheduleEntities(cfg: HubCfg): Promise<ScheduleEntity[]> {
     { q: "[agent-sched]", workspaceId: cfg.workspaceId, limit: "50" },
     cfg
   );
-  const entities = ((res as Record<string, unknown>).entities ?? res) as ScheduleEntity[];
-  return Array.isArray(entities)
-    ? entities.filter((e) => e.name?.startsWith("[agent-sched]"))
-    : [];
+  const entities = unwrapList<ScheduleEntity>(res, ["entities"]);
+  return entities.filter((e) => e.name?.startsWith("[agent-sched]"));
 }
 
 // ── Public: agentRun ──────────────────────────────────────────────────────────

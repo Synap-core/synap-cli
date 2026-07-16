@@ -25,8 +25,14 @@ interface DiscoverProfile {
   displayName: string;
   scope: "pod" | "workspace";
   description?: string | null;
-  properties: DiscoverProperty[];
-  createCommand: string;
+  properties?: DiscoverProperty[];
+  createCommand?: string;
+  /** 'kind' = a primary entity type (person, task, …); 'role' = a hat an
+   *  existing entity can wear (client, partner, …) via `synap facet attach` —
+   *  never created as its own entity. */
+  profileKind?: "kind" | "role";
+  /** For a role profile: which kinds it can attach to (e.g. ["person", "company"]). */
+  applicableKinds?: string[];
 }
 
 interface DiscoverResult {
@@ -42,6 +48,8 @@ export interface DiscoverOpts {
   json?: boolean;
   profiles?: boolean;
   commands?: boolean;
+  summary?: boolean;
+  profileSlugs?: string;
 }
 
 export async function discover(opts: DiscoverOpts): Promise<void> {
@@ -55,11 +63,20 @@ export async function discover(opts: DiscoverOpts): Promise<void> {
       process.exit(1);
     }
 
-    const res = await hubGet(
+    const profileSlugs = opts.profileSlugs
+      ?.split(",")
+      .map((slug) => slug.trim())
+      .filter(Boolean);
+    const res = (await hubGet(
       "/discover",
-      { userId, workspaceId },
+      {
+        userId,
+        workspaceId,
+        ...(opts.summary ? { summary: "true" } : {}),
+        ...(profileSlugs?.length ? { profileSlugs: profileSlugs.join(",") } : {}),
+      },
       cfg
-    ) as DiscoverResult;
+    )) as DiscoverResult;
 
     // JSON mode — dump everything (or filtered slice)
     if (opts.json) {
@@ -78,18 +95,26 @@ export async function discover(opts: DiscoverOpts): Promise<void> {
       log.heading(`Entity profiles (${res.profiles.length})`);
       for (const p of res.profiles) {
         const scope = p.scope === "pod" ? chalk.cyan("pod-wide") : chalk.yellow("workspace");
-        console.log(`\n  ${chalk.bold(p.slug)} ${chalk.dim("·")} ${p.displayName} ${chalk.dim(`[${scope}]`)}`);
+        // A role-profile is never its own entity — it's a hat an existing
+        // entity can wear (attach via `synap facet attach`). Label it
+        // distinctly so it never reads like a primary kind.
+        const kindLabel = p.profileKind === "role"
+          ? chalk.magenta(`[Role${p.applicableKinds?.length ? ` of ${p.applicableKinds.join("/")}` : ""}]`)
+          : chalk.green("[Kind]");
+        console.log(`\n  ${chalk.bold(p.slug)} ${chalk.dim("·")} ${p.displayName} ${kindLabel} ${chalk.dim(`[${scope}]`)}`);
         if (p.description) console.log(`    ${chalk.dim(p.description)}`);
-        if (p.properties.length > 0) {
-          for (const prop of p.properties) {
+        if ((p.properties?.length ?? 0) > 0) {
+          for (const prop of p.properties ?? []) {
             const opts_str = prop.options?.length ? chalk.dim(` (${prop.options.join("|")})`) : "";
             const req = prop.required ? chalk.red("*") : "";
             console.log(`    ${chalk.dim("·")} ${prop.slug}${req}: ${chalk.dim(prop.type)}${opts_str}`);
           }
-        } else {
+        } else if (!opts.summary) {
           console.log(`    ${chalk.dim("(no typed properties)")}`);
         }
-        console.log(`    ${chalk.dim("→")} ${chalk.dim(p.createCommand)}`);
+        if (p.createCommand) {
+          console.log(`    ${chalk.dim("→")} ${chalk.dim(p.createCommand)}`);
+        }
       }
     }
 

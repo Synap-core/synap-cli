@@ -85,13 +85,15 @@ export async function listSessions(
     if (opts.status) params.status = opts.status;
     if (opts.limit) params.limit = parseInt(opts.limit, 10);
 
-    const res = (await hubGet("/focus-sessions", params, cfg)) as {
-      sessions?: unknown[];
-    };
-    const sessions = res?.sessions ?? [];
+    // The Hub REST GET /focus-sessions returns a bare array of sessions.
+    // (Tolerate a { sessions: [...] } envelope too, for forward-compat.)
+    const res = await hubGet("/focus-sessions", params, cfg);
+    const sessions: unknown[] = Array.isArray(res)
+      ? res
+      : ((res as { sessions?: unknown[] })?.sessions ?? []);
 
     if (opts.json) {
-      console.log(JSON.stringify(res, null, 2));
+      console.log(JSON.stringify(sessions, null, 2));
       return;
     }
 

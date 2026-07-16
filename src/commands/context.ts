@@ -15,6 +15,7 @@
 import chalk from "chalk";
 import { log } from "../utils/logger.js";
 import { resolveHubConfig, hubGet, type HubConfig } from "../lib/hub-client.js";
+import { unwrapList } from "../lib/unwrapList.js";
 import { getAgentWorkspaceRouting } from "../lib/pod.js";
 
 export interface ContextOpts {
@@ -44,8 +45,7 @@ async function fetchEntities(
   try {
     if (workspaceId) params.workspaceId = workspaceId;
     const res = await hubGet("/entities", params, cfg) as Record<string, unknown>;
-    const items = (res.entities ?? res.items ?? res) as unknown[];
-    return Array.isArray(items) ? (items as EntityItem[]) : [];
+    return unwrapList<EntityItem>(res, ["entities", "items"]);
   } catch {
     return [];
   }
@@ -60,8 +60,7 @@ async function fetchProposals(
     const params: Record<string, string | number> = { status: "pending", limit };
     if (workspaceId) params.workspaceId = workspaceId;
     const res = await hubGet("/proposals", params, cfg) as Record<string, unknown>;
-    const items = (res.proposals ?? res.items ?? res) as unknown[];
-    return Array.isArray(items) ? (items as EntityItem[]) : [];
+    return unwrapList<EntityItem>(res, ["proposals", "items"]);
   } catch {
     return [];
   }
@@ -76,8 +75,7 @@ async function fetchSessions(
     const params: Record<string, string | number> = { status: "active", limit };
     if (workspaceId) params.workspaceId = workspaceId;
     const res = await hubGet("/focus-sessions", params, cfg) as Record<string, unknown>;
-    const items = (res.sessions ?? res.items ?? res) as unknown[];
-    return Array.isArray(items) ? (items as EntityItem[]) : [];
+    return unwrapList<EntityItem>(res, ["sessions", "items"]);
   } catch {
     return [];
   }
