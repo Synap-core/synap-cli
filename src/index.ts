@@ -1981,4 +1981,22 @@ try {
   process.exit(1);
 }
 
+// Last-resort net. Commander does not await async .action() handlers, so a
+// command that throws without its own catch becomes an unhandled rejection and
+// Node dumps a raw stack trace with dist/ paths at the user — e.g.
+// `synap digest --workspace <inaccessible>` printed the HubError constructor
+// frame. Render it through the one door instead. Commands that already catch
+// and render are unaffected: this only fires when nothing else handled it.
+process.on("unhandledRejection", (err: unknown) => {
+  void (async () => {
+    try {
+      const { renderHubError } = await import("./lib/hub-client.js");
+      renderHubError(err);
+    } catch {
+      console.error(err instanceof Error ? err.message : String(err));
+    }
+    process.exit(1);
+  })();
+});
+
 program.parse();
