@@ -23,7 +23,7 @@ import { fileURLToPath } from "url";
 import { dirname, join } from "path";
 import { log, banner } from "../utils/logger.js";
 import { checkPodHealth, getActivePodConfig, listPodProfiles, getAgentWorkspaceRouting } from "../lib/pod.js";
-import { resolveHubConfig, hubGet } from "../lib/hub-client.js";
+import { resolveHubConfig, hubGet, HubError } from "../lib/hub-client.js";
 import {
   isLoggedIn,
   getStoredToken,
@@ -242,7 +242,12 @@ export async function status(opts: { json?: boolean } = {}): Promise<void> {
       log.dim(`Key saved: ${timeAgo(localConfig.savedAt)}`);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
-      const is401 = msg.includes("401") || msg.toLowerCase().includes("unauthorized");
+      // A non-HubError (transport, DNS) can still be an auth failure worded by
+      // another layer — keep the text check as the fallback arm.
+      const is401 =
+        err instanceof HubError
+          ? err.status === 401
+          : msg.toLowerCase().includes("unauthorized");
       if (is401) {
         const activeName = allProfiles.find((p) => p.active)?.name ?? "default";
         log.warn(chalk.red("Invalid or expired — credentials must be refreshed."));
@@ -290,6 +295,46 @@ export async function status(opts: { json?: boolean } = {}): Promise<void> {
       }
     } catch {
       log.dim("Could not check IS status");
+    }
+  }
+
+  // ── Connectors ─────────────────────────────────────────────────────────
+  // Without this, `synap status` says "All set" on a pod where every OAuth
+  // connect is doomed because no provider is configured server-side.
+  log.heading("Connectors");
+  if (!localConfig) {
+    log.dim("No pod configured.");
+  } else if (!podHealthy) {
+    log.dim("Pod unreachable — cannot check connectors.");
+  } else {
+    try {
+      const cfg = await resolveHubConfig();
+      const params: Record<string, string> = {};
+      if (localConfig.workspaceId) params.workspaceId = localConfig.workspaceId;
+      const res = (await hubGet("/connectors/providers", params, cfg)) as Record<string, unknown>;
+      const providers = (res.providers ?? []) as Array<{ connected?: boolean }>;
+      const nangoError = res.nangoError as
+        | { reason?: string; message?: string }
+        | undefined;
+      // An empty list is only "nothing is declared" when Nango ANSWERED. On a
+      // lookup failure the list is ALSO empty — asserting "none configured"
+      // there is a false diagnosis, and false diagnoses are the whole bug.
+      if (res.nangoStatus === "error") {
+        log.warn(
+          `Could not check connectors (${nangoError?.reason ?? "unknown"}) — connection state is unknown.`
+        );
+        if (nangoError?.message) log.dim(nangoError.message);
+      } else if (providers.length === 0) {
+        log.warn("No providers available — connecting a service will not work.");
+        log.dim("This pod's Nango declares no integrations. They're declared in the Nango dashboard.");
+      } else {
+        const connected = providers.filter((p) => p.connected).length;
+        log.info(
+          `${providers.length} provider${providers.length === 1 ? "" : "s"} available  ${chalk.dim(`[${connected} connected]`)}`
+        );
+      }
+    } catch (err: unknown) {
+      log.warn(`Could not check connectors: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 

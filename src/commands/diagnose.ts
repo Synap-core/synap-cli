@@ -13,7 +13,7 @@
 
 import chalk from "chalk";
 import { log } from "../utils/logger.js";
-import { resolveHubConfig, hubGet } from "../lib/hub-client.js";
+import { resolveHubConfig, hubGet, renderHubError } from "../lib/hub-client.js";
 
 type FlowType = "automation" | "playbook" | "capture" | "session";
 const FLOW_TYPES: FlowType[] = ["automation", "playbook", "capture", "session"];
@@ -97,6 +97,47 @@ function renderDetail(run: UnifiedRun, activity: RunActivityItem[]): void {
   }
 }
 
+interface ProvidersEnvelope {
+  providers?: Array<{ provider: string; displayName?: string; connected?: boolean }>;
+  nangoStatus?: "ok" | "error";
+  nangoError?: { reason?: string; message?: string };
+}
+
+/**
+ * Connector health. A failed connect produces no run, so the run feed alone goes
+ * silent on exactly the failure a user runs `diagnose` to understand.
+ */
+async function renderConnectors(cfg: Awaited<ReturnType<typeof resolveHubConfig>>): Promise<void> {
+  log.heading("Connectors");
+  let res: ProvidersEnvelope;
+  try {
+    res = (await hubGet("/connectors/providers", {}, cfg)) as ProvidersEnvelope;
+  } catch (err) {
+    renderHubError(err);
+    return;
+  }
+
+  if (res.nangoStatus === "error") {
+    console.log(`  ${chalk.red("error")}  ${res.nangoError?.reason ?? "unknown"}`);
+    if (res.nangoError?.message) log.dim(res.nangoError.message);
+    return;
+  }
+
+  const providers = res.providers ?? [];
+  if (providers.length === 0) {
+    console.log(`  ${chalk.yellow("none")}  no integrations declared in this pod's Nango`);
+    log.dim("Declare them in the Nango dashboard — no CLI command can add them.");
+    return;
+  }
+
+  const connected = providers.filter((p) => p.connected).length;
+  console.log(
+    `  ${chalk.green("ok")}  ${providers.length} provider${providers.length === 1 ? "" : "s"} declared  ${chalk.dim(
+      `${connected} connected`
+    )}`
+  );
+}
+
 export async function diagnose(
   runId: string | undefined,
   opts: {
@@ -152,4 +193,7 @@ export async function diagnose(
   }
   log.heading(flow ? `${flow} runs` : "Recent runs");
   renderFeed(res.runs ?? []);
+
+  // Only on the unfiltered feed: a `--flow`-scoped view asked for that flow.
+  if (!flow) await renderConnectors(cfg);
 }

@@ -4,6 +4,147 @@ import { getActivePodConfig, getActiveWorkspaceId, getActiveProjectId, listPodPr
 import { resolveAgentOverride } from "./agents-config.js";
 import { resolveActiveLens } from "./session-lens.js";
 import { HubRestClient } from "@synap/hub-rest-client";
+import { log } from "../utils/logger.js";
+
+/**
+ * A failed Hub call, carrying the structured facts callers need to branch on.
+ *
+ * `message` is HUMAN-READABLE and is what the many `log.error((err as Error).message)`
+ * sites print. It keeps a literal `(HTTP <status>)` token: several call sites
+ * classify errors by matching that substring, and the token is the contract they
+ * depend on. The raw response body is kept on `rawBody` and never spliced into
+ * `message` — a JSON blob truncated mid-object is unreadable and leaks internals.
+ */
+export class HubError extends Error {
+  readonly status: number;
+  readonly code?: string;
+  readonly reason?: string;
+  readonly body?: unknown;
+  readonly rawBody: string;
+  readonly path: string;
+  readonly method: string;
+
+  constructor(init: {
+    message: string;
+    status: number;
+    code?: string;
+    reason?: string;
+    body?: unknown;
+    rawBody: string;
+    path: string;
+    method: string;
+  }) {
+    super(init.message);
+    this.name = "HubError";
+    this.status = init.status;
+    this.code = init.code;
+    this.reason = init.reason;
+    this.body = init.body;
+    this.rawBody = init.rawBody;
+    this.path = init.path;
+    this.method = init.method;
+  }
+}
+
+/** Fallback wording when the body carries no usable message of its own. */
+function statusPhrase(status: number): string {
+  if (status >= 500) return "the pod hit an internal error";
+  switch (status) {
+    case 400:
+      return "the pod rejected the request as invalid";
+    case 401:
+      return "the pod did not accept these credentials";
+    case 403:
+      return "the pod refused this operation";
+    case 404:
+      return "the pod has no such endpoint or record";
+    case 409:
+      return "this conflicts with what the pod already has";
+    case 429:
+      return "the pod is rate limiting this key";
+    default:
+      return "the pod returned an unexpected status";
+  }
+}
+
+/**
+ * Turn a raw error body into { detail, code, reason, parsed }.
+ * JSON bodies contribute only their `message`/`error` field; a JSON body with
+ * neither falls back to the status phrase rather than dumping the object.
+ */
+function readErrorBody(
+  status: number,
+  rawBody: string
+): { detail: string; code?: string; reason?: string; parsed?: unknown } {
+  const trimmed = rawBody.trim();
+  if (!trimmed) return { detail: statusPhrase(status) };
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    // Plain-text body (Hono default, a proxy page): safe to show inline — it is
+    // not structured, so a length cap cannot cut it mid-object.
+    const oneLine = trimmed.replace(/\s+/g, " ");
+    return { detail: oneLine.length > 200 ? `${oneLine.slice(0, 200)}…` : oneLine };
+  }
+
+  if (parsed && typeof parsed === "object") {
+    const o = parsed as Record<string, unknown>;
+    const code = typeof o.code === "string" ? o.code : undefined;
+    const reason = typeof o.reason === "string" ? o.reason : undefined;
+    const detail =
+      typeof o.message === "string" && o.message
+        ? o.message
+        : typeof o.error === "string" && o.error
+          ? o.error
+          : statusPhrase(status);
+    return { detail, code, reason, parsed };
+  }
+  return { detail: statusPhrase(status), parsed };
+}
+
+/** Build the HubError for a non-ok response body. */
+function hubError(
+  method: string,
+  path: string,
+  status: number,
+  rawBody: string,
+  suffix?: string
+): HubError {
+  const { detail, code, reason, parsed } = readErrorBody(status, rawBody);
+  return new HubError({
+    message: `Hub ${method} ${path} failed (HTTP ${status})${suffix ? ` ${suffix}` : ""}: ${detail}`,
+    status,
+    code,
+    reason,
+    body: parsed,
+    rawBody,
+    path,
+    method,
+  });
+}
+
+/**
+ * Print a failed Hub call: its humanized message plus a hint for the classes
+ * where the cause is not obvious from the message alone. Lives here rather than
+ * in utils/logger so the logger stays domain-agnostic and the taxonomy and its
+ * presentation sit in one file.
+ */
+export function renderHubError(err: unknown): void {
+  if (!(err instanceof HubError)) {
+    log.error(err instanceof Error ? err.message : String(err));
+    return;
+  }
+  log.error(err.message);
+  if (err.status >= 500) {
+    log.dim("The pod hit an internal error — this is a fault on the pod side, not in this command.");
+  } else if (err.status === 401 || err.status === 403) {
+    log.dim("The pod rejected this key's credentials or its scopes for this operation.");
+  } else if (err.status === 404) {
+    log.dim("The pod has no such endpoint or record — it may be running an older build.");
+  }
+}
 
 export interface HubConfig {
   podUrl: string;
@@ -242,6 +383,8 @@ async function hubFetchWithRetry(
   init: RequestInit,
   label: string
 ): Promise<Response> {
+  const [labelMethod, ...labelRest] = label.split(" ");
+  const labelPath = labelRest.join(" ");
   let attempt = 0;
   for (;;) {
     await acquireHubSlot();
@@ -250,8 +393,12 @@ async function hubFetchWithRetry(
     attempt++;
     if (attempt > HUB_429_MAX_RETRIES) {
       const bodyText = await res.text().catch(() => "");
-      throw new Error(
-        `Hub API error (HTTP 429) after ${HUB_429_MAX_RETRIES} retries (${label}): ${bodyText.slice(0, 200)}`
+      throw hubError(
+        labelMethod,
+        labelPath,
+        429,
+        bodyText,
+        `after ${HUB_429_MAX_RETRIES} retries`
       );
     }
     const bodyText = await res.text().catch(() => "");
@@ -282,7 +429,7 @@ export async function hubGet(
   );
   if (!res.ok) {
     const body = await res.text().catch(() => "");
-    throw new Error(`Hub API error (HTTP ${res.status}): ${body.slice(0, 300)}`);
+    throw hubError("GET", path, res.status, body);
   }
   return res.json();
 }
@@ -312,7 +459,7 @@ export async function hubPost(
   );
   if (!res.ok) {
     const bodyText = await res.text().catch(() => "");
-    throw new Error(`Hub API error (HTTP ${res.status}): ${bodyText.slice(0, 300)}`);
+    throw hubError("POST", path, res.status, bodyText);
   }
   return res.json();
 }
@@ -342,7 +489,7 @@ export async function hubPostMultipart(
   );
   if (!res.ok) {
     const bodyText = await res.text().catch(() => "");
-    throw new Error(`Hub API error (HTTP ${res.status}): ${bodyText.slice(0, 300)}`);
+    throw hubError("POST multipart", path, res.status, bodyText);
   }
   return res.json();
 }
@@ -370,17 +517,19 @@ export async function hubPostMultipartRetryable(
     if (res.status !== 429) {
       if (!res.ok) {
         const bodyText = await res.text().catch(() => "");
-        throw new Error(
-          `Hub API error (HTTP ${res.status}): ${bodyText.slice(0, 300)}`
-        );
+        throw hubError("POST multipart", path, res.status, bodyText);
       }
       return res.json();
     }
     attempt++;
     if (attempt > HUB_429_MAX_RETRIES) {
       const bodyText = await res.text().catch(() => "");
-      throw new Error(
-        `Hub API error (HTTP 429) after ${HUB_429_MAX_RETRIES} retries (POST multipart ${path}): ${bodyText.slice(0, 200)}`
+      throw hubError(
+        "POST multipart",
+        path,
+        429,
+        bodyText,
+        `after ${HUB_429_MAX_RETRIES} retries`
       );
     }
     const bodyText = await res.text().catch(() => "");
@@ -401,7 +550,7 @@ export async function hubPatch(path: string, body: unknown, cfg: HubConfig): Pro
   });
   if (!res.ok) {
     const bodyText = await res.text().catch(() => "");
-    throw new Error(`Hub API error (HTTP ${res.status}): ${bodyText.slice(0, 300)}`);
+    throw hubError("PATCH", path, res.status, bodyText);
   }
   return res.json();
 }
@@ -414,7 +563,7 @@ export async function hubDelete(path: string, cfg: HubConfig): Promise<unknown> 
   });
   if (!res.ok) {
     const bodyText = await res.text().catch(() => "");
-    throw new Error(`Hub API error (HTTP ${res.status}): ${bodyText.slice(0, 300)}`);
+    throw hubError("DELETE", path, res.status, bodyText);
   }
   return res.json().catch(() => ({}));
 }

@@ -122,8 +122,11 @@ function sectionTools(): void {
   console.log(chalk.dim("  39 Nango-powered integrations: Google, GitHub, Notion, Linear, Slack, Jira, …"));
   console.log("");
   console.log(`  ${chalk.cyan("synap tools list")}            ${chalk.dim("→ available tools + connection status")}`);
-  console.log(`  ${chalk.cyan("synap tools connect [name]")}   ${chalk.dim("→ connect a credential to a tool")}`);
-  console.log(`  ${chalk.cyan("synap tools sync <provider>")}  ${chalk.dim("→ trigger manual sync")}`);
+  console.log(`  ${chalk.cyan("synap cap list")}               ${chalk.dim("→ capabilities, one row per pack, with status + connection")}`);
+  console.log(`  ${chalk.cyan("synap cap connect [name]")}     ${chalk.dim("→ connect a credential to a capability")}`);
+  console.log(`  ${chalk.cyan("synap cap enable [name]")}      ${chalk.dim("→ turn on a capability (ensures connection, picks verbs)")}`);
+  console.log(`  ${chalk.cyan("synap cap show <name>")}        ${chalk.dim("→ status, connection, verbs, next action")}`);
+  console.log(`  ${chalk.cyan("synap cap run <verb>")}         ${chalk.dim("→ launch a verb")}`);
   console.log(`  ${chalk.cyan("synap tools disconnect <provider>")}`);
   console.log(`  ${chalk.cyan("synap tools schema")}          ${chalk.dim("→ supported providers + field mapping (AI context)")}`);
 }

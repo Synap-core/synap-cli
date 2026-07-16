@@ -18,7 +18,7 @@ import ora from "ora";
 import prompts from "prompts";
 import { exec } from "child_process";
 import { readFileSync } from "node:fs";
-import { resolveHubConfig, hubGet, hubPost, hubDelete } from "../lib/hub-client.js";
+import { resolveHubConfig, hubGet, hubPost, hubDelete, HubError, renderHubError } from "../lib/hub-client.js";
 import { unwrapList } from "../lib/unwrapList.js";
 import { log } from "../utils/logger.js";
 
@@ -62,7 +62,9 @@ type CardStatus =
   | "connected"
   | "draft"
   | "ready"
-  | "partial";
+  | "partial"
+  /** The pod can't offer this connection at all (provider not configured server-side). */
+  | "unavailable";
 
 interface CardVerb {
   verbId: string;
@@ -79,7 +81,12 @@ interface CardConnection {
   required: boolean;
   kind: "provider" | "vault" | null;
   provider?: string;
-  state: "connected" | "missing" | "expired";
+  /**
+   * `unavailable` = the pod itself can't offer this provider (not declared /
+   * unreachable / misconfigured). NOT the user's fault, and NOT fixable by
+   * running connect — never route it into an OAuth attempt.
+   */
+  state: "connected" | "missing" | "expired" | "unavailable";
   account?: string;
 }
 
@@ -246,7 +253,7 @@ async function fetchCatalog(
 
 /** True when the thrown hub error is the "catalog door not deployed" 404. */
 function isCatalogMissing(err: unknown): boolean {
-  return err instanceof Error && err.message.includes("HTTP 404");
+  return err instanceof HubError && err.status === 404;
 }
 
 function catalogNeedsDeploy(): void {
@@ -290,6 +297,10 @@ function statusSummary(card: CapabilityCard): string {
     }
     case "needs_connection":
       return "needs connection";
+    case "unavailable":
+      // Not "needs connection" — connecting cannot fix it. The pod can't offer
+      // this provider at all; the fix is server-side, not a user action.
+      return "unavailable on this pod";
     case "partial":
       return `partial · ${n} verb${n === 1 ? "" : "s"}`;
     case "draft":
@@ -300,9 +311,14 @@ function statusSummary(card: CapabilityCard): string {
 }
 
 /** Which display group a card belongs to. */
-function statusGroup(card: CapabilityCard): "usable" | "setup" | "available" {
+function statusGroup(
+  card: CapabilityCard
+): "usable" | "setup" | "available" | "unavailable" {
   if (card.status === "available") return "available";
   if (card.verbs.some((v) => v.runnable)) return "usable";
+  // Never "setup": that heading promises a step, and for an unavailable pack
+  // there is none — the pod can't offer the provider at all.
+  if (card.status === "unavailable") return "unavailable";
   return "setup";
 }
 
@@ -422,9 +438,11 @@ export async function capabilityList(opts: CapListOpts): Promise<void> {
   const usable = cards.filter((c) => statusGroup(c) === "usable");
   const setup = cards.filter((c) => statusGroup(c) === "setup");
   const available = cards.filter((c) => statusGroup(c) === "available");
+  const unavailable = cards.filter((c) => statusGroup(c) === "unavailable");
 
   log.heading(
-    `Capabilities — ${usable.length} ready · ${setup.length} need a step · ${available.length} available`
+    `Capabilities — ${usable.length} ready · ${setup.length} need a step · ${available.length} available` +
+      (unavailable.length > 0 ? ` · ${unavailable.length} unavailable` : "")
   );
 
   if (usable.length > 0) {
@@ -446,6 +464,14 @@ export async function capabilityList(opts: CapListOpts): Promise<void> {
     console.log();
     console.log(chalk.dim.bold("  AVAILABLE — add to install"));
     for (const card of available) renderAvailable(card);
+  }
+
+  // Last, and dim: nothing here is actionable, so it has the weakest claim on
+  // attention. Never under "NEEDS A STEP" — that heading promises a step.
+  if (unavailable.length > 0) {
+    console.log();
+    console.log(chalk.dim.bold("  NOT AVAILABLE HERE — this pod can't offer these"));
+    for (const card of unavailable) renderSetup(card);
   }
 
   console.log();
@@ -522,6 +548,12 @@ async function ensureConnection(
   const conn = card.connection;
   if (!conn || !conn.required || conn.state === "connected") return true;
 
+  // NOTE: `state === "unavailable"` is deliberately NOT short-circuited here.
+  // Resolving the door is not an OAuth attempt — it returns 200 with the pod's
+  // own diagnosis (which of not_declared / unauthenticated / unreachable, and
+  // the remedy). Only OPENING A BROWSER is doomed, and that is already guarded
+  // below. Short-circuiting on the card's cached state costs the real message.
+
   // ── Vault credential — prompt + re-apply WITH params ──────────────────────
   // The correct wiring: apply the template with the credential as a param, so the
   // governed applier stores the secret AND links it into the connection tool's
@@ -586,9 +618,25 @@ async function ensureConnection(
     log.dim(`Connect it directly:  synap cap connect "${card.name}"`);
     return false;
   }
+  if (status === "provider_unavailable") {
+    // The pod can't offer this provider (not declared / unreachable / malformed).
+    // The server message already names the real cause + remedy — print it as-is.
+    // No browser, and no "re-run connect": re-running cannot fix a server-side gap.
+    log.warn(`${card.name} is unavailable on this pod.`);
+    if (res.message) log.dim(String(res.message));
+    return false;
+  }
 
-  // setup_required → open OAuth, then poll.
-  const redirectUrl = String(res.redirectUrl);
+  // setup_required (or any status this CLI doesn't know) → only ever open a
+  // browser when the server actually handed us a URL. An older/newer pod that
+  // returns a status we don't handle must NOT send the user to "undefined".
+  const redirectUrl = typeof res.redirectUrl === "string" && res.redirectUrl.length > 0 ? res.redirectUrl : null;
+  if (!redirectUrl) {
+    log.warn(`Couldn't start a connection for ${res.displayName ?? provider}.`);
+    if (res.message) log.dim(String(res.message));
+    else log.dim(`The pod returned status "${status}" with no connect URL. Check the pod's connector configuration.`);
+    return false;
+  }
   log.heading(`Connect ${res.displayName ?? provider}`);
   console.log();
   console.log(`  Opening OAuth flow in your browser…`);
@@ -701,7 +749,7 @@ async function connectProviderFlow(
   provider: string,
   displayName: string,
   workspaceId: string | undefined
-): Promise<void> {
+): Promise<boolean> {
   const spinner = ora({ text: `Connecting ${chalk.bold(displayName)}…`, color: "cyan" }).start();
   let res: Record<string, unknown>;
   try {
@@ -711,18 +759,21 @@ async function connectProviderFlow(
     spinner.stop();
   } catch (err) {
     spinner.stop();
-    log.error((err as Error).message);
-    return;
+    renderHubError(err);
+    return false;
   }
 
   if (String(res.status) === "connected") {
     log.success(`${res.displayName ?? displayName} is already connected.`);
-    return;
+    return true;
   }
-  const redirectUrl = res.redirectUrl ? String(res.redirectUrl) : null;
+  const redirectUrl =
+    typeof res.redirectUrl === "string" && res.redirectUrl.length > 0 ? res.redirectUrl : null;
   if (!redirectUrl) {
     log.warn(`Couldn't start a connection for ${displayName}.`);
-    return;
+    // Covers provider_unavailable too — the server message names the real cause.
+    if (res.message) log.dim(String(res.message));
+    return false;
   }
   log.heading(`Connect ${displayName}`);
   console.log();
@@ -736,10 +787,11 @@ async function connectProviderFlow(
   const connected = await pollUntilConnected(cfg, provider, workspaceId);
   if (connected) {
     waitSpinner.succeed(chalk.green(`Connected ${chalk.bold(displayName)}!`));
-  } else {
-    waitSpinner.stop();
-    log.dim(`Didn't detect a connection yet — finish the browser flow, then re-run.`);
+    return true;
   }
+  waitSpinner.stop();
+  log.dim(`Didn't detect a connection yet — finish the browser flow, then re-run.`);
+  return false;
 }
 
 // ── Public: capabilityAdd ────────────────────────────────────────────────────
@@ -1193,7 +1245,14 @@ export async function capabilityConnect(
       return;
     }
     const chosen = providers.find((p) => p.id === answer.id)!;
-    await connectProviderFlow(cfg, chosen.id, chosen.displayName ?? chosen.provider, workspaceId);
+    const ok = await connectProviderFlow(
+      cfg,
+      chosen.id,
+      chosen.displayName ?? chosen.provider,
+      workspaceId
+    );
+    // A connect that did not connect must not report success to a caller/script.
+    if (!ok) process.exit(1);
     return;
   }
 
@@ -1226,8 +1285,135 @@ export async function capabilityConnect(
   }
 
   const ok = await ensureConnection(cfg, workspaceId, card);
-  if (ok) {
-    log.dim(`Now enable its verbs:  synap cap enable "${card.name}"`);
+  if (!ok) process.exit(1);
+  log.dim(`Now enable its verbs:  synap cap enable "${card.name}"`);
+}
+
+// ── Public: capabilityDisconnect ─────────────────────────────────────────────
+
+export interface CapDisconnectOpts {
+  workspace?: string;
+  force?: boolean;
+}
+
+interface ConnectorProviderRow {
+  id: string;
+  provider: string;
+  displayName?: string;
+  connected: boolean;
+  connectionId?: string;
+}
+
+async function fetchConnectorProviders(
+  cfg: HubCfg,
+  workspaceId?: string
+): Promise<ConnectorProviderRow[]> {
+  const params: Record<string, string> = {};
+  if (workspaceId) params.workspaceId = workspaceId;
+  const res = (await hubGet("/connectors/providers", params, cfg)) as {
+    providers?: ConnectorProviderRow[];
+  };
+  return res.providers ?? [];
+}
+
+/**
+ * Undo `cap connect`. Accepts a capability name/key OR a raw provider id — the
+ * deprecated `tools disconnect <provider>` forwards here and must keep working
+ * with the provider ids it has always taken.
+ */
+export async function capabilityDisconnect(
+  name: string,
+  opts: CapDisconnectOpts
+): Promise<void> {
+  let cfg: HubCfg;
+  try {
+    cfg = await resolveHubConfig();
+  } catch (err) {
+    log.error((err as Error).message);
+    process.exit(1);
+  }
+
+  const workspaceId = requireWorkspace(opts, cfg);
+
+  const spinner = ora({ text: `Resolving ${chalk.bold(name)}…`, color: "cyan" }).start();
+  let card: CapabilityCard | undefined;
+  try {
+    card = findCard(await fetchCatalog(cfg, workspaceId), name);
+    spinner.stop();
+  } catch (err) {
+    spinner.stop();
+    if (isCatalogMissing(err)) {
+      catalogNeedsDeploy();
+      return;
+    }
+    spinner.fail(chalk.red("Failed to fetch catalog"));
+    renderHubError(err);
+    process.exit(1);
+  }
+
+  // Resolve the provider to disconnect. No card → `name` is a raw provider id.
+  let provider = name;
+  if (card) {
+    if (!card.connection?.required) {
+      log.heading(`${card.name} has no connection to disconnect`);
+      log.dim(`Turn its verbs off instead:  synap cap enable "${card.name}"`);
+      return;
+    }
+    if (card.connection.kind === "vault") {
+      // A stored credential, not an OAuth connection — the provider door would
+      // not touch it. Point at the door that owns vault-backed connections.
+      log.warn(`${card.name} uses a stored credential, not a provider connection.`);
+      log.dim(`See it:     synap cap connections list "${card.name}"`);
+      log.dim(`Remove it:  synap cap connections rm "${card.name}" <id>`);
+      return;
+    }
+    provider = card.connection.provider ?? card.key;
+  }
+
+  const label = card?.name ?? provider;
+
+  let connectionId: string | undefined;
+  try {
+    const providers = await fetchConnectorProviders(cfg, workspaceId);
+    const match = providers.find(
+      (p) =>
+        p.provider === provider ||
+        p.id === provider ||
+        (p.displayName ?? "").toLowerCase() === provider.toLowerCase()
+    );
+    if (!match || !match.connected) {
+      log.error(`${chalk.bold(label)} is not connected.`);
+      process.exit(1);
+    }
+    connectionId = match.connectionId;
+  } catch (err) {
+    renderHubError(err);
+    process.exit(1);
+  }
+
+  if (!opts.force) {
+    const response = await prompts({
+      type: "confirm",
+      name: "confirmed",
+      message: `Disconnect ${label}? This will stop syncing but won't delete imported entities.`,
+      initial: false,
+    });
+    if (!response.confirmed) {
+      log.dim("Cancelled.");
+      return;
+    }
+  }
+
+  const work = ora({ text: `Disconnecting ${label}…`, color: "cyan" }).start();
+  try {
+    await hubPost("/connectors/disconnect", { connectionId, provider }, cfg);
+    work.succeed(
+      chalk.green(`Disconnected ${chalk.bold(label)}. Your imported entities remain intact.`)
+    );
+  } catch (err) {
+    work.fail(chalk.red(`Failed to disconnect ${label}`));
+    renderHubError(err);
+    process.exit(1);
   }
 }
 
@@ -1283,8 +1469,16 @@ export async function capabilityShow(name: string, opts: CapShowOpts): Promise<v
   // Connection
   if (card.connection?.required) {
     const c = card.connection;
+    // `unavailable` is dim, not red: it isn't the user's fault and isn't fixable
+    // by connecting — red reads as "you have a missing credential to go fix".
     const stateColor =
-      c.state === "connected" ? chalk.green : c.state === "expired" ? chalk.yellow : chalk.red;
+      c.state === "connected"
+        ? chalk.green
+        : c.state === "expired"
+          ? chalk.yellow
+          : c.state === "unavailable"
+            ? chalk.dim
+            : chalk.red;
     const parts = [
       c.kind ?? "connection",
       c.provider ? chalk.dim(`(${c.provider})`) : "",
@@ -1386,18 +1580,17 @@ export async function capabilityRun(
     spinner.stop();
   } catch (err) {
     spinner.stop();
-    const msg = (err as Error).message;
-    if (msg.includes("HTTP 404")) {
+    if (err instanceof HubError && err.status === 404) {
       log.error(`Capability not found: ${chalk.bold(verb)}`);
       log.dim("Run `synap capability list` to see available verbs.");
       process.exit(1);
     }
-    if (msg.includes("HTTP 403")) {
+    if (err instanceof HubError && err.status === 403) {
       log.error(`Refused: ${chalk.bold(verb)} is not runnable yet.`);
       log.dim(`Enable it first:  synap capability enable ${verb}`);
       process.exit(1);
     }
-    log.error(msg);
+    renderHubError(err);
     process.exit(1);
   }
 

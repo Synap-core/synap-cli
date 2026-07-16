@@ -6,12 +6,18 @@
 
 import chalk from "chalk";
 import ora from "ora";
-import prompts from "prompts";
 import { exec } from "child_process";
 import { mkdirSync, writeFileSync, existsSync } from "fs";
-import { resolveHubConfig, hubGet, hubPost } from "../lib/hub-client.js";
-import { capabilityList, capabilityConnect } from "./capability.js";
+import { resolveHubConfig, hubGet, hubPost, renderHubError } from "../lib/hub-client.js";
+import { capabilityList, capabilityConnect, capabilityDisconnect } from "./capability.js";
 import { log } from "../utils/logger.js";
+
+/**
+ * The one deprecation line every `tools` subcommand prints. `synap capability`
+ * (alias `cap`) is the single capability root; `tools` survives only as an alias
+ * so existing scripts keep working.
+ */
+const TOOLS_DEPRECATED = "`synap tools` is deprecated — use `synap cap`";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -114,10 +120,10 @@ export interface ConnectOpts {
 }
 
 export async function toolsConnect(service: string | undefined, opts: ConnectOpts): Promise<void> {
-  // `synap tools` is deprecated — capabilities are the one root now. Forward the
-  // named-service connect to `cap connect` (the capability-first equivalent).
+  log.dim(TOOLS_DEPRECATED);
+  // Capabilities are the one root now — forward the named-service connect to
+  // `cap connect` (the capability-first equivalent).
   if (service) {
-    log.dim("`synap tools` is deprecated — use `synap cap`");
     await capabilityConnect(service, { workspace: opts.workspace });
     return;
   }
@@ -160,43 +166,42 @@ export async function toolsConnect(service: string | undefined, opts: ConnectOpt
   }
 
   if (status === "provider_required") {
+    // The door only returns `provider_required` when Nango ANSWERED and declares
+    // at least one integration — "nothing declared" is `provider_unavailable`
+    // now, so this list is never empty. (The old fallback here opened a Connect
+    // session "for all services" against a Nango that declared none: it could
+    // only ever dead-end.)
     const providers = (res.providers ?? []) as Array<{ provider: string; displayName?: string }>;
-    if (providers.length > 0) {
-      log.heading("Which service do you want to connect?");
-      console.log();
-      for (const p of providers) {
-        console.log(`  ${chalk.cyan(p.provider)}${p.displayName ? chalk.dim(`  (${p.displayName})`) : ""}`);
-      }
-      console.log();
-      log.dim(`Run \`synap tools connect <name>\` with one of the above.`);
-      return;
+    log.heading("Which service do you want to connect?");
+    console.log();
+    for (const p of providers) {
+      console.log(`  ${chalk.cyan(p.provider)}${p.displayName ? chalk.dim(`  (${p.displayName})`) : ""}`);
     }
-    // No integrations declared — go straight to a Connect session. The Nango
-    // Connect UI handles discovery (which integrations are available + OAuth).
-    log.info("No integration catalog available — opening Connect session for all services...");
-    try {
-      const sessionBody: Record<string, unknown> = {};
-      if (service) sessionBody.providerId = service;
-      if (workspaceId) sessionBody.workspaceId = workspaceId;
-      const sess = (await hubPost("/connectors/session", sessionBody, cfg)) as Record<string, unknown>;
-      const redirectUrl = String(sess.redirectUrl);
-      log.heading(`Connect to ${service ?? "external services"}`);
-      console.log();
-      console.log(`  Opening OAuth flow in your browser…`);
-      console.log(`  ${chalk.underline(chalk.cyan(redirectUrl))}`);
-      console.log();
-      openBrowser(redirectUrl);
-      log.dim(`Once connected, run \`synap tools list\` to check status.`);
-    } catch (err) {
-      spinner.fail(chalk.red("Failed to start Connect session"));
-      log.error((err as Error).message);
-      process.exit(1);
-    }
+    console.log();
+    log.dim(`Run \`synap cap connect <name>\` with one of the above.`);
     return;
   }
 
-  // setup_required
-  const redirectUrl = String(res.redirectUrl);
+  if (status === "provider_unavailable") {
+    // The pod can't offer this provider (not declared / unreachable / malformed).
+    // The server message already names the real cause + remedy — print it as-is.
+    // No browser, and no "re-run connect": re-running cannot fix a server-side gap.
+    log.warn(`${res.displayName ?? res.provider ?? service ?? "That service"} is unavailable on this pod.`);
+    if (res.message) log.dim(String(res.message));
+    return;
+  }
+
+  // setup_required (or any status this CLI doesn't know) → only ever open a
+  // browser when the server actually handed us a URL. An older/newer pod that
+  // returns a status we don't handle must NOT send the user to "undefined".
+  const redirectUrl =
+    typeof res.redirectUrl === "string" && res.redirectUrl.length > 0 ? res.redirectUrl : null;
+  if (!redirectUrl) {
+    log.warn(`Couldn't start a connection for ${res.displayName ?? res.provider ?? service ?? "that service"}.`);
+    if (res.message) log.dim(String(res.message));
+    else log.dim(`The pod returned status "${status}" with no connect URL. Check the pod's connector configuration.`);
+    return;
+  }
   const matchedProvider = res.provider ? String(res.provider) : service;
   log.heading(`Connect to ${res.displayName ?? res.provider ?? service ?? "external service"}`);
   console.log();
@@ -235,8 +240,8 @@ export interface ListOpts {
 }
 
 export async function toolsList(opts: ListOpts): Promise<void> {
-  // `synap tools` is deprecated — `cap list` is the one capability-first view.
-  log.dim("`synap tools` is deprecated — use `synap cap`");
+  // `cap list` is the one capability-first view.
+  log.dim(TOOLS_DEPRECATED);
   await capabilityList({ json: opts.json, workspace: opts.workspace });
 }
 
@@ -247,6 +252,8 @@ export interface SyncOpts {
 }
 
 export async function toolsSync(provider: string, opts: SyncOpts): Promise<void> {
+  log.dim(TOOLS_DEPRECATED);
+
   let cfg: HubCfg;
   try {
     cfg = await resolveHubConfig();
@@ -257,36 +264,33 @@ export async function toolsSync(provider: string, opts: SyncOpts): Promise<void>
 
   const workspaceId = opts.workspace ?? cfg.workspaceId;
 
-  // Find the connectionId
-  let connectionId: string | undefined;
   try {
     const providers = await fetchProviders(cfg, workspaceId);
     const match = providers.find(
       (p) => p.provider === provider || p.id === provider || p.displayName.toLowerCase() === provider.toLowerCase()
     );
     if (!match || !match.connected) {
-      log.error(`Provider ${chalk.bold(provider)} is not connected. Run: ${chalk.cyan(`synap connect ${provider}`)}`);
+      log.error(`Provider ${chalk.bold(provider)} is not connected. Run: ${chalk.cyan(`synap cap connect ${provider}`)}`);
       process.exit(1);
     }
-    connectionId = match.connectionId;
   } catch (err) {
-    log.error((err as Error).message);
+    renderHubError(err);
     process.exit(1);
   }
 
-  // NOTE: the old background-import "sync" (POST /connectors/actions, a Nango
-  // named action) was retired — self-hosted Nango doesn't run Actions, and the
-  // model moved to ON-DEMAND access: a connected service is reached live via its
-  // capability skills (e.g. gmail_search), not pre-imported on a schedule. So
-  // there is nothing to trigger here; report honestly instead of calling a dead
-  // route and faking success.
-  void connectionId;
-  log.heading(`${chalk.bold(provider)} is connected — no manual sync needed`);
+  // The old background-import "sync" (POST /connectors/actions, a Nango named
+  // action) was retired — self-hosted Nango doesn't run Actions, and the model
+  // moved to ON-DEMAND access: a connected service is reached live via its
+  // capability skills (e.g. gmail_search), not pre-imported on a schedule. There
+  // is nothing to trigger, so this command does nothing and must not claim
+  // otherwise.
+  log.warn(`\`synap tools sync\` does nothing and will be removed.`);
   log.dim(
-    "Connected services are queried on demand by your agent's capabilities " +
-      "(e.g. search, list, send), not imported on a schedule."
+    `${provider} is connected. Connected services are queried on demand by your ` +
+      "agent's capabilities (e.g. search, list, send), not imported on a schedule — " +
+      "so there is no sync to trigger."
   );
-  log.dim(`Run \`synap tools list\` to see connection status.`);
+  log.dim(`See connection status:  synap cap list`);
 }
 
 // ── Public: toolsDisconnect ──────────────────────────────────────────────
@@ -297,56 +301,10 @@ export interface DisconnectOpts {
 }
 
 export async function toolsDisconnect(provider: string, opts: DisconnectOpts): Promise<void> {
-  let cfg: HubCfg;
-  try {
-    cfg = await resolveHubConfig();
-  } catch (err) {
-    log.error((err as Error).message);
-    process.exit(1);
-  }
-
-  const workspaceId = opts.workspace ?? cfg.workspaceId;
-
-  // Find the connectionId
-  let connectionId: string | undefined;
-  try {
-    const providers = await fetchProviders(cfg, workspaceId);
-    const match = providers.find(
-      (p) => p.provider === provider || p.id === provider || p.displayName.toLowerCase() === provider.toLowerCase()
-    );
-    if (!match || !match.connected) {
-      log.error(`Provider ${chalk.bold(provider)} is not connected.`);
-      process.exit(1);
-    }
-    connectionId = match.connectionId;
-  } catch (err) {
-    log.error((err as Error).message);
-    process.exit(1);
-  }
-
-  if (!opts.force) {
-    const response = await prompts({
-      type: "confirm",
-      name: "confirmed",
-      message: `Disconnect ${provider}? This will stop syncing but won't delete imported entities.`,
-      initial: false,
-    });
-    if (!response.confirmed) {
-      log.dim("Cancelled.");
-      return;
-    }
-  }
-
-  const spinner = ora({ text: `Disconnecting ${provider}…`, color: "cyan" }).start();
-
-  try {
-    await hubPost("/connectors/disconnect", { connectionId, provider }, cfg);
-    spinner.succeed(chalk.green(`Disconnected ${chalk.bold(provider)}. Your imported entities remain intact.`));
-  } catch (err) {
-    spinner.fail(chalk.red(`Failed to disconnect ${provider}`));
-    log.error((err as Error).message);
-    process.exit(1);
-  }
+  log.dim(TOOLS_DEPRECATED);
+  // `cap disconnect` resolves a capability name OR a raw provider id, so the
+  // provider ids this command has always taken keep resolving.
+  await capabilityDisconnect(provider, { workspace: opts.workspace, force: opts.force });
 }
 
 // ── Public: toolsSchema ──────────────────────────────────────────────────
@@ -450,16 +408,22 @@ function buildToolSchemaMarkdown(schema: Record<string, unknown>, podUrl: string
     ``,
     `\`\`\`bash`,
     `# Connect a service (opens OAuth flow in browser)`,
-    `synap connect [service]`,
-    `synap connect google`,
-    `synap connect github`,
+    `synap cap connect [name]`,
+    `synap cap connect "Nango — Google Workspace"`,
     ``,
-    `# List all tools and connection status`,
+    `# List all capabilities and connection status`,
     `synap tools list`,
     `synap tools list --json`,
+    `synap cap list`,
     ``,
-    `# Check a connected provider (services are queried on demand, not pre-imported)`,
-    `synap tools sync <provider>`,
+    `# Show one capability's detail (status, connection, verbs, next action)`,
+    `synap cap show <name>`,
+    ``,
+    `# Turn on a capability (ensures its connection, then picks verbs)`,
+    `synap cap enable [name]`,
+    ``,
+    `# Run a verb`,
+    `synap cap run <verb>`,
     ``,
     `# Disconnect a provider`,
     `synap tools disconnect <provider>`,
@@ -482,8 +446,8 @@ function buildToolSchemaMarkdown(schema: Record<string, unknown>, podUrl: string
     ``,
     `## AI Usage Flow`,
     ``,
-    `1. Check connected services: \`synap tools list\``,
-    `2. Connect a new service: \`synap connect <provider>\` — opens OAuth in browser`,
+    `1. Check connected services: \`synap cap list\``,
+    `2. Connect a new service: \`synap cap connect <name>\` — opens OAuth in browser`,
     `3. Connecting installs the service's capability skills (e.g. gmail_send, gmail_search)`,
     `4. The agent reaches the service ON DEMAND through those skills (no scheduled import)`,
     `5. Ask naturally: \`synap ask "any emails from Acme this week?"\``,

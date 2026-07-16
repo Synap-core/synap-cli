@@ -9,7 +9,7 @@ import ora from "ora";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
-import { resolveHubConfig, hubPost } from "../lib/hub-client.js";
+import { resolveHubConfig, hubPost, HubError, renderHubError } from "../lib/hub-client.js";
 import { log } from "../utils/logger.js";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -64,12 +64,11 @@ export async function keysRotate(opts: KeysRotateOpts): Promise<void> {
     spinner.succeed(chalk.green("Key rotated"));
   } catch (err) {
     spinner.fail(chalk.red("Failed to rotate key"));
-    const msg = (err as Error).message;
-    if (msg.includes("HTTP 401") || msg.includes("HTTP 403")) {
+    if (err instanceof HubError && (err.status === 401 || err.status === 403)) {
       log.error("The current key is already invalid (401/403).");
       log.dim("Run `synap init` to fully re-provision your credentials.");
     } else {
-      log.error(msg);
+      renderHubError(err);
     }
     process.exit(1);
   }

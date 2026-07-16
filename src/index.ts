@@ -1813,6 +1813,16 @@ capability
   });
 
 capability
+  .command("disconnect <name>")
+  .description("Disconnect a capability's service — accepts a capability name or a provider id")
+  .option("--workspace <id>", "Workspace context")
+  .option("--force", "Skip confirmation")
+  .action(async (name: string, opts) => {
+    const { capabilityDisconnect } = await import("./commands/capability.js");
+    await capabilityDisconnect(name, opts);
+  });
+
+capability
   .command("show <name>")
   .description("Show one capability's full detail: status, connection, verbs, next action")
   .option("--json", "Output as JSON")
