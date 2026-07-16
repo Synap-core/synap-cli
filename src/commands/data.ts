@@ -1,6 +1,6 @@
 import chalk from "chalk";
 import { log } from "../utils/logger.js";
-import { resolveHubConfig, resolveUserId, hubGet, hubPost, hubPatch, readActiveSessionId } from "../lib/hub-client.js";
+import { resolveHubConfig, resolveUserId, hubGet, hubPost, hubPatch, readActiveSessionId, renderHubError } from "../lib/hub-client.js";
 import { unwrapList } from "../lib/unwrapList.js";
 import { reportWrite } from "../lib/capture-lane.js";
 
@@ -172,7 +172,7 @@ export async function orient(opts: BaseOpts): Promise<void> {
     log.dim("  synap session start      the day-to-day move");
     log.dim("A project spans workspaces; a workspace spans projects.");
   } catch (e) {
-    console.error(chalk.red("Error: " + (e as Error).message));
+    renderHubError(e);
     process.exit(1);
   }
 }
@@ -216,7 +216,7 @@ export async function useWorkspace(
     const scopeNote = claudeSession ? chalk.dim(" (this session)") : "";
     log.success(`Now in workspace: ${chalk.bold(String(match.name ?? match.id))} ${chalk.dim(String(match.id ?? ""))}${scopeNote}`);
   } catch (e) {
-    console.error(chalk.red("Error: " + (e as Error).message));
+    renderHubError(e);
     process.exit(1);
   }
 }
@@ -243,7 +243,7 @@ export async function listWorkspaces(opts: BaseOpts): Promise<void> {
       log.info(`${String(w.name ?? w.id)}  ${chalk.dim(String(w.id ?? ""))}`);
     }
   } catch (e) {
-    console.error(chalk.red("Error: " + (e as Error).message));
+    renderHubError(e);
     process.exit(1);
   }
 }
@@ -319,7 +319,7 @@ export async function listEntities(
       log.dim(`${list.length} shown (hit --limit ${limit}; more may exist — raise --limit or filter with --profile)`);
     }
   } catch (e) {
-    console.error(chalk.red("Error: " + (e as Error).message));
+    renderHubError(e);
     process.exit(1);
   }
 }
@@ -353,7 +353,7 @@ export async function getEntity(
       }
     }
   } catch (e) {
-    console.error(chalk.red("Error: " + (e as Error).message));
+    renderHubError(e);
     process.exit(1);
   }
 }
@@ -564,7 +564,7 @@ export async function askKnowledge(
       log.blank();
     }
   } catch (e) {
-    console.error(chalk.red("Error: " + (e as Error).message));
+    renderHubError(e);
     process.exit(1);
   }
 }
@@ -646,7 +646,7 @@ export async function createEntity(
     // passed the raw response, including `resolution`, through reportWrite).
     if (!opts.json) reportResolution(entity);
   } catch (e) {
-    console.error(chalk.red("Error: " + (e as Error).message));
+    renderHubError(e);
     process.exit(1);
   }
 }
@@ -695,7 +695,7 @@ export async function listProfiles(
       log.info(`${chalk.bold(String(p.slug ?? ""))}  ${kindLabel}  ${chalk.dim(scope)}${desc}`);
     }
   } catch (e) {
-    console.error(chalk.red("Error: " + (e as Error).message));
+    renderHubError(e);
     process.exit(1);
   }
 }
@@ -726,7 +726,7 @@ export async function createRelation(
       json: opts.json,
     });
   } catch (e) {
-    console.error(chalk.red("Error: " + (e as Error).message));
+    renderHubError(e);
     process.exit(1);
   }
 }
@@ -764,7 +764,7 @@ export async function updateEntity(
       log.dim(`→ ${impact.length} connected entit${impact.length === 1 ? "y" : "ies"} may be affected: ${impact.map(refLabel).join(", ")}`);
     }
   } catch (e) {
-    console.error(chalk.red("Error: " + (e as Error).message));
+    renderHubError(e);
     process.exit(1);
   }
 }

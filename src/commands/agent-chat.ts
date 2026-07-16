@@ -32,6 +32,7 @@ import {
   hubGet,
   hubPost,
   type HubConfig,
+  renderHubError,
 } from "../lib/hub-client.js";
 import { unwrapList } from "../lib/unwrapList.js";
 import { log } from "../utils/logger.js";
@@ -273,7 +274,7 @@ export async function agentAsk(opts: AgentAskOpts): Promise<void> {
     if (opts.json) {
       console.log(JSON.stringify({ ok: false, error: (e as Error).message }, null, 2));
     } else {
-      console.error(chalk.red("Error: " + (e as Error).message));
+      renderHubError(e);
     }
     process.exit(1);
   }
@@ -293,7 +294,7 @@ export async function agentChat(opts: AgentChatOpts): Promise<void> {
     workspaceId = await resolveWorkspace(cfg, opts.workspace);
     channelId = await resolveChannel(cfg, userId, workspaceId, opts);
   } catch (e) {
-    console.error(chalk.red("Error: " + (e as Error).message));
+    renderHubError(e);
     process.exit(1);
     return;
   }

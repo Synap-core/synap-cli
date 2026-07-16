@@ -26,6 +26,7 @@ import {
   hubPost,
   readActiveSessionId,
   type HubConfig,
+  renderHubError,
 } from "../lib/hub-client.js";
 import { getAgentWorkspaceRouting } from "../lib/pod.js";
 import {
@@ -538,7 +539,7 @@ export async function captureKnowledge(opts: CaptureOpts): Promise<void> {
       console.log("  " + formatLaneLine(report));
     }
   } catch (e) {
-    console.error(chalk.red("Error: " + (e as Error).message));
+    renderHubError(e);
     process.exit(1);
   }
 }
@@ -573,7 +574,7 @@ export async function provisionAgentWorkspace(
       log.dim(`  Set as active workspace (synap use ${res.workspaceId})`);
     }
   } catch (e) {
-    console.error(chalk.red("Error: " + (e as Error).message));
+    renderHubError(e);
     process.exit(1);
   }
 }

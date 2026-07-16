@@ -20,8 +20,8 @@ import {
   removeAgent,
   type AgentProfile,
 } from "../lib/agents-config.js";
-import { getActivePodConfig, listPodProfiles, RESERVED_AGENT_TYPES } from "../lib/pod.js";
-import { resolveHubConfig, hubGet, hubPost } from "../lib/hub-client.js";
+import { getActivePodConfig, listPodProfiles, podNotFoundMessage, RESERVED_AGENT_TYPES } from "../lib/pod.js";
+import { resolveHubConfig, hubGet, hubPost, renderHubError } from "../lib/hub-client.js";
 import { unwrapList } from "../lib/unwrapList.js";
 import { provisionAgentKey, enrollAgentIfNeeded, configureAgentContext } from "../lib/targets.js";
 
@@ -169,8 +169,7 @@ export async function agentsAdd(opts: {
   // Validate pod profile exists
   const allProfiles = listPodProfiles();
   if (!allProfiles.find((p) => p.name === podName)) {
-    log.error(`Pod profile '${podName}' not found.`);
-    if (allProfiles.length > 0) log.dim("Available: " + allProfiles.map((p) => p.name).join(", "));
+    log.error(podNotFoundMessage(podName));
     return;
   }
 
@@ -332,7 +331,7 @@ export async function agentsCreate(opts: {
     : allProfiles.find((p) => p.active) ?? allProfiles[0];
 
   if (!activePod) {
-    log.error(`Pod profile '${opts.pod}' not found.`);
+    log.error(podNotFoundMessage(String(opts.pod)));
     return;
   }
 
@@ -343,7 +342,7 @@ export async function agentsCreate(opts: {
   try {
     workspaceId = await resolveWorkspace(cfg, opts.workspace);
   } catch (err) {
-    log.error(err instanceof Error ? err.message : String(err));
+    renderHubError(err);
     return;
   }
 
@@ -490,7 +489,7 @@ export async function agentsCreate(opts: {
     }
   } catch (err) {
     spinner.fail("Agent creation failed.");
-    log.error(err instanceof Error ? err.message : String(err));
+    renderHubError(err);
   }
 }
 
@@ -539,7 +538,7 @@ export async function agentsRotateKey(nameOrId: string): Promise<void> {
   const allProfiles = listPodProfiles();
   const podProfile = allProfiles.find((p) => p.name === profile.podName);
   if (!podProfile) {
-    log.error(`Pod profile '${profile.podName}' not found.`);
+    log.error(podNotFoundMessage(profile.podName));
     return;
   }
 

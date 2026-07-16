@@ -1,6 +1,6 @@
 import chalk from "chalk";
 import { log } from "../utils/logger.js";
-import { resolveHubConfig, hubPost } from "../lib/hub-client.js";
+import { resolveHubConfig, hubPost, renderHubError } from "../lib/hub-client.js";
 import { type BaseOpts } from "./data.js";
 
 /** The bits of a capability.run proposal's post-execution `data` this command reads. */
@@ -73,7 +73,7 @@ export async function approveProposal(
     if (opts.reason) log.dim(`  reason: ${opts.reason}`);
     printOutcome(res.proposal as Record<string, unknown> | undefined);
   } catch (e) {
-    console.error(chalk.red("Error: " + (e as Error).message));
+    renderHubError(e);
     process.exit(1);
   }
 }
@@ -101,7 +101,7 @@ export async function rejectProposal(
     log.success(`Proposal rejected  ${chalk.dim(id.slice(0, 8))}`);
     if (opts.reason) log.dim(`  reason: ${opts.reason}`);
   } catch (e) {
-    console.error(chalk.red("Error: " + (e as Error).message));
+    renderHubError(e);
     process.exit(1);
   }
 }

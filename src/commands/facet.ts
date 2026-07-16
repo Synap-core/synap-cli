@@ -1,6 +1,6 @@
 import chalk from "chalk";
 import { log } from "../utils/logger.js";
-import { resolveHubConfig, hubGet, hubPost, hubDelete, type HubConfig } from "../lib/hub-client.js";
+import { resolveHubConfig, hubGet, hubPost, hubDelete, type HubConfig, renderHubError } from "../lib/hub-client.js";
 import { resolveActiveLens } from "../lib/session-lens.js";
 import { reportWrite } from "../lib/capture-lane.js";
 import { unwrapList } from "../lib/unwrapList.js";
@@ -84,7 +84,7 @@ export async function attachFacet(
       json: opts.json,
     });
   } catch (e) {
-    console.error(chalk.red("Error: " + (e as Error).message));
+    renderHubError(e);
     process.exit(1);
   }
 }
@@ -109,7 +109,7 @@ export async function listFacets(entityId: string, opts: BaseOpts): Promise<void
 
     renderRoles(facets);
   } catch (e) {
-    console.error(chalk.red("Error: " + (e as Error).message));
+    renderHubError(e);
     process.exit(1);
   }
 }
@@ -151,7 +151,7 @@ export async function detachFacet(
       json: opts.json,
     });
   } catch (e) {
-    console.error(chalk.red("Error: " + (e as Error).message));
+    renderHubError(e);
     process.exit(1);
   }
 }

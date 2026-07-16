@@ -8,6 +8,7 @@ import {
   writeActiveSessionId,
   clearActiveSessionId,
   readActiveSessionId,
+  renderHubError,
 } from "../lib/hub-client.js";
 import { type BaseOpts } from "./data.js";
 
@@ -64,7 +65,7 @@ export async function startSession(
     // Print the ID alone on a final line so scripts can grab it easily
     console.log(id);
   } catch (e) {
-    console.error(chalk.red("Error: " + (e as Error).message));
+    renderHubError(e);
     process.exit(1);
   }
 }
@@ -117,7 +118,7 @@ export async function listSessions(
       );
     }
   } catch (e) {
-    console.error(chalk.red("Error: " + (e as Error).message));
+    renderHubError(e);
     process.exit(1);
   }
 }
@@ -156,7 +157,7 @@ export async function getSession(
     if (s.correlationId)
       console.log(`  CorrelationId: ${chalk.dim(String(s.correlationId))}`);
   } catch (e) {
-    console.error(chalk.red("Error: " + (e as Error).message));
+    renderHubError(e);
     process.exit(1);
   }
 }
@@ -192,7 +193,7 @@ export async function updateSession(
     if (opts.progress !== undefined) log.dim(`  progress → ${opts.progress}%`);
     if (opts.status) log.dim(`  status → ${opts.status}`);
   } catch (e) {
-    console.error(chalk.red("Error: " + (e as Error).message));
+    renderHubError(e);
     process.exit(1);
   }
 }
@@ -287,7 +288,7 @@ export async function closeSession(
 
     log.success(`Session closed  ${chalk.dim(id.slice(0, 8))}`);
   } catch (e) {
-    console.error(chalk.red("Error: " + (e as Error).message));
+    renderHubError(e);
     process.exit(1);
   }
 }

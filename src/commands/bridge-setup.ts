@@ -43,6 +43,7 @@ import {
   listPodProfiles,
   getSurfacePodName,
   setSurfacePod,
+  podNotFoundError,
 } from "../lib/pod.js";
 import {
   enrollAgentIfNeeded,
@@ -138,11 +139,7 @@ async function resolveBridgePod(
   let chosen: { name: string; config: typeof profiles[number]["config"] } | undefined;
   if (opts.pod) {
     chosen = profiles.find((p) => p.name === opts.pod);
-    if (!chosen) {
-      throw new Error(
-        `Pod profile '${opts.pod}' not found. Saved profiles: ${profiles.map((p) => p.name).join(", ")}`,
-      );
-    }
+    if (!chosen) throw podNotFoundError(opts.pod);
   } else if (profiles.length === 1) {
     chosen = profiles[0];
     log.dim(`Using your only saved pod profile: ${chosen.name}`);

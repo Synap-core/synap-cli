@@ -21,7 +21,7 @@ import prompts from "prompts";
 import ora from "ora";
 import chalk from "chalk";
 import { log, banner } from "../utils/logger.js";
-import { checkPodHealth, listPodProfiles, type LocalPodConfig } from "../lib/pod.js";
+import { checkPodHealth, listPodProfiles, podNotFoundMessage, type LocalPodConfig } from "../lib/pod.js";
 import {
   installForTarget,
   isTargetName,
@@ -138,8 +138,7 @@ async function resolvePodFromProfiles(preferredName?: string): Promise<LocalPodC
   if (preferredName) {
     const match = profiles.find((p) => p.name === preferredName);
     if (!match) {
-      log.error(`Pod profile '${preferredName}' not found.`);
-      log.dim("Available: " + profiles.map((p) => p.name).join(", "));
+      log.error(podNotFoundMessage(preferredName));
       return null;
     }
     log.info(`Using pod: ${chalk.bold(match.name)}  ${chalk.dim(match.config.podUrl)}`);

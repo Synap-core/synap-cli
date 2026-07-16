@@ -21,6 +21,8 @@ import {
   setSurfacePod,
   removePodProfile,
   listPodProfiles,
+  podNotFoundMessage,
+  SURFACE_NAMES,
   type SurfaceName,
 } from "../lib/pod.js";
 import {
@@ -205,17 +207,47 @@ const SURFACE_LABELS: Record<string, string> = {
   goose: "Goose",
 };
 
+/**
+ * The surfaces `applySurfaceConfig` can actually write. SURFACE_NAMES is much
+ * wider (it is the SSOT for every connect/agent identity), and `pods use
+ * --surface <one of the others>` used to print success and do nothing.
+ *
+ * Typing applySurfaceConfig to this narrow union makes its switch exhaustive, so
+ * adding a surface here without a writer is a COMPILE error, not a silent no-op.
+ */
+const SUPPORTED_USE_SURFACES = ["claude-desktop", "cursor", "claude-code", "raycast"] as const;
+type SupportedUseSurface = (typeof SUPPORTED_USE_SURFACES)[number];
+
+function isSupportedUseSurface(s: SurfaceName): s is SupportedUseSurface {
+  return (SUPPORTED_USE_SURFACES as readonly string[]).includes(s);
+}
+
+/**
+ * Raycast's support dir — its presence is our "is Raycast installed" gate.
+ * Mirrors `raycastSupportDir()` in lib/targets.ts, which is private to that file.
+ */
+function raycastSupportDir(): string {
+  return path.join(os.homedir(), "Library", "Application Support", "com.raycast.macos");
+}
+
 export async function podsUse(name: string, opts: { surface?: SurfaceName } = {}): Promise<void> {
   const profiles = listPodProfiles();
   const profile = profiles.find((p) => p.name === name);
   if (!profile) {
-    log.error(`Pod profile '${name}' not found.`);
-    if (profiles.length > 0) log.dim("Available: " + profiles.map((p) => p.name).join(", "));
+    log.error(podNotFoundMessage(name));
     return;
   }
   const podConfig = profile.config;
 
   if (opts.surface) {
+    if (!isSupportedUseSurface(opts.surface)) {
+      log.error(`'${opts.surface}' is not a surface \`pods use\` can configure.`);
+      log.dim(`Supported: ${SUPPORTED_USE_SURFACES.join(", ")}`);
+      log.dim(
+        `Other surfaces (${SURFACE_NAMES.filter((s) => !isSupportedUseSurface(s)).join(", ")}) are configured via: synap connect --target=<surface>`
+      );
+      return;
+    }
     // Per-surface switch — only update that surface's config
     try {
       setSurfacePod(opts.surface, name);
@@ -267,8 +299,18 @@ export async function podsUse(name: string, opts: { surface?: SurfaceName } = {}
     updated.push("Claude Code");
   }
 
-  // Raycast reads ~/.synap/config.json directly — activePod update is sufficient.
-  updated.push("Raycast");
+  // Raycast reads ~/.synap/config.json directly — the activePod update above is
+  // sufficient. Still gate on Raycast being installed: claiming we updated it on
+  // a machine that has never run Raycast is a lie (same existsSync gate as above).
+  if (fs.existsSync(raycastSupportDir())) {
+    updated.push("Raycast");
+  }
+
+  if (updated.length === 0) {
+    log.warn("Active pod switched, but no agent surface is configured on this machine.");
+    log.dim("Connect one with: synap connect --target=<surface>");
+    return;
+  }
 
   log.success(`Updated: ${updated.join(", ")}`);
   log.dim("Restart any open agents to apply the new pod.");
@@ -277,7 +319,7 @@ export async function podsUse(name: string, opts: { surface?: SurfaceName } = {}
 }
 
 /** Apply a pod config to a single surface's external config file. */
-async function applySurfaceConfig(surface: SurfaceName, podConfig: import("../lib/pod.js").LocalPodConfig): Promise<void> {
+async function applySurfaceConfig(surface: SupportedUseSurface, podConfig: import("../lib/pod.js").LocalPodConfig): Promise<void> {
   switch (surface) {
     case "claude-desktop": {
       const p = TARGETS["claude-desktop"].mcpConfigPath?.();
@@ -322,6 +364,12 @@ async function applySurfaceConfig(surface: SurfaceName, podConfig: import("../li
       // Raycast reads ~/.synap/config.json directly — surfaces entry is enough.
       log.success("Raycast surface preference saved.");
       break;
+    default: {
+      // Exhaustiveness guard: widening SUPPORTED_USE_SURFACES without adding a
+      // writer above fails to compile here, instead of silently doing nothing.
+      const _exhaustive: never = surface;
+      return _exhaustive;
+    }
   }
 }
 
@@ -368,8 +416,7 @@ export async function podsRemove(name: string): Promise<void> {
   const profile = profiles.find((p) => p.name === name);
 
   if (!profile) {
-    log.error(`Pod profile '${name}' not found.`);
-    if (profiles.length > 0) log.dim("Available: " + profiles.map((p) => p.name).join(", "));
+    log.error(podNotFoundMessage(name));
     return;
   }
 
@@ -436,7 +483,7 @@ export async function podsReconnect(name?: string): Promise<void> {
 
   const profile = profiles.find((p) => p.name === targetName);
   if (!profile) {
-    log.error(`Pod profile '${targetName}' not found.`);
+    log.error(podNotFoundMessage(targetName));
     return;
   }
 

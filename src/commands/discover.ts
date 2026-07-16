@@ -10,7 +10,7 @@
 
 import chalk from "chalk";
 import { log } from "../utils/logger.js";
-import { resolveHubConfig, resolveUserId, hubGet } from "../lib/hub-client.js";
+import { resolveHubConfig, resolveUserId, hubGet, renderHubError } from "../lib/hub-client.js";
 
 interface DiscoverProperty {
   slug: string;
@@ -128,7 +128,7 @@ export async function discover(opts: DiscoverOpts): Promise<void> {
 
     console.log(`\n${chalk.dim(res.hint)}`);
   } catch (e) {
-    console.error(chalk.red("Error: " + (e as Error).message));
+    renderHubError(e);
     process.exit(1);
   }
 }

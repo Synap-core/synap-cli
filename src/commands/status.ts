@@ -23,7 +23,7 @@ import { fileURLToPath } from "url";
 import { dirname, join } from "path";
 import { log, banner } from "../utils/logger.js";
 import { checkPodHealth, getActivePodConfig, listPodProfiles, getAgentWorkspaceRouting } from "../lib/pod.js";
-import { resolveHubConfig, hubGet, HubError } from "../lib/hub-client.js";
+import { resolveHubConfig, hubGet, HubError, renderHubError } from "../lib/hub-client.js";
 import {
   isLoggedIn,
   getStoredToken,
@@ -117,17 +117,22 @@ export async function status(opts: { json?: boolean } = {}): Promise<void> {
   const creds = getStoredToken();
 
   // ── Account ────────────────────────────────────────────────────────────
+  // This is the synap.live CONTROL-PLANE account (~/.synap/credentials.json) —
+  // a different identity axis from the pod API key (~/.synap/config.json). A
+  // self-hosted pod added via `synap pods add` never has one, and works fine
+  // without it. Never render the two axes as one, and never gate Next Steps on
+  // this one — that's what made a healthy pod report "Not logged in".
   log.heading("Account");
-  let loggedIn = false;
+  let cpLinked = false;
   if (creds) {
-    log.success(`Logged in as ${chalk.bold(creds.email)}`);
+    log.success(`Logged in as ${chalk.bold(creds.email)} ${chalk.dim("(synap.live)")}`);
     log.dim(`User ID: ${creds.userId}`);
 
     if (isTokenLocallyExpired(creds)) {
       // Local expiry passed — confirm with CP before declaring dead.
       const authStatus = await isLoggedIn();
       if (authStatus.valid) {
-        loggedIn = true;
+        cpLinked = true;
         log.dim(`Token refreshed (valid until ${new Date(creds.expiresAt).toLocaleDateString()})`);
       } else {
         log.warn("Session expired — run: synap login");
@@ -135,7 +140,7 @@ export async function status(opts: { json?: boolean } = {}): Promise<void> {
       }
     } else {
       // Token is locally fresh — validate in background but don't block on failure.
-      loggedIn = true;
+      cpLinked = true;
       const authStatus = await isLoggedIn().catch(() => ({ valid: false as const }));
       if (authStatus.valid) {
         log.dim(`Token valid until ${new Date(creds.expiresAt).toLocaleDateString()}`);
@@ -144,7 +149,8 @@ export async function status(opts: { json?: boolean } = {}): Promise<void> {
       }
     }
   } else {
-    log.dim("Not logged in. Run: synap login");
+    log.dim("Account (synap.live): not linked — optional for self-hosted pods.");
+    log.dim("Needed only for managed pods, provisioning and the marketplace. Link with: synap login");
   }
 
   // ── Pod ────────────────────────────────────────────────────────────────
@@ -230,6 +236,9 @@ export async function status(opts: { json?: boolean } = {}): Promise<void> {
   // means the key was rotated or revoked — surface the exact reconnect command
   // so the user doesn't have to diagnose it themselves.
   log.heading("API Key");
+  // null = not checked (no pod / unreachable), true/false = probe result.
+  // This is the axis Next Steps cares about — not the synap.live account.
+  let keyValid: boolean | null = null;
   if (!localConfig) {
     log.dim("No pod configured.");
   } else if (!podHealthy) {
@@ -238,6 +247,7 @@ export async function status(opts: { json?: boolean } = {}): Promise<void> {
     try {
       const cfg = await resolveHubConfig();
       await hubGet("/users/me", {}, cfg);
+      keyValid = true;
       log.success("Valid");
       log.dim(`Key saved: ${timeAgo(localConfig.savedAt)}`);
     } catch (err: unknown) {
@@ -249,11 +259,13 @@ export async function status(opts: { json?: boolean } = {}): Promise<void> {
           ? err.status === 401
           : msg.toLowerCase().includes("unauthorized");
       if (is401) {
+        keyValid = false;
         const activeName = allProfiles.find((p) => p.active)?.name ?? "default";
         log.warn(chalk.red("Invalid or expired — credentials must be refreshed."));
         log.info(`Run: ${chalk.cyan(`synap login --reconnect ${activeName}`)}`);
       } else {
-        log.dim(`Could not verify key: ${msg}`);
+        // Verification itself failed — key state stays unknown, not invalid.
+        renderHubError(err);
       }
     }
   }
@@ -271,16 +283,20 @@ export async function status(opts: { json?: boolean } = {}): Promise<void> {
       }).catch(() => null);
       if (isRes?.ok) {
         const isData = (await isRes.json()) as {
-          intelligenceService?: { status: string; url?: string } | null;
+          intelligenceService?: { status?: string; url?: string } | null;
           credentialsValid?: boolean | null;
+          connectionState?: string;
+          connectionIssueDetails?: Array<{ code: string; hint: string }>;
         };
         const svc = isData?.intelligenceService;
+        // Gate on `status`, not on the object: an older pod still ships a
+        // status-less `{}` here, and that is "not provisioned", not a status.
         if (svc?.status === "active") {
           log.success(`Active${svc.url ? ` (${svc.url})` : ""}`);
           if (isData.credentialsValid === false) {
             log.warn("Credentials invalid — reprovision from Browser Settings");
           }
-        } else if (svc) {
+        } else if (svc?.status) {
           log.warn(`Status: ${svc.status}`);
         } else {
           log.dim("Not provisioned");
@@ -289,6 +305,13 @@ export async function status(opts: { json?: boolean } = {}): Promise<void> {
           } else {
             log.dim("Sign in with 'synap login' then run 'synap init' to provision");
           }
+        }
+        // The pod already computed a next action for each issue — show it.
+        if (isData.connectionState && isData.connectionState !== "connected") {
+          log.dim(`Connection state: ${isData.connectionState}`);
+        }
+        for (const issue of isData.connectionIssueDetails ?? []) {
+          log.warn(`${issue.code}: ${issue.hint}`);
         }
       } else {
         log.dim("Could not check (pod may not support this endpoint)");
@@ -379,14 +402,25 @@ export async function status(opts: { json?: boolean } = {}): Promise<void> {
 
   // ── Next Steps ─────────────────────────────────────────────────────────
   log.heading("Next Steps");
-  if (!loggedIn) {
-    log.info("Login: synap login");
-  } else if (!localConfig) {
+  // Ordered by the POD axis — reachability, then config, then key validity.
+  // The synap.live account is deliberately NOT a gate here: a self-hosted pod
+  // is fully usable without one, and telling that user to `synap login` is the
+  // misleading advice this section used to lead with.
+  if (!podUrl) {
     log.info("Connect to a pod: synap init");
+    log.dim("Already have a self-hosted pod? Add it with: synap pods add");
   } else if (!podHealthy) {
     log.info("Pod unreachable — check it with: ./synap health on the pod host");
+  } else if (!localConfig) {
+    log.info("Pod reachable but no local config — run: synap init");
+  } else if (keyValid === false) {
+    const activeName = allProfiles.find((p) => p.active)?.name ?? "default";
+    log.info(`Refresh pod credentials: ${chalk.cyan(`synap login --reconnect ${activeName}`)}`);
   } else {
     log.dim("All set. Run: synap context   to load workspace context for an agent session.");
+    if (!cpLinked) {
+      log.dim("Optional: link a synap.live account with 'synap login' for managed pods + marketplace.");
+    }
   }
 
   log.blank();

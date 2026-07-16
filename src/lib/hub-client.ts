@@ -46,6 +46,155 @@ export class HubError extends Error {
   }
 }
 
+/**
+ * A Hub call that never reached the pod — DNS, TCP, TLS or timeout.
+ *
+ * Peer of {@link HubError}: same rendering path, same `message`-is-human-readable
+ * rule. It deliberately carries NO `(HTTP <status>)` token — there was no HTTP
+ * response, and the call sites that classify on that substring must not match.
+ * `podUrl` is the origin we failed to reach and `hint` is the next action.
+ */
+export class HubNetworkError extends Error {
+  /** Transport code we classified on: ENOTFOUND, ECONNREFUSED, TIMEOUT, TLS… */
+  readonly code: string;
+  readonly podUrl: string;
+  readonly path: string;
+  readonly method: string;
+  /** The one thing the user should do next. Rendered under the message. */
+  readonly hint: string;
+
+  constructor(init: {
+    message: string;
+    code: string;
+    podUrl: string;
+    path: string;
+    method: string;
+    hint: string;
+    cause?: unknown;
+  }) {
+    super(init.message, { cause: init.cause });
+    this.name = "HubNetworkError";
+    this.code = init.code;
+    this.podUrl = init.podUrl;
+    this.path = init.path;
+    this.method = init.method;
+    this.hint = init.hint;
+  }
+}
+
+/** Origin of a Hub URL, for messages. Falls back to the raw URL if unparseable. */
+function originOf(url: string): string {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return url;
+  }
+}
+
+/**
+ * Classify a transport-layer failure into a HubNetworkError.
+ *
+ * undici throws a bare `TypeError: fetch failed` and hangs the real cause off
+ * `err.cause`, so a wrong DNS name, a pod that is down, an offline laptop and a
+ * fired AbortSignal.timeout are otherwise indistinguishable at the call sites
+ * that print `err.message`. This is the one place that taxonomy lives.
+ */
+function networkError(
+  err: unknown,
+  url: string,
+  method: string,
+  path: string,
+  timeoutMs: number
+): HubNetworkError {
+  const podUrl = originOf(url);
+  const name = err instanceof Error ? err.name : "";
+  const cause = (err as { cause?: unknown } | null)?.cause;
+  const rawCode =
+    cause && typeof cause === "object" && typeof (cause as { code?: unknown }).code === "string"
+      ? ((cause as { code: string }).code)
+      : "";
+
+  const fail = (code: string, detail: string, hint: string) =>
+    new HubNetworkError({
+      message: `Hub ${method} ${path} failed: ${detail}`,
+      code,
+      podUrl,
+      path,
+      method,
+      hint,
+      cause: err,
+    });
+
+  // AbortSignal.timeout() rejects with a TimeoutError; undici's own connect/header
+  // timeouts surface as codes. Both mean the same thing to the user.
+  if (
+    name === "TimeoutError" ||
+    name === "AbortError" ||
+    rawCode === "ETIMEDOUT" ||
+    rawCode === "UND_ERR_CONNECT_TIMEOUT" ||
+    rawCode === "UND_ERR_HEADERS_TIMEOUT"
+  ) {
+    return fail(
+      "TIMEOUT",
+      `no response from the pod at ${podUrl} after ${Math.round(timeoutMs / 1000)}s`,
+      "The pod accepted the connection but did not answer in time — it may be overloaded or mid-restart. Check it with: synap status",
+    );
+  }
+
+  if (rawCode === "ENOTFOUND" || rawCode === "EAI_AGAIN") {
+    return fail(
+      rawCode,
+      `could not resolve the pod host for ${podUrl}`,
+      rawCode === "EAI_AGAIN"
+        ? "DNS lookup failed temporarily — check this machine is online, then retry."
+        : "That hostname does not resolve — check the pod URL is spelled right. See your saved pods with: synap pods list",
+    );
+  }
+
+  if (rawCode === "ECONNREFUSED") {
+    return fail(
+      rawCode,
+      `the pod at ${podUrl} refused the connection`,
+      "Nothing is listening there — check the pod is up, or switch to another saved pod with: synap pods use <name>",
+    );
+  }
+
+  if (rawCode === "ECONNRESET" || rawCode === "EPIPE") {
+    return fail(
+      rawCode,
+      `the connection to ${podUrl} was dropped mid-request`,
+      "The pod or a proxy in front of it closed the connection — retry, then check the pod with: synap status",
+    );
+  }
+
+  if (rawCode === "ENETUNREACH" || rawCode === "EHOSTUNREACH") {
+    return fail(
+      rawCode,
+      `no network route to ${podUrl}`,
+      "This machine cannot reach that host — check you are online and on the right network/VPN.",
+    );
+  }
+
+  if (rawCode.startsWith("CERT_") || rawCode.startsWith("ERR_TLS_") || rawCode.includes("SELF_SIGNED") || rawCode === "UNABLE_TO_VERIFY_LEAF_SIGNATURE" || rawCode === "DEPTH_ZERO_SELF_SIGNED_CERT") {
+    return fail(
+      rawCode,
+      `the TLS certificate of ${podUrl} was rejected (${rawCode})`,
+      "The pod's certificate is not trusted by this machine — check the pod URL and its TLS setup.",
+    );
+  }
+
+  // Unknown transport failure: still name the pod and the underlying code rather
+  // than letting a bare "fetch failed" through.
+  const detail = rawCode
+    ? `could not reach the pod at ${podUrl} (${rawCode})`
+    : `could not reach the pod at ${podUrl}`;
+  return fail(
+    rawCode || "NETWORK",
+    detail,
+    "Check this machine is online and the pod URL is right: synap pods list",
+  );
+}
+
 /** Fallback wording when the body carries no usable message of its own. */
 function statusPhrase(status: number): string {
   if (status >= 500) return "the pod hit an internal error";
@@ -132,17 +281,25 @@ function hubError(
  * presentation sit in one file.
  */
 export function renderHubError(err: unknown): void {
+  // Hints use log.hint (stderr), not log.dim (stdout): a hint belongs to the
+  // error it explains, and splitting one message across two streams means
+  // `2>/dev/null` shows a bare hint with no error above it.
+  if (err instanceof HubNetworkError) {
+    log.error(err.message);
+    log.hint(err.hint);
+    return;
+  }
   if (!(err instanceof HubError)) {
     log.error(err instanceof Error ? err.message : String(err));
     return;
   }
   log.error(err.message);
   if (err.status >= 500) {
-    log.dim("The pod hit an internal error — this is a fault on the pod side, not in this command.");
+    log.hint("The pod hit an internal error — this is a fault on the pod side, not in this command.");
   } else if (err.status === 401 || err.status === 403) {
-    log.dim("The pod rejected this key's credentials or its scopes for this operation.");
+    log.hint("The pod rejected this key's credentials or its scopes for this operation.");
   } else if (err.status === 404) {
-    log.dim("The pod has no such endpoint or record — it may be running an older build.");
+    log.hint("The pod has no such endpoint or record — it may be running an older build.");
   }
 }
 
@@ -377,18 +534,27 @@ function retryAfterMs(res: Response, bodyText: string): number {
 
 /**
  * fetch with client pacing + automatic 429 backoff.
+ *
+ * `timeoutMs` mirrors the AbortSignal.timeout() the caller put on `init` — it is
+ * only used to say how long we waited when the signal fires.
  */
 async function hubFetchWithRetry(
   url: string,
   init: RequestInit,
-  label: string
+  label: string,
+  timeoutMs: number
 ): Promise<Response> {
   const [labelMethod, ...labelRest] = label.split(" ");
   const labelPath = labelRest.join(" ");
   let attempt = 0;
   for (;;) {
     await acquireHubSlot();
-    const res = await fetch(url, init);
+    let res: Response;
+    try {
+      res = await fetch(url, init);
+    } catch (err) {
+      throw networkError(err, url, labelMethod, labelPath, timeoutMs);
+    }
     if (res.status !== 429) return res;
     attempt++;
     if (attempt > HUB_429_MAX_RETRIES) {
@@ -425,7 +591,8 @@ export async function hubGet(
       headers: { Authorization: `Bearer ${cfg.apiKey}`, ...sessionHeaders() },
       signal: AbortSignal.timeout(15_000),
     },
-    `GET ${path}`
+    `GET ${path}`,
+    15_000
   );
   if (!res.ok) {
     const body = await res.text().catch(() => "");
@@ -455,7 +622,8 @@ export async function hubPost(
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(timeoutMs),
     },
-    `POST ${path}`
+    `POST ${path}`,
+    timeoutMs
   );
   if (!res.ok) {
     const bodyText = await res.text().catch(() => "");
@@ -485,7 +653,8 @@ export async function hubPostMultipart(
       body: form,
       signal: AbortSignal.timeout(timeoutMs),
     },
-    `POST multipart ${path}`
+    `POST multipart ${path}`,
+    timeoutMs
   );
   if (!res.ok) {
     const bodyText = await res.text().catch(() => "");
@@ -508,12 +677,18 @@ export async function hubPostMultipartRetryable(
   for (;;) {
     await acquireHubSlot();
     const form = buildForm();
-    const res = await fetch(`${cfg.podUrl}/api/hub${path}`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${cfg.apiKey}`, ...sessionHeaders() },
-      body: form,
-      signal: AbortSignal.timeout(timeoutMs),
-    });
+    const url = `${cfg.podUrl}/api/hub${path}`;
+    let res: Response;
+    try {
+      res = await fetch(url, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${cfg.apiKey}`, ...sessionHeaders() },
+        body: form,
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+    } catch (err) {
+      throw networkError(err, url, "POST multipart", path, timeoutMs);
+    }
     if (res.status !== 429) {
       if (!res.ok) {
         const bodyText = await res.text().catch(() => "");
@@ -542,12 +717,18 @@ export async function hubPostMultipartRetryable(
 }
 
 export async function hubPatch(path: string, body: unknown, cfg: HubConfig): Promise<unknown> {
-  const res = await fetch(`${cfg.podUrl}/api/hub${path}`, {
-    method: "PATCH",
-    headers: { Authorization: `Bearer ${cfg.apiKey}`, "Content-Type": "application/json", ...sessionHeaders() },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(15_000),
-  });
+  const url = `${cfg.podUrl}/api/hub${path}`;
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      method: "PATCH",
+      headers: { Authorization: `Bearer ${cfg.apiKey}`, "Content-Type": "application/json", ...sessionHeaders() },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(15_000),
+    });
+  } catch (err) {
+    throw networkError(err, url, "PATCH", path, 15_000);
+  }
   if (!res.ok) {
     const bodyText = await res.text().catch(() => "");
     throw hubError("PATCH", path, res.status, bodyText);
@@ -556,11 +737,17 @@ export async function hubPatch(path: string, body: unknown, cfg: HubConfig): Pro
 }
 
 export async function hubDelete(path: string, cfg: HubConfig): Promise<unknown> {
-  const res = await fetch(`${cfg.podUrl}/api/hub${path}`, {
-    method: "DELETE",
-    headers: { Authorization: `Bearer ${cfg.apiKey}`, ...sessionHeaders() },
-    signal: AbortSignal.timeout(15_000),
-  });
+  const url = `${cfg.podUrl}/api/hub${path}`;
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${cfg.apiKey}`, ...sessionHeaders() },
+      signal: AbortSignal.timeout(15_000),
+    });
+  } catch (err) {
+    throw networkError(err, url, "DELETE", path, 15_000);
+  }
   if (!res.ok) {
     const bodyText = await res.text().catch(() => "");
     throw hubError("DELETE", path, res.status, bodyText);

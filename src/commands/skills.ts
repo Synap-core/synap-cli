@@ -5,6 +5,7 @@ import {
   hubGet,
   hubPatch,
   hubPost,
+  renderHubError,
 } from "../lib/hub-client.js";
 import { unwrapList } from "../lib/unwrapList.js";
 import { type BaseOpts } from "./data.js";
@@ -159,7 +160,7 @@ export async function gatherContext(opts: SkillOpts & { session: string }): Prom
     log.dim(`Session: ${sessionId.slice(0, 8)}`);
     log.dim(`Report: ${contextReport.length} bytes`);
   } catch (e) {
-    console.error(chalk.red("Error: " + (e as Error).message));
+    renderHubError(e);
     process.exit(1);
   }
 }

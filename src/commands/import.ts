@@ -31,6 +31,7 @@ import {
   hubPost,
   readActiveSessionId,
   type HubConfig,
+  renderHubError,
 } from "../lib/hub-client.js";
 import { unwrapList } from "../lib/unwrapList.js";
 import { formatLaneLine, resolveWorkspaceName, type LaneReport } from "../lib/capture-lane.js";
@@ -563,7 +564,7 @@ export async function importData(inputs: string[], opts: ImportOpts): Promise<vo
     const anyFailed = outcomes.some((o) => o.status === "failed");
     if (anyFailed) process.exit(1);
   } catch (e) {
-    console.error(chalk.red("Error: " + (e as Error).message));
+    renderHubError(e);
     process.exit(1);
   }
 }

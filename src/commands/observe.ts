@@ -1,6 +1,6 @@
 import chalk from "chalk";
 import { log } from "../utils/logger.js";
-import { resolveHubConfig, hubGet, hubPost } from "../lib/hub-client.js";
+import { resolveHubConfig, hubGet, hubPost, renderHubError } from "../lib/hub-client.js";
 import { unwrapList } from "../lib/unwrapList.js";
 import { reportWrite } from "../lib/capture-lane.js";
 import { type BaseOpts, parseLimit } from "./data.js";
@@ -64,7 +64,7 @@ export async function observeWrite(
       json: opts.json,
     });
   } catch (e) {
-    console.error(chalk.red("Error: " + (e as Error).message));
+    renderHubError(e);
     process.exit(1);
   }
 }
@@ -116,7 +116,7 @@ export async function observeRecall(
       log.info(`${category}  ${chalk.dim(`conf:${confidence}`)}  ${observation}`);
     }
   } catch (e) {
-    console.error(chalk.red("Error: " + (e as Error).message));
+    renderHubError(e);
     process.exit(1);
   }
 }

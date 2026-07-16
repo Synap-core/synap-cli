@@ -138,6 +138,24 @@ function writeMultiConfig(config: MultiPodConfig): void {
 
 // ─── Public API ───────────────────────────────────────────────────────────────
 
+/**
+ * The ONE "pod profile not found" message.
+ *
+ * Names the profile that missed, the pods that DO exist, and the command that
+ * adds one. Every site that fails to resolve a profile name renders through
+ * this — a bare `not found` leaves the user with no next move, and the known-pods
+ * list is usually the whole answer (a typo).
+ */
+export function podNotFoundMessage(name: string): string {
+  const known = Object.keys(readMultiConfig().pods).join(", ") || "(none configured)";
+  return `Pod profile '${name}' not found. Known pods: ${known}. Add one with: synap pods add`;
+}
+
+/** Throwing form of {@link podNotFoundMessage}. */
+export function podNotFoundError(name: string): Error {
+  return new Error(podNotFoundMessage(name));
+}
+
 /** Get the pod config for a specific surface, falling back to the global activePod. */
 export function getSurfacePod(surface: SurfaceName): LocalPodConfig | null {
   const config = readMultiConfig();
@@ -155,7 +173,7 @@ export function getSurfacePodName(surface: SurfaceName): string | null {
 /** Assign a pod to a specific surface without changing the global activePod. */
 export function setSurfacePod(surface: SurfaceName, podName: string): LocalPodConfig {
   const config = readMultiConfig();
-  if (!config.pods[podName]) throw new Error(`Pod profile '${podName}' not found`);
+  if (!config.pods[podName]) throw podNotFoundError(podName);
   config.surfaces = config.surfaces ?? {};
   config.surfaces[surface] = podName;
   writeMultiConfig(config);
@@ -197,12 +215,7 @@ export function getPodOverride(): LocalPodConfig | null {
 export function setPodOverrideByName(name: string): LocalPodConfig {
   const config = readMultiConfig();
   const pod = config.pods[name];
-  if (!pod) {
-    const known = Object.keys(config.pods).join(", ") || "(none configured)";
-    throw new Error(
-      `Pod profile '${name}' not found. Known pods: ${known}. Add one with: synap pods add`
-    );
-  }
+  if (!pod) throw podNotFoundError(name);
   _podOverride = pod;
   return pod;
 }
@@ -248,7 +261,7 @@ export function addPodProfile(name: string, podConfig: LocalPodConfig): void {
 
 export function setActivePod(name: string): LocalPodConfig {
   const config = readMultiConfig();
-  if (!config.pods[name]) throw new Error(`Pod profile '${name}' not found`);
+  if (!config.pods[name]) throw podNotFoundError(name);
   config.activePod = name;
   writeMultiConfig(config);
   return config.pods[name];
@@ -324,7 +337,7 @@ export function clearActiveWorkspaceId(): void {
 
 export function removePodProfile(name: string): void {
   const config = readMultiConfig();
-  if (!config.pods[name]) throw new Error(`Pod profile '${name}' not found`);
+  if (!config.pods[name]) throw podNotFoundError(name);
   delete config.pods[name];
   if (config.activePod === name) {
     const remaining = Object.keys(config.pods);
@@ -551,7 +564,14 @@ export async function enableOpenClawAddonManaged(
     return url === podUrl || podUrl.includes(p.subdomain);
   });
 
-  if (!pod) throw new Error("Pod not found on your account");
+  // Not a local profile miss — this is a lookup against the pods the Control
+  // Plane says you own, so podNotFoundError's "synap pods add" is the wrong fix.
+  if (!pod) {
+    const owned = pods.map((p) => p.customDomain ?? `${p.subdomain}.${appDomain}`).join(", ") || "(none)";
+    throw new Error(
+      `No pod matching ${podUrl} on your account. Pods on this account: ${owned}.`
+    );
+  }
 
   const provRes = await fetch(`${CP_URL}/openclaw/provision`, {
     method: "POST",

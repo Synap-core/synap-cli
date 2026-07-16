@@ -1,6 +1,6 @@
 import chalk from "chalk";
 import { log } from "../utils/logger.js";
-import { resolveHubConfig, resolveUserId, hubGet } from "../lib/hub-client.js";
+import { resolveHubConfig, resolveUserId, hubGet, renderHubError } from "../lib/hub-client.js";
 import { unwrapList } from "../lib/unwrapList.js";
 import { fetchFacets, renderRoles } from "./facet.js";
 import { type BaseOpts, parseLimit } from "./data.js";
@@ -78,7 +78,7 @@ export async function showEntity(
       log.dim("No relations. Link with: synap create relation --source <id> --target <id> --type <type>");
     }
   } catch (e) {
-    console.error(chalk.red("Error: " + (e as Error).message));
+    renderHubError(e);
     process.exit(1);
   }
 }
@@ -131,7 +131,7 @@ export async function listProposals(
       if (reviewUrl) log.dim(`  Review: ${reviewUrl}`);
     }
   } catch (e) {
-    console.error(chalk.red("Error: " + (e as Error).message));
+    renderHubError(e);
     process.exit(1);
   }
 }
@@ -202,7 +202,7 @@ export async function browseEntities(
       log.dim(`Showing ${entities.length} of ${total}. Add --limit ${limit * 2} to see more.`);
     }
   } catch (e) {
-    console.error(chalk.red("Error: " + (e as Error).message));
+    renderHubError(e);
     process.exit(1);
   }
 }
