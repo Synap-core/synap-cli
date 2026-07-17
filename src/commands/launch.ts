@@ -13,10 +13,16 @@
  *   3. Disclose the FULL plan (incl. dependencies) → confirm
  *   4. For each template → POST /packages/apply → report the real outcome
  *
- * Discovery is LOCAL: the bundled @synap-core/workspace-templates package is the
- * single source of truth (the pod exposes no GET /packages). It carries the
- * private, CLI-only templates too — those can never appear in the CP marketplace,
- * which is why this command is the only installer for them.
+ * Discovery is TWO-SOURCE, merged through the ONE `mergeCatalog` door:
+ *   • PUBLIC templates ship BUNDLED in @synap-core/workspace-templates — always
+ *     present, zero network, offline.
+ *   • PRIVATE templates live in the control plane behind the user's login and are
+ *     fetched from `GET /api/packages/mine` (Bearer). Logged out or CP-unreachable
+ *     degrades HONESTLY to bundled-only + a "private needs login" note — it never
+ *     fails open empty.
+ * The bundle still carries the private YAMLs today, so a private template that
+ * arrives as a remote entry is installed from the identical, offline bundled
+ * definition; once a later wave drops those YAMLs it is installed from the CP.
  *
  * Dependencies are resolved SERVER-side: `toPackageDefinition` carries the
  * template's `dependencies` into the body, and the apply endpoint ensures each
@@ -30,13 +36,20 @@
  * live until the proposal is approved, so we never print "ready" for it.
  */
 
+import { createRequire } from "node:module";
+import path from "node:path";
+import fs from "node:fs";
 import prompts from "prompts";
 import ora from "ora";
 import chalk from "chalk";
 import {
+  listPublicTemplates,
   listWorkspaceTemplates,
+  mergeCatalog,
   toPackageDefinition,
   type WorkspaceYaml,
+  type CatalogEntry,
+  type MergeCatalogResult,
 } from "@synap-core/workspace-templates";
 import { log, banner } from "../utils/logger.js";
 import {
@@ -47,6 +60,12 @@ import {
 } from "../lib/hub-client.js";
 import { writeGovernance } from "../lib/capture-lane.js";
 import { unwrapList } from "../lib/unwrapList.js";
+import { getStoredToken } from "../lib/auth.js";
+import {
+  fetchRemoteCatalog,
+  fetchPackageDefinition,
+  type RemoteCatalog,
+} from "../lib/cp-packages.js";
 
 // Provisioning a template writes profiles, properties, views, bento layouts and
 // seed entities in one call — `life-os` alone carries 21 profiles and 25 views.
@@ -54,45 +73,107 @@ import { unwrapList } from "../lib/unwrapList.js";
 // so this door opts into the longer budget (same precedent as `cap run`).
 const APPLY_TIMEOUT_MS = 120_000;
 
-// ── Template catalog (local, instant, offline) ───────────────────────────────
+// ── Template catalog (bundled public + CP private, merged) ───────────────────
 
-/** Every bundled template, keyed by slug. */
-function catalog(): Map<string, WorkspaceYaml> {
-  return new Map(listWorkspaceTemplates().map((t) => [t.meta.slug, t]));
+/**
+ * THIS client's bundled `@synap-core/workspace-templates` version. The merge
+ * door compares it against each CP row's `sourcePackage.version` to decide
+ * whether the bundle is stale. Resolved from the installed package.json (the
+ * subpath is blocked by `exports`, so we walk up from the resolved entry). On
+ * failure we return "" — unparseable ⇒ the door keeps the bundle (safe default).
+ */
+function bundledTemplatesVersion(): string {
+  try {
+    const require = createRequire(import.meta.url);
+    let dir = path.dirname(require.resolve("@synap-core/workspace-templates"));
+    for (let i = 0; i < 6; i++) {
+      const pj = path.join(dir, "package.json");
+      if (fs.existsSync(pj)) {
+        const parsed = JSON.parse(fs.readFileSync(pj, "utf8")) as {
+          name?: string;
+          version?: string;
+        };
+        if (parsed.name === "@synap-core/workspace-templates") return parsed.version ?? "";
+      }
+      dir = path.dirname(dir);
+    }
+  } catch {
+    /* fall through to the safe default */
+  }
+  return "";
+}
+
+/**
+ * The merged, deduped catalog + the pieces the flow needs afterward:
+ *  - `entries`  — merged picker list (bundled public ∪ CP private-if-logged-in).
+ *  - `entryMap` — the same, by slug, for O(1) name/lookup.
+ *  - `remote`   — the CP source's health (drives honest messaging).
+ *  - `yaml`     — EVERY bundled template incl. private (21), by slug. This is the
+ *    dependency graph the apply resolver mirrors AND the offline install payload;
+ *    a merged entry whose slug is here installs from the bundle, offline.
+ */
+interface Catalog {
+  entries: CatalogEntry[];
+  entryMap: Map<string, CatalogEntry>;
+  sources: MergeCatalogResult["sources"];
+  remote: RemoteCatalog;
+  yaml: Map<string, WorkspaceYaml>;
+}
+
+async function buildCatalog(): Promise<Catalog> {
+  const remote = await fetchRemoteCatalog();
+  const merged = mergeCatalog({
+    // PUBLIC = bundle; PRIVATE = CP. Passing the public-only list (18) is what
+    // makes this survive a later wave that drops the private YAMLs: they simply
+    // arrive as remote entries instead of vanishing.
+    bundled: listPublicTemplates(),
+    remote: remote.rows,
+    remoteStatus: remote.status,
+    bundleVersion: bundledTemplatesVersion(),
+  });
+  return {
+    entries: merged.entries,
+    entryMap: new Map(merged.entries.map((e) => [e.slug, e])),
+    sources: merged.sources,
+    remote,
+    yaml: new Map(listWorkspaceTemplates().map((t) => [t.meta.slug, t])),
+  };
 }
 
 /** The `compose` dependency, if any — the base this template LAYERS onto. */
-function composeBase(t: WorkspaceYaml): string | undefined {
-  return t.dependencies?.find((d) => d.relation === "compose")?.slug;
+function composeBase(y: WorkspaceYaml): string | undefined {
+  return y.dependencies?.find((d) => d.relation === "compose")?.slug;
 }
 
-/** An overlay adds no workspace of its own — it layers onto its base. */
-function isOverlay(t: WorkspaceYaml): boolean {
-  return composeBase(t) !== undefined;
+/**
+ * An overlay adds no workspace of its own — it layers onto its base. Only the
+ * bundled YAML declares this; a remote-only entry has no local graph, so it is
+ * treated as a plain workspace (the apply resolver figures out the rest).
+ */
+function isOverlay(slug: string, cat: Catalog): boolean {
+  const y = cat.yaml.get(slug);
+  return y ? composeBase(y) !== undefined : false;
 }
 
-/** Private templates can never reach the CP marketplace — the CLI is their only installer. */
-function isPrivate(t: WorkspaceYaml): boolean {
-  return t.meta.isPublic === false;
+function isPrivate(entry: CatalogEntry): boolean {
+  return entry.isPrivate;
 }
 
-function displayName(slug: string, all: Map<string, WorkspaceYaml>): string {
-  return all.get(slug)?.meta.name ?? slug;
+function displayName(slug: string, cat: Catalog): string {
+  return cat.entryMap.get(slug)?.name ?? cat.yaml.get(slug)?.meta.name ?? slug;
 }
 
 /**
  * Transitive closure of every template a selection drags in, excluding the
  * selection itself. Walks BOTH `compose` and `require` edges, because the apply
  * resolver installs the whole graph — e.g. `blockchain-ecosystem` composes onto
- * `ecosystem`, which in turn requires `foundation`.
+ * `ecosystem`, which in turn requires `foundation`. Only bundled YAML carries
+ * dependency edges; remote-only entries contribute none (server resolves them).
  */
-function resolveExtras(
-  selected: string[],
-  all: Map<string, WorkspaceYaml>
-): string[] {
+function resolveExtras(selected: string[], cat: Catalog): string[] {
   const seen = new Set<string>();
   const walk = (slug: string) => {
-    for (const dep of all.get(slug)?.dependencies ?? []) {
+    for (const dep of cat.yaml.get(slug)?.dependencies ?? []) {
       if (seen.has(dep.slug)) continue;
       seen.add(dep.slug);
       walk(dep.slug);
@@ -104,22 +185,24 @@ function resolveExtras(
 }
 
 /** What picking this template actually does, in the user's words. */
-function consequence(slug: string, all: Map<string, WorkspaceYaml>): string {
-  const t = all.get(slug);
-  if (!t) return "";
+function consequence(slug: string, cat: Catalog): string {
+  const y = cat.yaml.get(slug);
+  if (!y) return "";
   const parts: string[] = [];
-  const base = composeBase(t);
-  if (base) parts.push(`layers onto ${displayName(base, all)}`);
-  const extras = resolveExtras([slug], all).filter((s) => s !== base);
+  const base = composeBase(y);
+  if (base) parts.push(`layers onto ${displayName(base, cat)}`);
+  const extras = resolveExtras([slug], cat).filter((s) => s !== base);
   if (extras.length > 0)
-    parts.push(`also sets up: ${extras.map((s) => displayName(s, all)).join(", ")}`);
+    parts.push(`also sets up: ${extras.map((s) => displayName(s, cat)).join(", ")}`);
   return parts.join(" · ");
 }
 
-/** Terse "what you get" line, derived from the template itself. */
-function contents(t: WorkspaceYaml): string {
-  const p = t.profiles?.length ?? 0;
-  const v = t.views?.length ?? 0;
+/** Terse "what you get" line. Derived from the bundled YAML when we have it. */
+function contents(entry: CatalogEntry, cat: Catalog): string {
+  const y = cat.yaml.get(entry.slug);
+  if (!y) return "workspace template"; // remote-only — counts unknown until install
+  const p = y.profiles?.length ?? 0;
+  const v = y.views?.length ?? 0;
   return `${p} profile${p === 1 ? "" : "s"} · ${v} view${v === 1 ? "" : "s"}`;
 }
 
@@ -129,43 +212,76 @@ function clip(s: string, n: number): string {
 
 /**
  * Suggest domains from a free-text company description. Matches the user's words
- * against each template's own `tags` — no hardcoded keyword catalog, so new
- * templates become suggestable the moment they declare tags.
+ * against each merged entry's `tags` — no hardcoded keyword catalog, so new
+ * templates (bundled OR private) become suggestable the moment they declare tags.
  */
-function inferDomains(description: string, all: Map<string, WorkspaceYaml>): string[] {
+function inferDomains(description: string, cat: Catalog): string[] {
   const text = description.toLowerCase();
   const matched: string[] = [];
-  for (const [slug, t] of all) {
-    const tags = (t.meta.tags ?? []).filter((k) => k.length >= 3);
+  for (const entry of cat.entries) {
+    const tags = (entry.tags ?? []).filter((k) => k.length >= 3);
     const hit = tags.some((k) =>
       new RegExp(`\\b${k.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`).test(text)
     );
-    if (hit) matched.push(slug);
+    if (hit) matched.push(entry.slug);
   }
   // Always land on something sensible rather than an empty picker.
   return matched.length > 0 ? matched : ["project-management"];
 }
 
+/**
+ * The ONE honest line about the remote (private) source's health — the reason
+ * the merge door returns `sources`. `null` when everything resolved cleanly and
+ * there is nothing to disclose. NEVER silence a degradation (the fails-open-empty
+ * trap where an agent sees an empty catalog and thinks the pod is empty).
+ */
+function remoteNote(remote: RemoteCatalog): string | null {
+  switch (remote.status) {
+    case "ok":
+      return remote.privateCount > 0
+        ? `${remote.privateCount} private template${remote.privateCount === 1 ? "" : "s"} from your account${remote.email ? ` (${remote.email})` : ""}.`
+        : null;
+    case "unauthenticated":
+      return remote.loggedIn
+        ? "Your session expired — run 'synap login' to see your private templates."
+        : "Private templates are available after 'synap login'.";
+    case "unreachable":
+      return "Couldn't reach the control plane — showing bundled templates only. Your private templates need it.";
+  }
+}
+
 // ── `synap launch --list` — what CAN be launched, without committing ─────────
 
-export function launchList(opts: { json?: boolean }): void {
-  const all = catalog();
-  const templates = [...all.values()];
+export async function launchList(opts: { json?: boolean }): Promise<void> {
+  const cat = await buildCatalog();
+  const { entries, remote } = cat;
 
   if (opts.json) {
     console.log(
       JSON.stringify(
-        templates.map((t) => ({
-          slug: t.meta.slug,
-          name: t.meta.name,
-          description: t.meta.description,
-          tags: t.meta.tags ?? [],
-          isPublic: t.meta.isPublic !== false,
-          kind: isOverlay(t) ? "overlay" : "workspace",
-          profiles: t.profiles?.length ?? 0,
-          views: t.views?.length ?? 0,
-          dependencies: t.dependencies ?? [],
-        })),
+        {
+          entries: entries.map((e) => {
+            const y = cat.yaml.get(e.slug);
+            return {
+              slug: e.slug,
+              name: e.name,
+              description: e.description,
+              tags: e.tags,
+              isPrivate: e.isPrivate,
+              source: e.source,
+              kind: isOverlay(e.slug, cat) ? "overlay" : "workspace",
+              profiles: y?.profiles?.length ?? null,
+              views: y?.views?.length ?? null,
+              dependencies: y?.dependencies ?? [],
+            };
+          }),
+          sources: cat.sources,
+          remote: {
+            status: remote.status,
+            loggedIn: remote.loggedIn,
+            privateCount: remote.privateCount,
+          },
+        },
         null,
         2
       )
@@ -173,29 +289,27 @@ export function launchList(opts: { json?: boolean }): void {
     return;
   }
 
-  const render = (t: WorkspaceYaml) => {
-    const tags = [
-      isPrivate(t) ? chalk.yellow("CLI-only") : null,
-    ].filter(Boolean);
+  const render = (entry: CatalogEntry) => {
+    const tags = [isPrivate(entry) ? chalk.yellow("private") : null].filter(Boolean);
     console.log(
       "    " +
-        chalk.cyan(t.meta.slug.padEnd(22)) +
-        chalk.bold(t.meta.name) +
+        chalk.cyan(entry.slug.padEnd(22)) +
+        chalk.bold(entry.name) +
         (tags.length ? "  " + tags.join(" ") : "")
     );
-    console.log("    " + " ".repeat(22) + chalk.dim(clip(t.meta.description, 68)));
-    const why = consequence(t.meta.slug, all);
+    console.log("    " + " ".repeat(22) + chalk.dim(clip(entry.description ?? "", 68)));
+    const why = consequence(entry.slug, cat);
     console.log(
       "    " +
         " ".repeat(22) +
-        chalk.dim(contents(t)) +
+        chalk.dim(contents(entry, cat)) +
         (why ? chalk.dim(" · " + why) : "")
     );
     log.blank();
   };
 
-  const workspaces = templates.filter((t) => !isOverlay(t));
-  const overlays = templates.filter((t) => isOverlay(t));
+  const workspaces = entries.filter((e) => !isOverlay(e.slug, cat));
+  const overlays = entries.filter((e) => isOverlay(e.slug, cat));
 
   log.heading("  Domain workspaces — each creates its own workspace");
   log.blank();
@@ -207,10 +321,9 @@ export function launchList(opts: { json?: boolean }): void {
     overlays.forEach(render);
   }
 
-  log.dim(`${templates.length} templates bundled with this CLI.`);
-  log.dim(
-    chalk.yellow("CLI-only") + " templates are private — they never appear in the marketplace."
-  );
+  log.dim(`${entries.length} templates available.`);
+  const note = remoteNote(remote);
+  if (note) log.dim(note);
   log.dim("Run 'synap launch' to set one up · 'synap orient' to see what you already have.");
 }
 
@@ -222,15 +335,20 @@ export async function launch(opts: {
   json?: boolean;
   list?: boolean;
 }): Promise<void> {
-  // Discovery is local — never touch a pod to answer "what can I launch?".
+  // Discovery answers "what can I launch?" — bundled public always, plus the
+  // user's private CP templates when logged in. Never touches the pod.
   if (opts.list) {
-    launchList(opts);
+    await launchList(opts);
     return;
   }
 
   if (!opts.json) banner();
 
-  const all = catalog();
+  const cat = await buildCatalog();
+  if (!opts.json) {
+    const note = remoteNote(cat.remote);
+    if (note) log.dim(note);
+  }
 
   let cfg;
   try {
@@ -299,12 +417,12 @@ export async function launch(opts: {
     name: "description",
     message: "Describe what you do (one sentence):",
   });
-  const suggested = inferDomains(description ?? "", all);
+  const suggested = inferDomains(description ?? "", cat);
 
   log.blank();
   log.info(
     `Based on that, I suggest: ${chalk.cyan(
-      suggested.map((s) => displayName(s, all)).join(", ")
+      suggested.map((s) => displayName(s, cat)).join(", ")
     )}`
   );
 
@@ -312,26 +430,25 @@ export async function launch(opts: {
   // `prompts` only renders `description` for the FOCUSED choice — so what you
   // get, and what it drags in, goes in the always-visible title. The prose sits
   // in the description where it costs nothing to skip.
-  const choice = (t: WorkspaceYaml) => {
-    const why = consequence(t.meta.slug, all);
+  const choice = (entry: CatalogEntry) => {
+    const why = consequence(entry.slug, cat);
     return {
       title:
-        `${t.meta.name}${isPrivate(t) ? chalk.yellow(" (CLI-only)") : ""}` +
-        chalk.dim(` — ${contents(t)}`) +
+        `${entry.name}${isPrivate(entry) ? chalk.yellow(" (private)") : ""}` +
+        chalk.dim(` — ${contents(entry, cat)}`) +
         (why ? chalk.dim(` · ${why}`) : ""),
-      description: clip(t.meta.description, 72),
-      value: t.meta.slug,
-      selected: suggested.includes(t.meta.slug),
+      description: clip(entry.description ?? "", 72),
+      value: entry.slug,
+      selected: suggested.includes(entry.slug),
     };
   };
-  const templates = [...all.values()];
   const { domains } = await prompts({
     type: "multiselect",
     name: "domains",
     message: "Which workspaces do you want? (space to toggle, enter to confirm)",
     choices: [
-      ...templates.filter((t) => !isOverlay(t)).map(choice),
-      ...templates.filter((t) => isOverlay(t)).map(choice),
+      ...cat.entries.filter((e) => !isOverlay(e.slug, cat)).map(choice),
+      ...cat.entries.filter((e) => isOverlay(e.slug, cat)).map(choice),
     ],
     hint: "- Space to select. Return to submit",
   });
@@ -346,18 +463,18 @@ export async function launch(opts: {
   // ── 3b. DISCLOSE the whole plan before the user commits ──────────────────
   // Picking "Grants" silently provisions Operations AND Foundation — the user
   // must see that BEFORE confirming, not discover it afterwards.
-  const extras = resolveExtras(selected, all);
+  const extras = resolveExtras(selected, cat);
   log.blank();
   log.heading("  This will set up:");
   log.blank();
   for (const slug of selected) {
-    const t = all.get(slug);
-    if (!t) continue;
-    const why = consequence(slug, all);
+    const entry = cat.entryMap.get(slug);
+    if (!entry) continue;
+    const why = consequence(slug, cat);
     console.log(
       "    " +
-        chalk.bold(t.meta.name.padEnd(22)) +
-        chalk.dim(isOverlay(t) ? "overlay" : "new workspace")
+        chalk.bold(displayName(slug, cat).padEnd(22)) +
+        chalk.dim(isOverlay(slug, cat) ? "overlay" : "new workspace")
     );
     if (why) console.log("    " + " ".repeat(22) + chalk.dim(why));
   }
@@ -365,7 +482,7 @@ export async function launch(opts: {
     log.blank();
     log.info(
       `Dependencies provisioned automatically: ${chalk.cyan(
-        extras.map((s) => displayName(s, all)).join(", ")
+        extras.map((s) => displayName(s, cat)).join(", ")
       )}`
     );
   }
@@ -420,24 +537,54 @@ export async function launch(opts: {
     slug: string;
     name: string;
     outcome: Outcome;
+    /** Which source produced the install payload. */
+    source?: "bundled" | "remote";
     workspaceId?: string;
     onto?: string;
     proposalId?: string;
     error?: string;
   }> = [];
 
+  // Authed detail fetches (private CP-only templates) need the Bearer token.
+  const cpToken = getStoredToken()?.token;
+
   for (const slug of selected) {
-    const t = all.get(slug);
-    const name = t?.meta.name ?? slug;
+    const name = displayName(slug, cat);
     const s = ora(`Provisioning ${name}…`).start();
 
+    // Install-source decision, per entry:
+    //  • slug IS in the bundle → use the OFFLINE bundled definition. It is
+    //    byte-for-byte the install payload the CP would serve, needs no network,
+    //    and no extra authed round-trip — so we prefer it EVEN for a private
+    //    template that arrived as a remote entry (its YAML still ships today).
+    //  • slug is CP-only (third-party, or a future build that dropped the YAML)
+    //    → the CP is the sole source; fetch the full definition (authed, so a
+    //    private one resolves).
     let pkg: Record<string, unknown>;
-    try {
-      pkg = toPackageDefinition(slug) as unknown as Record<string, unknown>;
-    } catch {
-      s.fail(`${name} — template not found`);
-      results.push({ slug, name, outcome: "failed", error: "template not found" });
-      continue;
+    let source: "bundled" | "remote";
+    if (cat.yaml.has(slug)) {
+      try {
+        pkg = toPackageDefinition(slug) as unknown as Record<string, unknown>;
+        source = "bundled";
+      } catch {
+        s.fail(`${name} — template not found`);
+        results.push({ slug, name, outcome: "failed", error: "template not found" });
+        continue;
+      }
+    } else {
+      const def = await fetchPackageDefinition(slug, cpToken);
+      if (!def) {
+        s.fail(`${name} — couldn't fetch its definition from the control plane`);
+        results.push({
+          slug,
+          name,
+          outcome: "failed",
+          error: "remote definition unavailable",
+        });
+        continue;
+      }
+      pkg = def;
+      source = "remote";
     }
 
     try {
@@ -456,7 +603,7 @@ export async function launch(opts: {
         const proposalId = res.proposalId ? String(res.proposalId) : undefined;
         s.stop();
         log.info(`${name} — proposed (under review)`);
-        results.push({ slug, name, outcome: "proposed", proposalId });
+        results.push({ slug, name, outcome: "proposed", source, proposalId });
         continue;
       }
 
@@ -466,21 +613,21 @@ export async function launch(opts: {
       if (ws?.status === "composed") {
         const onto = ws.onto ? String(ws.onto) : undefined;
         s.succeed(`${name} — layered onto its base workspace`);
-        results.push({ slug, name, outcome: "composed", workspaceId: ws.workspaceId, onto });
+        results.push({ slug, name, outcome: "composed", source, workspaceId: ws.workspaceId, onto });
       } else if (ws?.status === "created") {
         s.succeed(`${name} ready`);
-        results.push({ slug, name, outcome: "created", workspaceId: ws.workspaceId });
+        results.push({ slug, name, outcome: "created", source, workspaceId: ws.workspaceId });
       } else {
         // No workspace in the response and not proposed — report it, don't
         // silently count it as a success.
         s.fail(`${name} — pod returned no workspace`);
-        results.push({ slug, name, outcome: "failed", error: "no workspace in response" });
+        results.push({ slug, name, outcome: "failed", source, error: "no workspace in response" });
       }
     } catch (e) {
       s.stop();
       log.error(`${name} failed`);
       renderHubError(e);
-      results.push({ slug, name, outcome: "failed", error: (e as Error).message });
+      results.push({ slug, name, outcome: "failed", source, error: (e as Error).message });
     }
   }
 
