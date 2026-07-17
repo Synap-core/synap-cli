@@ -70,7 +70,11 @@ interface CardVerb {
   verbId: string;
   skillId?: string | null;
   label: string;
-  type: "read" | "write";
+  // Matches synap-backend's verbType() (capability-catalog.ts), which can emit
+  // "action" (e.g. linkedin_send_invite) — NOT just read/write. Kept widened on
+  // purpose so `v.type === "write"` looks type-safe but is WRONG (misses
+  // "action"); every approval-gating site below deliberately uses `!== "read"`.
+  type: "read" | "write" | "action";
   enabled: boolean;
   governance: "auto" | "propose";
   runnable: boolean;
@@ -1099,7 +1103,7 @@ export async function capabilityEnable(
     choices: card.verbs.map((v) => ({
       title:
         v.type !== "read"
-          ? `${v.label} (write · asks approval each run)`
+          ? `${v.label} (asks approval each run)`
           : `${v.label} (read)`,
       value: v.verbId,
       selected: v.enabled || v.type === "read",
@@ -1500,7 +1504,7 @@ export async function capabilityShow(name: string, opts: CapShowOpts): Promise<v
         ? chalk.yellow("◑")
         : chalk.dim("·");
     const kind =
-      v.type !== "read" ? chalk.dim("write · asks approval") : chalk.dim("read");
+      v.type !== "read" ? chalk.dim("asks approval") : chalk.dim("read");
     console.log(`    ${mark} ${chalk.bold(cleanLabel(v.label))}  ${kind}`);
     // For a runnable verb, show the exact command; otherwise show what unblocks it.
     if (v.runnable) {
@@ -1782,6 +1786,7 @@ interface CapRemoveOpts {
   podUrl?: string;
   apiKey?: string;
   workspace?: string;
+  force?: boolean;
 }
 
 /**
@@ -1794,6 +1799,10 @@ interface CapRemoveOpts {
  * --json`) or the capability's display name/key (resolved against the
  * installed catalog, like every other `cap` subcommand) — consistent with
  * `add`/`show`/`enable`/`connect`, which all take a friendly name.
+ *
+ * Destructive — prompts for confirmation (like `cap disconnect`) unless
+ * --force is passed, since resolving by name (not just an opaque UUID pasted
+ * from `cap list --json`) makes this much easier to fire off by accident.
  */
 export async function capabilityRemove(
   ids: string[],
@@ -1802,35 +1811,65 @@ export async function capabilityRemove(
   const cfg = await resolveHubConfig(opts);
   const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-  let removed = 0;
+  // Resolve every arg to a {id, label} target FIRST (no deletes yet) so we can
+  // show one clear confirmation for the whole batch, and so a bad/ambiguous
+  // name is reported without having already deleted the good ones before it.
+  let cards: CapabilityCard[] | undefined;
+  const targets: { id: string; label: string }[] = [];
   let failed = 0;
+  for (const rawId of ids) {
+    if (uuid.test(rawId)) {
+      targets.push({ id: rawId, label: rawId.slice(0, 8) });
+      continue;
+    }
+    if (!cards) {
+      const workspaceId = requireWorkspace(opts, cfg);
+      cards = await fetchCatalog(cfg, workspaceId).catch(() => [] as CapabilityCard[]);
+    }
+    const card = findCard(cards, rawId);
+    if (!card || card.source !== "installed" || !card.id) {
+      log.warn(
+        `  ${chalk.yellow("skip")} ${rawId} — no installed capability matches this name (pass a container id from \`synap cap list --json\`, or check \`synap cap list\`)`
+      );
+      failed++;
+      continue;
+    }
+    targets.push({ id: card.id, label: card.name });
+  }
+
+  if (targets.length === 0) {
+    log.warn(`Removed 0 container(s), ${failed} failed. Nothing to do.`);
+    return;
+  }
+
+  if (!opts.force) {
+    const list = targets.map((t) => `  · ${t.label}`).join("\n");
+    const response = await prompts({
+      type: "confirm",
+      name: "confirmed",
+      message: `Remove ${targets.length} capability container(s)?\n${list}\nThis deletes the container(s); orphaned tools/skills are cleaned up too (shared members kept).`,
+      initial: false,
+    });
+    if (!response.confirmed) {
+      log.dim("Cancelled.");
+      return;
+    }
+  }
+
+  let removed = 0;
   let tools = 0;
   let skills = 0;
-  for (const rawId of ids) {
-    let id = rawId;
-    if (!uuid.test(id)) {
-      const workspaceId = requireWorkspace(opts, cfg);
-      const cards = await fetchCatalog(cfg, workspaceId).catch(() => [] as CapabilityCard[]);
-      const card = findCard(cards, rawId);
-      if (!card || card.source !== "installed" || !card.id) {
-        log.warn(
-          `  ${chalk.yellow("skip")} ${rawId} — no installed capability matches this name (pass a container id from \`synap cap list --json\`, or check \`synap cap list\`)`
-        );
-        failed++;
-        continue;
-      }
-      id = card.id;
-    }
+  for (const { id, label } of targets) {
     try {
       const res = (await hubDelete(`/capabilities/containers/${id}`, cfg)) as {
         deleted?: { tools?: number; skills?: number };
       };
       tools += res?.deleted?.tools ?? 0;
       skills += res?.deleted?.skills ?? 0;
-      log.dim(`  ${chalk.green("✓")} removed ${id.slice(0, 8)}`);
+      log.dim(`  ${chalk.green("✓")} removed ${label}`);
       removed++;
     } catch (err) {
-      log.warn(`  ${chalk.red("✗")} ${id.slice(0, 8)} — ${(err as Error).message}`);
+      log.warn(`  ${chalk.red("✗")} ${label} — ${(err as Error).message}`);
       failed++;
     }
   }

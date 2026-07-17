@@ -1789,6 +1789,7 @@ capability
   .alias("remove")
   .description("Remove capability container(s) by id or name — member tools/skills untouched")
   .option("--workspace <id>", "Workspace context")
+  .option("--force", "Skip the confirmation prompt")
   .action(async (ids: string[], opts) => {
     const { capabilityRemove } = await import("./commands/capability.js");
     await capabilityRemove(ids, opts);
