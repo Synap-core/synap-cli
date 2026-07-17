@@ -59,19 +59,19 @@ program
     await init(opts);
   });
 
-// ── launch — orchestrate a complete company OS from templates ──────────────────
-const launch = program
+// ── launch — nothing → a working company (project + domain workspaces) ────────
+// Not a template browser: `--list` shows what's launchable (local, no pod),
+// bare `synap launch` runs the guided one-per-company setup.
+program
   .command("launch")
-  .description("Provision a complete workspace setup from templates");
-launch
-  .command("agent-os")
-  .description("Launch a company OS — project + domain workspaces, interactively")
+  .description("Set up a company on your pod — a project + its domain workspaces, interactively")
+  .option("--list", "List what can be launched (local templates, no pod needed) and exit")
   .option("--json", "Output as JSON")
   .option("--pod-url <url>", "Pod URL override")
   .option("--api-key <key>", "API key override")
   .action(async (opts) => {
-    const { launchAgentOs } = await import("./commands/launch.js");
-    await launchAgentOs(opts);
+    const { launch } = await import("./commands/launch.js");
+    await launch(opts);
   });
 
 // Hidden: one-shot Discord↔Synap bridge provisioning (dogfood/dev convenience).
