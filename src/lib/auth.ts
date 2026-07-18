@@ -170,21 +170,27 @@ function openBrowser(url: string): void {
 /**
  * Browser login via the CP poll-based approval flow.
  *
- * 1. POST /auth/cli-request → { requestId, pollSecret, approveUrl }.
- * 2. Open the browser at approveUrl (`${LANDING}/cli?request=<id>`) — the user
- *    signs in and picks a pod, which POSTs the approval to the CP.
+ * 1. POST /auth/cli-request → { requestId, pollSecret }.
+ * 2. Open the browser at `${LANDING_URL}/cli?request=<id>` — the user signs in
+ *    and picks a pod, which POSTs the approval to the CP.
  * 3. Poll GET /auth/cli-request/<id> with the pollSecret until the CP returns
  *    the credential payload (session token + chosen pod).
  *
  * No localhost server, no https→http redirect: the three fragile hops of the
  * old flow are gone. Returns null on timeout/denied/failure (callers surface
  * their own message), preserving the previous contract.
+ *
+ * The BROWSER host is a CLI concern, owned by `LANDING_URL` (default
+ * synap.live, env-overridable) — NOT the CP's `approveUrl`. The CP builds that
+ * from its own FRONTEND_URL, which is the ADMIN dashboard (dashboard.synap.live),
+ * the wrong place to send a user. We take only the `requestId` from the CP and
+ * build the landing URL ourselves, exactly as the old flow owned LANDING_URL.
  */
 export async function login(): Promise<StoredCredentials | null> {
   const { pollForApproval } = await import("./approval-poll.js");
 
   // 1. Create the login request on the CP (unauthenticated).
-  let created: { requestId: string; pollSecret: string; approveUrl: string };
+  let created: { requestId: string; pollSecret: string };
   try {
     const res = await fetch(`${CP_URL}/auth/cli-request`, {
       method: "POST",
@@ -197,10 +203,12 @@ export async function login(): Promise<StoredCredentials | null> {
     return null;
   }
 
-  const { requestId, pollSecret, approveUrl } = created;
-  if (!requestId || !pollSecret || !approveUrl) return null;
+  const { requestId, pollSecret } = created;
+  if (!requestId || !pollSecret) return null;
 
-  // 2. Open the browser to the approve screen.
+  // 2. Open the browser to the approve screen on the LANDING host (never the
+  //    CP's dashboard-derived approveUrl — dashboard is admin-only).
+  const approveUrl = `${LANDING_URL}/cli?request=${encodeURIComponent(requestId)}`;
   try {
     openBrowser(approveUrl);
   } catch {
