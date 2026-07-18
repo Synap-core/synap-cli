@@ -163,8 +163,24 @@ function isPrivate(entry: CatalogEntry): boolean {
   return entry.isPrivate;
 }
 
+/**
+ * Picker-facing display labels (user-ratified 2026-07-18) — presentation-only
+ * overrides; the template package's own names change at its next publish.
+ * `--list` intentionally keeps showing the raw catalog names.
+ */
+const DISPLAY_LABELS: Record<string, string> = {
+  foundation: "Strategy & Identity",
+  "internal-runbook": "Operations Manual",
+  social: "Social Media",
+};
+
 function displayName(slug: string, cat: Catalog): string {
-  return cat.entryMap.get(slug)?.name ?? cat.yaml.get(slug)?.meta.name ?? slug;
+  return (
+    DISPLAY_LABELS[slug] ??
+    cat.entryMap.get(slug)?.name ??
+    cat.yaml.get(slug)?.meta.name ??
+    slug
+  );
 }
 
 /**
@@ -495,7 +511,7 @@ async function pickCustom(cat: Catalog, description: string): Promise<string[]> 
     const why = consequence(entry.slug, cat);
     return {
       title:
-        `${entry.name}${isPrivate(entry) ? chalk.yellow(" (private)") : ""}` +
+        `${DISPLAY_LABELS[entry.slug] ?? entry.name}${isPrivate(entry) ? chalk.yellow(" (private)") : ""}` +
         `${isInstalled(entry.slug, cat) ? chalk.green(" [installed]") : ""}` +
         chalk.dim(` — ${contents(entry, cat)}`) +
         (why ? chalk.dim(` · ${why}`) : ""),
