@@ -388,10 +388,40 @@ program
       console.log(chalk.green("  All pods healthy."));
       const active = checks.find((p) => p.active);
       if (active) console.log(chalk.dim(`  Active: ${active.name} (${active.config.podUrl})`));
-      console.log();
-      console.log(chalk.dim("  synap pods use <name>    — switch active pod"));
-      console.log(chalk.dim("  synap pods add           — connect another pod"));
     }
+
+    // ── Synap ACCOUNT (control plane) — the OTHER half of "login" ──────────
+    // Pods authenticate data access; the ACCOUNT authenticates the control
+    // plane (private templates, hosted pods, marketplace publishing). They are
+    // different credentials — `synap launch`'s "private templates after
+    // 'synap login'" hint lands HERE, so this command must actually offer it.
+    const { isLoggedIn: cpLoggedIn, login: cpLogin } = await import("./lib/auth.js");
+    console.log();
+    const account = await cpLoggedIn();
+    if (account.valid) {
+      console.log(
+        `  Account: ${chalk.green("●")} ${chalk.bold(account.email ?? "logged in")} ${chalk.dim("— private templates available")}`
+      );
+    } else {
+      console.log(`  Account: ${chalk.yellow("○ not logged in")} ${chalk.dim("— private templates hidden")}`);
+      const prompts = (await import("prompts")).default;
+      const { doLogin } = await prompts({
+        type: "confirm",
+        name: "doLogin",
+        message: "Log in to your Synap account now?",
+        initial: true,
+      });
+      if (doLogin) {
+        const creds = await cpLogin();
+        if (creds?.email) {
+          console.log(chalk.green(`  ✓ Logged in as ${creds.email} — private templates unlocked.`));
+        }
+      }
+    }
+
+    console.log();
+    console.log(chalk.dim("  synap pods use <name>    — switch active pod"));
+    console.log(chalk.dim("  synap pods add           — connect another pod"));
   });
 
 
