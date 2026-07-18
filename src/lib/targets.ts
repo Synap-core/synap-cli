@@ -761,28 +761,19 @@ async function waitForKeyApproval(
   pendingToken: string,
   agentType: string
 ): Promise<void> {
-  const pollUrl = `${podBase}/api/hub/setup/agent/pending/${pendingToken}`;
-  const deadline = Date.now() + 120_000;
-  while (Date.now() < deadline) {
-    await new Promise((r) => setTimeout(r, 2000));
-    let poll: Response;
-    try {
-      poll = await fetch(pollUrl, {
-        headers: { Authorization: `Bearer ${humanApiKey}` },
-        signal: AbortSignal.timeout(30000),
-      });
-    } catch { continue; }
-    if (!poll.ok) continue;
-    const data = await poll.json() as { status?: string };
-    if (data.status === "active") return;
-    if (data.status === "rejected") {
-      throw new Error(`Agent key for ${agentType} was rejected in the browser. Run connect again to re-request.`);
-    }
-  }
-  throw new Error(
-    `Timed out waiting for approval of ${agentType} agent key (120s). ` +
-    `Open the review URL manually or run connect again.`
-  );
+  // Shared poll loop (also backs CP `synap login`) — see lib/approval-poll.ts.
+  const { pollForApproval } = await import("./approval-poll.js");
+  await pollForApproval<void>({
+    url: `${podBase}/api/hub/setup/agent/pending/${pendingToken}`,
+    headers: { Authorization: `Bearer ${humanApiKey}` },
+    isApproved: (d) => (d as { status?: string }).status === "active",
+    isRejected: (d) => (d as { status?: string }).status === "rejected",
+    onApproved: () => undefined,
+    rejectedError: `Agent key for ${agentType} was rejected in the browser. Run connect again to re-request.`,
+    timeoutError:
+      `Timed out waiting for approval of ${agentType} agent key (120s). ` +
+      `Open the review URL manually or run connect again.`,
+  });
 }
 
 /**

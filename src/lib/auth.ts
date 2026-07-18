@@ -167,103 +167,84 @@ function openBrowser(url: string): void {
   }
 }
 
+/**
+ * Browser login via the CP poll-based approval flow.
+ *
+ * 1. POST /auth/cli-request → { requestId, pollSecret, approveUrl }.
+ * 2. Open the browser at approveUrl (`${LANDING}/cli?request=<id>`) — the user
+ *    signs in and picks a pod, which POSTs the approval to the CP.
+ * 3. Poll GET /auth/cli-request/<id> with the pollSecret until the CP returns
+ *    the credential payload (session token + chosen pod).
+ *
+ * No localhost server, no https→http redirect: the three fragile hops of the
+ * old flow are gone. Returns null on timeout/denied/failure (callers surface
+ * their own message), preserving the previous contract.
+ */
 export async function login(): Promise<StoredCredentials | null> {
-  return new Promise((resolve) => {
-    const server = http.createServer((req, res) => {
-      const url = new URL(req.url ?? "/", `http://localhost`);
+  const { pollForApproval } = await import("./approval-poll.js");
 
-      if (url.pathname === "/callback") {
-        const token = url.searchParams.get("token");
-        const email = url.searchParams.get("email");
-        const userId = url.searchParams.get("userId");
-        const expiresAt = url.searchParams.get("expiresAt");
-        const cbPodId = url.searchParams.get("podId") ?? undefined;
-        const cbPodUrl = url.searchParams.get("podUrl") ?? undefined;
-
-        if (token && email && userId) {
-          const creds: StoredCredentials = {
-            token,
-            email,
-            userId,
-            expiresAt:
-              expiresAt ||
-              new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
-            ...(cbPodId ? { podId: cbPodId } : {}),
-            ...(cbPodUrl ? { podUrl: cbPodUrl } : {}),
-          };
-          writeCredentials(creds);
-
-          // Send success page
-          res.writeHead(200, { "Content-Type": "text/html" });
-          res.end(`<!DOCTYPE html>
-<html>
-<head><title>Synap CLI</title></head>
-<body style="font-family: system-ui, sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; background: #0a0a0a; color: #e5e5e5;">
-  <div style="text-align: center;">
-    <h1 style="font-size: 24px; margin-bottom: 8px;">Authenticated</h1>
-    <p style="color: #888;">You can close this window and return to the terminal.</p>
-  </div>
-</body>
-</html>`);
-
-          cleanup();
-          resolve(creds);
-        } else {
-          res.writeHead(400, { "Content-Type": "text/html" });
-          res.end(`<!DOCTYPE html>
-<html>
-<head><title>Synap CLI</title></head>
-<body style="font-family: system-ui, sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; background: #0a0a0a; color: #e5e5e5;">
-  <div style="text-align: center;">
-    <h1 style="font-size: 24px; color: #ef4444; margin-bottom: 8px;">Authentication Failed</h1>
-    <p style="color: #888;">Missing token. Please try again.</p>
-  </div>
-</body>
-</html>`);
-        }
-      } else {
-        res.writeHead(404);
-        res.end();
-      }
+  // 1. Create the login request on the CP (unauthenticated).
+  let created: { requestId: string; pollSecret: string; approveUrl: string };
+  try {
+    const res = await fetch(`${CP_URL}/auth/cli-request`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      signal: AbortSignal.timeout(15000),
     });
+    if (!res.ok) return null;
+    created = (await res.json()) as typeof created;
+  } catch {
+    return null;
+  }
 
-    // Listen on random port
-    server.listen(0, "127.0.0.1", () => {
-      const addr = server.address();
-      if (!addr || typeof addr === "string") {
-        cleanup();
-        resolve(null);
-        return;
-      }
+  const { requestId, pollSecret, approveUrl } = created;
+  if (!requestId || !pollSecret || !approveUrl) return null;
 
-      const port = addr.port;
-      const callbackUrl = `http://localhost:${port}/callback`;
-      const loginUrl = `${LANDING_URL}/cli?callback=${encodeURIComponent(callbackUrl)}`;
+  // 2. Open the browser to the approve screen.
+  try {
+    openBrowser(approveUrl);
+  } catch {
+    console.log(`\n  Open this URL in your browser:\n`);
+    console.log(`  ${approveUrl}\n`);
+  }
 
-      try {
-        openBrowser(loginUrl);
-      } catch {
-        // Browser didn't open — show manual URL
-        console.log(`\n  Open this URL in your browser:\n`);
-        console.log(`  ${loginUrl}\n`);
-      }
+  // 3. Poll for approval — the payload IS the StoredCredentials.
+  try {
+    const creds = await pollForApproval<StoredCredentials>({
+      url: `${CP_URL}/auth/cli-request/${requestId}`,
+      headers: { Authorization: `Bearer ${pollSecret}` },
+      isApproved: (d) => (d as { status?: string }).status === "approved",
+      isRejected: (d) => {
+        const s = (d as { status?: string }).status;
+        return s === "denied" || s === "expired";
+      },
+      onApproved: (d) => {
+        const p = d as {
+          token: string;
+          email: string;
+          userId: string;
+          expiresAt?: string;
+          podId?: string;
+          podUrl?: string;
+        };
+        return {
+          token: p.token,
+          email: p.email,
+          userId: p.userId,
+          expiresAt:
+            p.expiresAt ||
+            new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
+          ...(p.podId ? { podId: p.podId } : {}),
+          ...(p.podUrl ? { podUrl: p.podUrl } : {}),
+        };
+      },
     });
-
-    // Timeout after 120 seconds
-    const timeout = setTimeout(() => {
-      cleanup();
-      resolve(null);
-    }, 120_000);
-
-    function cleanup() {
-      clearTimeout(timeout);
-      try {
-        server.close();
-      } catch {
-        // ignore
-      }
-    }
-  });
+    writeCredentials(creds);
+    return creds;
+  } catch {
+    // Timed out or denied — callers print their own guidance.
+    return null;
+  }
 }
 
 // ─── Pod Provisioning Callback ────────────────────────────────────────────────
