@@ -210,11 +210,27 @@ export async function login(): Promise<StoredCredentials | null> {
   const { requestId, pollSecret, userCode } = created;
   if (!requestId || !pollSecret || !userCode) return null;
 
+  // The CLI already owns its (self-hosted) pod locally — `synap login` is
+  // ACCOUNT auth, not pod selection. Pass the active pod's host so the browser
+  // can SHOW "your CLI is using <pod>" instead of forcing a redundant re-pick.
+  let podLabel = "";
+  try {
+    const { listPodProfiles } = await import("./pod.js");
+    const active = listPodProfiles().find((p) => p.active);
+    if (active?.config.podUrl) {
+      podLabel = new URL(active.config.podUrl).host;
+    }
+  } catch {
+    // no active pod / unreadable config — browser falls back to account-only
+  }
+
   // 2. Show the device code, then open the browser to the approve screen on the
   //    LANDING host (never the CP's dashboard-derived approveUrl). The user must
   //    enter this code in the browser to approve — it binds the login to this
   //    terminal so a phished approve link can't authorize someone else.
-  const approveUrl = `${LANDING_URL}/cli?request=${encodeURIComponent(requestId)}`;
+  const approveUrl =
+    `${LANDING_URL}/cli?request=${encodeURIComponent(requestId)}` +
+    (podLabel ? `&pod=${encodeURIComponent(podLabel)}` : "");
   console.log(`\n  Enter this code in your browser to authorize the login:\n`);
   console.log(`      ${userCode}\n`);
   try {
