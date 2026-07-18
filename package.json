@@ -9,6 +9,7 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsx src/index.ts",
+    "test": "tsx --test src/**/*.test.ts",
     "sync-skills": "bash scripts/sync-skills.sh",
     "prepublishOnly": "pnpm sync-skills && pnpm build",
     "prepack": "rm -rf node_modules/@synap/hub-rest-client && cp -r ../synap-backend/packages/hub-rest-client node_modules/@synap/",

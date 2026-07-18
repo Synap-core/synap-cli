@@ -57,6 +57,7 @@ import {
   hubGet,
   hubPost,
   renderHubError,
+  type HubConfig,
 } from "../lib/hub-client.js";
 import { writeGovernance } from "../lib/capture-lane.js";
 import { unwrapList } from "../lib/unwrapList.js";
@@ -164,6 +165,23 @@ function displayName(slug: string, cat: Catalog): string {
 }
 
 /**
+ * CLI-side display-name overrides for the INTERACTIVE picker only — `--list`
+ * and JSON output stay the raw catalog name, unchanged, so scripts and the
+ * template-package identity are never affected by this cosmetic relabeling.
+ */
+const PICKER_LABELS: Record<string, string> = {
+  foundation: "Strategy & Identity",
+  "internal-runbook": "Operations Manual",
+  social: "Social Media",
+};
+
+/** Like `displayName`, but for the guided `launch` flow's prompts/summaries —
+ * applies `PICKER_LABELS`. Never use this for `--list` or JSON output. */
+function pickerName(slug: string, cat: Catalog): string {
+  return PICKER_LABELS[slug] ?? displayName(slug, cat);
+}
+
+/**
  * Transitive closure of every template a selection drags in, excluding the
  * selection itself. Walks BOTH `compose` and `require` edges, because the apply
  * resolver installs the whole graph — e.g. `blockchain-ecosystem` composes onto
@@ -185,15 +203,19 @@ function resolveExtras(selected: string[], cat: Catalog): string[] {
 }
 
 /** What picking this template actually does, in the user's words. */
-function consequence(slug: string, cat: Catalog): string {
+function consequence(
+  slug: string,
+  cat: Catalog,
+  nameFn: (slug: string, cat: Catalog) => string = displayName
+): string {
   const y = cat.yaml.get(slug);
   if (!y) return "";
   const parts: string[] = [];
   const base = composeBase(y);
-  if (base) parts.push(`layers onto ${displayName(base, cat)}`);
+  if (base) parts.push(`layers onto ${nameFn(base, cat)}`);
   const extras = resolveExtras([slug], cat).filter((s) => s !== base);
   if (extras.length > 0)
-    parts.push(`also sets up: ${extras.map((s) => displayName(s, cat)).join(", ")}`);
+    parts.push(`also sets up: ${extras.map((s) => nameFn(s, cat)).join(", ")}`);
   return parts.join(" · ");
 }
 
@@ -328,105 +350,240 @@ export async function launchList(opts: { json?: boolean }): Promise<void> {
 }
 
 // ── Intent pickers — the flow shows the RIGHT thing per intent ───────────────
-// Not a flat wall of 24 templates. A SUITE is the headline for a company; its
-// constituent lenses are opt-OUT customization UNDER it, never flat peers; bases
-// (foundation) and overlays (grants, internal-runbook) are implementation
-// details a suite pulls in — they surface only in "Custom".
+// Not a flat wall of 24 templates. The `enterprise-os` bundle is the headline
+// for a company — its components are opt-OUT under it, never flat peers with
+// niche add-ons; bases (foundation) never surface as a choice anywhere; and the
+// full catalog stays one "Browse all templates…" away for power users.
 
 /** The suite headline for a company. Bundled + public. */
 const COMPANY_SUITE = "enterprise-os";
-/** The private flagship layer offered on top of the company suite. */
-const PRIVATE_SUITE = "the-arch";
-/** Personal-knowledge default (falls back to life-os if personal isn't bundled). */
+/** Personal-knowledge options — both shown, single-select. */
 const PERSONAL_SLUGS = ["personal", "life-os"];
 
 /**
- * Company intent → the suite is the headline. "Use the full suite" installs it
- * as ONE apply (the pod resolves its lenses); "pick lenses" installs the chosen
- * constituents directly. Required bases (foundation) are pulled back in by the
- * resolver and shown in the disclose step, so a de-selected base is never lost.
- * If the private flagship suite is actually available to this account, offer it.
+ * Niche add-ons offered (unchecked) under the Company intent — domains most
+ * companies don't need on day one. Any PRIVATE/CP template not already part of
+ * the bundle rides along here too — this is where a logged-in account's own
+ * overlays (e.g. a private flagship suite) surface, honestly and only when
+ * they actually resolved for that account.
  */
-async function pickCompany(cat: Catalog): Promise<string[]> {
-  const suiteName = displayName(COMPANY_SUITE, cat);
-  const lenses = (cat.yaml.get(COMPANY_SUITE)?.dependencies ?? [])
+const COMPANY_ADDON_SLUGS = [
+  "internal-runbook",
+  "social",
+  "content-studio",
+  "hr",
+  "legal",
+  "finance",
+  "project-management",
+];
+
+/**
+ * Curated standalone picks for "Just one workspace" — the common single-domain
+ * asks. Deliberately excludes: `foundation` (never a choice, see module doc),
+ * `personal`/`life-os` (their own intent), `enterprise-os`/private suites (the
+ * Company intent's job), and `project-management` (add-on/browse-all only, per
+ * the label-map note below `PICKER_LABELS`). Anything else stays reachable via
+ * "Browse all templates…".
+ */
+const JUST_ONE_SLUGS = [
+  "crm",
+  "operations",
+  "ecosystem",
+  "content-os",
+  "marketing-campaign",
+  "communication",
+  "brand-library",
+  "builder-workspace",
+  "agent-fleet",
+  "internal-runbook",
+  "social",
+  "content-studio",
+  "hr",
+  "legal",
+  "finance",
+];
+
+/**
+ * Existing workspace NAMES on the pod (lowercased), best-effort. Used only to
+ * flag a bundle component as "already installed" in the Company picker — a
+ * failure here degrades honestly to an empty set (nothing shows as installed),
+ * it never blocks the flow.
+ */
+async function fetchExistingWorkspaceNames(cfg: HubConfig): Promise<Set<string>> {
+  try {
+    const res = (await hubGet("/workspaces", {}, cfg)) as Record<string, unknown>;
+    const list = unwrapList<Record<string, unknown>>(res, ["workspaces"]);
+    return new Set(
+      list.map((w) => String(w.name ?? "").toLowerCase().trim()).filter(Boolean)
+    );
+  } catch {
+    return new Set();
+  }
+}
+
+/**
+ * Pure catalog partitioning for the guided flow — bundle components vs
+ * add-ons vs personal vs "just one" curated list. No I/O, no prompts: this is
+ * the piece worth unit-testing. (This package has no test runner installed
+ * today — see the wave report; the test file uses node's built-in
+ * `node:test`, which needs no new dependency.)
+ */
+export function partitionCatalog(cat: Catalog): {
+  /** `enterprise-os`'s required lenses, minus `foundation` (never a choice). */
+  companyComponents: string[];
+  /** Public niche add-ons + any private/CP entry not already a component. */
+  companyAddons: CatalogEntry[];
+  /** Personal-knowledge options available in this catalog. */
+  personal: string[];
+  /** Curated standalone picks for "Just one workspace". */
+  justOne: string[];
+} {
+  const requireDeps = (cat.yaml.get(COMPANY_SUITE)?.dependencies ?? [])
     .filter((d) => (d.relation ?? "require") === "require")
     .map((d) => d.slug);
+  const companyComponents = requireDeps.filter((s) => s !== "foundation");
+  const companyAddons = cat.entries.filter(
+    (e) =>
+      COMPANY_ADDON_SLUGS.includes(e.slug) ||
+      (isPrivate(e) && e.slug !== COMPANY_SUITE && !companyComponents.includes(e.slug))
+  );
+  const personal = PERSONAL_SLUGS.filter((s) => cat.yaml.has(s) || cat.entryMap.has(s));
+  const justOne = JUST_ONE_SLUGS.filter((s) => cat.yaml.has(s) || cat.entryMap.has(s));
+  return { companyComponents, companyAddons, personal, justOne };
+}
 
-  const { scope } = await prompts({
-    type: "select",
-    name: "scope",
-    message: `${suiteName} — ${lenses.map((s) => displayName(s, cat)).join(", ")}`,
-    choices: [
-      {
-        title: `Use the full ${suiteName}`,
-        description: "Everything, wired together — recommended",
-        value: "full",
-      },
-      {
-        title: "Pick which lenses",
-        description: "Choose which parts to install",
-        value: "pick",
-      },
-    ],
-  });
-  if (!scope) return [];
+/**
+ * Company intent → the `enterprise-os` bundle IS the default: its components
+ * are shown pre-checked (uncheck to skip); a component that already exists as
+ * a workspace on the pod is shown non-toggleable and forced in ("will be
+ * reused" — never silently dropped). Then an Add-ons section, unchecked.
+ */
+async function pickCompany(cat: Catalog, cfg: HubConfig): Promise<string[]> {
+  const suiteName = pickerName(COMPANY_SUITE, cat);
+  const { companyComponents: components, companyAddons: addonEntries } = partitionCatalog(cat);
 
-  let selected: string[];
-  if (scope === "full") {
-    selected = [COMPANY_SUITE];
-  } else {
-    const { picked } = await prompts({
-      type: "multiselect",
-      name: "picked",
-      message: "Which lenses? (space to toggle)",
-      choices: lenses.map((s) => ({
+  const existing = await fetchExistingWorkspaceNames(cfg);
+  const alreadyInstalled = (s: string) => existing.has(pickerName(s, cat).toLowerCase());
+
+  log.blank();
+  log.heading(`  ${suiteName} — uncheck anything you don't need`);
+  const { picked } = await prompts({
+    type: "multiselect",
+    name: "picked",
+    message: "Components",
+    choices: components.map((s) => {
+      const already = alreadyInstalled(s);
+      return {
         title:
-          displayName(s, cat) +
-          chalk.dim(` — ${clip(cat.yaml.get(s)?.meta?.description ?? "", 56)}`),
+          pickerName(s, cat) +
+          (already
+            ? chalk.dim(" (already installed — will be reused)")
+            : chalk.dim(` — ${clip(cat.yaml.get(s)?.meta?.description ?? "", 50)}`)),
         value: s,
         selected: true,
-      })),
-      hint: "- Space to toggle. Return to submit. Required bases are added automatically.",
-    });
-    selected = (picked as string[]) ?? [];
-    if (selected.length === 0) return [];
-  }
+        disabled: already,
+      };
+    }),
+    hint: "- Space to toggle. Return to submit.",
+  });
+  if (picked === undefined) return []; // cancelled (Ctrl+C / Esc)
+  let selected: string[] = (picked as string[]) ?? [];
 
-  // Private flagship layer — offered ONLY when it actually resolved for this
-  // account (CP-logged-in as its owner). Absent otherwise, honestly.
-  const arch = cat.entryMap.get(PRIVATE_SUITE);
-  if (arch && isPrivate(arch)) {
-    const { addArch } = await prompts({
-      type: "confirm",
-      name: "addArch",
-      message: `Add your private flagships — ${arch.name}?`,
-      initial: false,
+  // Add-ons — public niche domains plus any private/CP template not already
+  // part of the bundle (an account's own overlays surface here, honestly).
+  if (addonEntries.length > 0) {
+    const { addons } = await prompts({
+      type: "multiselect",
+      name: "addons",
+      message: "Add-ons (space to toggle — none selected by default)",
+      choices: addonEntries.map((e) => ({
+        title:
+          pickerName(e.slug, cat) +
+          (isPrivate(e) ? chalk.yellow(" (private)") : "") +
+          chalk.dim(` — ${clip(e.description ?? "", 50)}`),
+        value: e.slug,
+        selected: false,
+      })),
+      hint: "- Space to toggle. Return to submit.",
     });
-    if (addArch) selected.push(PRIVATE_SUITE);
+    selected = selected.concat((addons as string[]) ?? []);
   }
   return selected;
 }
 
+/** Personal intent → life-os and personal-knowledge, both shown, single-select. */
+async function pickPersonal(cat: Catalog): Promise<string[]> {
+  const { personal: available } = partitionCatalog(cat);
+  if (available.length === 0) return [];
+  if (available.length === 1) return available;
+
+  const { slug } = await prompts({
+    type: "select",
+    name: "slug",
+    message: "Which personal knowledge base?",
+    choices: available.map((s) => ({
+      title: pickerName(s, cat),
+      description: clip(cat.entryMap.get(s)?.description ?? cat.yaml.get(s)?.meta.description ?? "", 72),
+      value: s,
+    })),
+  });
+  return slug ? [slug] : [];
+}
+
+const BROWSE_ALL = "__browse_all__";
+
 /**
- * Custom intent → the full flat list (the power-user escape hatch). Keeps the
- * describe-inference suggestion and the overlay-last ordering the flow had.
+ * "Just one workspace" intent → a curated single-select of common domains,
+ * with a final "Browse all templates…" entry that falls back to today's full
+ * flat list (`pickCustom`) — every template stays reachable, per the guardrail.
+ */
+async function pickJustOne(cat: Catalog): Promise<string[]> {
+  const { justOne: curated } = partitionCatalog(cat);
+  const { slug } = await prompts({
+    type: "select",
+    name: "slug",
+    message: "Which workspace?",
+    choices: [
+      ...curated.map((s) => ({
+        title: pickerName(s, cat),
+        description: clip(cat.entryMap.get(s)?.description ?? cat.yaml.get(s)?.meta.description ?? "", 72),
+        value: s,
+      })),
+      { title: chalk.cyan("Browse all templates…"), description: "See every workspace and overlay", value: BROWSE_ALL },
+    ],
+  });
+  if (!slug) return [];
+  if (slug === BROWSE_ALL) {
+    const { description } = await prompts({
+      type: "text",
+      name: "description",
+      message: "Describe what you do (one sentence) — helps suggest a starting point:",
+    });
+    return pickCustom(cat, description ?? "");
+  }
+  return [slug];
+}
+
+/**
+ * The full flat list (the power-user escape hatch, reached via "Browse all
+ * templates…"). Keeps the describe-inference suggestion and the overlay-last
+ * ordering the flow had.
  */
 async function pickCustom(cat: Catalog, description: string): Promise<string[]> {
   const suggested = inferDomains(description, cat);
   log.blank();
   log.info(
     `Based on that, I suggest: ${chalk.cyan(
-      suggested.map((s) => displayName(s, cat)).join(", ")
+      suggested.map((s) => pickerName(s, cat)).join(", ")
     )}`
   );
   // `prompts` only renders `description` for the FOCUSED choice — so what you
   // get, and what it drags in, goes in the always-visible title.
   const choice = (entry: CatalogEntry) => {
-    const why = consequence(entry.slug, cat);
+    const why = consequence(entry.slug, cat, pickerName);
     return {
       title:
-        `${entry.name}${isPrivate(entry) ? chalk.yellow(" (private)") : ""}` +
+        `${pickerName(entry.slug, cat)}${isPrivate(entry) ? chalk.yellow(" (private)") : ""}` +
         chalk.dim(` — ${contents(entry, cat)}`) +
         (why ? chalk.dim(` · ${why}`) : ""),
       description: clip(entry.description ?? "", 72),
@@ -489,7 +646,46 @@ export async function launch(opts: {
     return;
   }
 
-  // ── 1b. Attach to an existing project, or create a new one? ──────────────
+  // ── 2. Intent — what are you setting up? ────────────────────────────────
+  // Intent-first, not a flat wall of ~20 templates. A company gets the
+  // `enterprise-os` bundle as the headline (opt-out components + add-ons);
+  // personal gets a knowledge-base pick; "just one" is a curated single pick
+  // with a full-catalog escape hatch. This is where foundation, overlays, and
+  // niche standalones stop being confusing flat peers.
+  const companyAvailable = cat.yaml.has(COMPANY_SUITE) || cat.entryMap.has(COMPANY_SUITE);
+  const { intent } = await prompts({
+    type: "select",
+    name: "intent",
+    message: "What are you setting up?",
+    choices: [
+      {
+        title: "Personal second brain",
+        description: "A private space for your notes, ideas, and thinking",
+        value: "personal",
+      },
+      ...(companyAvailable
+        ? [
+            {
+              title: "A company or venture",
+              description:
+                "Enterprise OS — strategy, market, operations, CRM, and content in one",
+              value: "company",
+            },
+          ]
+        : []),
+      {
+        title: "Just one workspace",
+        description: "Pick a single domain — or browse every template yourself",
+        value: "just-one",
+      },
+    ],
+  });
+  if (!intent) {
+    log.warn("Cancelled.");
+    return;
+  }
+
+  // ── 3. Attach to an existing project, or create a new one? ───────────────
   let existingProjects: Array<{ id: string; name: string }> = [];
   try {
     const res = (await hubGet("/projects", {}, cfg)) as unknown;
@@ -531,66 +727,22 @@ export async function launch(opts: {
     }
   }
 
-  // ── 2. Describe → infer domains ─────────────────────────────────────────
-  const { description } = await prompts({
-    type: "text",
-    name: "description",
-    message: "Describe what you do (one sentence):",
-  });
-  // ── 3. Intent — what are you setting up? ────────────────────────────────
-  // Intent-first, not a flat wall of 24 templates. A company gets the suite as
-  // the headline; personal gets a knowledge base; custom is the full list for
-  // power users. This is where foundation/overlays/niche standalones stop being
-  // confusing flat peers — they only appear under "Custom".
-  const companyAvailable = cat.yaml.has(COMPANY_SUITE) || cat.entryMap.has(COMPANY_SUITE);
-  const { intent } = await prompts({
-    type: "select",
-    name: "intent",
-    message: "What are you setting up?",
-    choices: [
-      ...(companyAvailable
-        ? [
-            {
-              title: "A company / full operation",
-              description:
-                "Enterprise OS — strategy, market, operations, CRM, and content in one",
-              value: "company",
-            },
-          ]
-        : []),
-      {
-        title: "Personal knowledge base",
-        description: "A private space for your notes, ideas, and thinking",
-        value: "personal",
-      },
-      {
-        title: "Custom — browse every workspace",
-        description: "Pick individual workspaces and overlays yourself",
-        value: "custom",
-      },
-    ],
-  });
-  if (!intent) {
-    log.warn("Cancelled.");
-    return;
-  }
-
+  // ── 4. Per-intent selection ───────────────────────────────────────────────
   let selected: string[];
   if (intent === "personal") {
-    const slug = PERSONAL_SLUGS.find((s) => cat.yaml.has(s) || cat.entryMap.has(s));
-    if (!slug) {
+    selected = await pickPersonal(cat);
+    if (selected.length === 0) {
       log.warn("No personal-knowledge template is available.");
       return;
     }
-    selected = [slug];
   } else if (intent === "company") {
-    selected = await pickCompany(cat);
+    selected = await pickCompany(cat, cfg);
     if (selected.length === 0) {
       log.warn("Cancelled.");
       return;
     }
   } else {
-    selected = await pickCustom(cat, description ?? "");
+    selected = await pickJustOne(cat);
     if (selected.length === 0) {
       log.warn("No workspaces selected. Cancelled.");
       return;
@@ -607,10 +759,10 @@ export async function launch(opts: {
   for (const slug of selected) {
     const entry = cat.entryMap.get(slug);
     if (!entry) continue;
-    const why = consequence(slug, cat);
+    const why = consequence(slug, cat, pickerName);
     console.log(
       "    " +
-        chalk.bold(displayName(slug, cat).padEnd(22)) +
+        chalk.bold(pickerName(slug, cat).padEnd(22)) +
         chalk.dim(isOverlay(slug, cat) ? "overlay" : "new workspace")
     );
     if (why) console.log("    " + " ".repeat(22) + chalk.dim(why));
@@ -619,7 +771,7 @@ export async function launch(opts: {
     log.blank();
     log.info(
       `Dependencies provisioned automatically: ${chalk.cyan(
-        extras.map((s) => displayName(s, cat)).join(", ")
+        extras.map((s) => pickerName(s, cat)).join(", ")
       )}`
     );
   }
@@ -645,9 +797,12 @@ export async function launch(opts: {
   } else {
     const spinner = ora("Creating project…").start();
     try {
+      // No free-text description question in the new intent-first flow — the
+      // project is created from its name alone; `description` stays optional
+      // server-side.
       const project = (await hubPost(
         "/projects",
-        { name: projectName, description: description || undefined, status: "active" },
+        { name: projectName, status: "active" },
         cfg
       )) as { id?: string; status?: string; proposalId?: string };
       // Governance may return a proposal instead of creating directly.
@@ -686,7 +841,9 @@ export async function launch(opts: {
   const cpToken = getStoredToken()?.token;
 
   for (const slug of selected) {
-    const name = displayName(slug, cat);
+    // Picker label, not the raw catalog name — this whole command (spinners,
+    // disclosure, summary) is the interactive picker; only `--list` stays raw.
+    const name = pickerName(slug, cat);
     const s = ora(`Provisioning ${name}…`).start();
 
     // Install-source decision, per entry:
