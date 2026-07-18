@@ -1803,7 +1803,8 @@ const market = program
 
 market
   .command("install <slug>")
-  .description("Install a package by slug — workspaces install now; other types route you to the right surface")
+  .description("Install a package by slug into a project — workspaces install now; other types route you to the right surface")
+  .option("--project <id>", "Project to add it to (defaults to the active project; else prompts / pod-wide)")
   .option("--json", "Output as JSON")
   .option("--pod-url <url>", "Pod URL override")
   .option("--api-key <key>", "API key override")

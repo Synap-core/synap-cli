@@ -51,12 +51,11 @@ import {
 import { log, banner } from "../utils/logger.js";
 import {
   resolveHubConfig,
-  hubGet,
   hubPost,
   renderHubError,
 } from "../lib/hub-client.js";
 import { writeGovernance } from "../lib/capture-lane.js";
-import { unwrapList } from "../lib/unwrapList.js";
+import { fetchProjects } from "../lib/project.js";
 import { getStoredToken } from "../lib/auth.js";
 import {
   fetchRemoteCatalog,
@@ -562,20 +561,15 @@ export async function launch(opts: {
   }
 
   // ── 1b. Attach to an existing project, or create a new one? ──────────────
-  let existingProjects: Array<{ id: string; name: string }> = [];
-  try {
-    const res = (await hubGet("/projects", {}, cfg)) as unknown;
-    const list = unwrapList<Record<string, unknown>>(res, ["projects"]);
-    existingProjects = list
-      .filter((p) => p.id)
-      .map((p) => ({ id: String(p.id), name: String(p.name ?? p.id) }));
-  } catch {
-    // Non-fatal: if we can't list, fall back to create-new only.
-  }
+  // Shared door with `market install` (fetchProjects) — one fetch, one shape.
+  const existingProjects = await fetchProjects(cfg);
 
   const NEW_PROJECT = "__new__";
   let attachProjectId: string | undefined;
   if (existingProjects.length > 0) {
+    // Discoverability: adding a single add-on to an existing project is a direct,
+    // zero-prompt path — surface it so users don't run the whole guided flow.
+    log.dim("Tip: to add one add-on to an existing project, use 'synap market install <slug> --project <id>'.");
     const { choice } = await prompts({
       type: "select",
       name: "choice",
