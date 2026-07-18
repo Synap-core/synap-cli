@@ -523,15 +523,15 @@ project
     await projectNew(name, opts);
   });
 project
-  .command("use <projectId>")
-  .description("Pin the active project (durable, like `synap use <workspace>`) — narrows scoped calls + statusline")
-  .option("--session", "Ephemeral: scope only this Claude Code session, don't persist")
+  .command("use <ref>")
+  .description("Pin the active project (durable, like `synap use <workspace>`). Ref = uuid, slug, or <pod>/<slug> — cross-pod refs switch the active pod too")
+  .option("--session", "Ephemeral: scope only this Claude Code session, don't persist (cross-pod refs refused)")
   .option("--json", "Output as JSON")
   .option("--pod-url <url>", "Pod URL override")
   .option("--api-key <key>", "API key override")
-  .action(async (projectId: string, opts) => {
+  .action(async (ref: string, opts) => {
     const { useProject } = await import("./commands/lens.js");
-    await useProject(projectId, opts);
+    await useProject(ref, opts);
   });
 project
   .command("clear")

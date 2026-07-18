@@ -11,8 +11,27 @@ import chalk from "chalk";
 import { resolveHubConfig, hubGet, renderHubError } from "../lib/hub-client.js";
 import { getClaudeSessionId, writeLens, clearLensField, resolveActiveLens } from "../lib/session-lens.js";
 import { describeLens } from "../lib/describe-lens.js";
-import { setActiveProjectId, clearActiveProjectId, getActiveProjectId } from "../lib/pod.js";
+import {
+  setActiveProjectId,
+  clearActiveProjectId,
+  getActiveProjectId,
+  setActiveProjectBinding,
+  setActivePod,
+  addPodProfile,
+  listPodProfiles,
+  provisionUserOnPod,
+  setupAgentViaPod,
+} from "../lib/pod.js";
+import { getStoredToken } from "../lib/auth.js";
+import {
+  resolveProjectRef,
+  sessionScopeRefusal,
+  samePodOrigin,
+  candidateLabel,
+  type CpProjectResolution,
+} from "../lib/project-ref.js";
 import { fetchProjects, createProject } from "../lib/project.js";
+import { unwrapList } from "../lib/unwrapList.js";
 import { renderNextSteps, FLOW } from "../lib/next-steps.js";
 import { log } from "../utils/logger.js";
 import { type BaseOpts } from "./data.js";
@@ -29,14 +48,65 @@ function requireClaudeSession(): string {
 
 /**
  * Pin the active project — a peer lens to `synap use <workspace>`.
+ *
+ * `ref` goes through the ONE resolution door (`lib/project-ref.ts`):
+ *   - uuid → today's behavior exactly: pinned against the ACTIVE pod.
+ *   - slug / <pod>/<slug> → resolved via the Control Plane directory; when the
+ *     project lives on another pod, the CLI switches activePod AND the project
+ *     together (auto-provisioning access on the pod if it isn't saved locally).
+ *
  * Default: DURABLE — persists to ~/.synap/config.json (activeProjectId), same
  * tier as `synap use`. Composes with a Claude session: when one is active, the
- * session lens is ALSO updated so `resolveActiveLens()` reflects it immediately
- * without waiting for the durable value to be re-read.
- * `--session`: ephemeral — scopes only this Claude Code session, like the old
- * behavior. Requires an active Claude Code session.
+ * session lens is ALSO updated so `resolveActiveLens()` reflects it immediately.
+ * `--session`: ephemeral — scopes only this Claude Code session. Cross-pod refs
+ * are REFUSED there: the session lens has no pod field.
  */
-export async function useProject(projectId: string, opts: BaseOpts & { session?: boolean }): Promise<void> {
+export async function useProject(ref: string, opts: BaseOpts & { session?: boolean }): Promise<void> {
+  const resolution = await resolveProjectRef(ref);
+
+  switch (resolution.kind) {
+    case "invalid":
+      log.error(resolution.reason);
+      process.exit(1);
+      break;
+    case "not-logged-in":
+      log.error(`Cross-pod project refs resolve via your Synap account — run: synap login`);
+      log.hint("Or pin by uuid against the active pod: synap project use <projectId> (see: synap project list)");
+      process.exit(1);
+      break;
+    case "not-found":
+      log.error(`Project "${ref}" was not found in the directory.`);
+      log.hint("Check the slug with: synap project list — or use the full <pod-subdomain>/<slug> form.");
+      process.exit(1);
+      break;
+    case "cp-error":
+      log.error(`Could not resolve "${ref}": ${resolution.message}`);
+      log.hint("The directory is an accelerator, not a dependency — uuid refs keep working: synap project use <projectId>");
+      process.exit(1);
+      break;
+    case "ambiguous": {
+      if (opts.json) {
+        console.log(JSON.stringify({ ambiguous: true, candidates: resolution.candidates }, null, 2));
+        process.exit(1);
+      }
+      log.warn(`"${ref}" matches ${resolution.candidates.length} projects — use the full <pod-subdomain>/<slug> form:`);
+      for (const c of resolution.candidates) {
+        console.log(`    ${chalk.bold(candidateLabel(c))}${c.name ? chalk.dim(`  ${c.name}`) : ""}`);
+      }
+      process.exit(1);
+      break;
+    }
+    case "local":
+      await useProjectOnActivePod(resolution.projectId, opts);
+      return;
+    case "resolved":
+      await useCrossPodProject(ref, resolution.project, resolution.refPod, opts);
+      return;
+  }
+}
+
+/** uuid path — today's behavior exactly: pin against the active pod. */
+async function useProjectOnActivePod(projectId: string, opts: BaseOpts & { session?: boolean }): Promise<void> {
   let name = projectId;
   try {
     const cfg = await resolveHubConfig(opts);
@@ -79,6 +149,152 @@ export async function useProject(projectId: string, opts: BaseOpts & { session?:
     return;
   }
   log.success(`Project focus: ${chalk.bold(name)} ${chalk.dim(session ? "(this session)" : "(persisted)")}`);
+  renderNextSteps(steps);
+}
+
+/**
+ * Directory-resolved path: the project may live on ANOTHER pod. Switch
+ * activePod AND the project together; auto-provision the pod locally when it
+ * isn't in ~/.synap yet (existing doors: provisionUserOnPod + setupAgentViaPod).
+ */
+async function useCrossPodProject(
+  ref: string,
+  project: CpProjectResolution,
+  refPod: string | undefined,
+  opts: BaseOpts & { session?: boolean }
+): Promise<void> {
+  const profiles = listPodProfiles();
+  const activeProfile = profiles.find((p) => p.active);
+  let target = profiles.find((p) => samePodOrigin(p.config.podUrl, project.podUrl));
+
+  // ── --session: the session lens has no pod field — refuse cross-pod refs.
+  if (opts.session) {
+    const refusal = sessionScopeRefusal(project, activeProfile?.config.podUrl);
+    if (refusal) {
+      log.error(refusal);
+      process.exit(1);
+    }
+    const session = requireClaudeSession();
+    writeLens(session, { projectId: project.projectId });
+    const steps = FLOW.afterProjectUse(project.name);
+    if (opts.json) {
+      console.log(JSON.stringify({ projectId: project.projectId, name: project.name, scope: "session", nextSteps: steps }, null, 2));
+      return;
+    }
+    log.success(`Project focus: ${chalk.bold(project.name)} ${chalk.dim("(this session)")}`);
+    renderNextSteps(steps);
+    return;
+  }
+
+  const podHost = (() => {
+    try {
+      return new URL(project.podUrl).hostname;
+    } catch {
+      return project.podUrl;
+    }
+  })();
+
+  // ── Pod not saved locally → auto-provision via the existing doors.
+  if (!target) {
+    const creds = getStoredToken();
+    if (!creds?.token) {
+      // resolveProjectRef required a login, so this only happens if the creds
+      // file vanished mid-command — same remedy either way.
+      log.error("Not logged in — run: synap login");
+      process.exit(1);
+    }
+    log.dim(`Pod ${podHost} isn't configured locally — provisioning access…`);
+    try {
+      const { sessionToken } = await provisionUserOnPod(project.podUrl, creds.token);
+      if (!sessionToken) {
+        throw new Error("the pod returned no session from the federation handshake");
+      }
+      const agent = await setupAgentViaPod(project.podUrl, sessionToken, "cli");
+      const name = refPod && !profiles.some((p) => p.name === refPod) ? refPod : podHost;
+      const config = {
+        podUrl: project.podUrl,
+        podId: project.podId,
+        workspaceId: agent.workspaceId,
+        agentUserId: agent.agentUserId,
+        hubApiKey: agent.hubApiKey,
+        label: `added by synap project use ${ref}`,
+        savedAt: new Date().toISOString(),
+      };
+      addPodProfile(name, config);
+      target = { name, config, active: false };
+      log.success(`Pod saved: ${chalk.bold(name)} ${chalk.dim(`(${podHost})`)}`);
+    } catch (e) {
+      log.error(`Could not provision access on ${project.podUrl}: ${(e as Error).message}`);
+      log.hint("Add the pod manually with: synap pods add — then re-run this command.");
+      process.exit(1);
+    }
+  }
+
+  // ── Switch pod + project TOGETHER, and store the binding for drift warnings.
+  const switched = target.name !== activeProfile?.name;
+  if (switched) setActivePod(target.name);
+  setActiveProjectBinding({ projectId: project.projectId, podName: target.name });
+  const session = getClaudeSessionId();
+  if (session) writeLens(session, { projectId: project.projectId });
+
+  // Env pinning beats the config switch in resolveHubConfig — warn loudly.
+  const envPinned = Boolean(process.env.SYNAP_POD_URL && process.env.SYNAP_HUB_API_KEY);
+
+  // ── Liveness: same post-resolve check the uuid path does, but aimed at the
+  // NEW pod directly (resolveHubConfig would let env pinning aim it at the old
+  // one). Deployed pods return a BARE ARRAY from GET /projects (and may ignore
+  // `ids`), so read it through unwrapList like fetchProjects does.
+  let name = project.name || project.slug || project.projectId;
+  let stale = false;
+  try {
+    const cfg = {
+      podUrl: target.config.podUrl,
+      apiKey: target.config.hubApiKey,
+      userId: target.config.agentUserId || "cli",
+    };
+    const res = await hubGet(`/projects?ids=${encodeURIComponent(project.projectId)}`, {}, cfg);
+    const list = unwrapList<{ id: string; name?: string }>(res, ["projects"]);
+    const match = list.find((p) => p.id === project.projectId);
+    if (match) name = String(match.name ?? name);
+    else stale = true;
+  } catch {
+    /* liveness is best-effort — the pin already happened */
+  }
+
+  const steps = FLOW.afterProjectUse(name);
+  if (opts.json) {
+    console.log(
+      JSON.stringify(
+        {
+          projectId: project.projectId,
+          name,
+          slug: project.slug,
+          pod: { name: target.name, url: target.config.podUrl },
+          switchedPod: switched,
+          envPinned,
+          staleDirectoryEntry: stale,
+          scope: "global",
+          nextSteps: steps,
+        },
+        null,
+        2
+      )
+    );
+    return;
+  }
+
+  if (switched) {
+    log.success(`switched pod: ${activeProfile?.name ?? "(none)"} → ${chalk.bold(target.name)} ${chalk.dim(`(${podHost})`)}`);
+  }
+  log.success(`Project focus: ${chalk.bold(name)} ${chalk.dim("(persisted)")}`);
+  if (stale) {
+    log.warn(`stale directory entry: the pod at ${target.config.podUrl} does not report project ${project.projectId} — the directory may be out of date.`);
+  }
+  if (envPinned) {
+    log.warn(
+      "this shell is env-pinned: SYNAP_POD_URL / SYNAP_HUB_API_KEY are set, and they override the pod switch for hub calls made from THIS environment. Unset them (or open a fresh shell) for the switch to apply here."
+    );
+  }
   renderNextSteps(steps);
 }
 

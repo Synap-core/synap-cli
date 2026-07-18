@@ -1,7 +1,7 @@
 {
   "name": "@synap-core/cli",
   "version": "1.9.0",
-  "description": "Synap CLI — connect OpenClaw to sovereign knowledge infrastructure",
+  "description": "Synap CLI \u2014 connect OpenClaw to sovereign knowledge infrastructure",
   "type": "module",
   "bin": {
     "synap": "./dist/index.js"
@@ -13,7 +13,8 @@
     "prepublishOnly": "pnpm sync-skills && pnpm build",
     "prepack": "rm -rf node_modules/@synap/hub-rest-client && cp -r ../synap-backend/packages/hub-rest-client node_modules/@synap/",
     "postpack": "rm -rf node_modules/@synap/hub-rest-client && ln -s ../../../synap-backend/packages/hub-rest-client node_modules/@synap/hub-rest-client",
-    "postbuild": "chmod +x dist/index.js"
+    "postbuild": "chmod +x dist/index.js",
+    "test": "vitest run"
   },
   "dependencies": {
     "@synap/hub-rest-client": "file:../synap-backend/packages/hub-rest-client",
@@ -28,7 +29,8 @@
     "@types/prompts": "^2.4.9",
     "esbuild": "^0.28.0",
     "tsx": "^4.0.0",
-    "typescript": "^5.7.0"
+    "typescript": "^5.7.0",
+    "vitest": "^3.2.4"
   },
   "bundledDependencies": [
     "@synap/hub-rest-client"
