@@ -194,7 +194,7 @@ export async function login(): Promise<StoredCredentials | null> {
   const { pollForApproval } = await import("./approval-poll.js");
 
   // 1. Create the login request on the CP (unauthenticated).
-  let created: { requestId: string; pollSecret: string };
+  let created: { requestId: string; pollSecret: string; userCode: string };
   try {
     const res = await fetch(`${CP_URL}/auth/cli-request`, {
       method: "POST",
@@ -207,16 +207,20 @@ export async function login(): Promise<StoredCredentials | null> {
     return null;
   }
 
-  const { requestId, pollSecret } = created;
-  if (!requestId || !pollSecret) return null;
+  const { requestId, pollSecret, userCode } = created;
+  if (!requestId || !pollSecret || !userCode) return null;
 
-  // 2. Open the browser to the approve screen on the LANDING host (never the
-  //    CP's dashboard-derived approveUrl — dashboard is admin-only).
+  // 2. Show the device code, then open the browser to the approve screen on the
+  //    LANDING host (never the CP's dashboard-derived approveUrl). The user must
+  //    enter this code in the browser to approve — it binds the login to this
+  //    terminal so a phished approve link can't authorize someone else.
   const approveUrl = `${LANDING_URL}/cli?request=${encodeURIComponent(requestId)}`;
+  console.log(`\n  Enter this code in your browser to authorize the login:\n`);
+  console.log(`      ${userCode}\n`);
   try {
     openBrowser(approveUrl);
   } catch {
-    console.log(`\n  Open this URL in your browser:\n`);
+    console.log(`  Open this URL in your browser:\n`);
     console.log(`  ${approveUrl}\n`);
   }
 
