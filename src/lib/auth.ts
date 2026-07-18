@@ -1,12 +1,16 @@
 /**
  * CLI Authentication Module
  *
- * Browser-based OAuth flow:
- * 1. Start temporary HTTP server on localhost (random port)
- * 2. Open browser to synap.live/auth/cli?callback=http://localhost:PORT/callback
- * 3. User logs in via Better Auth (email/password, Google, GitHub)
- * 4. synap.live redirects to localhost callback with session token
- * 5. CLI stores token in ~/.synap/credentials.json
+ * Browser-based poll approval flow (see login() below):
+ * 1. POST ${CP}/auth/cli-request → { requestId, pollSecret }
+ * 2. Open browser to ${LANDING_URL}/cli?request=<requestId>
+ * 3. User signs in via Better Auth + picks a pod → browser POSTs the approval
+ * 4. CLI polls GET ${CP}/auth/cli-request/<requestId> with the pollSecret until
+ *    the credential payload (session token + pod) comes back
+ * 5. CLI stores it in ~/.synap/credentials.json
+ *
+ * (waitForPodCallback below still uses a localhost server — that's the separate
+ * managed-pod provisioning path, not login.)
  */
 
 import http from "node:http";
