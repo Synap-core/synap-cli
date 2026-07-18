@@ -36,9 +36,6 @@
  * live until the proposal is approved, so we never print "ready" for it.
  */
 
-import { createRequire } from "node:module";
-import path from "node:path";
-import fs from "node:fs";
 import prompts from "prompts";
 import ora from "ora";
 import chalk from "chalk";
@@ -69,6 +66,7 @@ import {
 } from "../lib/cp-packages.js";
 import { fetchInstalledSlugs } from "../lib/installed.js";
 import { isSuite } from "../lib/suite.js";
+import { bundledTemplatesVersion } from "../lib/bundle-version.js";
 
 // Provisioning a template writes profiles, properties, views, bento layouts and
 // seed entities in one call — `life-os` alone carries 21 profiles and 25 views.
@@ -77,34 +75,6 @@ import { isSuite } from "../lib/suite.js";
 const APPLY_TIMEOUT_MS = 120_000;
 
 // ── Template catalog (bundled public + CP private, merged) ───────────────────
-
-/**
- * THIS client's bundled `@synap-core/workspace-templates` version. The merge
- * door compares it against each CP row's `sourcePackage.version` to decide
- * whether the bundle is stale. Resolved from the installed package.json (the
- * subpath is blocked by `exports`, so we walk up from the resolved entry). On
- * failure we return "" — unparseable ⇒ the door keeps the bundle (safe default).
- */
-function bundledTemplatesVersion(): string {
-  try {
-    const require = createRequire(import.meta.url);
-    let dir = path.dirname(require.resolve("@synap-core/workspace-templates"));
-    for (let i = 0; i < 6; i++) {
-      const pj = path.join(dir, "package.json");
-      if (fs.existsSync(pj)) {
-        const parsed = JSON.parse(fs.readFileSync(pj, "utf8")) as {
-          name?: string;
-          version?: string;
-        };
-        if (parsed.name === "@synap-core/workspace-templates") return parsed.version ?? "";
-      }
-      dir = path.dirname(dir);
-    }
-  } catch {
-    /* fall through to the safe default */
-  }
-  return "";
-}
 
 /**
  * The merged, deduped catalog + the pieces the flow needs afterward:

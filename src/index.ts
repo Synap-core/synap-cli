@@ -1786,6 +1786,32 @@ tools
     await toolsSchema(opts);
   });
 
+// ─── market — discover + install ANY package type ────────────────────────────
+// launch is workspace-first (bundled, offline); market reaches every CP package
+// type (capability/skill/workflow/view/cell/workspace), public or private.
+const market = program
+  .command("market")
+  .description("Browse + install packages of any type — capabilities, skills, workflows, views, cells, workspaces")
+  .option("--list", "List and exit (the default action)")
+  .option("--search <query>", "Filter by name/description/slug")
+  .option("--type <type>", "Filter by package type (workspace|capability|skill|workflow|view|cell)")
+  .option("--json", "Output as JSON")
+  .action(async (opts) => {
+    const { market: marketBrowse } = await import("./commands/market.js");
+    await marketBrowse(opts);
+  });
+
+market
+  .command("install <slug>")
+  .description("Install a package by slug — workspaces install now; other types route you to the right surface")
+  .option("--json", "Output as JSON")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (slug: string, opts) => {
+    const { marketInstall } = await import("./commands/market.js");
+    await marketInstall(slug, opts);
+  });
+
 // ─── capability ───────────────────────────────────────────────────────────────
 
 const capability = program

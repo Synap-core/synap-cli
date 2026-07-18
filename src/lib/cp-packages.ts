@@ -69,7 +69,7 @@ export interface CpBrowseRow extends CpPackageRow {
 }
 
 /** `/mine` returns `isPublic` on top of the canonical row shape. */
-type CpMineRow = CpPackageRow & { isPublic?: boolean };
+export type CpMineRow = CpPackageRow & { isPublic?: boolean };
 
 /** Build the `/api/packages` query string from filters + any extra params. */
 function buildQuery(
@@ -122,10 +122,10 @@ export async function fetchPublicPackages(
  * only when the row actually carries one (the `/mine` select omits it, so a
  * type filter never silently drops the user's own rows).
  */
-export async function fetchMyPackages(
+export async function fetchMyRows(
   token: string,
   filters?: PackageFilters,
-): Promise<RemoteEntry[]> {
+): Promise<CpMineRow[]> {
   const res = await fetch(`${packagesBase()}/mine?limit=100`, {
     headers: { Authorization: `Bearer ${token}` },
     signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
@@ -148,6 +148,14 @@ export async function fetchMyPackages(
         (r.description ?? "").toLowerCase().includes(q),
     );
   }
+  return rows;
+}
+
+export async function fetchMyPackages(
+  token: string,
+  filters?: PackageFilters,
+): Promise<RemoteEntry[]> {
+  const rows = await fetchMyRows(token, filters);
   return rows.map((r) => rowToRemoteEntry(r, r.isPublic === false ? true : undefined));
 }
 
