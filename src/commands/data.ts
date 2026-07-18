@@ -3,6 +3,7 @@ import { log } from "../utils/logger.js";
 import { resolveHubConfig, resolveUserId, hubGet, hubPost, hubPatch, readActiveSessionId, renderHubError } from "../lib/hub-client.js";
 import { unwrapList } from "../lib/unwrapList.js";
 import { reportWrite } from "../lib/capture-lane.js";
+import { renderNextSteps, FLOW } from "../lib/next-steps.js";
 
 export interface BaseOpts {
   json?: boolean;
@@ -73,7 +74,7 @@ export async function orient(opts: BaseOpts): Promise<void> {
     if (opts.json) {
       console.log(
         JSON.stringify(
-          { ...res, podUrl: cfg.podUrl, workspaceId: cfg.workspaceId },
+          { ...res, podUrl: cfg.podUrl, workspaceId: cfg.workspaceId, nextSteps: FLOW.afterOrient() },
           null,
           2
         )
@@ -166,11 +167,8 @@ export async function orient(opts: BaseOpts): Promise<void> {
     }
 
     log.blank();
-    log.dim("Lenses compose — omit them to stay pod-wide:");
-    log.dim("  synap project use <id>   the company / initiative (cross-cutting)");
-    log.dim("  synap use <ws>           an operational domain");
-    log.dim("  synap session start      the day-to-day move");
-    log.dim("A project spans workspaces; a workspace spans projects.");
+    log.dim("Lenses compose — a project spans workspaces; a workspace spans projects. Omit them to stay pod-wide.");
+    renderNextSteps(FLOW.afterOrient());
   } catch (e) {
     renderHubError(e);
     process.exit(1);

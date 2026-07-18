@@ -33,6 +33,7 @@ import {
   configureAgentContext,
 } from "../lib/targets.js";
 import { runBrowserAuth } from "../lib/browser-auth.js";
+import { renderNextSteps, FLOW } from "../lib/next-steps.js";
 
 
 // ─── list ─────────────────────────────────────────────────────────────────────
@@ -230,7 +231,7 @@ function raycastSupportDir(): string {
   return path.join(os.homedir(), "Library", "Application Support", "com.raycast.macos");
 }
 
-export async function podsUse(name: string, opts: { surface?: SurfaceName } = {}): Promise<void> {
+export async function podsUse(name: string, opts: { surface?: SurfaceName; json?: boolean } = {}): Promise<void> {
   const profiles = listPodProfiles();
   const profile = profiles.find((p) => p.name === name);
   if (!profile) {
@@ -306,9 +307,17 @@ export async function podsUse(name: string, opts: { surface?: SurfaceName } = {}
     updated.push("Raycast");
   }
 
+  const steps = FLOW.afterPodUse(name);
+
+  if (opts.json) {
+    console.log(JSON.stringify({ pod: name, podUrl: podConfig.podUrl, surfaces: updated, nextSteps: steps }, null, 2));
+    return;
+  }
+
   if (updated.length === 0) {
     log.warn("Active pod switched, but no agent surface is configured on this machine.");
     log.dim("Connect one with: synap connect --target=<surface>");
+    renderNextSteps(steps);
     return;
   }
 
@@ -316,6 +325,7 @@ export async function podsUse(name: string, opts: { surface?: SurfaceName } = {}
   log.dim("Restart any open agents to apply the new pod.");
   log.blank();
   log.dim("Tip: synap pods use <name> --surface <surface>  — switch only one surface");
+  renderNextSteps(steps);
 }
 
 /** Apply a pod config to a single surface's external config file. */

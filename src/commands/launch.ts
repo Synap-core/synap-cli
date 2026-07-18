@@ -56,6 +56,7 @@ import {
 } from "../lib/hub-client.js";
 import { writeGovernance } from "../lib/capture-lane.js";
 import { fetchProjects } from "../lib/project.js";
+import { renderNextSteps, FLOW } from "../lib/next-steps.js";
 import { getStoredToken } from "../lib/auth.js";
 import {
   fetchRemoteCatalog,
@@ -848,6 +849,7 @@ export async function launch(opts: {
           attached: Boolean(attachProjectId),
           dependencies: extras,
           results,
+          nextSteps: FLOW.afterLaunch(projectLabel),
         },
         null,
         2
@@ -887,8 +889,6 @@ export async function launch(opts: {
   }
 
   if (live.length > 0 && proposed.length === 0 && failed.length === 0) {
-    log.blank();
-    log.dim("Run 'synap orient' to see your new workspaces and project.");
-    log.dim(`Scope your AI to this project: 'synap project use ${projectId.slice(0, 8)}'`);
+    renderNextSteps(FLOW.afterLaunch(projectLabel));
   }
 }

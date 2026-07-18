@@ -38,6 +38,7 @@ import { fetchProjects, createProject, type ProjectRef } from "../lib/project.js
 import { getActiveProjectId } from "../lib/pod.js";
 import { resolveActiveLens } from "../lib/session-lens.js";
 import { writeGovernance } from "../lib/capture-lane.js";
+import { renderNextSteps, FLOW } from "../lib/next-steps.js";
 import { getStoredToken, isTokenLocallyExpired } from "../lib/auth.js";
 import {
   fetchPublicBrowseRows,
@@ -203,6 +204,7 @@ export async function market(opts: {
           }),
           loggedIn: cat.loggedIn,
           reachedCp: cat.reachedCp,
+          nextSteps: FLOW.afterMarketList(),
         },
         null,
         2
@@ -276,7 +278,7 @@ export async function market(opts: {
 
   log.dim(`${entries.length} package${entries.length === 1 ? "" : "s"} available.`);
   if (!cat.loggedIn) log.dim("Log in to see your private packages: synap login");
-  log.dim("Install with: synap market install <slug>");
+  renderNextSteps(FLOW.afterMarketList());
 }
 
 // ── Target project resolution (the spine `market install` links installs to) ─
@@ -468,34 +470,39 @@ export async function marketInstall(
       APPLY_TIMEOUT_MS
     )) as Record<string, unknown>;
 
+    const projectName = target.kind === "project" ? target.name : undefined;
+
     if (writeGovernance(res) === "proposed") {
       const proposalId = res.proposalId ? String(res.proposalId) : undefined;
+      const steps = FLOW.afterMarketInstall({ slug, proposed: true, projectName });
       s?.stop();
       if (opts.json) {
-        console.log(JSON.stringify({ slug, outcome: "proposed", proposalId, projectId }, null, 2));
+        console.log(JSON.stringify({ slug, outcome: "proposed", proposalId, projectId, nextSteps: steps }, null, 2));
         return;
       }
       log.info(`${entry.name} — proposed (under review, not live yet).`);
       if (proposalId) log.hint(`Approve: synap proposals approve ${proposalId.slice(0, 8)}`);
+      renderNextSteps(steps);
       return;
     }
 
     const ws = res.workspace as
       | { status?: string; workspaceId?: string; onto?: string }
       | undefined;
+    const steps = FLOW.afterMarketInstall({ slug, proposed: false, projectName });
     s?.stop();
     if (opts.json) {
-      console.log(JSON.stringify({ slug, outcome: ws?.status ?? "unknown", workspace: ws, projectId }, null, 2));
+      console.log(JSON.stringify({ slug, outcome: ws?.status ?? "unknown", workspace: ws, projectId, nextSteps: steps }, null, 2));
       return;
     }
     if (ws?.status === "composed") {
       log.success(`${entry.name} — layered onto its base workspace.`);
     } else if (ws?.status === "created") {
       log.success(`${entry.name} ready.`);
-      log.dim("See it: synap orient");
     } else {
       log.warn(`${entry.name} — pod returned no workspace.`);
     }
+    if (ws?.status === "composed" || ws?.status === "created") renderNextSteps(steps);
   } catch (e) {
     s?.stop();
     log.error(`${entry.name} failed`);

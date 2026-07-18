@@ -8,10 +8,12 @@
  */
 
 import chalk from "chalk";
-import { resolveHubConfig, hubGet } from "../lib/hub-client.js";
+import { resolveHubConfig, hubGet, renderHubError } from "../lib/hub-client.js";
 import { getClaudeSessionId, writeLens, clearLensField, resolveActiveLens } from "../lib/session-lens.js";
 import { describeLens } from "../lib/describe-lens.js";
-import { setActiveProjectId, clearActiveProjectId } from "../lib/pod.js";
+import { setActiveProjectId, clearActiveProjectId, getActiveProjectId } from "../lib/pod.js";
+import { fetchProjects, createProject } from "../lib/project.js";
+import { renderNextSteps, FLOW } from "../lib/next-steps.js";
 import { log } from "../utils/logger.js";
 import { type BaseOpts } from "./data.js";
 
@@ -47,14 +49,17 @@ export async function useProject(projectId: string, opts: BaseOpts & { session?:
     /* validation is best-effort — accept the id regardless */
   }
 
+  const steps = FLOW.afterProjectUse(name);
+
   if (opts.session) {
     const session = requireClaudeSession();
     writeLens(session, { projectId });
     if (opts.json) {
-      console.log(JSON.stringify({ projectId, name, scope: "session" }, null, 2));
+      console.log(JSON.stringify({ projectId, name, scope: "session", nextSteps: steps }, null, 2));
       return;
     }
     log.success(`Project focus: ${chalk.bold(name)} ${chalk.dim("(this session)")}`);
+    renderNextSteps(steps);
     return;
   }
 
@@ -70,10 +75,11 @@ export async function useProject(projectId: string, opts: BaseOpts & { session?:
     setActiveProjectId(projectId);
   }
   if (opts.json) {
-    console.log(JSON.stringify({ projectId, name, scope: session ? "session" : "global" }, null, 2));
+    console.log(JSON.stringify({ projectId, name, scope: session ? "session" : "global", nextSteps: steps }, null, 2));
     return;
   }
   log.success(`Project focus: ${chalk.bold(name)} ${chalk.dim(session ? "(this session)" : "(persisted)")}`);
+  renderNextSteps(steps);
 }
 
 export async function clearProject(opts: BaseOpts & { session?: boolean }): Promise<void> {
@@ -118,4 +124,104 @@ export async function showLens(opts: BaseOpts): Promise<void> {
   for (const { label, value, bound } of described.lines) {
     console.log(`  ${label}:${" ".repeat(Math.max(1, 10 - label.length))}${bound ? chalk.white(value) : chalk.dim(value)}`);
   }
+}
+
+/** The active project — session lens first, then the durable global default. */
+function activeProjectId(): string | undefined {
+  return resolveActiveLens()?.projectId || getActiveProjectId();
+}
+
+/**
+ * List the projects on the active pod (mirrors `synap pods`) with an ACTIVE
+ * marker on the currently-pinned one. Full ids are shown so they paste straight
+ * into `synap project use <id>`. Degrades to an empty list offline.
+ */
+export async function projectList(opts: BaseOpts): Promise<void> {
+  let projects: Awaited<ReturnType<typeof fetchProjects>> = [];
+  try {
+    const cfg = await resolveHubConfig(opts);
+    projects = await fetchProjects(cfg);
+  } catch (e) {
+    if (opts.json) {
+      console.log(JSON.stringify({ projects: [], activeProjectId: activeProjectId() ?? null, nextSteps: FLOW.afterProjectList() }, null, 2));
+      return;
+    }
+    renderHubError(e);
+    return;
+  }
+
+  const active = activeProjectId();
+  const steps = FLOW.afterProjectList();
+
+  if (opts.json) {
+    console.log(
+      JSON.stringify(
+        {
+          projects: projects.map((p) => ({ id: p.id, name: p.name, active: p.id === active })),
+          activeProjectId: active ?? null,
+          nextSteps: steps,
+        },
+        null,
+        2
+      )
+    );
+    return;
+  }
+
+  log.heading("Projects");
+  if (projects.length === 0) {
+    log.dim("No projects yet — a project is a company/initiative that ties workspaces together.");
+    log.dim("Create one: synap project new <name>");
+    return;
+  }
+  for (const p of projects) {
+    const marker = p.id === active ? chalk.green("▶ ") : "  ";
+    console.log(`  ${marker}${chalk.bold(p.name)}  ${chalk.dim(p.id)}`);
+  }
+  renderNextSteps(steps);
+}
+
+/**
+ * Create a project on the active pod. Governance may queue it as a proposal
+ * instead of creating it live — we distinguish and message accordingly. On a
+ * live create, guides the user to pin it + add to it.
+ */
+export async function projectNew(
+  name: string,
+  opts: BaseOpts & { description?: string }
+): Promise<void> {
+  let created: Awaited<ReturnType<typeof createProject>>;
+  try {
+    const cfg = await resolveHubConfig(opts);
+    created = await createProject(cfg, { name, description: opts.description });
+  } catch (e) {
+    renderHubError(e);
+    process.exit(1);
+  }
+
+  const proposed = !created.id && Boolean(created.proposalId);
+  const steps = created.id
+    ? FLOW.afterProjectNew(name, created.id)
+    : [{ command: "synap proposals list", why: `approve the queued creation of ${name}` }];
+
+  if (opts.json) {
+    console.log(
+      JSON.stringify(
+        { id: created.id ?? null, proposalId: created.proposalId ?? null, name, status: created.status ?? null, nextSteps: steps },
+        null,
+        2
+      )
+    );
+    return;
+  }
+
+  if (proposed) {
+    log.warn(`Project "${name}" isn't live yet — governance queued it for your approval.`);
+    if (created.proposalId) log.hint(`Approve proposal ${created.proposalId.slice(0, 8)}, then retry pinning it.`);
+    renderNextSteps(steps);
+    return;
+  }
+
+  log.success(`Project created: ${chalk.bold(name)}${created.id ? chalk.dim(`  ${created.id}`) : ""}`);
+  renderNextSteps(steps);
 }

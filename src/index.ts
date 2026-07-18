@@ -64,7 +64,7 @@ program
 // bare `synap launch` runs the guided one-per-company setup.
 program
   .command("launch")
-  .description("Set up a company on your pod — a project + its domain workspaces, interactively")
+  .description("Stand up a NEW company/OS on a pod — creates a project + its core workspaces (interactive)")
   .option("--list", "List what can be launched (local templates, no pod needed) and exit")
   .option("--search <query>", "Filter --list by name/description/slug")
   .option("--type <type>", "Filter --list by package type (workspace|capability|skill|workflow|view|cell)")
@@ -146,9 +146,10 @@ pods
   .command("use <name>")
   .description("Switch active pod and propagate credentials to all agent surfaces")
   .option("--surface <surface>", "Only switch this surface (raycast, claude-code, claude-desktop, cursor)")
-  .action(async (name: string, opts: { surface?: string }) => {
+  .option("--json", "Output as JSON (incl. nextSteps for agents; full-switch only)")
+  .action(async (name: string, opts: { surface?: string; json?: boolean }) => {
     const { podsUse } = await import("./commands/pods.js");
-    await podsUse(name, { surface: opts.surface as import("./commands/pods.js").SurfaceName | undefined });
+    await podsUse(name, { surface: opts.surface as import("./commands/pods.js").SurfaceName | undefined, json: opts.json });
   });
 
 pods
@@ -401,7 +402,9 @@ program
     const { isLoggedIn: cpLoggedIn, login: cpLogin } = await import("./lib/auth.js");
     console.log("\n  Synap account:\n");
     const account = await cpLoggedIn();
+    let accountEmail: string | undefined;
     if (account.valid) {
+      accountEmail = account.email;
       console.log(
         `  ${chalk.green("●")} ${chalk.bold(account.email ?? "logged in")}  ${chalk.dim("— private templates available")}`
       );
@@ -419,6 +422,7 @@ program
       if (doLogin) {
         const creds = await cpLogin();
         if (creds?.email) {
+          accountEmail = creds.email;
           console.log(chalk.green(`  ✓ Logged in as ${creds.email} — private templates unlocked.`));
         }
       } else {
@@ -426,9 +430,8 @@ program
       }
     }
 
-    console.log();
-    console.log(chalk.dim("  synap pods use <name>    — switch active pod"));
-    console.log(chalk.dim("  synap pods add           — connect another pod"));
+    const { renderNextSteps, FLOW } = await import("./lib/next-steps.js");
+    renderNextSteps(FLOW.afterLogin(accountEmail));
   });
 
 
@@ -497,7 +500,28 @@ program
 // ─── project / lens (per-Claude-session scoping) ──────────────────────────────
 const project = program
   .command("project")
-  .description("Focus this Claude session on a project (cross-cutting lens)");
+  .description("Manage + focus the cross-cutting project lens (a company/initiative): list, new, use, clear");
+project
+  .command("list", { isDefault: true })
+  .description("List projects on the active pod, with the pinned one marked (bare `synap project` runs this)")
+  .option("--json", "Output as JSON (incl. nextSteps for agents)")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (opts) => {
+    const { projectList } = await import("./commands/lens.js");
+    await projectList(opts);
+  });
+project
+  .command("new <name>")
+  .description("Create a project (a company/initiative) on the active pod, then guide you to pin + add to it")
+  .option("--description <text>", "Optional one-line description")
+  .option("--json", "Output as JSON (incl. nextSteps for agents)")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (name: string, opts) => {
+    const { projectNew } = await import("./commands/lens.js");
+    await projectNew(name, opts);
+  });
 project
   .command("use <projectId>")
   .description("Pin the active project (durable, like `synap use <workspace>`) — narrows scoped calls + statusline")
@@ -1791,7 +1815,7 @@ tools
 // type (capability/skill/workflow/view/cell/workspace), public or private.
 const market = program
   .command("market")
-  .description("Browse + install packages of any type — capabilities, skills, workflows, views, cells, workspaces")
+  .description("Browse + install packages (workspaces, capabilities, skills, workflows, views, cells) into a project")
   .option("--list", "List and exit (the default action)")
   .option("--search <query>", "Filter by name/description/slug")
   .option("--type <type>", "Filter by package type (workspace|capability|skill|workflow|view|cell)")
