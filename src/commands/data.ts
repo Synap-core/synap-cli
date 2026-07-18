@@ -563,6 +563,13 @@ export async function askKnowledge(
       }
       log.blank();
     }
+
+    // res.degraded was only ever checked as a boolean (anyErrored) above —
+    // surface which substrate(s) actually degraded, verbatim, so the answer's
+    // incompleteness is visible rather than just its existence.
+    if (res.degraded && res.degraded.length > 0) {
+      log.dim(`Degraded: ${res.degraded.join(", ")}`);
+    }
   } catch (e) {
     renderHubError(e);
     process.exit(1);
