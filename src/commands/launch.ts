@@ -65,7 +65,10 @@ import {
   fetchRemoteCatalog,
   fetchPackageDefinition,
   type RemoteCatalog,
+  type PackageFilters,
 } from "../lib/cp-packages.js";
+import { fetchInstalledSlugs } from "../lib/installed.js";
+import { isSuite } from "../lib/suite.js";
 
 // Provisioning a template writes profiles, properties, views, bento layouts and
 // seed entities in one call — `life-os` alone carries 21 profiles and 25 views.
@@ -118,10 +121,18 @@ interface Catalog {
   sources: MergeCatalogResult["sources"];
   remote: RemoteCatalog;
   yaml: Map<string, WorkspaceYaml>;
+  /** Package slugs already provisioned on the active pod (B3). Empty if unreachable. */
+  installed: Set<string>;
 }
 
-async function buildCatalog(): Promise<Catalog> {
-  const remote = await fetchRemoteCatalog();
+async function buildCatalog(filters?: PackageFilters): Promise<Catalog> {
+  // Installed-awareness is best-effort and runs alongside the CP fetch: a pod
+  // that is unconfigured/unreachable degrades to an empty set (no markers),
+  // never a failure — discovery works offline.
+  const [remote, installed] = await Promise.all([
+    fetchRemoteCatalog(filters),
+    fetchInstalledSlugs(),
+  ]);
   const merged = mergeCatalog({
     // PUBLIC = bundle; PRIVATE = CP. Passing the public-only list (18) is what
     // makes this survive a later wave that drops the private YAMLs: they simply
@@ -137,7 +148,30 @@ async function buildCatalog(): Promise<Catalog> {
     sources: merged.sources,
     remote,
     yaml: new Map(listWorkspaceTemplates().map((t) => [t.meta.slug, t])),
+    installed,
   };
+}
+
+/** Is this entry already installed on the active pod? (B3) */
+function isInstalled(slug: string, cat: Catalog): boolean {
+  return cat.installed.has(slug);
+}
+
+/**
+ * Client-side filter for the merged catalog. The CP browse route already applies
+ * `search`/`category` to REMOTE rows; bundled entries (all `workspace` category)
+ * need the same filter applied here so `--list --type`/`--search` behaves
+ * uniformly across both sources.
+ */
+function matchesFilters(entry: CatalogEntry, filters?: PackageFilters): boolean {
+  if (!filters) return true;
+  if (filters.category && (entry.category ?? "workspace") !== filters.category) return false;
+  if (filters.search) {
+    const q = filters.search.toLowerCase();
+    const hay = `${entry.slug} ${entry.name} ${entry.description ?? ""}`.toLowerCase();
+    if (!hay.includes(q)) return false;
+  }
+  return true;
 }
 
 /** The `compose` dependency, if any — the base this template LAYERS onto. */
@@ -250,11 +284,36 @@ function remoteNote(remote: RemoteCatalog): string | null {
   }
 }
 
+/**
+ * Status badges for an entry — data-driven, no hardcoded slugs. `suite` from the
+ * tag (`isSuite`); `installed` from the pod (B3); `requiredTier`/price and
+ * `locked` from the CP browse row (B4).
+ */
+function entryBadges(entry: CatalogEntry, cat: Catalog): string[] {
+  const badges: string[] = [];
+  if (isSuite(entry)) badges.push(chalk.magenta("suite"));
+  if (isPrivate(entry)) badges.push(chalk.yellow("private"));
+  if (isInstalled(entry.slug, cat)) badges.push(chalk.green("installed"));
+  const tier = cat.remote.tierBySlug.get(entry.slug);
+  if (tier?.requiredTier) badges.push(chalk.cyan(tier.requiredTier));
+  else if (tier?.pricingModel && tier.pricingModel !== "free")
+    badges.push(chalk.cyan(tier.pricingModel));
+  if (cat.remote.lockedSlugs.has(entry.slug)) badges.push(chalk.red("locked"));
+  return badges;
+}
+
 // ── `synap launch --list` — what CAN be launched, without committing ─────────
 
-export async function launchList(opts: { json?: boolean }): Promise<void> {
-  const cat = await buildCatalog();
-  const { entries, remote } = cat;
+export async function launchList(opts: {
+  json?: boolean;
+  search?: string;
+  type?: string;
+}): Promise<void> {
+  const filters: PackageFilters | undefined =
+    opts.search || opts.type ? { search: opts.search, category: opts.type } : undefined;
+  const cat = await buildCatalog(filters);
+  const { remote } = cat;
+  const entries = cat.entries.filter((e) => matchesFilters(e, filters));
 
   if (opts.json) {
     console.log(
@@ -262,12 +321,18 @@ export async function launchList(opts: { json?: boolean }): Promise<void> {
         {
           entries: entries.map((e) => {
             const y = cat.yaml.get(e.slug);
+            const tier = remote.tierBySlug.get(e.slug);
             return {
               slug: e.slug,
               name: e.name,
               description: e.description,
               tags: e.tags,
               isPrivate: e.isPrivate,
+              suite: isSuite(e),
+              installed: isInstalled(e.slug, cat),
+              requiredTier: tier?.requiredTier ?? null,
+              pricingModel: tier?.pricingModel ?? null,
+              locked: remote.lockedSlugs.has(e.slug),
               source: e.source,
               kind: isOverlay(e.slug, cat) ? "overlay" : "workspace",
               profiles: y?.profiles?.length ?? null,
@@ -290,12 +355,12 @@ export async function launchList(opts: { json?: boolean }): Promise<void> {
   }
 
   const render = (entry: CatalogEntry) => {
-    const tags = [isPrivate(entry) ? chalk.yellow("private") : null].filter(Boolean);
+    const badges = entryBadges(entry, cat);
     console.log(
       "    " +
         chalk.cyan(entry.slug.padEnd(22)) +
         chalk.bold(entry.name) +
-        (tags.length ? "  " + tags.join(" ") : "")
+        (badges.length ? "  " + badges.join(" ") : "")
     );
     console.log("    " + " ".repeat(22) + chalk.dim(clip(entry.description ?? "", 68)));
     const why = consequence(entry.slug, cat);
@@ -308,12 +373,20 @@ export async function launchList(opts: { json?: boolean }): Promise<void> {
     log.blank();
   };
 
+  if (entries.length === 0) {
+    log.warn("No templates match that filter.");
+    log.dim("Try 'synap launch --list' with no filter, or 'synap market --list' for all package types.");
+    return;
+  }
+
   const workspaces = entries.filter((e) => !isOverlay(e.slug, cat));
   const overlays = entries.filter((e) => isOverlay(e.slug, cat));
 
-  log.heading("  Domain workspaces — each creates its own workspace");
-  log.blank();
-  workspaces.forEach(render);
+  if (workspaces.length > 0) {
+    log.heading("  Domain workspaces — each creates its own workspace");
+    log.blank();
+    workspaces.forEach(render);
+  }
 
   if (overlays.length > 0) {
     log.heading("  Overlays — layer onto an existing workspace (no new workspace)");
@@ -321,7 +394,7 @@ export async function launchList(opts: { json?: boolean }): Promise<void> {
     overlays.forEach(render);
   }
 
-  log.dim(`${entries.length} templates available.`);
+  log.dim(`${entries.length} template${entries.length === 1 ? "" : "s"} available.`);
   const note = remoteNote(remote);
   if (note) log.dim(note);
   log.dim("Run 'synap launch' to set one up · 'synap orient' to see what you already have.");
@@ -333,12 +406,34 @@ export async function launchList(opts: { json?: boolean }): Promise<void> {
 // (foundation) and overlays (grants, internal-runbook) are implementation
 // details a suite pulls in — they surface only in "Custom".
 
-/** The suite headline for a company. Bundled + public. */
-const COMPANY_SUITE = "enterprise-os";
-/** The private flagship layer offered on top of the company suite. */
-const PRIVATE_SUITE = "the-arch";
+/**
+ * The preferred public headline suite for a company — a TIEBREAKER, not an
+ * allowlist. "Is this a suite?" is derived from the `suite` tag via `isSuite()`
+ * (data-driven); this only decides WHICH public suite headlines when several are
+ * tagged. enterprise-os stays the canonical company OS.
+ */
+const PREFERRED_COMPANY_SUITE = "enterprise-os";
 /** Personal-knowledge default (falls back to life-os if personal isn't bundled). */
 const PERSONAL_SLUGS = ["personal", "life-os"];
+
+/**
+ * The public headline suite for a company — a suite-tagged, public entry
+ * (`isSuite && !isPrivate`), preferring `enterprise-os` when several are tagged.
+ * Replaces the hardcoded `COMPANY_SUITE` slug.
+ */
+function publicCompanySuite(cat: Catalog): CatalogEntry | undefined {
+  const suites = cat.entries.filter((e) => isSuite(e) && !isPrivate(e));
+  return suites.find((e) => e.slug === PREFERRED_COMPANY_SUITE) ?? suites[0];
+}
+
+/**
+ * The private flagship suite offered on top — any suite-tagged PRIVATE entry
+ * (resolves only when the account owns it). Replaces the hardcoded
+ * `PRIVATE_SUITE` slug.
+ */
+function privateSuite(cat: Catalog): CatalogEntry | undefined {
+  return cat.entries.find((e) => isSuite(e) && isPrivate(e));
+}
 
 /**
  * Company intent → the suite is the headline. "Use the full suite" installs it
@@ -348,8 +443,11 @@ const PERSONAL_SLUGS = ["personal", "life-os"];
  * If the private flagship suite is actually available to this account, offer it.
  */
 async function pickCompany(cat: Catalog): Promise<string[]> {
-  const suiteName = displayName(COMPANY_SUITE, cat);
-  const lenses = (cat.yaml.get(COMPANY_SUITE)?.dependencies ?? [])
+  const suite = publicCompanySuite(cat);
+  if (!suite) return [];
+  const suiteSlug = suite.slug;
+  const suiteName = suite.name;
+  const lenses = (cat.yaml.get(suiteSlug)?.dependencies ?? [])
     .filter((d) => (d.relation ?? "require") === "require")
     .map((d) => d.slug);
 
@@ -374,7 +472,7 @@ async function pickCompany(cat: Catalog): Promise<string[]> {
 
   let selected: string[];
   if (scope === "full") {
-    selected = [COMPANY_SUITE];
+    selected = [suiteSlug];
   } else {
     const { picked } = await prompts({
       type: "multiselect",
@@ -393,17 +491,18 @@ async function pickCompany(cat: Catalog): Promise<string[]> {
     if (selected.length === 0) return [];
   }
 
-  // Private flagship layer — offered ONLY when it actually resolved for this
-  // account (CP-logged-in as its owner). Absent otherwise, honestly.
-  const arch = cat.entryMap.get(PRIVATE_SUITE);
-  if (arch && isPrivate(arch)) {
+  // Private flagship layer — offered ONLY when a suite-tagged PRIVATE entry
+  // actually resolved for this account (CP-logged-in as its owner). Absent
+  // otherwise, honestly. Detected by tag, not a hardcoded slug.
+  const arch = privateSuite(cat);
+  if (arch) {
     const { addArch } = await prompts({
       type: "confirm",
       name: "addArch",
       message: `Add your private flagships — ${arch.name}?`,
       initial: false,
     });
-    if (addArch) selected.push(PRIVATE_SUITE);
+    if (addArch) selected.push(arch.slug);
   }
   return selected;
 }
@@ -427,6 +526,7 @@ async function pickCustom(cat: Catalog, description: string): Promise<string[]> 
     return {
       title:
         `${entry.name}${isPrivate(entry) ? chalk.yellow(" (private)") : ""}` +
+        `${isInstalled(entry.slug, cat) ? chalk.green(" [installed]") : ""}` +
         chalk.dim(` — ${contents(entry, cat)}`) +
         (why ? chalk.dim(` · ${why}`) : ""),
       description: clip(entry.description ?? "", 72),
@@ -454,6 +554,8 @@ export async function launch(opts: {
   apiKey?: string;
   json?: boolean;
   list?: boolean;
+  search?: string;
+  type?: string;
 }): Promise<void> {
   // Discovery answers "what can I launch?" — bundled public always, plus the
   // user's private CP templates when logged in. Never touches the pod.
@@ -542,7 +644,7 @@ export async function launch(opts: {
   // the headline; personal gets a knowledge base; custom is the full list for
   // power users. This is where foundation/overlays/niche standalones stop being
   // confusing flat peers — they only appear under "Custom".
-  const companyAvailable = cat.yaml.has(COMPANY_SUITE) || cat.entryMap.has(COMPANY_SUITE);
+  const companyAvailable = publicCompanySuite(cat) !== undefined;
   const { intent } = await prompts({
     type: "select",
     name: "intent",

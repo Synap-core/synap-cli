@@ -66,6 +66,8 @@ program
   .command("launch")
   .description("Set up a company on your pod — a project + its domain workspaces, interactively")
   .option("--list", "List what can be launched (local templates, no pod needed) and exit")
+  .option("--search <query>", "Filter --list by name/description/slug")
+  .option("--type <type>", "Filter --list by package type (workspace|capability|skill|workflow|view|cell)")
   .option("--json", "Output as JSON")
   .option("--pod-url <url>", "Pod URL override")
   .option("--api-key <key>", "API key override")
