@@ -95,7 +95,11 @@ async function buildMarketCatalog(filters?: PackageFilters): Promise<MarketCatal
   ]);
 
   const merged = assembleCatalog({
-    bundled: listPublicTemplates(),
+    // Logged in → include PRIVATE bundled templates (e.g. the `the-arch` suite),
+    // matching the "private templates unlocked" promise. Logged out → public
+    // bundle only. (mergeCatalog derives `isPrivate` from each template's
+    // `meta.isPublic === false`, so private bundled entries stay badged.)
+    bundled: loggedIn ? listWorkspaceTemplates() : listPublicTemplates(),
     remoteRows: [...publicRows, ...mineRows],
     bundleVersion: bundledTemplatesVersion(),
     remoteStatus: reachedCp ? "ok" : "unreachable",
