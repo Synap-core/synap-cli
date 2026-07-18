@@ -60,7 +60,7 @@ export const FLOW = {
         command: "synap market --list",
         why: email ? `your private packages (${email}) are now visible` : "your private packages are now visible",
       },
-      { command: "synap project use <id>", why: "focus a project before installing" },
+      { command: "synap market install <slug>", why: "install an OS / template pod-wide" },
     ];
   },
 
@@ -92,8 +92,8 @@ export const FLOW = {
   /** After browsing the marketplace. */
   afterMarketList(): NextStep[] {
     return [
-      { command: "synap market install <slug>", why: "install a package into your active project" },
-      { command: "synap project use <id>", why: "scope installs to a project first" },
+      { command: "synap market install <slug>", why: "install it pod-wide" },
+      { command: "synap market install <slug> --project <id>", why: "optionally also tag its seeded entities to a project" },
     ];
   },
 
@@ -108,11 +108,16 @@ export const FLOW = {
     ];
   },
 
-  /** After `synap launch` stands up a company/OS. */
-  afterLaunch(projectName: string): NextStep[] {
+  /** After `synap launch` stands up a company/OS (pod-wide, or under a project). */
+  afterLaunch(projectName?: string): NextStep[] {
     return [
-      { command: "synap orient", why: `see the new workspaces under ${projectName}` },
-      { command: "synap market --list", why: "add more packages to it" },
+      {
+        command: "synap orient",
+        why: projectName
+          ? `see the new workspaces under ${projectName}`
+          : "see the new workspaces",
+      },
+      { command: "synap market --list", why: "add more packages" },
     ];
   },
 

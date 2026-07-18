@@ -566,52 +566,61 @@ export async function launch(opts: {
     process.exit(1);
   }
 
-  // ── 1. Project name ─────────────────────────────────────────────────────
-  const { projectName } = await prompts({
-    type: "text",
-    name: "projectName",
-    message: "What's your company or project called?",
+  // ── 1. Where should this live? Project is OPTIONAL ──────────────────────
+  // Launching an OS provisions its WORKSPACES pod-wide, and their contents are
+  // workspace-level — so a project is NOT required (on a team/company pod, the
+  // pod IS the company). Default is pod-wide; a project is an opt-in
+  // cross-cutting lens the user can attach or create, never mandatory.
+  const existingProjects = await fetchProjects(cfg);
+
+  const POD_WIDE = "__pod_wide__";
+  const NEW_PROJECT = "__new__";
+  let attachProjectId: string | undefined;
+  let projectName: string | undefined;
+
+  const { where } = await prompts({
+    type: "select",
+    name: "where",
+    message: "Where should this live?",
+    choices: [
+      {
+        title: "Pod-wide — the whole pod (recommended)",
+        description: "Best for a company/team pod, where the pod IS the company",
+        value: POD_WIDE,
+      },
+      ...existingProjects.map((p) => ({
+        title: `Project: ${p.name} ${chalk.dim(p.id.slice(0, 8))}`,
+        value: p.id,
+      })),
+      {
+        title: chalk.cyan("＋ Create a new project"),
+        description: "An optional cross-cutting lens over what you install",
+        value: NEW_PROJECT,
+      },
+    ],
+    initial: 0,
   });
-  if (!projectName) {
+  if (!where) {
     log.warn("Cancelled.");
     return;
   }
-
-  // ── 1b. Attach to an existing project, or create a new one? ──────────────
-  // Shared door with `market install` (fetchProjects) — one fetch, one shape.
-  const existingProjects = await fetchProjects(cfg);
-
-  const NEW_PROJECT = "__new__";
-  let attachProjectId: string | undefined;
-  if (existingProjects.length > 0) {
-    // Discoverability: adding a single add-on to an existing project is a direct,
-    // zero-prompt path — surface it so users don't run the whole guided flow.
-    log.dim("Tip: to add one add-on to an existing project, use 'synap market install <slug> --project <id>'.");
-    const { choice } = await prompts({
-      type: "select",
-      name: "choice",
-      message: "Attach to an existing project, or create a new one?",
-      choices: [
-        ...existingProjects.map((p) => ({
-          title: `${p.name} ${chalk.dim(p.id.slice(0, 8))}`,
-          value: p.id,
-        })),
-        { title: chalk.cyan("＋ Create a new project"), value: NEW_PROJECT },
-      ],
+  if (where === NEW_PROJECT) {
+    const { name } = await prompts({
+      type: "text",
+      name: "name",
+      message: "New project name:",
     });
-    if (!choice) {
+    if (!name) {
       log.warn("Cancelled.");
       return;
     }
-    if (choice !== NEW_PROJECT) {
-      attachProjectId = choice as string;
-      const chosen = existingProjects.find((p) => p.id === attachProjectId);
-      log.blank();
-      log.info(`Attaching new workspaces to ${chalk.bold(chosen?.name ?? attachProjectId)}.`);
-      log.dim(
-        `Tip: review what's already there first — 'synap digest --project ${attachProjectId.slice(0, 8)}'`
-      );
-    }
+    projectName = name; // created below
+  } else if (where !== POD_WIDE) {
+    attachProjectId = where as string;
+    const chosen = existingProjects.find((p) => p.id === attachProjectId);
+    projectName = chosen?.name;
+    log.blank();
+    log.info(`Attaching new workspaces to ${chalk.bold(chosen?.name ?? attachProjectId)}.`);
   }
 
   // ── 2. Describe → infer domains ─────────────────────────────────────────
@@ -721,11 +730,14 @@ export async function launch(opts: {
     return;
   }
 
-  // ── 4. Resolve the project — attach to the chosen one, or create new ─────
-  let projectId: string;
+  // ── 4. Resolve the project — POD-WIDE unless one was chosen/created ───────
+  // projectId stays undefined for a pod-wide launch (the default); the workspaces
+  // provision pod-wide and /packages/apply skips the entity→project link.
+  let projectId: string | undefined;
   if (attachProjectId) {
     projectId = attachProjectId;
-  } else {
+  } else if (projectName) {
+    // "Create a new project" was chosen — mint it, then link the workspaces.
     const spinner = ora("Creating project…").start();
     try {
       const project = (await hubPost(
@@ -881,7 +893,9 @@ export async function launch(opts: {
   log.blank();
   if (live.length > 0) {
     log.success(
-      `${live.length}/${results.length} live under project ${chalk.bold(projectLabel)}.`
+      projectLabel
+        ? `${live.length}/${results.length} live under project ${chalk.bold(projectLabel)}.`
+        : `${live.length}/${results.length} live (pod-wide).`
     );
   }
 
