@@ -327,6 +327,126 @@ export async function launchList(opts: { json?: boolean }): Promise<void> {
   log.dim("Run 'synap launch' to set one up · 'synap orient' to see what you already have.");
 }
 
+// ── Intent pickers — the flow shows the RIGHT thing per intent ───────────────
+// Not a flat wall of 24 templates. A SUITE is the headline for a company; its
+// constituent lenses are opt-OUT customization UNDER it, never flat peers; bases
+// (foundation) and overlays (grants, internal-runbook) are implementation
+// details a suite pulls in — they surface only in "Custom".
+
+/** The suite headline for a company. Bundled + public. */
+const COMPANY_SUITE = "enterprise-os";
+/** The private flagship layer offered on top of the company suite. */
+const PRIVATE_SUITE = "the-arch";
+/** Personal-knowledge default (falls back to life-os if personal isn't bundled). */
+const PERSONAL_SLUGS = ["personal", "life-os"];
+
+/**
+ * Company intent → the suite is the headline. "Use the full suite" installs it
+ * as ONE apply (the pod resolves its lenses); "pick lenses" installs the chosen
+ * constituents directly. Required bases (foundation) are pulled back in by the
+ * resolver and shown in the disclose step, so a de-selected base is never lost.
+ * If the private flagship suite is actually available to this account, offer it.
+ */
+async function pickCompany(cat: Catalog): Promise<string[]> {
+  const suiteName = displayName(COMPANY_SUITE, cat);
+  const lenses = (cat.yaml.get(COMPANY_SUITE)?.dependencies ?? [])
+    .filter((d) => (d.relation ?? "require") === "require")
+    .map((d) => d.slug);
+
+  const { scope } = await prompts({
+    type: "select",
+    name: "scope",
+    message: `${suiteName} — ${lenses.map((s) => displayName(s, cat)).join(", ")}`,
+    choices: [
+      {
+        title: `Use the full ${suiteName}`,
+        description: "Everything, wired together — recommended",
+        value: "full",
+      },
+      {
+        title: "Pick which lenses",
+        description: "Choose which parts to install",
+        value: "pick",
+      },
+    ],
+  });
+  if (!scope) return [];
+
+  let selected: string[];
+  if (scope === "full") {
+    selected = [COMPANY_SUITE];
+  } else {
+    const { picked } = await prompts({
+      type: "multiselect",
+      name: "picked",
+      message: "Which lenses? (space to toggle)",
+      choices: lenses.map((s) => ({
+        title:
+          displayName(s, cat) +
+          chalk.dim(` — ${clip(cat.yaml.get(s)?.meta?.description ?? "", 56)}`),
+        value: s,
+        selected: true,
+      })),
+      hint: "- Space to toggle. Return to submit. Required bases are added automatically.",
+    });
+    selected = (picked as string[]) ?? [];
+    if (selected.length === 0) return [];
+  }
+
+  // Private flagship layer — offered ONLY when it actually resolved for this
+  // account (CP-logged-in as its owner). Absent otherwise, honestly.
+  const arch = cat.entryMap.get(PRIVATE_SUITE);
+  if (arch && isPrivate(arch)) {
+    const { addArch } = await prompts({
+      type: "confirm",
+      name: "addArch",
+      message: `Add your private flagships — ${arch.name}?`,
+      initial: false,
+    });
+    if (addArch) selected.push(PRIVATE_SUITE);
+  }
+  return selected;
+}
+
+/**
+ * Custom intent → the full flat list (the power-user escape hatch). Keeps the
+ * describe-inference suggestion and the overlay-last ordering the flow had.
+ */
+async function pickCustom(cat: Catalog, description: string): Promise<string[]> {
+  const suggested = inferDomains(description, cat);
+  log.blank();
+  log.info(
+    `Based on that, I suggest: ${chalk.cyan(
+      suggested.map((s) => displayName(s, cat)).join(", ")
+    )}`
+  );
+  // `prompts` only renders `description` for the FOCUSED choice — so what you
+  // get, and what it drags in, goes in the always-visible title.
+  const choice = (entry: CatalogEntry) => {
+    const why = consequence(entry.slug, cat);
+    return {
+      title:
+        `${entry.name}${isPrivate(entry) ? chalk.yellow(" (private)") : ""}` +
+        chalk.dim(` — ${contents(entry, cat)}`) +
+        (why ? chalk.dim(` · ${why}`) : ""),
+      description: clip(entry.description ?? "", 72),
+      value: entry.slug,
+      selected: suggested.includes(entry.slug),
+    };
+  };
+  const { domains } = await prompts({
+    type: "multiselect",
+    name: "domains",
+    message: "Which workspaces do you want? (space to toggle, enter to confirm)",
+    choices: [
+      ...cat.entries.filter((e) => !isOverlay(e.slug, cat)).map(choice),
+      ...cat.entries.filter((e) => isOverlay(e.slug, cat)).map(choice),
+    ],
+    hint: "- Space to select. Return to submit",
+  });
+  return (domains as string[]) ?? [];
+}
+
 // ── `synap launch` — the guided flow ─────────────────────────────────────────
 
 export async function launch(opts: {
@@ -417,48 +537,65 @@ export async function launch(opts: {
     name: "description",
     message: "Describe what you do (one sentence):",
   });
-  const suggested = inferDomains(description ?? "", cat);
-
-  log.blank();
-  log.info(
-    `Based on that, I suggest: ${chalk.cyan(
-      suggested.map((s) => displayName(s, cat)).join(", ")
-    )}`
-  );
-
-  // ── 3. Pick the domain set — the picker says what each one GIVES you ─────
-  // `prompts` only renders `description` for the FOCUSED choice — so what you
-  // get, and what it drags in, goes in the always-visible title. The prose sits
-  // in the description where it costs nothing to skip.
-  const choice = (entry: CatalogEntry) => {
-    const why = consequence(entry.slug, cat);
-    return {
-      title:
-        `${entry.name}${isPrivate(entry) ? chalk.yellow(" (private)") : ""}` +
-        chalk.dim(` — ${contents(entry, cat)}`) +
-        (why ? chalk.dim(` · ${why}`) : ""),
-      description: clip(entry.description ?? "", 72),
-      value: entry.slug,
-      selected: suggested.includes(entry.slug),
-    };
-  };
-  const { domains } = await prompts({
-    type: "multiselect",
-    name: "domains",
-    message: "Which workspaces do you want? (space to toggle, enter to confirm)",
+  // ── 3. Intent — what are you setting up? ────────────────────────────────
+  // Intent-first, not a flat wall of 24 templates. A company gets the suite as
+  // the headline; personal gets a knowledge base; custom is the full list for
+  // power users. This is where foundation/overlays/niche standalones stop being
+  // confusing flat peers — they only appear under "Custom".
+  const companyAvailable = cat.yaml.has(COMPANY_SUITE) || cat.entryMap.has(COMPANY_SUITE);
+  const { intent } = await prompts({
+    type: "select",
+    name: "intent",
+    message: "What are you setting up?",
     choices: [
-      ...cat.entries.filter((e) => !isOverlay(e.slug, cat)).map(choice),
-      ...cat.entries.filter((e) => isOverlay(e.slug, cat)).map(choice),
+      ...(companyAvailable
+        ? [
+            {
+              title: "A company / full operation",
+              description:
+                "Enterprise OS — strategy, market, operations, CRM, and content in one",
+              value: "company",
+            },
+          ]
+        : []),
+      {
+        title: "Personal knowledge base",
+        description: "A private space for your notes, ideas, and thinking",
+        value: "personal",
+      },
+      {
+        title: "Custom — browse every workspace",
+        description: "Pick individual workspaces and overlays yourself",
+        value: "custom",
+      },
     ],
-    hint: "- Space to select. Return to submit",
   });
-
-  if (!domains || (domains as string[]).length === 0) {
-    log.warn("No workspaces selected. Cancelled.");
+  if (!intent) {
+    log.warn("Cancelled.");
     return;
   }
 
-  const selected = domains as string[];
+  let selected: string[];
+  if (intent === "personal") {
+    const slug = PERSONAL_SLUGS.find((s) => cat.yaml.has(s) || cat.entryMap.has(s));
+    if (!slug) {
+      log.warn("No personal-knowledge template is available.");
+      return;
+    }
+    selected = [slug];
+  } else if (intent === "company") {
+    selected = await pickCompany(cat);
+    if (selected.length === 0) {
+      log.warn("Cancelled.");
+      return;
+    }
+  } else {
+    selected = await pickCustom(cat, description ?? "");
+    if (selected.length === 0) {
+      log.warn("No workspaces selected. Cancelled.");
+      return;
+    }
+  }
 
   // ── 3b. DISCLOSE the whole plan before the user commits ──────────────────
   // Picking "Grants" silently provisions Operations AND Foundation — the user

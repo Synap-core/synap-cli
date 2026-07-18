@@ -309,7 +309,7 @@ mcp
 
 program
   .command("login")
-  .description("Connect to a Synap pod (self-hosted or managed)")
+  .description("Connect your Synap account (private templates) + your pods")
   .option("--reconnect [name]", "Re-authenticate a saved pod without re-entering its URL")
   .action(async (opts: { reconnect?: string | boolean }) => {
     const chalk = (await import("chalk")).default;
@@ -390,20 +390,23 @@ program
       if (active) console.log(chalk.dim(`  Active: ${active.name} (${active.config.podUrl})`));
     }
 
-    // ── Synap ACCOUNT (control plane) — the OTHER half of "login" ──────────
-    // Pods authenticate data access; the ACCOUNT authenticates the control
-    // plane (private templates, hosted pods, marketplace publishing). They are
-    // different credentials — `synap launch`'s "private templates after
-    // 'synap login'" hint lands HERE, so this command must actually offer it.
+    // ── Synap ACCOUNT (control plane) — a FIRST-CLASS half of "login" ──────
+    // Pods authenticate DATA access; the ACCOUNT authenticates the control plane
+    // (private templates like The Arch, hosted pods, marketplace publishing).
+    // They are different credentials, and pods alone never unlock private
+    // templates — so this gets its own headed section, not a footnote. `synap
+    // launch`'s "private templates after 'synap login'" hint lands HERE.
     const { isLoggedIn: cpLoggedIn, login: cpLogin } = await import("./lib/auth.js");
-    console.log();
+    console.log("\n  Synap account:\n");
     const account = await cpLoggedIn();
     if (account.valid) {
       console.log(
-        `  Account: ${chalk.green("●")} ${chalk.bold(account.email ?? "logged in")} ${chalk.dim("— private templates available")}`
+        `  ${chalk.green("●")} ${chalk.bold(account.email ?? "logged in")}  ${chalk.dim("— private templates available")}`
       );
     } else {
-      console.log(`  Account: ${chalk.yellow("○ not logged in")} ${chalk.dim("— private templates hidden")}`);
+      console.log(
+        `  ${chalk.yellow("○")} ${chalk.bold("not logged in")}  ${chalk.dim("— your private templates (e.g. The Arch) are hidden until you log in")}`
+      );
       const prompts = (await import("prompts")).default;
       const { doLogin } = await prompts({
         type: "confirm",
@@ -416,6 +419,8 @@ program
         if (creds?.email) {
           console.log(chalk.green(`  ✓ Logged in as ${creds.email} — private templates unlocked.`));
         }
+      } else {
+        console.log(chalk.dim("  Later: synap login  ·  or  synap login --token <token>  (synap.live/account/tokens)"));
       }
     }
 
