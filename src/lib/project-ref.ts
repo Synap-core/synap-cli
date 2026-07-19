@@ -64,7 +64,8 @@ export function parseProjectRef(raw: string): ParsedProjectRef {
 /** One resolved project, as the CP directory returns it (200). */
 export interface CpProjectResolution {
   projectId: string;
-  slug: string;
+  /** Nullable in the CP mirror (pre-slug rows); render with a fallback. */
+  slug: string | null;
   name: string;
   podId: string;
   podUrl: string;
@@ -72,9 +73,7 @@ export interface CpProjectResolution {
 }
 
 /** A 300-ambiguous candidate — same shape, rendered as `pod/slug` hints. */
-export type CpProjectCandidate = Partial<CpProjectResolution> & {
-  podSubdomain?: string;
-};
+export type CpProjectCandidate = Partial<CpProjectResolution>;
 
 export type ProjectRefResolution =
   /** uuid ref — no CP involved; caller keeps today's active-pod behavior. */
@@ -183,8 +182,9 @@ export function sessionScopeRefusal(
 
 /** `pod/slug` label for a candidate row, degrading to whatever fields exist. */
 export function candidateLabel(c: CpProjectCandidate): string {
-  let pod = c.podSubdomain;
-  if (!pod && c.podUrl) {
+  // The CP emits podUrl (never a subdomain field); derive the label from it.
+  let pod: string | undefined;
+  if (c.podUrl) {
     try {
       pod = new URL(c.podUrl).hostname;
     } catch {

@@ -200,10 +200,13 @@ describe("helpers", () => {
     expect(samePodOrigin(undefined, "https://a.example")).toBe(false);
   });
 
-  it("candidateLabel prefers podSubdomain, falls back to podUrl host", () => {
-    expect(candidateLabel({ podSubdomain: "perso", slug: "synap" })).toBe("perso/synap");
+  it("candidateLabel derives the pod from podUrl, degrading gracefully", () => {
     expect(candidateLabel({ podUrl: "https://pod.team.thearchitech.xyz", slug: "synap" })).toBe(
       "pod.team.thearchitech.xyz/synap"
+    );
+    expect(candidateLabel({ slug: "synap" })).toBe("?/synap");
+    expect(candidateLabel({ podUrl: "https://x.example", projectId: "p1", slug: null })).toBe(
+      "x.example/p1"
     );
   });
 });
