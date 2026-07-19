@@ -128,4 +128,36 @@ export const FLOW = {
       { command: "synap market --list", why: "browse installable packages" },
     ];
   },
+
+  /** After `synap market update` found drift but didn't apply (no --yes / no slug). */
+  afterMarketUpdateCheck(slugsWithUpdates: string[]): NextStep[] {
+    if (slugsWithUpdates.length === 0) return [];
+    const steps: NextStep[] = slugsWithUpdates
+      .slice(0, 3)
+      .map((slug) => ({ command: `synap market update ${slug}`, why: "apply this template's update" }));
+    if (slugsWithUpdates.length > 1) {
+      steps.push({ command: "synap market update --yes", why: "apply every available update, no prompt" });
+    }
+    return steps;
+  },
+
+  /** After `synap market installed` inventoried the pod (found drift or not). */
+  afterMarketInstalledCheck(slugsWithUpdates: string[]): NextStep[] {
+    if (slugsWithUpdates.length === 0) return [];
+    const steps: NextStep[] = slugsWithUpdates
+      .slice(0, 3)
+      .map((slug) => ({ command: `synap market update ${slug}`, why: "preview this package's update" }));
+    if (slugsWithUpdates.length > 1) {
+      steps.push({ command: "synap market update --yes", why: "apply every available update, no prompt" });
+    }
+    return steps;
+  },
+
+  /** After `synap market update` applied one or more updates. */
+  afterMarketUpdateApply(): NextStep[] {
+    return [
+      { command: "synap orient", why: "see what changed in the pod" },
+      { command: "synap market update", why: "re-check for further drift" },
+    ];
+  },
 };

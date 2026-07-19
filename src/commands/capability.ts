@@ -296,7 +296,8 @@ function statusSummary(card: CapabilityCard): string {
   switch (card.status) {
     case "ready":
     case "connected": {
-      const acct = card.connection?.account ? `${card.connection.account} · ` : "";
+      const label = accountLabel(card.connection?.account);
+      const acct = label ? `${label} · ` : "";
       return `${acct}connected · ${n} verb${n === 1 ? "" : "s"}`;
     }
     case "needs_connection":
@@ -337,10 +338,22 @@ function runCommand(v: CardVerb): string {
   return `synap cap run ${v.verbId}${flags ? " " + flags : ""}`;
 }
 
+/** A raw Nango connection id (UUID) is not a human account label — never show it
+ * in a title. Only a real handle (e.g. an email) is worth surfacing. */
+function accountLabel(account: string | undefined): string | null {
+  if (!account) return null;
+  const isUuid =
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+      account
+    );
+  return isUuid ? null : account;
+}
+
 /** A USABLE pack: name + each runnable verb as a ready-to-run command. */
 function renderUsable(card: CapabilityCard): void {
-  const acct = card.connection?.account
-    ? chalk.dim(` · ${card.connection.account}`)
+  const label = accountLabel(card.connection?.account);
+  const acct = label
+    ? chalk.dim(` · ${label}`)
     : card.connection?.provider
       ? chalk.dim(` · ${card.connection.provider} connected`)
       : "";
@@ -1201,21 +1214,35 @@ export async function capabilityConnect(
   if (!name || !name.trim()) {
     const spin = ora({ text: "Fetching connectable services…", color: "cyan" }).start();
     let providers: Array<{ id: string; provider: string; displayName?: string; connected: boolean }>;
+    let nangoStatus: "ok" | "error" | undefined;
+    let nangoError: { reason?: string; message?: string } | undefined;
     try {
       const res = (await hubGet("/connectors/providers", {}, cfg)) as {
         providers?: typeof providers;
+        nangoStatus?: "ok" | "error";
+        nangoError?: { reason?: string; message?: string };
       };
       providers = res.providers ?? [];
+      nangoStatus = res.nangoStatus;
+      nangoError = res.nangoError;
       spin.stop();
     } catch (err) {
       spin.stop();
       log.error((err as Error).message);
-      log.dim("Nango may not be configured on this pod.");
+      log.dim("Couldn't reach the pod's connector service.");
+      return;
+    }
+    // Distinguish "couldn't check" from "checked, genuinely empty" — the same
+    // fault-vs-absence signal the pod now returns. A guess ("may not be
+    // configured") is exactly what this surface should not print.
+    if (nangoStatus === "error") {
+      log.warn(`Couldn't check connectors (${nangoError?.reason ?? "unknown"}) — connection state is unknown.`);
+      if (nangoError?.message) log.dim(nangoError.message);
       return;
     }
     if (providers.length === 0) {
       log.warn("No connectable services available on this pod.");
-      log.dim("Nango may not be configured on this pod.");
+      log.dim("This pod's Nango declares no integrations. A pod admin declares them in the Nango dashboard.");
       return;
     }
     const connectable = providers.filter((p) => !p.connected);

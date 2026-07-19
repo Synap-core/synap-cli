@@ -68,8 +68,8 @@ export interface CpBrowseRow extends CpPackageRow {
   installCount?: number;
 }
 
-/** `/mine` returns `isPublic` on top of the canonical row shape. */
-export type CpMineRow = CpPackageRow & { isPublic?: boolean };
+/** `/mine` returns `isPublic` (and, like the browse route, `version`) on top of the canonical row shape. */
+export type CpMineRow = CpPackageRow & { isPublic?: boolean; version?: string };
 
 /** Build the `/api/packages` query string from filters + any extra params. */
 function buildQuery(

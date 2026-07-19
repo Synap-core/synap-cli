@@ -335,7 +335,12 @@ export async function status(opts: { json?: boolean } = {}): Promise<void> {
       const params: Record<string, string> = {};
       if (localConfig.workspaceId) params.workspaceId = localConfig.workspaceId;
       const res = (await hubGet("/connectors/providers", params, cfg)) as Record<string, unknown>;
-      const providers = (res.providers ?? []) as Array<{ connected?: boolean }>;
+      const providers = (res.providers ?? []) as Array<{
+        connected?: boolean;
+        displayName?: string;
+        provider?: string;
+        id?: string;
+      }>;
       const nangoError = res.nangoError as
         | { reason?: string; message?: string }
         | undefined;
@@ -351,10 +356,14 @@ export async function status(opts: { json?: boolean } = {}): Promise<void> {
         log.warn("No providers available — connecting a service will not work.");
         log.dim("This pod's Nango declares no integrations. They're declared in the Nango dashboard.");
       } else {
-        const connected = providers.filter((p) => p.connected).length;
+        const connectedProviders = providers.filter((p) => p.connected);
         log.info(
-          `${providers.length} provider${providers.length === 1 ? "" : "s"} available  ${chalk.dim(`[${connected} connected]`)}`
+          `${providers.length} provider${providers.length === 1 ? "" : "s"} available  ${chalk.dim(`[${connectedProviders.length} connected]`)}`
         );
+        // Name the connected ones — a bare count doesn't tell the user WHAT is wired up.
+        for (const p of connectedProviders) {
+          log.dim(`  ${chalk.green("✓")} ${p.displayName ?? p.provider ?? p.id}`);
+        }
       }
     } catch (err: unknown) {
       log.warn(`Could not check connectors: ${err instanceof Error ? err.message : String(err)}`);

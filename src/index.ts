@@ -178,6 +178,14 @@ program
     await status({ json: opts.json });
   });
 
+program
+  .command("whoami")
+  .description("Show the winning API key's identity/scopes/workspace and flag env-vs-surface key divergence")
+  .action(async () => {
+    const { whoami } = await import("./commands/whoami.js");
+    await whoami();
+  });
+
 // Hidden: compact ANSI line for the Claude Code statusLine (reads stdin JSON).
 program
   .command("statusline", { hidden: true })
@@ -1832,9 +1840,46 @@ market
   .option("--json", "Output as JSON")
   .option("--pod-url <url>", "Pod URL override")
   .option("--api-key <key>", "API key override")
-  .action(async (slug: string, opts) => {
+  .action(async (slug: string, _opts, cmd) => {
+    // `--json` collides with the parent `market` command's own `--json` —
+    // commander then attributes the flag's VALUE to the parent's
+    // `_optionValues`, leaving this action's own `opts` argument `{}` for it
+    // (a real, pre-existing gap: `market install <slug> --json` silently fell
+    // back to human output). `optsWithGlobals()` walks the whole command
+    // chain and merges regardless of which level actually captured the flag.
+    const opts = cmd.optsWithGlobals();
     const { marketInstall } = await import("./commands/market.js");
     await marketInstall(slug, opts);
+  });
+
+market
+  .command("update [slugs...]")
+  .description(
+    "Check installed packages for drift against the catalog, and re-apply the ones that are stale (all with --yes, specific ones with explicit slugs)"
+  )
+  .option("--yes", "Apply every available update without prompting (no slugs required)")
+  .option("--dry-run", "Force the preview path — never apply, even with --yes")
+  .option("--json", "Output as JSON")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (slugs: string[] | undefined, _opts, cmd) => {
+    // Same parent/child `--json` collision as `market install` — see its comment.
+    const opts = cmd.optsWithGlobals();
+    const { marketUpdate } = await import("./commands/market.js");
+    await marketUpdate(slugs && slugs.length > 0 ? slugs : undefined, opts);
+  });
+
+market
+  .command("installed")
+  .description("List packages installed on this pod — a pure read, no writes (pairs with 'market update' to check drift)")
+  .option("--outdated", "Only show packages with an update available")
+  .option("--tree", "Show the composition graph — package → templates → resulting workspaces, marking shared nodes")
+  .option("--json", "Output as JSON")
+  .action(async (_opts, cmd) => {
+    // Same parent/child `--json` collision as `market install` — see its comment.
+    const opts = cmd.optsWithGlobals();
+    const { marketInstalled } = await import("./commands/market.js");
+    await marketInstalled(opts);
   });
 
 // ─── capability ───────────────────────────────────────────────────────────────
