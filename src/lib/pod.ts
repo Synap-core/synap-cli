@@ -77,6 +77,12 @@ export interface AgentWorkspaceRouting {
   productWorkspaceIds?: string[];
 }
 
+/** The active project pinned together with the pod profile it lives on. */
+export interface ActiveProjectBinding {
+  projectId: string;
+  podName: string;
+}
+
 export interface MultiPodConfig {
   activePod: string;
   /** Per-surface pod overrides. When set, takes priority over activePod for that surface. */
@@ -86,6 +92,8 @@ export interface MultiPodConfig {
   activeWorkspaceId?: string;
   /** Active project override — set by `synap project use <projectId>`. Peer of activeWorkspaceId; independent (composable). */
   activeProjectId?: string;
+  /** Pod-aware binding of the active project — set by cross-pod `synap project use <ref>` so later drift (active pod changed under the pin) can warn. */
+  activeProject?: ActiveProjectBinding;
   /** Per-surface dedicated agent keys (provisioned with named agentType). Separate from pod profile keys. */
   agentKeys?: Partial<Record<SurfaceName, SurfaceAgentKey>>;
   /** Workspace routing set by `synap connect` wizard — drives capture/recall defaults. */
@@ -103,7 +111,7 @@ function readMultiConfig(): MultiPodConfig {
   try {
     if (fs.existsSync(CONFIG_FILE)) {
       const parsed = JSON.parse(fs.readFileSync(CONFIG_FILE, "utf-8")) as Partial<MultiPodConfig>;
-      if (parsed.pods) return { activePod: parsed.activePod ?? "", pods: parsed.pods, activeWorkspaceId: parsed.activeWorkspaceId, activeProjectId: parsed.activeProjectId, surfaces: parsed.surfaces, agentKeys: parsed.agentKeys, agentWorkspaceRouting: parsed.agentWorkspaceRouting };
+      if (parsed.pods) return { activePod: parsed.activePod ?? "", pods: parsed.pods, activeWorkspaceId: parsed.activeWorkspaceId, activeProjectId: parsed.activeProjectId, activeProject: parsed.activeProject, surfaces: parsed.surfaces, agentKeys: parsed.agentKeys, agentWorkspaceRouting: parsed.agentWorkspaceRouting };
       // File exists but has old/unrecognized shape — fall through to migration
     }
   } catch { /* fall through */ }
@@ -293,6 +301,23 @@ export function setActiveProjectId(projectId: string): void {
   const config = readMultiConfig();
   config.activeProjectId = projectId;
   writeMultiConfig(config);
+}
+
+/**
+ * Pin project AND the pod it lives on together — the cross-pod `project use`
+ * door. Stores the binding so later drift (active pod switched away from the
+ * pinned project's pod) can warn.
+ */
+export function setActiveProjectBinding(binding: ActiveProjectBinding): void {
+  const config = readMultiConfig();
+  config.activeProjectId = binding.projectId;
+  config.activeProject = binding;
+  writeMultiConfig(config);
+}
+
+/** The pod-aware active-project binding, when set by cross-pod `project use`. */
+export function getActiveProjectBinding(): ActiveProjectBinding | undefined {
+  return readMultiConfig().activeProject;
 }
 
 /** Remove the active project override — subsequent commands see all projects. */
