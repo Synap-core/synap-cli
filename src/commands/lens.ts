@@ -74,6 +74,11 @@ export async function useProject(ref: string, opts: BaseOpts & { session?: boole
       log.hint("Or pin by uuid against the active pod: synap project use <projectId> (see: synap project list)");
       process.exit(1);
       break;
+    case "not-active":
+      log.error(`Project "${ref}" exists but is ${resolution.status} — it cannot be focused.`);
+      log.hint("Reactivate it on its pod first, or pick an active project: synap project list");
+      process.exit(1);
+      break;
     case "not-found":
       log.error(`Project "${ref}" was not found in the directory.`);
       log.hint("Check the slug with: synap project list — or use the full <pod-subdomain>/<slug> form.");

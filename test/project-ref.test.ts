@@ -123,6 +123,14 @@ describe("resolveProjectRef", () => {
     if (out.kind === "ambiguous") expect(out.candidates).toHaveLength(2);
   });
 
+  it("maps a 404 carrying a status to not-active", async () => {
+    const fetchImpl = vi.fn(async () =>
+      jsonResponse({ error: "Project is not active", status: "archived" }, 404)
+    );
+    const res = await resolveProjectRef("perso/old", { fetchImpl, getToken: () => ({ token: "t" }) });
+    expect(res).toEqual({ kind: "not-active", ref: "perso/old", status: "archived" });
+  });
+
   it("maps 404 to not-found", async () => {
     const fetchImpl = vi.fn(async () => jsonResponse({ error: "Not found" }, 404));
     const out = await resolveProjectRef("perso/nope", {

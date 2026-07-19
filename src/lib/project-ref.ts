@@ -81,6 +81,7 @@ export type ProjectRefResolution =
   | { kind: "resolved"; project: CpProjectResolution; refPod?: string }
   | { kind: "ambiguous"; candidates: CpProjectCandidate[] }
   | { kind: "not-found"; ref: string }
+  | { kind: "not-active"; ref: string; status: string }
   | { kind: "not-logged-in" }
   | { kind: "cp-error"; message: string }
   | { kind: "invalid"; reason: string };
@@ -134,7 +135,14 @@ export async function resolveProjectRef(
     } | null;
     return { kind: "ambiguous", candidates: body?.candidates ?? [] };
   }
-  if (res.status === 404) return { kind: "not-found", ref };
+  if (res.status === 404) {
+    // The CP distinguishes "exists but archived/completed" from truly absent.
+    const body = (await res.json().catch(() => null)) as {
+      status?: string;
+    } | null;
+    if (body?.status) return { kind: "not-active", ref, status: body.status };
+    return { kind: "not-found", ref };
+  }
   if (res.status === 401 || res.status === 403) return { kind: "not-logged-in" };
   if (!res.ok) {
     return { kind: "cp-error", message: `the project directory returned HTTP ${res.status}` };
