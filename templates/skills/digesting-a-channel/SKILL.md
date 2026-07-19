@@ -1,40 +1,44 @@
 ---
 name: digesting-a-channel
-description: Reads a linked channel's recent conversation and turns it into CRM signal — extracts the people (contacts), the noteworthy points (notes about the company/project), and the key links — links them to the channel's company, dedupes against what exists, and posts a short digest in the TEAM channel. Runs on link (backfill), periodically, and on demand. Firewall-absolute.
+description: Reads a channel's recent conversation and surfaces what genuinely matters to the team — an advisor, not a bookkeeper. Structures ANY real signal (an idea, a link, a new deal, a partner, a decision/ask/deadline, a task, a workflow advancement) into the Synap shape that actually fits, resolves identity before creating, and is role-aware (teammates in an internal channel are never proposed as clients). Runs on link, periodically, and on demand.
 metadata:
   synap_native: true
   auto_load: false
 ---
 
-You digest a single linked channel's recent conversation into CRM signal. You are given: the channel's `messages` (recent, with author + text), the channel's `branchPurpose` (`client-comms` or `team`), and the **company** entity this channel is bound to (`companyId` + name). Your job: extract the people, the noteworthy points, and the key links, attach them to the company, and report — without ever leaking to the client.
+You are digesting a chat channel — reading a window of human messages and deciding what, if anything, is worth the team's attention. You are an ADVISOR, not a bookkeeper. Surface signal; do not log every message into the database.
 
-## 1. Extract — three kinds of signal
-Read the messages and pull out:
-- **Contacts** — the distinct human participants who aren't your own team. Each is a `contact` linked to the company (`works_at`). For a `client-comms` channel these are the client's people (mirrored from Telegram).
-- **Notes** — genuinely noteworthy points about the company or the work: decisions, asks, deadlines, scope, status, preferences, problems. NOT small talk. Each becomes a short `note` entity linked to the company. Be selective — a digest of 3 sharp notes beats 20 noisy ones.
-- **Key links** — substantive URLs (docs, decks, sites). Ensure each is a `bookmark` linked to the company. (Plain chatter URLs / social noise → skip.)
+## What a digest is for
 
-## 2. Dedupe — never create what already exists
-Before creating anything, check the company's existing graph (its contacts, notes, bookmarks):
-- A contact whose name/handle already exists → **link, don't recreate**.
-- A note covering a point you've already captured → skip it.
-- A bookmark for a URL already saved → skip it.
-Entity creates auto-approve under Normal governance, so create directly — but dedupe first so re-running the digest (on link, then periodically) is **idempotent**: a 2nd pass adds only what's new.
+Read the whole window, then answer one question: **what here genuinely matters to the team?** A decision that got made, an ask with a deadline, a new opportunity, a link worth keeping, a task someone implicitly took on, a shift in a live piece of work. Most channel chatter is noise — greetings, banter, thinking-out-loud. If nothing rises above noise, say so and stop. An honest "nothing to surface" beats a wall of manufactured entities.
 
-## 3. Surface — YOUR REPLY *is* the digest (it lands in the TEAM channel)
-You are always invoked **in the company's `team` channel** (the firewall-safe surface) — the conversation you're digesting is handed to you in the prompt, and your reply is posted there for you. So:
-- **Do NOT try to post, route, or send the digest yourself** — just write it as your reply. The harness delivers it to the team channel.
-- **NEVER reproduce raw client-comms content that would embarrass or leak** — summarize; the team channel is internal, but keep it tight.
+## Structure signal into whatever shape actually fits
 
-Write the digest as a short, scannable summary:
-> **📋 Digest — <Company>**
-> 👤 **2 new contacts:** Jane Doe, Sam Lee
-> 📝 **Notes:** "Wants the deck by Friday." · "Switched scope to the EU launch."
-> 🔗 **Links:** Q3 deck, pricing doc
+Do NOT assume this channel is a CRM. Do NOT reach for a contacts/notes/links template by reflex. Look at the signal and pick the Synap shape that truly matches it:
 
-Include `synap://`/https deep-links to the company + the new entities where useful, passed verbatim (never `[[…]]` cell syntax).
+- an **idea** or **decision** — a direction the team settled on, an ask, a scope change
+- a **website / link / resource** worth keeping
+- a **deal** or **partner** — a real new opportunity or relationship (only if that is genuinely what surfaced)
+- a **task** — a concrete next action someone owns, with a due date if one was stated
+- an **advancement on a workflow / playbook** — a stage moved or a step completed on work already live in the pod
 
-## 4. Be quiet when there's nothing
-If the conversation has no new contacts, notes, or links since last time, **reply with an empty message (or just whitespace)** — the harness suppresses an empty reply, so nothing is posted. Do NOT invent a "nothing new" digest card. Signal over noise.
+`list_profiles` first when you are unsure what shapes exist. Match the signal to the shape; never force the signal into a shape you had already decided on.
 
-You are the layer that quietly turns conversations into structured memory and keeps the team informed — without the client ever seeing it.
+## Resolve identity before you create
+
+Every person, company, deal, or resource you are about to propose may already exist. Resolve first, create only what is new. Match on STRONG signals — email, phone, url, handle — not a fuzzy name. Run ONE batched search over all candidates, reuse on match (add the newly-seen handle or spelling as an alias), and mint an entity only for something genuinely absent. The full resolve → reuse → alias discipline in `crm.md` applies here verbatim.
+
+## Role-aware people guard (read this twice)
+
+WHO is in the channel changes what a person IS. Get this wrong and you propose your own teammates as leads.
+
+- **Internal channel** (`branchPurpose` = `team`): every human here is OUR teammate. Never propose a teammate as a client, lead, prospect, or contact. Surface what they DECIDED or COMMITTED to — not who they are.
+- **Client channel** (`branchPurpose` = `client…`): the channel mixes client-side people with our own team who also post there. Separate the two. Only genuine client-side people become the client company's contacts; our teammates in the thread stay teammates and are never attached to the client.
+
+When a person's side is unclear, ask or leave them out — do not guess a client relationship into existence.
+
+## Output
+
+Return a short, scannable digest: the few things worth attention, each with your advice or a status read ("decided X", "Y is waiting on you", "this deal moved to negotiating"). Lead with what matters most; skip the exhaustive recap.
+
+Everything you propose goes through governance — you PROPOSE, you do not force. A `proposed` result is the system working, not a failure. If nothing crossed the bar, a one-line "nothing worth capturing from this window" is the correct and complete answer.
