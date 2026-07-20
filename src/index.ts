@@ -179,6 +179,15 @@ program
   });
 
 program
+  .command("versions")
+  .description("Show LOCAL vs NPM vs CONTROL-PLANE vs POD version drift for workspace-templates, api-types, and capabilities")
+  .option("--json", "Output structured {artifacts:[...]} JSON")
+  .action(async (opts: { json?: boolean }) => {
+    const { versions } = await import("./commands/versions.js");
+    await versions({ json: opts.json });
+  });
+
+program
   .command("whoami")
   .description("Show the winning API key's identity/scopes/workspace and flag env-vs-surface key divergence")
   .action(async () => {
@@ -1818,6 +1827,39 @@ tools
     await toolsSchema(opts);
   });
 
+// ─── pod — unified pod-configuration view ─────────────────────────────────────
+// `market installed` shows what packages are installed; `pod` answers the
+// bigger question: what does the WHOLE pod look like — every workspace with
+// its provenance (marketplace/composed/ad-hoc/orphan), pod-wide vs
+// per-workspace capabilities/automations/playbooks, and the give/need feed
+// links between workspaces. Read surface for GET /api/hub/pod/config.
+const podCmd = program
+  .command("pod")
+  .description("Show the whole configured pod — workspaces (with provenance), capabilities/automations/playbooks, and feed links")
+  .option("--json", "Output the full structured graph as JSON")
+  .option("--orphans", "Only show orphan/ad-hoc workspaces and their template-match suggestions")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (opts) => {
+    const { pod } = await import("./commands/pod.js");
+    await pod(opts);
+  });
+
+podCmd
+  .command("adopt <workspaceNameOrId>")
+  .description("Link an orphan/ad-hoc workspace (by name or id) to a matching template — makes it version-tracked")
+  .requiredOption("--template <slug>", "The template slug to adopt this workspace into")
+  .option("--json", "Output as JSON")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (workspaceNameOrId: string, _opts, cmd) => {
+    // `--json` collides with the parent `pod` command's own `--json` — same
+    // gap `market install` has (see its comment). Merge across the chain.
+    const opts = cmd.optsWithGlobals();
+    const { podAdopt } = await import("./commands/pod.js");
+    await podAdopt(workspaceNameOrId, opts);
+  });
+
 // ─── market — discover + install ANY package type ────────────────────────────
 // launch is workspace-first (bundled, offline); market reaches every CP package
 // type (capability/skill/workflow/view/cell/workspace), public or private.
@@ -1837,6 +1879,8 @@ market
   .command("install <slug>")
   .description("Install a package by slug into a project — workspaces install now; other types route you to the right surface")
   .option("--project <id>", "Optionally tag the seeded entities to a project (installs are pod-wide by default)")
+  .option("--onto <workspaceId>", "Reconcile this template ONTO an existing workspace (additive) instead of creating a new one")
+  .option("--timeout <seconds>", "How long to wait for the apply to finish (default: 120)")
   .option("--json", "Output as JSON")
   .option("--pod-url <url>", "Pod URL override")
   .option("--api-key <key>", "API key override")
@@ -1859,6 +1903,7 @@ market
   )
   .option("--yes", "Apply every available update without prompting (no slugs required)")
   .option("--dry-run", "Force the preview path — never apply, even with --yes")
+  .option("--timeout <seconds>", "How long to wait for each package's apply to finish (default: 120)")
   .option("--json", "Output as JSON")
   .option("--pod-url <url>", "Pod URL override")
   .option("--api-key <key>", "API key override")
@@ -1874,6 +1919,7 @@ market
   .description("List packages installed on this pod — a pure read, no writes (pairs with 'market update' to check drift)")
   .option("--outdated", "Only show packages with an update available")
   .option("--tree", "Show the composition graph — package → templates → resulting workspaces, marking shared nodes")
+  .option("--layers", "Show the composition graph as a flat DAG — one row per slug, bedrock-first, with true fan-in counts")
   .option("--json", "Output as JSON")
   .action(async (_opts, cmd) => {
     // Same parent/child `--json` collision as `market install` — see its comment.

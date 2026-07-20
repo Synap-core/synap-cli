@@ -28,14 +28,19 @@ import chalk from "chalk";
 import {
   assembleCatalog,
   computeTemplateUpdates,
-  getWorkspaceTemplate,
   isHashVersion,
   listPublicTemplates,
   listWorkspaceTemplates,
   toPackageDefinition,
+  layerTemplateGraph,
+  bundledEdgesOf,
   type CatalogEntry,
   type TemplateDependency,
   type TemplateUpdateCheck,
+  type CompositionEdge,
+  type CompositionGraph,
+  type CompositionNode,
+  type CompositionInstalledEntry,
 } from "@synap-core/workspace-templates";
 import { log, banner } from "../utils/logger.js";
 import { resolveHubConfig, hubPost, renderHubError, type HubConfig } from "../lib/hub-client.js";
@@ -56,11 +61,18 @@ import {
 import { fetchInstalledSlugs, fetchInstalledTemplates, type InstalledTemplateInfo } from "../lib/installed.js";
 import { isSuite } from "../lib/suite.js";
 import { bundledTemplatesVersion } from "../lib/bundle-version.js";
+import { HubNetworkError } from "../lib/hub-client.js";
 
 // Same longer budget launch uses — an apply writes profiles/views/entities.
 const APPLY_TIMEOUT_MS = 120_000;
 
-interface MarketCatalog {
+/** `--timeout <seconds>` → ms, falling back to `APPLY_TIMEOUT_MS` when unset/invalid. */
+function parseApplyTimeoutMs(raw: string | undefined): number {
+  const secs = raw ? parseInt(raw, 10) : NaN;
+  return Number.isFinite(secs) && secs > 0 ? secs * 1000 : APPLY_TIMEOUT_MS;
+}
+
+export interface MarketCatalog {
   entries: CatalogEntry[];
   tierBySlug: Map<string, TierInfo>;
   lockedSlugs: Set<string>;
@@ -88,7 +100,7 @@ interface MarketCatalog {
  * logged out — the bundle only carries workspaces, so all-types discovery needs
  * the CP browse route (which needs no auth).
  */
-async function buildMarketCatalog(filters?: PackageFilters): Promise<MarketCatalog> {
+export async function buildMarketCatalog(filters?: PackageFilters): Promise<MarketCatalog> {
   const creds = getStoredToken();
   const loggedIn = !!creds && !isTokenLocallyExpired(creds);
 
@@ -205,7 +217,7 @@ interface DependencySeedOutcome {
   error?: string;
 }
 
-interface ResolvedDependencyLike {
+export interface ResolvedDependencyLike {
   slug: string;
   seedOutcome?: DependencySeedOutcome;
 }
@@ -216,14 +228,14 @@ interface ResolvedDependencyLike {
  * a structural match is all `/packages/apply`'s JSON needs, and this CLI
  * doesn't carry api-types. Optional — older pod builds won't send it.
  */
-interface SeedSummary {
+export interface SeedSummary {
   attempted: number;
   seeded: number;
   failed: Array<{ slug: string; error: string }>;
 }
 
 /** The two new honest-outcome fields `/packages/apply` may return. Both optional — a legacy pod build may omit them. */
-interface WorkspaceApplyResult {
+export interface WorkspaceApplyResult {
   status?: string;
   workspaceId?: string;
   onto?: string;
@@ -267,6 +279,135 @@ function printSeedOutcomes(
   log.warn(`${seeded.length}/${withLayers.length} capabilities seeded`);
   for (const d of failed) {
     log.hint(`${d.slug}: failed${d.seedOutcome!.error ? ` (${d.seedOutcome!.error})` : ""}`);
+  }
+}
+
+// ── Apply-outcome honesty — shared by `marketInstall` + `applyOnePackage` ───
+// Both hit the same `/packages/apply` door and must render the SAME honest
+// verdict from its response: a partial capability-seed failure, a version
+// stamp that silently didn't take, or a compose-overlay result are never a
+// plain "✓ success" — in the human text OR in `--json`.
+
+/** True when at least one dependency's capability seed genuinely failed. */
+function hasSeedFailure(
+  dependencies: ResolvedDependencyLike[] | undefined,
+  seedSummary: SeedSummary | undefined
+): boolean {
+  if (seedSummary) return seedSummary.failed.length > 0;
+  return !!dependencies?.some((d) => d.seedOutcome?.status === "failed");
+}
+
+/**
+ * A version was sent for a template the pod had never stamped before, yet the
+ * response either says nothing changed or omits the honest-outcome fields
+ * entirely — that combination means the stamp/reconcile didn't actually take,
+ * not that the install was genuinely a no-op (the observed `market install
+ * the-arch` → "already up to date" bug).
+ */
+function detectStampContradiction(
+  ws: WorkspaceApplyResult | undefined,
+  seedSummary: SeedSummary | undefined,
+  remoteVersionSent: string | undefined,
+  wasUnstamped: boolean
+): boolean {
+  if (!remoteVersionSent || !wasUnstamped) return false;
+  return ws?.outcome === "unchanged" || (ws?.outcome === undefined && seedSummary === undefined);
+}
+
+export interface ApplyVerdict {
+  /** Honest coarse status — JSON consumers should branch on this, never guess from `workspace.outcome` alone. */
+  status:
+    | "installed"
+    | "installed-with-failures"
+    | "updated"
+    | "updated-with-failures"
+    | "unchanged"
+    | "composed"
+    | "composed-with-failures"
+    | "stamp-contradiction"
+    | "legacy-unknown"
+    | "no-workspace";
+  /** Non-fatal warnings — a stamp contradiction or a compose-overlay note. Seed failures are reported separately via `printSeedOutcomes`. */
+  warnings: string[];
+}
+
+/**
+ * Classify one `/packages/apply` response into the honest verdict both
+ * `marketInstall` and `applyOnePackage` print (and both put in `--json`).
+ * `wasUnstamped` = the slug was already installed with no recorded version
+ * BEFORE this call (only `marketInstall` can detect this today — see its
+ * `fetchInstalledTemplates` call; `applyOnePackage` only ever re-applies
+ * already-versioned slugs, so it always passes `false`).
+ */
+export function classifyApplyResult(
+  entry: CatalogEntry,
+  ws: WorkspaceApplyResult | undefined,
+  dependencies: ResolvedDependencyLike[] | undefined,
+  seedSummary: SeedSummary | undefined,
+  ctx: { remoteVersionSent?: string; wasUnstamped: boolean }
+): ApplyVerdict {
+  const seedFailed = hasSeedFailure(dependencies, seedSummary);
+
+  if (detectStampContradiction(ws, seedSummary, ctx.remoteVersionSent, ctx.wasUnstamped)) {
+    return {
+      status: "stamp-contradiction",
+      warnings: [
+        `${entry.name} didn't get stamped — your pod may be running an older version that doesn't support this yet (redeploy the pod backend).`,
+      ],
+    };
+  }
+
+  if (ws?.outcome === "created") return { status: seedFailed ? "installed-with-failures" : "installed", warnings: [] };
+  if (ws?.outcome === "reconciled") return { status: seedFailed ? "updated-with-failures" : "updated", warnings: [] };
+  if (ws?.outcome === "unchanged") return { status: "unchanged", warnings: [] };
+  if (ws?.status === "composed") {
+    const warnings = [
+      `${entry.name} is a compose-overlay — it rides its base workspace and isn't independently updatable; update the base workspace to update this too.`,
+    ];
+    return { status: seedFailed ? "composed-with-failures" : "composed", warnings };
+  }
+  if (ws?.status === "created") return { status: "legacy-unknown", warnings: [] };
+  return { status: "no-workspace", warnings: [] };
+}
+
+/** Render a `classifyApplyResult` verdict — the ONE honest-text door for both `marketInstall` and `applyOnePackage`. */
+export function printApplyVerdict(entry: CatalogEntry, verdict: ApplyVerdict): void {
+  switch (verdict.status) {
+    case "installed":
+      log.success(`Installed ${entry.name}.`);
+      return;
+    case "installed-with-failures":
+      log.warn(`Installed ${entry.name} — completed with capability failures (see below).`);
+      return;
+    case "updated":
+      log.success(`Updated ${entry.name}.`);
+      return;
+    case "updated-with-failures":
+      log.warn(`Updated ${entry.name} — completed with capability failures (see below).`);
+      return;
+    case "unchanged":
+      log.info(`• ${entry.name} is already up to date.`);
+      return;
+    case "composed":
+      log.success(`${entry.name} — layered onto its base workspace.`);
+      log.hint(verdict.warnings[0]);
+      return;
+    case "composed-with-failures":
+      log.warn(`${entry.name} — layered onto its base workspace, with capability failures (see below).`);
+      log.hint(verdict.warnings[0]);
+      return;
+    case "stamp-contradiction":
+      log.warn(verdict.warnings[0]);
+      return;
+    case "legacy-unknown":
+      log.success(`${entry.name} ready.`);
+      log.hint(
+        "This pod's /packages/apply doesn't distinguish reconciled-vs-unchanged yet — check synap orient if you expected new content."
+      );
+      return;
+    case "no-workspace":
+      log.warn(`${entry.name} — pod returned no workspace.`);
+      return;
   }
 }
 
@@ -395,9 +536,22 @@ async function resolveOptionalProject(
 
 export async function marketInstall(
   slug: string,
-  opts: { podUrl?: string; apiKey?: string; json?: boolean; project?: string }
+  opts: {
+    podUrl?: string;
+    apiKey?: string;
+    json?: boolean;
+    project?: string;
+    timeout?: string;
+    /** Reconcile this template ONTO an existing workspace (additive) instead of creating a new one — passed through to `/packages/apply` as `targetWorkspaceId`. */
+    onto?: string;
+  }
 ): Promise<void> {
-  const cat = await buildMarketCatalog();
+  const applyTimeoutMs = parseApplyTimeoutMs(opts.timeout);
+  // `installedTemplates` (not just `cat.installed`'s slug set) is fetched here
+  // too — it carries per-slug VERSION, which is what lets the stamp-
+  // contradiction check below tell "genuinely unchanged" apart from "the pod
+  // silently failed to stamp/reconcile a previously-unstamped install".
+  const [cat, installedTemplates] = await Promise.all([buildMarketCatalog(), fetchInstalledTemplates()]);
   const entry = cat.entries.find((e) => e.slug === slug);
   if (!entry) {
     log.error(`No package "${slug}" found.`);
@@ -463,15 +617,28 @@ export async function marketInstall(
     pkg = def;
   }
 
+  // Stamp the version the catalog resolved for this slug — including the
+  // authed `/mine` version for private templates — so the pod records the
+  // installed baseline and later `market update` drift checks work.
+  const remoteVersion = cat.remoteVersionBySlug.get(slug);
+  if (remoteVersion) pkg._meta = { ...(pkg._meta as Record<string, unknown> | undefined ?? {}), version: remoteVersion };
+
+  // Pre-apply state — was this slug already installed with NO version stamp?
+  // Feeds `classifyApplyResult`'s stamp-contradiction check below.
+  const preInstalled = installedTemplates.find((t) => t.slug === slug);
+  const wasUnstamped = !!preInstalled && !preInstalled.version;
+
   const s = opts.json ? null : ora(`Installing ${entry.name}…`).start();
   try {
     // projectId links the workspace's seed entities to the project
     // (belongs_to_project) — exactly what `launch` does. Undefined = pod-wide.
+    // targetWorkspaceId (--onto) reconciles the template ADDITIVELY onto an
+    // existing workspace instead of creating a new one.
     const res = (await hubPost(
       "/packages/apply",
-      { ...pkg, projectId },
+      { ...pkg, projectId, targetWorkspaceId: opts.onto },
       cfg,
-      APPLY_TIMEOUT_MS
+      applyTimeoutMs
     )) as Record<string, unknown>;
 
     if (writeGovernance(res) === "proposed") {
@@ -493,16 +660,23 @@ export async function marketInstall(
     const seedSummary = res.seedSummary as SeedSummary | undefined;
     const steps = FLOW.afterMarketInstall({ slug, proposed: false, projectName });
     s?.stop();
+    const verdict = classifyApplyResult(entry, ws, dependencies, seedSummary, {
+      remoteVersionSent: remoteVersion,
+      wasUnstamped,
+    });
     if (opts.json) {
       console.log(
         JSON.stringify(
           {
             slug,
             outcome: ws?.outcome ?? ws?.status ?? "unknown",
+            status: verdict.status,
+            warnings: verdict.warnings,
             workspace: ws,
             dependencies,
             seedSummary,
             projectId,
+            onto: opts.onto,
             nextSteps: steps,
           },
           null,
@@ -511,20 +685,28 @@ export async function marketInstall(
       );
       return;
     }
-    // `outcome` is the honest signal when the pod build sends it — falls back
-    // to the older ambiguous `status`-based message otherwise.
-    if (ws?.outcome === "created") {
-      log.success(`✓ Installed ${entry.name}.`);
-    } else if (ws?.outcome === "reconciled") {
-      log.success(`✓ Updated ${entry.name}.`);
-    } else if (ws?.outcome === "unchanged") {
-      log.info(`• ${entry.name} is already up to date.`);
-    } else if (ws?.status === "composed") {
-      log.success(`${entry.name} — layered onto its base workspace.`);
-    } else if (ws?.status === "created") {
-      log.success(`${entry.name} ready.`);
+    // `--onto` reconciles onto an EXISTING workspace — the honest verdict
+    // reads "reconciled onto <workspace>", not the create-flavored default
+    // text `printApplyVerdict` would otherwise print for the same outcomes.
+    if (opts.onto) {
+      const wsLabel = ws?.workspaceId ? chalk.bold(ws.workspaceId) : chalk.bold(opts.onto);
+      switch (verdict.status) {
+        case "installed":
+        case "updated":
+          log.success(`Reconciled ${entry.name} onto ${wsLabel}.`);
+          break;
+        case "installed-with-failures":
+        case "updated-with-failures":
+          log.warn(`Reconciled ${entry.name} onto ${wsLabel} — completed with capability failures (see below).`);
+          break;
+        case "unchanged":
+          log.info(`• ${entry.name} is already up to date on ${wsLabel}.`);
+          break;
+        default:
+          printApplyVerdict(entry, verdict);
+      }
     } else {
-      log.warn(`${entry.name} — pod returned no workspace.`);
+      printApplyVerdict(entry, verdict);
     }
     printSeedOutcomes(dependencies, seedSummary);
     if (ws?.outcome || ws?.status === "composed" || ws?.status === "created") renderNextSteps(steps);
@@ -538,7 +720,7 @@ export async function marketInstall(
 
 // ── `synap market update [slug]` — drift detection + version-aware re-apply ──
 
-interface UpdateCheck extends TemplateUpdateCheck {
+export interface UpdateCheck extends TemplateUpdateCheck {
   /**
    * True when the installed workspace carries no version stamp at all — the
    * pod can't say whether it's stale. Distinct from `updateAvailable: false`
@@ -556,7 +738,7 @@ interface UpdateCheck extends TemplateUpdateCheck {
  * needs (see `MarketCatalog.remoteVersionBySlug`'s doc). A slug the pod never
  * version-stamped is reported `noVersionInfo: true`, never silently "outdated".
  */
-function computeUpdates(installedTemplates: InstalledTemplateInfo[], cat: MarketCatalog): UpdateCheck[] {
+export function computeUpdates(installedTemplates: InstalledTemplateInfo[], cat: MarketCatalog): UpdateCheck[] {
   const withVersion = installedTemplates.filter(
     (t): t is InstalledTemplateInfo & { version: string } => !!t.version
   );
@@ -601,10 +783,14 @@ async function applyOnePackage(
   entry: CatalogEntry,
   cat: MarketCatalog,
   cfg: HubConfig,
-  opts: { json?: boolean }
+  opts: { json?: boolean },
+  applyTimeoutMs: number = APPLY_TIMEOUT_MS
 ): Promise<{
   slug: string;
   outcome: string;
+  /** Honest coarse status from `classifyApplyResult` — see its doc. Early-return branches (locked/fetch-failed/proposed/failed/timed-out) reuse `outcome` as `status` verbatim. */
+  status: string;
+  warnings: string[];
   error?: string;
   dependencies?: ResolvedDependencyLike[];
   seedSummary?: SeedSummary;
@@ -613,7 +799,7 @@ async function applyOnePackage(
     const tier = cat.tierBySlug.get(entry.slug)?.requiredTier;
     if (!opts.json)
       log.warn(`"${entry.name}" requires the ${tier ?? "a higher"} tier — skipping.`);
-    return { slug: entry.slug, outcome: "locked" };
+    return { slug: entry.slug, outcome: "locked", status: "locked", warnings: [] };
   }
 
   const cpToken = getStoredToken()?.token;
@@ -627,14 +813,19 @@ async function applyOnePackage(
         log.error(`Couldn't fetch "${entry.name}"'s definition from the control plane.`);
         if (!cat.loggedIn) log.hint("It may be private — try: synap login");
       }
-      return { slug: entry.slug, outcome: "fetch-failed" };
+      return { slug: entry.slug, outcome: "fetch-failed", status: "fetch-failed", warnings: [] };
     }
     pkg = def;
   }
 
+  // Same version stamp as `marketInstall` — needed for private templates too,
+  // since `applyOnePackage` re-runs the apply door on every update.
+  const remoteVersion = cat.remoteVersionBySlug.get(entry.slug);
+  if (remoteVersion) pkg._meta = { ...(pkg._meta as Record<string, unknown> | undefined ?? {}), version: remoteVersion };
+
   const s = opts.json ? null : ora(`Updating ${entry.name}…`).start();
   try {
-    const res = (await hubPost("/packages/apply", pkg, cfg, APPLY_TIMEOUT_MS)) as Record<string, unknown>;
+    const res = (await hubPost("/packages/apply", pkg, cfg, applyTimeoutMs)) as Record<string, unknown>;
     s?.stop();
 
     if (writeGovernance(res) === "proposed") {
@@ -643,49 +834,62 @@ async function applyOnePackage(
         log.info(`${entry.name} — update proposed (under review, not live yet).`);
         if (proposalId) log.hint(`Approve: synap proposals approve ${proposalId.slice(0, 8)}`);
       }
-      return { slug: entry.slug, outcome: "proposed" };
+      return { slug: entry.slug, outcome: "proposed", status: "proposed", warnings: [] };
     }
 
     const ws = res.workspace as WorkspaceApplyResult | undefined;
     const dependencies = res.dependencies as ResolvedDependencyLike[] | undefined;
     const seedSummary = res.seedSummary as SeedSummary | undefined;
+    // `wasUnstamped: false` — `applyOnePackage` is only ever reached (from
+    // `marketUpdate`) for a slug that already had `updateAvailable: true`,
+    // which by construction means it already carried a recorded version. The
+    // stamp-contradiction check is therefore a no-op here by design; it's
+    // `marketInstall`'s job to catch it on a first-time/unstamped install.
+    const verdict = classifyApplyResult(entry, ws, dependencies, seedSummary, {
+      remoteVersionSent: remoteVersion,
+      wasUnstamped: false,
+    });
     if (!opts.json) {
-      // `outcome` is the honest signal when the pod build sends it — the
-      // "created" status used to be ambiguous (also what a no-op idempotent
-      // return reports); `outcome` disambiguates, so prefer it.
-      if (ws?.outcome === "created") {
-        log.success(`✓ Installed ${entry.name}.`);
-      } else if (ws?.outcome === "reconciled") {
-        log.success(`✓ Updated ${entry.name}.`);
-      } else if (ws?.outcome === "unchanged") {
-        log.info(`• ${entry.name} is already up to date.`);
-      } else if (ws?.status === "composed") {
-        log.success(`${entry.name} — reconciled onto its base workspace.`);
-      } else if (ws?.status === "created") {
-        log.success(`${entry.name} — apply call completed.`);
-        log.hint(
-          "This pod's /packages/apply doesn't distinguish reconciled-vs-unchanged yet — check synap orient if you expected new content."
-        );
-      } else {
-        log.warn(`${entry.name} — pod returned no workspace.`);
-      }
+      printApplyVerdict(entry, verdict);
       printSeedOutcomes(dependencies, seedSummary);
     }
-    return { slug: entry.slug, outcome: ws?.outcome ?? ws?.status ?? "unknown", dependencies, seedSummary };
+    return {
+      slug: entry.slug,
+      outcome: ws?.outcome ?? ws?.status ?? "unknown",
+      status: verdict.status,
+      warnings: verdict.warnings,
+      dependencies,
+      seedSummary,
+    };
   } catch (e) {
     s?.stop();
+    const timedOut = e instanceof HubNetworkError && e.code === "TIMEOUT";
     if (!opts.json) {
       log.error(`${entry.name} update failed`);
       renderHubError(e);
     }
-    return { slug: entry.slug, outcome: "failed", error: e instanceof Error ? e.message : String(e) };
+    return {
+      slug: entry.slug,
+      outcome: timedOut ? "timed-out" : "failed",
+      status: timedOut ? "timed-out" : "failed",
+      warnings: [],
+      error: e instanceof Error ? e.message : String(e),
+    };
   }
 }
 
 export async function marketUpdate(
   slugsArg: string[] | undefined,
-  opts: { yes?: boolean; dryRun?: boolean; json?: boolean; podUrl?: string; apiKey?: string }
+  opts: {
+    yes?: boolean;
+    dryRun?: boolean;
+    json?: boolean;
+    podUrl?: string;
+    apiKey?: string;
+    timeout?: string;
+  }
 ): Promise<void> {
+  const applyTimeoutMs = parseApplyTimeoutMs(opts.timeout);
   const [installedTemplates, cat] = await Promise.all([fetchInstalledTemplates(), buildMarketCatalog()]);
 
   if (installedTemplates.length === 0) {
@@ -699,6 +903,7 @@ export async function marketUpdate(
   }
 
   let checks = computeUpdates(installedTemplates, cat);
+  const entryBySlug = new Map(cat.entries.map((e) => [e.slug, e]));
   const explicitSlugs = !!slugsArg && slugsArg.length > 0;
   let unknownSlugs: string[] = [];
 
@@ -742,7 +947,7 @@ export async function marketUpdate(
     log.blank();
     for (const c of checks) {
       const label = c.noVersionInfo
-        ? chalk.dim("version unknown — reinstall to enable update checks")
+        ? noVersionLabel(entryBySlug.get(c.slug)?.isPrivate ?? false, cat.loggedIn)
         : c.updateAvailable
           ? chalk.yellow(`update available  `) + chalk.dim(c.installedVersion) + " → " + c.latestVersion
           : chalk.green("up to date");
@@ -757,8 +962,36 @@ export async function marketUpdate(
   }
 
   if (withUpdates.length === 0) {
+    // "Nothing to update" is only honest when every installed row was
+    // actually CHECKED. Rows the pod can't version-check are "couldn't be
+    // checked", not silently folded into a clean ✓ — see rule #2 in this
+    // file's header.
     if (opts.json) {
-      console.log(JSON.stringify({ checks, loggedIn: cat.loggedIn, unknownSlugs, applied: [] }, null, 2));
+      console.log(
+        JSON.stringify(
+          {
+            checks,
+            loggedIn: cat.loggedIn,
+            unknownSlugs,
+            applied: [],
+            status: noVersionInfo.length > 0 ? "partial" : "clean",
+            uncheckable: noVersionInfo.map((c) => c.slug),
+          },
+          null,
+          2
+        )
+      );
+    } else if (noVersionInfo.length > 0) {
+      const upToDate = checks.length - noVersionInfo.length;
+      console.log(
+        "  " +
+          chalk.yellow(
+            `⚠ ${upToDate} up to date · ${noVersionInfo.length} couldn't be checked`
+          )
+      );
+      log.hint(
+        "Run 'synap market installed' for why — unstamped install (reinstall to fix) or a private template while logged out (synap login)."
+      );
     } else {
       log.success("Nothing to update.");
     }
@@ -789,6 +1022,8 @@ export async function marketUpdate(
   const results: Array<{
     slug: string;
     outcome: string;
+    status: string;
+    warnings: string[];
     error?: string;
     dependencies?: ResolvedDependencyLike[];
     seedSummary?: SeedSummary;
@@ -797,20 +1032,87 @@ export async function marketUpdate(
     const entry = cat.entries.find((e) => e.slug === c.slug);
     if (!entry) {
       if (!opts.json) log.warn(`"${c.slug}" is no longer in the catalog — skipping.`);
-      results.push({ slug: c.slug, outcome: "not-in-catalog" });
+      results.push({ slug: c.slug, outcome: "not-in-catalog", status: "not-in-catalog", warnings: [] });
       continue;
     }
-    results.push(await applyOnePackage(entry, cat, cfg, { json: opts.json }));
+    results.push(await applyOnePackage(entry, cat, cfg, { json: opts.json }, applyTimeoutMs));
   }
 
+  const summary = summarizeApplyResults(results);
   const steps = FLOW.afterMarketUpdateApply();
   if (opts.json) {
     console.log(
-      JSON.stringify({ checks, loggedIn: cat.loggedIn, unknownSlugs, applied: results, nextSteps: steps }, null, 2)
+      JSON.stringify(
+        { checks, loggedIn: cat.loggedIn, unknownSlugs, applied: results, summary, nextSteps: steps },
+        null,
+        2
+      )
     );
     return;
   }
+  log.blank();
+  console.log("  " + summary.line);
   renderNextSteps(steps);
+}
+
+/**
+ * One-line rollup over a batch of `applyOnePackage` outcomes — computed from
+ * the SAME per-item `status` (`classifyApplyResult`'s honest verdict) the
+ * loop already collects, not a separate tally. `"installed"`/`"updated"`/
+ * `"composed"`/`"legacy-unknown"` count as a clean update, `"unchanged"` as
+ * already-current, the `*-with-failures` and `"stamp-contradiction"` statuses
+ * get their OWN bucket — a partial capability-seed failure or a stamp that
+ * silently didn't take is never folded into a clean "updated" count.
+ * `"timed-out"` is broken out from the generic `"failed"` bucket; everything
+ * else (locked/proposed/fetch-failed/not-in-catalog/no-workspace/unknown)
+ * rolls into "failed".
+ */
+function summarizeApplyResults(
+  results: Array<{ slug: string; status: string }>
+): { updated: number; unchanged: number; withFailures: number; failed: number; timedOut: number; line: string } {
+  let updated = 0;
+  let unchanged = 0;
+  let withFailures = 0;
+  let timedOut = 0;
+  let failed = 0;
+  for (const r of results) {
+    switch (r.status) {
+      case "installed":
+      case "updated":
+      case "composed":
+      case "legacy-unknown":
+        updated++;
+        break;
+      case "unchanged":
+        unchanged++;
+        break;
+      case "installed-with-failures":
+      case "updated-with-failures":
+      case "composed-with-failures":
+      case "stamp-contradiction":
+        withFailures++;
+        break;
+      case "timed-out":
+        timedOut++;
+        break;
+      default:
+        failed++;
+    }
+  }
+  const parts = [`${updated} updated`, `${unchanged} already current`];
+  if (withFailures > 0) parts.push(`${withFailures} completed with failures`);
+  if (failed > 0) parts.push(`${failed} failed`);
+  if (timedOut > 0) parts.push(`${timedOut} timed out`);
+  const clean = withFailures === 0 && failed === 0 && timedOut === 0;
+  const color = clean ? chalk.green : chalk.yellow;
+  return {
+    updated,
+    unchanged,
+    withFailures,
+    failed,
+    timedOut,
+    line: color(`${clean ? "✓" : "⚠"} ${parts.join(" · ")}`),
+  };
 }
 
 // ── `synap market installed [--json] [--outdated]` — pure-read inventory ────
@@ -821,11 +1123,23 @@ function truncateVersion(v: string): string {
 }
 
 /**
+ * Honest `noVersionInfo` label — a PRIVATE template that's blind to updates
+ * because the caller is logged out is a different (recoverable) situation
+ * than a genuinely unstampable install: "reinstall" is the wrong fix when
+ * the real fix is `synap login`.
+ */
+function noVersionLabel(isPrivate: boolean, loggedIn: boolean): string {
+  return isPrivate && !loggedIn
+    ? chalk.dim("connect to the Control Plane to check/update — run: synap login")
+    : chalk.dim("version unknown — reinstall to enable update checks");
+}
+
+/**
  * Human status cell for one installed row — distinguishes hash drift (no
  * ordering, just "changed") from semver drift ("update available").
  */
-function installedStatusLabel(c: UpdateCheck): string {
-  if (c.noVersionInfo) return chalk.dim("can't check — reinstall");
+function installedStatusLabel(c: UpdateCheck, isPrivate: boolean, loggedIn: boolean): string {
+  if (c.noVersionInfo) return noVersionLabel(isPrivate, loggedIn);
   if (!c.updateAvailable) return chalk.green("up to date");
   const installed = truncateVersion(c.installedVersion);
   const latest = c.latestVersion ? truncateVersion(c.latestVersion) : "?";
@@ -834,16 +1148,79 @@ function installedStatusLabel(c: UpdateCheck): string {
   return chalk.yellow(`${label}  `) + chalk.dim(installed) + " → " + latest;
 }
 
-// ── `synap market installed --tree` — composition graph ────────────────────
+// ── Composition engine — the ONE traversal door ─────────────────────────────
 //
-// The flat list above shows one row per installed slug — so a SUITE (e.g.
-// `enterprise-os`) reads as "1 workspace" even though it composed several
-// (foundation/ecosystem/operations/crm/…). The tree surfaces that graph by
-// walking each package's `dependencies[]` (the template-composition edges,
-// declared once in the template YAML — no new storage). Purely derived: no
-// new drift/version logic, reuses `computeUpdates`'s per-slug checks.
+// Both `--tree` (nested view) and `--layers` (flat DAG view) are RENDERERS
+// over the shared `layerTemplateGraph` engine (`@synap-core/workspace-
+// templates`) — neither hand-walks `dependencies[]` itself anymore. The old
+// bespoke walker (`collectDescendantSlugs`/`buildDependencyNode`) rebuilt a
+// fresh node for every OCCURRENCE of a shared slug (`foundation` printed once
+// per branch that reached it) and was blind to a remote/private CP-only
+// package's `dependencies[]` (only bundled templates were ever consulted, so
+// such a package's subtree silently rendered empty — a live bug). The engine
+// fixes both: one node per slug at its longest-path layer, edges converging
+// on it, via an INJECTED `edgesOf` (see `buildEdgesOf` below) that falls back
+// to a remote catalog entry's fetched `definition.dependencies` when the slug
+// isn't in the bundle.
 
-interface TreeNode {
+/**
+ * Synchronous `edgesOf` for `layerTemplateGraph`, backed by an async prefetch
+ * BFS: bundled slugs resolve instantly via `bundledEdgesOf`; any slug NOT
+ * bundled (a remote/private CP-only package) has its full definition fetched
+ * via `fetchPackageDefinition` and its `.dependencies` cached. `seeds` is the
+ * set of slugs to start the BFS from — pass every installed slug so the
+ * resulting closure covers everything either renderer might touch.
+ */
+async function buildEdgesOf(
+  seeds: string[],
+  cat: MarketCatalog,
+  cpToken: string | undefined
+): Promise<(slug: string) => readonly TemplateDependency[]> {
+  const cache = new Map<string, readonly TemplateDependency[]>();
+  const visited = new Set<string>();
+  let frontier = [...new Set(seeds)];
+  while (frontier.length > 0) {
+    const nextFrontier = new Set<string>();
+    await Promise.all(
+      frontier.map(async (slug) => {
+        if (visited.has(slug)) return;
+        visited.add(slug);
+        let deps: readonly TemplateDependency[];
+        if (cat.bundledSlugs.has(slug)) {
+          deps = bundledEdgesOf(slug);
+        } else {
+          try {
+            const def = await fetchPackageDefinition(slug, cpToken);
+            deps = (def?.dependencies as TemplateDependency[] | undefined) ?? [];
+          } catch {
+            deps = [];
+          }
+        }
+        cache.set(slug, deps);
+        for (const d of deps) nextFrontier.add(d.slug);
+      })
+    );
+    frontier = [...nextFrontier].filter((s) => !visited.has(s));
+  }
+  // Fallback covers a slug the BFS never seeded (shouldn't happen — every
+  // `edgesOf` call the engine makes is reachable from `seeds`) — cheap and
+  // safe either way since it's the same bundled-only lookup as the default.
+  return (slug: string) => cache.get(slug) ?? bundledEdgesOf(slug);
+}
+
+/** `CompositionInstalledEntry[]` from the Hub's installed-templates rows — the shape both `--tree` and `--layers` feed the engine. */
+function toInstalledEntries(installedTemplates: InstalledTemplateInfo[]): CompositionInstalledEntry[] {
+  return installedTemplates.map((t) => ({
+    slug: t.slug,
+    workspaceId: t.workspaceId,
+    workspaceName: t.workspaceName,
+    version: t.version,
+  }));
+}
+
+// ── `synap market installed --tree` — nested composition view ──────────────
+
+export interface TreeNode {
   slug: string;
   name: string;
   relation: "compose" | "require";
@@ -860,7 +1237,7 @@ interface TreeNode {
   children: TreeNode[];
 }
 
-interface TreePackage {
+export interface TreePackage {
   slug: string;
   name: string;
   installedVersion: string;
@@ -873,134 +1250,97 @@ interface TreePackage {
 }
 
 /**
- * All slugs reachable from `slug`'s `dependencies[]`, recursively. `ancestors`
- * guards against a cycle (A requires B requires A) — a slug already on the
- * current path is not re-descended into.
+ * The nested composition-tree view: one tree per installed TOP-LEVEL package
+ * (a suite, or any installed package whose `edgesOf` resolves at least one
+ * dependency — bundled OR remote). Everything else stays a flat leaf
+ * (`leafRows`, rendered like a plain `market installed` row). This is the
+ * SAME "top-level" rule the old walker used (kept verbatim for `--tree`'s
+ * JSON/text backward compatibility — see `marketInstalled`'s before/after
+ * diff check), just evaluated against the fixed `edgesOf` instead of the
+ * bundled-only map.
+ *
+ * Nested `TreeNode`s are built by walking `graph.edges` (both `require` and
+ * `compose` relations — the engine excludes compose SOURCES from `nodes`,
+ * rule 2, but never from `edges`, so the nested view still shows them exactly
+ * where the old walker did) and `shared` reads straight off each node's
+ * `roots` (the engine's true reachability set), replacing the old walker's
+ * bespoke reverse index.
  */
-function collectDescendantSlugs(slug: string, ancestors: Set<string>): Set<string> {
-  const out = new Set<string>();
-  const deps = getWorkspaceTemplate(slug)?.dependencies ?? [];
-  for (const dep of deps) {
-    if (ancestors.has(dep.slug)) continue; // cycle guard
-    out.add(dep.slug);
-    const nextAncestors = new Set(ancestors);
-    nextAncestors.add(dep.slug);
-    for (const s of collectDescendantSlugs(dep.slug, nextAncestors)) out.add(s);
-  }
-  return out;
-}
-
-/**
- * Build one dependency node (and its subtree) for a top-level package's tree.
- * `ancestors` is the path from the top-level package down to this node — used
- * only for the cycle guard, so the SAME slug can still appear under multiple
- * sibling branches (that's sharing, not a cycle).
- */
-function buildDependencyNode(
-  dep: TemplateDependency,
-  entryBySlug: Map<string, CatalogEntry>,
-  installedBySlug: Map<string, InstalledTemplateInfo>,
-  checksBySlug: Map<string, UpdateCheck>,
-  slugToTopLevels: Map<string, Map<string, string>>,
-  currentTopLevelSlug: string,
-  ancestors: Set<string>
-): TreeNode {
-  const entry = entryBySlug.get(dep.slug);
-  const installedInfo = installedBySlug.get(dep.slug);
-  const check = checksBySlug.get(dep.slug);
-
-  const owners = slugToTopLevels.get(dep.slug);
-  const shared = owners
-    ? [...owners.entries()].filter(([slug]) => slug !== currentTopLevelSlug).map(([, name]) => name)
-    : [];
-
-  const children: TreeNode[] = [];
-  if (!ancestors.has(dep.slug)) {
-    const nextAncestors = new Set(ancestors);
-    nextAncestors.add(dep.slug);
-    const childDeps = getWorkspaceTemplate(dep.slug)?.dependencies ?? [];
-    for (const childDep of childDeps) {
-      children.push(
-        buildDependencyNode(
-          childDep,
-          entryBySlug,
-          installedBySlug,
-          checksBySlug,
-          slugToTopLevels,
-          currentTopLevelSlug,
-          nextAncestors
-        )
-      );
-    }
-  }
-
-  return {
-    slug: dep.slug,
-    name: entry?.name ?? dep.slug,
-    relation: dep.relation ?? "require",
-    depKind: dep.kind,
-    installed: !!installedInfo,
-    workspaceId: installedInfo?.workspaceId,
-    workspaceName: installedInfo?.workspaceName,
-    installedVersion: check?.installedVersion,
-    latestVersion: check?.latestVersion ?? null,
-    updateAvailable: check?.updateAvailable ?? false,
-    noVersionInfo: check ? check.noVersionInfo : !installedInfo,
-    shared,
-    children,
-  };
-}
-
-/**
- * The composition-graph view: one tree per installed TOP-LEVEL package (a
- * suite, or any installed package whose template declares `dependencies[]`).
- * Everything else stays a flat leaf (`leafSlugs`, rendered like today's row).
- */
-function buildCompositionTrees(
+export async function buildCompositionTrees(
   rows: UpdateCheck[],
   cat: MarketCatalog,
   installedTemplates: InstalledTemplateInfo[],
   workspaceCountBySlug: Map<string, number>
-): { packages: TreePackage[]; leafRows: UpdateCheck[] } {
+): Promise<{ packages: TreePackage[]; leafRows: UpdateCheck[] }> {
   const entryBySlug = new Map(cat.entries.map((e) => [e.slug, e]));
   const installedBySlug = new Map(installedTemplates.map((t) => [t.slug, t]));
   const checksBySlug = new Map(rows.map((c) => [c.slug, c]));
+  const cpToken = getStoredToken()?.token;
+
+  const installedSlugs = [...new Set(installedTemplates.map((t) => t.slug))];
+  const edgesOf = await buildEdgesOf(installedSlugs, cat, cpToken);
 
   const topLevel = rows.filter((c) => {
     const entry = entryBySlug.get(c.slug);
-    const hasDeps = (getWorkspaceTemplate(c.slug)?.dependencies?.length ?? 0) > 0;
-    return (entry && isSuite(entry)) || hasDeps;
+    return (entry && isSuite(entry)) || edgesOf(c.slug).length > 0;
   });
   const topLevelSlugs = new Set(topLevel.map((c) => c.slug));
   const leafRows = rows.filter((c) => !topLevelSlugs.has(c.slug));
 
-  // Reverse index: dep slug → { top-level slug → top-level name } for every
-  // top-level package that reaches it. Needed BEFORE building nodes so each
-  // node can list its OTHER owners.
-  const slugToTopLevels = new Map<string, Map<string, string>>();
-  for (const c of topLevel) {
-    const name = entryBySlug.get(c.slug)?.name ?? c.slug;
-    const descendants = collectDescendantSlugs(c.slug, new Set([c.slug]));
-    for (const d of descendants) {
-      if (!slugToTopLevels.has(d)) slugToTopLevels.set(d, new Map());
-      slugToTopLevels.get(d)!.set(c.slug, name);
+  const graph = layerTemplateGraph({
+    roots: [...topLevelSlugs],
+    edgesOf,
+    nameOf: (slug) => entryBySlug.get(slug)?.name,
+    installed: toInstalledEntries(installedTemplates),
+    updates: rows,
+  });
+
+  function buildTreeNode(edge: CompositionEdge, currentTopLevelSlug: string, ancestors: Set<string>): TreeNode {
+    const slug = edge.to;
+    const entry = entryBySlug.get(slug);
+    const installedInfo = installedBySlug.get(slug);
+    const node = graph.nodes.get(slug);
+    // Exclude BOTH the walking root (matches the old walker's exclusion) AND
+    // the node's own slug (a top-level package that's ALSO separately
+    // installed reaches itself trivially in `node.roots` — rule 4 of Phase 4
+    // — which the old bespoke `collectDescendantSlugs` never surfaced since
+    // it only ever recorded genuine descendants, never a self-loop).
+    const shared = (node?.roots ?? [])
+      .filter((r) => r !== currentTopLevelSlug && r !== slug)
+      .map((r) => entryBySlug.get(r)?.name ?? r);
+
+    const children: TreeNode[] = [];
+    if (!ancestors.has(slug)) {
+      const nextAncestors = new Set(ancestors);
+      nextAncestors.add(slug);
+      for (const childEdge of graph.edges.filter((e) => e.from === slug)) {
+        children.push(buildTreeNode(childEdge, currentTopLevelSlug, nextAncestors));
+      }
     }
+
+    const check = checksBySlug.get(slug);
+    return {
+      slug,
+      name: entry?.name ?? slug,
+      relation: edge.relation,
+      depKind: edge.depKind,
+      installed: !!installedInfo,
+      workspaceId: installedInfo?.workspaceId,
+      workspaceName: installedInfo?.workspaceName,
+      installedVersion: check?.installedVersion,
+      latestVersion: check?.latestVersion ?? null,
+      updateAvailable: check?.updateAvailable ?? false,
+      noVersionInfo: check ? check.noVersionInfo : !installedInfo,
+      shared,
+      children,
+    };
   }
 
   const packages: TreePackage[] = topLevel.map((c) => {
     const entry = entryBySlug.get(c.slug);
-    const deps = getWorkspaceTemplate(c.slug)?.dependencies ?? [];
-    const children = deps.map((dep) =>
-      buildDependencyNode(
-        dep,
-        entryBySlug,
-        installedBySlug,
-        checksBySlug,
-        slugToTopLevels,
-        c.slug,
-        new Set([c.slug])
-      )
-    );
+    const children = graph.edges
+      .filter((e) => e.from === c.slug)
+      .map((edge) => buildTreeNode(edge, c.slug, new Set([c.slug])));
     return {
       slug: c.slug,
       name: entry?.name ?? c.slug,
@@ -1046,7 +1386,7 @@ function printDependencyNode(node: TreeNode, prefix: string, isLast: boolean): v
   node.children.forEach((child, i) => printDependencyNode(child, childPrefix, i === node.children.length - 1));
 }
 
-function printCompositionTree(pkg: TreePackage): void {
+export function printCompositionTree(pkg: TreePackage): void {
   const suiteTag = pkg.isSuite ? "  " + chalk.magenta("suite") : "";
   console.log(
     chalk.bold(pkg.name) +
@@ -1066,13 +1406,149 @@ function printCompositionTree(pkg: TreePackage): void {
   log.blank();
 }
 
+// ── `synap market installed --layers` — flat DAG view ──────────────────────
+//
+// `--tree` nests (and, by design, reprints a shared base once per branch that
+// reaches it — see `TreeNode.shared`). `--layers` is the OTHER read of the
+// SAME engine: each installed/dependency slug appears EXACTLY ONCE, sunk to
+// its longest-path layer (roots at the top, bedrock at the bottom), with true
+// fan-in (`← N packages`) instead of a per-branch "shared" tag.
+
+/**
+ * Full graph over every currently-installed package — the ROOTS are every
+ * "top-level" installed slug (a suite, or one with its own resolved
+ * dependencies — same rule `buildCompositionTrees` uses) PLUS any installed
+ * slug left unreached by that walk (a standalone leaf with no dependents/
+ * dependencies of its own). The second half matters here specifically:
+ * `layerTemplateGraph` only ever surfaces nodes reachable from `roots` (its
+ * contract — "roots always land at layer 0"), so a genuinely standalone
+ * package would otherwise silently vanish from `--layers` instead of showing
+ * up as its own one-node layer-0 entry.
+ */
+async function buildInstallationGraph(
+  installedTemplates: InstalledTemplateInfo[],
+  cat: MarketCatalog,
+  checks: UpdateCheck[]
+): Promise<CompositionGraph> {
+  const cpToken = getStoredToken()?.token;
+  const entryBySlug = new Map(cat.entries.map((e) => [e.slug, e]));
+  const installedSlugs = [...new Set(installedTemplates.map((t) => t.slug))];
+  const edgesOf = await buildEdgesOf(installedSlugs, cat, cpToken);
+
+  const primary = installedSlugs.filter((slug) => {
+    const entry = entryBySlug.get(slug);
+    return (entry && isSuite(entry)) || edgesOf(slug).length > 0;
+  });
+
+  const reached = new Set<string>(primary);
+  let frontier = [...primary];
+  while (frontier.length > 0) {
+    const next: string[] = [];
+    for (const s of frontier) {
+      for (const dep of edgesOf(s)) {
+        if (!reached.has(dep.slug)) {
+          reached.add(dep.slug);
+          next.push(dep.slug);
+        }
+      }
+    }
+    frontier = next;
+  }
+  const leftover = installedSlugs.filter((s) => !reached.has(s));
+  const roots = [...new Set([...primary, ...leftover])];
+
+  return layerTemplateGraph({
+    roots,
+    edgesOf,
+    nameOf: (slug) => entryBySlug.get(slug)?.name,
+    installed: toInstalledEntries(installedTemplates),
+    updates: checks,
+  });
+}
+
+/** Status cell for one `--layers` row — same vocabulary as `installedStatusLabel`, adapted to a `CompositionNode` (which, unlike `UpdateCheck`, can be a ghost — not installed at all). */
+function layerNodeStatus(node: CompositionNode, isPrivate: boolean, loggedIn: boolean): string {
+  if (!node.installed) return chalk.dim("not installed");
+  if (node.noVersionInfo) return noVersionLabel(isPrivate, loggedIn);
+  if (!node.updateAvailable) return chalk.green("up to date");
+  const installed = node.installedVersion ? truncateVersion(node.installedVersion) : "?";
+  const latest = node.latestVersion ? truncateVersion(node.latestVersion) : "?";
+  return chalk.yellow("update available  ") + chalk.dim(installed) + " → " + latest;
+}
+
+/**
+ * Render the layered DAG bottom-up: bedrock (the highest layer index, most
+ * depended-on) FIRST, roots (layer 0) LAST — the base of the pyramid printed
+ * first felt like the clearer reading order for "what everything rests on".
+ */
+function printLayersGraph(graph: CompositionGraph, cat: MarketCatalog): void {
+  const entryBySlug = new Map(cat.entries.map((e) => [e.slug, e]));
+  log.heading("  Installed packages — composition layers (bedrock first, bottom-up)");
+  log.blank();
+
+  // Column widths computed ONCE over every node in the graph (not per layer
+  // bucket) — otherwise name/slug columns re-align at each layer boundary
+  // and read as ragged.
+  const allNodes = [...graph.nodes.values()];
+  const nameW = Math.max(4, ...allNodes.map((n) => n.name.length)) + 2;
+  const slugW = Math.max(4, ...allNodes.map((n) => n.slug.length)) + 2;
+
+  for (let i = graph.layers.length - 1; i >= 0; i--) {
+    const bucket = graph.layers[i];
+    if (!bucket || bucket.length === 0) continue;
+    // Bedrock/Roots already say what they need to; a bare "Layer N" in
+    // between doesn't need "— layer N" repeated after it.
+    const label =
+      i === graph.layers.length - 1 ? "Bedrock" : i === 0 ? "Roots" : `Layer ${i}`;
+    console.log("    " + chalk.dim(label));
+    for (const node of bucket) {
+      const entry = entryBySlug.get(node.slug);
+      const dim = !node.installed;
+      const fanIn =
+        node.dependents.length > 0
+          ? "  " + chalk.magenta(`used by ${node.dependents.length} package${node.dependents.length === 1 ? "" : "s"}`)
+          : "";
+      const overlays =
+        node.overlays.length > 0
+          ? "  " + node.overlays.map((o) => chalk.cyan(`+ ${o.name} (overlay)`)).join(" ")
+          : "";
+      const priv = entry?.isPrivate ? "  " + chalk.yellow("private") : "";
+      const name = dim ? chalk.dim(node.name.padEnd(nameW)) : chalk.bold(node.name.padEnd(nameW));
+      const slug = dim ? chalk.dim(node.slug.padEnd(slugW)) : chalk.cyan(node.slug.padEnd(slugW));
+      console.log(
+        "      " +
+          name +
+          slug +
+          layerNodeStatus(node, entry?.isPrivate ?? false, cat.loggedIn) +
+          fanIn +
+          overlays +
+          priv
+      );
+    }
+    log.blank();
+  }
+
+  if (graph.cycles.length > 0) {
+    log.warn(
+      `${graph.cycles.length} dependency cycle${graph.cycles.length === 1 ? "" : "s"} detected — surfaced, not hidden:`
+    );
+    for (const [from, to] of graph.cycles) log.hint(`${from} → ${to}  (broken here to avoid an infinite loop)`);
+    log.blank();
+  }
+}
+
 /**
  * Pure-read inventory of what's installed on this pod — reuses
  * `buildMarketCatalog` + `fetchInstalledTemplates` + `computeUpdates`
  * (`market update`'s own drift check), never writes anything. Pairs with
  * `market update` to apply what this surfaces.
  */
-export async function marketInstalled(opts: { json?: boolean; outdated?: boolean; tree?: boolean }): Promise<void> {
+export async function marketInstalled(opts: {
+  json?: boolean;
+  outdated?: boolean;
+  tree?: boolean;
+  layers?: boolean;
+}): Promise<void> {
   const [installedTemplates, cat] = await Promise.all([fetchInstalledTemplates(), buildMarketCatalog()]);
 
   if (installedTemplates.length === 0) {
@@ -1104,8 +1580,41 @@ export async function marketInstalled(opts: { json?: boolean; outdated?: boolean
 
   const entryBySlug = new Map(cat.entries.map((e) => [e.slug, e]));
 
+  if (opts.layers) {
+    const graph = await buildInstallationGraph(installedTemplates, cat, checks);
+    const steps = FLOW.afterMarketInstalledCheck(rows.filter((c) => c.updateAvailable).map((c) => c.slug));
+
+    if (opts.json) {
+      console.log(
+        JSON.stringify(
+          {
+            nodes: [...graph.nodes.values()],
+            edges: graph.edges,
+            layers: graph.layers.map((bucket) => bucket.map((n) => n.slug)),
+            cycles: graph.cycles,
+            loggedIn: cat.loggedIn,
+            nextSteps: steps,
+          },
+          null,
+          2
+        )
+      );
+      return;
+    }
+
+    if (graph.nodes.size === 0) {
+      log.success("Nothing installed.");
+      return;
+    }
+
+    printLayersGraph(graph, cat);
+    if (!cat.loggedIn) log.dim("Not logged in — private template updates aren't visible. Run: synap login");
+    renderNextSteps(steps);
+    return;
+  }
+
   if (opts.tree) {
-    const { packages, leafRows } = buildCompositionTrees(rows, cat, installedTemplates, workspaceCountBySlug);
+    const { packages, leafRows } = await buildCompositionTrees(rows, cat, installedTemplates, workspaceCountBySlug);
     const steps = FLOW.afterMarketInstalledCheck(rows.filter((c) => c.updateAvailable).map((c) => c.slug));
 
     if (opts.json) {
@@ -1161,7 +1670,7 @@ export async function marketInstalled(opts: { json?: boolean; outdated?: boolean
           "    " +
             chalk.bold(name.padEnd(nameW)) +
             chalk.cyan(c.slug.padEnd(slugW)) +
-            installedStatusLabel(c) +
+            installedStatusLabel(c, entry?.isPrivate ?? false, cat.loggedIn) +
             "  " +
             priv +
             (priv ? "  " : "") +
@@ -1225,7 +1734,7 @@ export async function marketInstalled(opts: { json?: boolean; outdated?: boolean
       "    " +
         chalk.bold(name.padEnd(nameW)) +
         chalk.cyan(c.slug.padEnd(slugW)) +
-        installedStatusLabel(c) +
+        installedStatusLabel(c, entry?.isPrivate ?? false, cat.loggedIn) +
         "  " +
         priv +
         (priv ? "  " : "") +
