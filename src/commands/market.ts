@@ -14,13 +14,12 @@
  *   synap market install <slug>                              — install
  *   synap market update [slug] [--yes] [--json]              — check/apply drift
  *
- * INSTALL SCOPE: the pod's one install door (`/packages/apply`) provisions a
- * WORKSPACE from a package definition — it is workspace-centric. So `market
- * install` fully installs WORKSPACE-type packages (same door `launch` uses) and,
- * for the operational types (capability/skill/…), routes the user to the surface
- * that installs them (the browser marketplace, or `synap cap add` for a
- * capability already in the pod catalog) rather than silently doing nothing. A
- * generic CLI→pod install for standalone non-workspace packages is not wired yet.
+ * INSTALL SCOPE: WORKSPACE-type packages install via `/packages/apply` (the
+ * same door `launch` uses), which provisions a workspace from the definition.
+ * Non-workspace kinds (capability / automation / cell / template) install via
+ * the pod's kind-agnostic `market.install` verb on `/capabilities/execute`,
+ * which resolves the definition from `cp_catalog_cache`. Types the verb doesn't
+ * handle fall back to a route-to-browser message.
  */
 
 import ora from "ora";
@@ -34,6 +33,7 @@ import {
   toPackageDefinition,
   layerTemplateGraph,
   bundledEdgesOf,
+  groupByDomain,
   type CatalogEntry,
   type TemplateDependency,
   type TemplateUpdateCheck,
@@ -43,7 +43,7 @@ import {
   type CompositionInstalledEntry,
 } from "@synap-core/workspace-templates";
 import { log, banner } from "../utils/logger.js";
-import { resolveHubConfig, hubPost, renderHubError, type HubConfig } from "../lib/hub-client.js";
+import { resolveHubConfig, hubPost, renderHubError, HubError, type HubConfig } from "../lib/hub-client.js";
 import { fetchProjects } from "../lib/project.js";
 import { writeGovernance } from "../lib/capture-lane.js";
 import { renderNextSteps, FLOW } from "../lib/next-steps.js";
@@ -60,6 +60,7 @@ import {
 } from "../lib/cp-packages.js";
 import { fetchInstalledSlugs, fetchInstalledTemplates, type InstalledTemplateInfo } from "../lib/installed.js";
 import { isSuite } from "../lib/suite.js";
+import { capabilityAdd } from "./capability.js";
 import { bundledTemplatesVersion } from "../lib/bundle-version.js";
 import { HubNetworkError } from "../lib/hub-client.js";
 
@@ -170,6 +171,36 @@ function typeOf(entry: CatalogEntry): string {
   return entry.category ?? "workspace";
 }
 
+/** The `kind` values the pod's `market.install` verb provisions (see
+ * cp-catalog-sync.ts `CatalogKind`). */
+export type MarketInstallKind = "capability" | "automation" | "template" | "cell";
+
+/**
+ * Map a CP package `category` (what {@link typeOf} returns) → the pod
+ * `market.install` verb's `kind` vocabulary, or `null` when the verb can't
+ * install that type. The CP's live PACKAGE_TYPES and the pod's cache `kind`
+ * diverge (see cp-catalog-sync.ts): the CP's `workflow` is the pod's
+ * `automation`; the CP's `workspace` is the pod's `template` — but a workspace
+ * installs through the dedicated `/packages/apply` create path, so it never
+ * routes through here. `automation`/`template` are also accepted verbatim so a
+ * row already speaking the pod's cache vocabulary still resolves.
+ */
+export function marketInstallKind(type: string): MarketInstallKind | null {
+  switch (type) {
+    case "capability":
+      return "capability";
+    case "cell":
+      return "cell";
+    case "workflow":
+    case "automation":
+      return "automation";
+    case "template":
+      return "template";
+    default:
+      return null;
+  }
+}
+
 /**
  * Client-side filter. The CP browse route filters REMOTE rows server-side, but
  * `assembleCatalog` always adds the BUNDLED (all-`workspace`) templates — so a
@@ -185,20 +216,6 @@ function matchesFilters(entry: CatalogEntry, filters?: PackageFilters): boolean 
     if (!hay.includes(q)) return false;
   }
   return true;
-}
-
-/** Status badges — suite (tag) / private / installed / tier / locked. */
-function badges(entry: CatalogEntry, cat: MarketCatalog): string[] {
-  const out: string[] = [];
-  if (isSuite(entry)) out.push(chalk.magenta("suite"));
-  if (entry.isPrivate) out.push(chalk.yellow("private"));
-  if (cat.installed.has(entry.slug)) out.push(chalk.green("installed"));
-  const tier = cat.tierBySlug.get(entry.slug);
-  if (tier?.requiredTier) out.push(chalk.cyan(tier.requiredTier));
-  else if (tier?.pricingModel && tier.pricingModel !== "free")
-    out.push(chalk.cyan(tier.pricingModel));
-  if (cat.lockedSlugs.has(entry.slug)) out.push(chalk.red("locked"));
-  return out;
 }
 
 function clip(s: string, n: number): string {
@@ -435,8 +452,12 @@ export async function market(opts: {
               name: e.name,
               description: e.description,
               type: typeOf(e),
+              domain: e.domain ?? null,
               tags: e.tags,
               suite: isSuite(e),
+              overlay: isOverlay(e),
+              ridesBase: composeBaseOf(e.slug),
+              bundles: bundleCountOf(e.slug),
               isPrivate: e.isPrivate,
               installed: cat.installed.has(e.slug),
               requiredTier: tier?.requiredTier ?? null,
@@ -464,48 +485,167 @@ export async function market(opts: {
     return;
   }
 
-  // Suites headline; then group by type.
-  const suites = entries.filter((e) => isSuite(e));
-  const rest = entries.filter((e) => !isSuite(e));
+  renderCatalog(entries, cat);
+}
 
-  const render = (entry: CatalogEntry) => {
-    const b = badges(entry, cat);
-    console.log(
-      "    " +
-        chalk.cyan(entry.slug.padEnd(24)) +
-        chalk.bold(entry.name) +
-        (b.length ? "  " + b.join(" ") : "")
-    );
-    if (entry.description)
-      console.log("    " + " ".repeat(24) + chalk.dim(clip(entry.description, 66)));
-    log.blank();
+/**
+ * The kind of composition a workspace template participates in, derived from its
+ * bundled dependency edges — NOT hardcoded. A `compose` edge = an OVERLAY that
+ * rides a base workspace (installing it bare is meaningless); a `require` edge
+ * on a suite = a workspace it BUNDLES. Non-bundled (private/CP-only) rows return
+ * `null` base and 0 bundles, which the renderer degrades gracefully.
+ */
+function composeBaseOf(slug: string): string | null {
+  for (const dep of bundledEdgesOf(slug)) {
+    if (dep.relation === "compose") return dep.slug;
+  }
+  return null;
+}
+function bundleCountOf(slug: string): number {
+  return bundledEdgesOf(slug).filter((d) => d.relation === "require").length;
+}
+function isOverlay(entry: CatalogEntry): boolean {
+  return typeOf(entry) === "workspace" && !isSuite(entry) && composeBaseOf(entry.slug) !== null;
+}
+
+/**
+ * Section-aware catalog renderer. Three axes carry distinct signal, so each gets
+ * its OWN visual channel instead of one flat colored word (the old list):
+ *   KIND    → the SECTION (Suites / Workspaces-by-domain / Overlays / other types)
+ *   STATE   → a leading ✓ glyph (installed)
+ *   ACCESS  → a dim right-hand tag (private / tier / locked)
+ * Name reads first (you scan it); the slug is the dim type-token (you type it).
+ */
+function renderCatalog(entries: CatalogEntry[], cat: MarketCatalog): void {
+  const width = process.stdout.columns ?? 100;
+  const NAME_W = 26;
+  const SLUG_W = 20;
+  // Resolve a base slug to its display name so an overlay names the WORKSPACE it
+  // extends, not its raw slug (e.g. "→ Brand Library", not "→ brand-library").
+  const nameBySlug = new Map(entries.map((e) => [e.slug, e.name]));
+
+  const accessTag = (entry: CatalogEntry): string => {
+    const parts: string[] = [];
+    if (entry.isPrivate) parts.push(chalk.yellow("private"));
+    const tier = cat.tierBySlug.get(entry.slug);
+    if (tier?.requiredTier) parts.push(chalk.cyan(tier.requiredTier));
+    else if (tier?.pricingModel && tier.pricingModel !== "free")
+      parts.push(chalk.cyan(tier.pricingModel));
+    if (cat.lockedSlugs.has(entry.slug)) parts.push(chalk.red("locked"));
+    return parts.length ? "  " + parts.join(" ") : "";
   };
 
+  // One item = one line: glyph · bold name · default-weight slug (the token you
+  // TYPE — never dimmed) · dim detail · dim access.
+  const row = (entry: CatalogEntry, detail?: string): void => {
+    const glyph = cat.installed.has(entry.slug) ? chalk.green("✓") : " ";
+    const name = clip(entry.name, NAME_W).padEnd(NAME_W);
+    const slug = clip(entry.slug, SLUG_W).padEnd(SLUG_W);
+    const access = accessTag(entry);
+    const head = `  ${glyph} ${chalk.bold(name)} ${slug}`;
+    // Budget the detail to the remaining terminal width (never wrap/overflow).
+    const detailText = detail ?? entry.description ?? "";
+    const used = 2 + 1 + 1 + NAME_W + 1 + SLUG_W + 1;
+    const room = Math.max(12, width - used - stripLen(access) - 1);
+    console.log(head + " " + chalk.dim(clip(detailText, room)) + access);
+  };
+
+  // An overlay's identity IS "Name → Base Workspace" — the base it extends must
+  // read as part of what it IS, not be buried in the description. So it gets its
+  // own row shape: a combined, coloured identity column, then slug, then blurb.
+  const IDENT_W = 40;
+  const overlayRow = (entry: CatalogEntry): void => {
+    const glyph = cat.installed.has(entry.slug) ? chalk.green("✓") : " ";
+    const baseName = clip(
+      nameBySlug.get(composeBaseOf(entry.slug) ?? "") ?? composeBaseOf(entry.slug) ?? "",
+      IDENT_W - 22 - 3 // leave room for "name → " inside IDENT_W
+    );
+    const nameText = clip(entry.name, 22);
+    const identityVisible = `${nameText} → ${baseName}`;
+    const identity = chalk.bold(nameText) + chalk.dim(" → ") + chalk.cyan(baseName);
+    const pad = " ".repeat(Math.max(1, IDENT_W - identityVisible.length));
+    const slug = clip(entry.slug, SLUG_W).padEnd(SLUG_W);
+    const access = accessTag(entry);
+    const used = 2 + 1 + 1 + IDENT_W + 1 + SLUG_W + 1;
+    const room = Math.max(10, width - used - stripLen(access) - 1);
+    console.log(
+      `  ${glyph} ${identity}${pad} ${slug} ` +
+        chalk.dim(clip(entry.description ?? "", room)) +
+        access
+    );
+  };
+
+  // ── Suites — the headline: one install = a whole operating core ────────────
+  const suites = entries.filter((e) => isSuite(e));
   if (suites.length > 0) {
-    log.heading("  Suites — a whole operating core in one install");
+    log.heading("  Suites  ·  a whole operating core in one install");
     log.blank();
-    suites.forEach(render);
+    for (const e of suites) {
+      const n = bundleCountOf(e.slug);
+      row(e, n > 0 ? `bundles ${n} workspace${n === 1 ? "" : "s"}` : e.description ?? "");
+    }
+    log.blank();
   }
 
-  // Group the rest by type, in a stable order.
-  const order = ["workspace", "capability", "skill", "workflow", "view", "cell"];
-  const byType = new Map<string, CatalogEntry[]>();
-  for (const e of rest) {
-    const t = typeOf(e);
-    (byType.get(t) ?? byType.set(t, []).get(t)!).push(e);
-  }
-  const types = [...byType.keys()].sort(
-    (a, b) => (order.indexOf(a) + 1 || 99) - (order.indexOf(b) + 1 || 99)
+  // ── Workspaces — standalone installs, grouped by authored DOMAIN ───────────
+  const workspaces = entries.filter(
+    (e) => typeOf(e) === "workspace" && !isSuite(e) && !isOverlay(e)
   );
-  for (const t of types) {
-    log.heading(`  ${t.charAt(0).toUpperCase() + t.slice(1)}`);
+  if (workspaces.length > 0) {
+    log.heading("  Workspaces");
+    for (const group of groupByDomain(workspaces, (e) => e.domain)) {
+      log.blank();
+      console.log("  " + chalk.underline(group.label));
+      for (const e of group.items) row(e);
+    }
     log.blank();
-    byType.get(t)!.forEach(render);
   }
 
-  log.dim(`${entries.length} package${entries.length === 1 ? "" : "s"} available.`);
+  // ── Add-ons — each rides a workspace you already have (named in-line) ───────
+  const overlays = entries.filter((e) => isOverlay(e));
+  if (overlays.length > 0) {
+    log.heading("  Add-ons  ·  each extends the workspace named after the →");
+    log.blank();
+    for (const e of overlays) overlayRow(e);
+    log.blank();
+  }
+
+  // ── Other package types (capability / skill / view / cell) by type ─────────
+  const other = entries.filter(
+    (e) => typeOf(e) !== "workspace"
+  );
+  if (other.length > 0) {
+    const order = ["capability", "skill", "workflow", "view", "cell"];
+    const byType = new Map<string, CatalogEntry[]>();
+    for (const e of other) {
+      const t = typeOf(e);
+      (byType.get(t) ?? byType.set(t, []).get(t)!).push(e);
+    }
+    const types = [...byType.keys()].sort(
+      (a, b) => (order.indexOf(a) + 1 || 99) - (order.indexOf(b) + 1 || 99)
+    );
+    for (const t of types) {
+      log.heading(`  ${t.charAt(0).toUpperCase() + t.slice(1)}`);
+      log.blank();
+      for (const e of byType.get(t)!) row(e);
+      log.blank();
+    }
+  }
+
+  // Footer: a scannable count line + progressive-disclosure hints.
+  const installedN = entries.filter((e) => cat.installed.has(e.slug)).length;
+  log.dim(
+    `${installedN} installed · ${entries.length - installedN} available` +
+      (suites.length ? ` · ${suites.length} suite${suites.length === 1 ? "" : "s"}` : "")
+  );
   if (!cat.loggedIn) log.dim("Log in to see your private packages: synap login");
   renderNextSteps(FLOW.afterMarketList());
+}
+
+/** Visible length of a string with chalk color codes stripped — for width math. */
+function stripLen(s: string): number {
+  // eslint-disable-next-line no-control-regex
+  return s.replace(/\[[0-9;]*m/g, "").length;
 }
 
 // ── Optional --project link ──────────────────────────────────────────────────
@@ -532,6 +672,90 @@ async function resolveOptionalProject(
   return { projectId: match.id, name: match.name };
 }
 
+// ── `synap market install <slug> --dry-run` — write-free preflight ───────────
+
+/** Mirror of the backend `WorkspacePreflightReport` (@synap/database). */
+interface PreflightReport {
+  dryRun: boolean;
+  ok: boolean;
+  validationErrors: string[];
+  profiles: {
+    create: string[];
+    reused: string[];
+    conflicts: Array<{ slug: string; existingKind: string; declaredKind: string }>;
+    deferred: Array<{ slug: string; reason: string }>;
+    scopeConflicts: Array<{
+      slug: string;
+      existingScope: string;
+      declaredScope: string;
+      existingEntityScope: string;
+      declaredEntityScope: string | null;
+    }>;
+  };
+  entityLinks: { unresolved: string[] };
+  views: { wouldOrphan: string[] };
+}
+
+/** Human render of a preflight report — scannable summary + per-issue reasons. */
+function renderPreflightReport(entry: CatalogEntry, r: PreflightReport): void {
+  // Hard structural failure — the definition itself won't install.
+  if (r.validationErrors.length > 0) {
+    log.error(
+      `${entry.name} — ${r.validationErrors.length} structural error${r.validationErrors.length === 1 ? "" : "s"} (won't install):`
+    );
+    for (const e of r.validationErrors) log.hint(e);
+    return;
+  }
+
+  const p = r.profiles;
+  // Every issue class, not just profile conflicts — the verdict and the printed
+  // warnings must agree (`r.ok` excludes advisory deferred/scopeConflicts, so
+  // "cleanly" alone could sit above a ⚠ line; count them all here).
+  const issueCounts: string[] = [];
+  if (p.conflicts.length) issueCounts.push(`${p.conflicts.length} profile conflict${p.conflicts.length === 1 ? "" : "s"}`);
+  if (p.deferred.length) issueCounts.push(`${p.deferred.length} duplicate${p.deferred.length === 1 ? "" : "s"}`);
+  if (p.scopeConflicts.length) issueCounts.push(`${p.scopeConflicts.length} scope note${p.scopeConflicts.length === 1 ? "" : "s"}`);
+  if (r.entityLinks.unresolved.length) issueCounts.push(`${r.entityLinks.unresolved.length} dropped link${r.entityLinks.unresolved.length === 1 ? "" : "s"}`);
+  if (r.views.wouldOrphan.length) issueCounts.push(`${r.views.wouldOrphan.length} orphaned view${r.views.wouldOrphan.length === 1 ? "" : "s"}`);
+  const blocking = !r.ok; // conflicts / dropped links / orphaned views
+  const hasAny = issueCounts.length > 0;
+
+  // Verdict — never says "clean" if any warning will print below.
+  if (!hasAny) log.success(`Preflight for ${entry.name}: no conflicts — safe to install.`);
+  else if (blocking) log.warn(`Preflight for ${entry.name}: would install with issues — review before installing.`);
+  else log.warn(`Preflight for ${entry.name}: installs, with ${issueCounts.length} advisory note${issueCounts.length === 1 ? "" : "s"} — review below.`);
+
+  log.dim(`Profiles: ${p.create.length} to create · ${p.reused.length} reused`);
+  if (hasAny) log.dim(`Issues: ${issueCounts.join(" · ")}`);
+
+  // Warnings are the PAYLOAD of a dry-run — print them BEFORE the (potentially
+  // long) create/reuse list so they never scroll off-screen.
+  // The load-bearing signal for an AI author: a declared role/kind that clashes
+  // with an existing pod profile is SKIPPED — never created, never mutated.
+  for (const c of p.conflicts)
+    log.warn(`${c.slug}: declared ${c.declaredKind}, pod has ${c.existingKind} → SKIP (not created)`);
+  for (const d of p.deferred)
+    log.warn(`${d.slug}: same slug exists but not promotable (${d.reason}) → a duplicate would be created`);
+  for (const sc of p.scopeConflicts)
+    log.warn(`${sc.slug}: declared scope ${sc.declaredScope}, pod has ${sc.existingScope} → reused as-is (declared scope not applied)`);
+  for (const link of r.entityLinks.unresolved)
+    log.warn(`link ${link}: an endpoint profile is a conflict → relation dropped`);
+  for (const v of r.views.wouldOrphan)
+    log.warn(`view "${v}": its scope profile is a conflict → view would have no scope`);
+
+  // One actionable hint for the whole conflict/link/view class — the remedy the
+  // per-line messages don't give.
+  if (p.conflicts.length || r.entityLinks.unresolved.length || r.views.wouldOrphan.length)
+    log.hint(
+      "Conflicts are skipped, never merged — rename the template's profile to a new slug, or install as-is to reuse the pod's existing one."
+    );
+
+  for (const slug of p.create) log.dim(`+ ${slug} (new profile)`);
+  for (const slug of p.reused) log.dim(`↺ ${slug} (reuses existing pod profile)`);
+
+  if (!hasAny) log.hint("Run without --dry-run to install.");
+}
+
 // ── `synap market install <slug>` ───────────────────────────────────────────
 
 export async function marketInstall(
@@ -544,6 +768,8 @@ export async function marketInstall(
     timeout?: string;
     /** Reconcile this template ONTO an existing workspace (additive) instead of creating a new one — passed through to `/packages/apply` as `targetWorkspaceId`. */
     onto?: string;
+    /** Preview the create path write-free (`/packages/preflight`) — reports would-create / reuse / conflicts and writes nothing. */
+    dryRun?: boolean;
   }
 ): Promise<void> {
   const applyTimeoutMs = parseApplyTimeoutMs(opts.timeout);
@@ -561,14 +787,91 @@ export async function marketInstall(
 
   const type = typeOf(entry);
 
-  // Non-workspace types have no CLI→pod install door yet (the pod's
-  // /packages/apply provisions a WORKSPACE). Be honest and route the user.
+  // A CAPABILITY installs through the SAME door as `cap add` — one code path, so
+  // the two commands can never diverge. That door resolves the template by key
+  // (so opt-in / syncByDefault:false caps like unipile-linkedin work — the
+  // params-less market.install verb below cannot) AND prompts for any required
+  // credential inline (a key), which a server-side verb can never do. `cap add`
+  // is now a thin alias of this. `--pod` is honoured (capabilityAdd resolves the
+  // active pod itself); `--json` prompts can't render, so a credentialed cap
+  // still prompts — run it interactively.
+  if (type === "capability") {
+    await capabilityAdd(slug, {});
+    return;
+  }
+
+  // Other non-workspace packages install through the pod's ONE kind-agnostic
+  // door — the `market.install` verb on `/capabilities/execute`. (The WORKSPACE
+  // path below uses `/packages/apply`, which provisions a workspace, and is
+  // left untouched.) The verb resolves the definition from `cp_catalog_cache`
+  // by (kind, slug), tier-gates, and — for the CLI's OPERATOR hub key (no
+  // agentUserId) — installs directly; an agent call would file a proposal.
   if (type !== "workspace") {
-    log.warn(`"${entry.name}" is a ${type} package — not installable from the CLI yet.`);
-    if (type === "capability") {
-      log.hint(`Add a capability from the pod catalog: synap cap add "${entry.name}"`);
+    const kind = marketInstallKind(type);
+    if (!kind) {
+      log.warn(`"${entry.name}" is a ${type} package — the CLI can't install this type yet.`);
+      log.hint("Install it from the browser marketplace (Marketplace → find it → Install).");
+      return;
     }
-    log.hint("Install it from the browser marketplace (Marketplace → find it → Install).");
+
+    let cfg;
+    try {
+      cfg = await resolveHubConfig(opts);
+    } catch (e) {
+      renderHubError(e);
+      process.exit(1);
+    }
+
+    const s = opts.json ? null : ora(`Installing ${entry.name}…`).start();
+    let res: Record<string, unknown>;
+    try {
+      // Pod-wide install: no workspaceId (a capability/cell/template lands on
+      // the pod). `market.install` is a WRITE builtin — an operator run
+      // owner-bypasses the gate and runs it in-process.
+      res = (await hubPost(
+        "/capabilities/execute",
+        { verbId: "market.install", parameters: { slug, kind } },
+        cfg,
+        applyTimeoutMs
+      )) as Record<string, unknown>;
+    } catch (e) {
+      s?.stop();
+      // 404 = this pod predates the seeded `market.install` verb (older deploy).
+      if (e instanceof HubError && e.status === 404) {
+        log.error(`This pod doesn't expose the market.install verb yet.`);
+        log.hint("It needs a newer pod deploy — meanwhile install from the browser marketplace.");
+        process.exit(1);
+      }
+      // The verb throws NOT_FOUND (surfaced as a 500) when the CP kind hasn't
+      // synced into `cp_catalog_cache` yet — say so actionably, not opaquely.
+      if (e instanceof HubError && /catalog cache/i.test(e.message)) {
+        log.error(`"${entry.name}" isn't in the pod's marketplace cache yet.`);
+        log.hint("The pod syncs the catalog every ~10 min — retry shortly, or install from the browser marketplace.");
+        process.exit(1);
+      }
+      log.error(`${entry.name} failed`);
+      renderHubError(e);
+      process.exit(1);
+    }
+    s?.stop();
+
+    // The execute door wraps the verb's return as { status:"run", result: <MarketInstallOutcome> }.
+    // The outcome is { status:"installed", result } (operator) or { status:"proposed", proposalId, reviewUrl }.
+    const outcome = (res.result ?? res) as Record<string, unknown>;
+    const status = String(outcome.status ?? "installed");
+
+    if (opts.json) {
+      console.log(JSON.stringify({ slug, kind, outcome: status, result: outcome }, null, 2));
+      return;
+    }
+
+    if (status === "proposed") {
+      const proposalId = outcome.proposalId ? String(outcome.proposalId) : undefined;
+      log.info(`${entry.name} — proposed (under review, not live yet).`);
+      if (proposalId) log.hint(`Approve: synap proposals approve ${proposalId}`);
+      return;
+    }
+    log.success(`Installed ${entry.name}.`);
     return;
   }
 
@@ -623,6 +926,34 @@ export async function marketInstall(
   const remoteVersion = cat.remoteVersionBySlug.get(slug);
   if (remoteVersion) pkg._meta = { ...(pkg._meta as Record<string, unknown> | undefined ?? {}), version: remoteVersion };
 
+  // ── --dry-run: write-free preflight of the CREATE path. ───────────────────
+  // Runs the pod's REAL resolver (write-free) so a template author sees
+  // profileKind conflicts and other resolution failures BEFORE installing.
+  // (Previews the create path only; `--onto` reconcile-preview is not modeled.)
+  if (opts.dryRun) {
+    const s = opts.json ? null : ora(`Checking ${entry.name}…`).start();
+    try {
+      const report = (await hubPost(
+        "/packages/preflight",
+        pkg,
+        cfg,
+        applyTimeoutMs
+      )) as PreflightReport;
+      s?.stop();
+      if (opts.json) {
+        console.log(JSON.stringify({ slug, ...report }, null, 2));
+        return;
+      }
+      renderPreflightReport(entry, report);
+      return;
+    } catch (e) {
+      s?.stop();
+      log.error(`${entry.name} preflight failed`);
+      renderHubError(e);
+      process.exit(1);
+    }
+  }
+
   // Pre-apply state — was this slug already installed with NO version stamp?
   // Feeds `classifyApplyResult`'s stamp-contradiction check below.
   const preInstalled = installedTemplates.find((t) => t.slug === slug);
@@ -650,7 +981,7 @@ export async function marketInstall(
         return;
       }
       log.info(`${entry.name} — proposed (under review, not live yet).`);
-      if (proposalId) log.hint(`Approve: synap proposals approve ${proposalId.slice(0, 8)}`);
+      if (proposalId) log.hint(`Approve: synap proposals approve ${proposalId}`);
       renderNextSteps(steps);
       return;
     }
@@ -832,7 +1163,7 @@ async function applyOnePackage(
       const proposalId = res.proposalId ? String(res.proposalId) : undefined;
       if (!opts.json) {
         log.info(`${entry.name} — update proposed (under review, not live yet).`);
-        if (proposalId) log.hint(`Approve: synap proposals approve ${proposalId.slice(0, 8)}`);
+        if (proposalId) log.hint(`Approve: synap proposals approve ${proposalId}`);
       }
       return { slug: entry.slug, outcome: "proposed", status: "proposed", warnings: [] };
     }
