@@ -275,6 +275,25 @@ function findCard(cards: CapabilityCard[], name: string): CapabilityCard | undef
   );
 }
 
+/**
+ * When a name doesn't match a pack, it's often a VERB (e.g. `exa_search`) rather
+ * than its pack (`exa`). Find the pack that owns a verb by that id/label so the
+ * caller can point the user at the right `enable` target instead of a dead end.
+ */
+function findCardByVerb(
+  cards: CapabilityCard[],
+  name: string
+): { card: CapabilityCard; verb: CardVerb } | undefined {
+  const q = name.trim().toLowerCase();
+  for (const card of cards) {
+    const verb = card.verbs.find(
+      (v) => v.verbId.toLowerCase() === q || v.label.toLowerCase() === q
+    );
+    if (verb) return { card, verb };
+  }
+  return undefined;
+}
+
 /** Status → badge glyph (●/◑/○) per §6. */
 function statusBadge(status: CardStatus): string {
   switch (status) {
@@ -964,18 +983,69 @@ export async function capabilityAdd(
     }
   }
 
-  // Re-fetch to show the resulting (installed) status.
+  // Re-fetch to get the installed card (verbs + skillIds).
+  let after: CapabilityCard | undefined;
   try {
-    const after = findCard(await fetchCatalog(cfg, workspaceId), card.name);
-    if (after) {
-      console.log();
-      renderCardAny(after);
-    }
+    after = findCard(await fetchCatalog(cfg, workspaceId), card.name);
   } catch {
     // best-effort — the add already succeeded
   }
+
+  // AUTO-ENABLE the read verbs, so install is ONE step, not two. Reads are the
+  // `auto`-governance, no-side-effect verbs — safe to turn on without asking.
+  // Write/action verbs stay OFF (they ask approval per run); enable them later
+  // with `cap enable`. This also removes the wrong-pod footgun the second command
+  // caused: `cap enable` (no --pod) targets the ACTIVE pod, not the install's
+  // --pod, so it "couldn't find" a capability installed on a different pod.
+  const autoEnabled: string[] = [];
+  const connectionReady = !after?.connection?.required || after?.connection?.state === "connected";
+  if (after && after.verbs.length > 0 && connectionReady) {
+    const reads = after.verbs.filter((v) => v.type === "read" && !v.enabled);
+    if (reads.length > 0) {
+      const idByName = reads.some((v) => !v.skillId)
+        ? new Map((await fetchSkills(cfg, workspaceId).catch(() => [])).map((s) => [s.name, s.id]))
+        : new Map<string, string>();
+      const work = ora({ text: "Turning on read verbs…", color: "cyan" }).start();
+      try {
+        for (const v of reads) {
+          const skillId = v.skillId ?? idByName.get(v.verbId);
+          if (!skillId) continue;
+          await hubPost(`/skills/${skillId}/approve`, { approved: true }, cfg);
+          autoEnabled.push(v.label);
+        }
+        work.stop();
+      } catch (err) {
+        work.stop();
+        log.dim(
+          `(Couldn't auto-enable read verbs — run \`synap cap enable "${card.name}"\`. ${(err as Error).message})`
+        );
+      }
+      try {
+        after = findCard(await fetchCatalog(cfg, workspaceId), card.name) ?? after;
+      } catch {
+        // keep the pre-enable card for the render below
+      }
+    }
+  }
+
+  if (after) {
+    console.log();
+    renderCardAny(after);
+  }
   console.log();
-  log.dim(`Turn it on:  synap cap enable "${card.name}"`);
+  if (autoEnabled.length > 0) {
+    log.success(
+      `Enabled ${autoEnabled.length} read verb${autoEnabled.length === 1 ? "" : "s"}: ${autoEnabled.join(", ")}`
+    );
+  }
+  const pendingWrites = (after?.verbs ?? []).filter((v) => v.type !== "read" && !v.enabled);
+  if (pendingWrites.length > 0) {
+    log.dim(
+      `${pendingWrites.length} write/action verb${pendingWrites.length === 1 ? "" : "s"} stay off (they ask approval per run). Turn on:  synap cap enable "${card.name}"`
+    );
+  } else if (autoEnabled.length === 0) {
+    log.dim(`Turn it on:  synap cap enable "${card.name}"`);
+  }
 }
 
 // ── Public: capabilityEnable (the orchestrator) ──────────────────────────────
@@ -1063,8 +1133,10 @@ export async function capabilityEnable(
 
   const spinner = ora({ text: `Resolving ${chalk.bold(name)}…`, color: "cyan" }).start();
   let card: CapabilityCard | undefined;
+  let catalog: CapabilityCard[] = [];
   try {
-    card = findCard(await fetchCatalog(cfg, workspaceId), name);
+    catalog = await fetchCatalog(cfg, workspaceId);
+    card = findCard(catalog, name);
     spinner.stop();
   } catch (err) {
     spinner.stop();
@@ -1078,6 +1150,14 @@ export async function capabilityEnable(
   }
 
   if (!card) {
+    // A verb name (e.g. `exa_search`) isn't a pack — `enable` takes the PACK
+    // (`exa`). Point at the owning pack instead of dead-ending.
+    const owner = findCardByVerb(catalog, name);
+    if (owner) {
+      log.error(`"${name}" is a verb of the "${owner.card.name}" pack, not a capability itself.`);
+      log.dim(`Enable the pack (it lets you pick verbs):  synap cap enable "${owner.card.name}"`);
+      process.exit(1);
+    }
     log.error(`No capability named "${name}".`);
     log.dim("Run `synap cap list` to see what's available, or `synap cap add <name>` first.");
     process.exit(1);
