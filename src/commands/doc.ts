@@ -25,6 +25,7 @@ import {
   hubPost,
   hubPatch,
 } from "../lib/hub-client.js";
+import { writeGovernance } from "../lib/capture-lane.js";
 import { openInBrowser } from "./open.js";
 
 export interface DocCreateOpts {
@@ -42,6 +43,15 @@ export interface DocUpdateOpts {
   content?: string;
   file?: string;
   title?: string;
+  open?: boolean;
+  json?: boolean;
+  podUrl?: string;
+  apiKey?: string;
+}
+
+export interface DocReferenceOpts {
+  title: string;
+  workspace?: string;
   open?: boolean;
   json?: boolean;
   podUrl?: string;
@@ -113,14 +123,75 @@ export async function docCreate(opts: DocCreateOpts): Promise<void> {
 
     const isProposed = res.status === "proposed" || Boolean(res.proposalId);
     if (isProposed) {
-      log.warn(`Queued for approval (proposal: ${String(res.proposalId ?? "")})`);
-      if (res.reviewUrl) log.dim(`  Review: ${String(res.reviewUrl)}`);
+      // A proposal is normal — the write is queued for review, not a failure.
+      log.info(`Document: ${opts.title} — proposed (under review)`);
+      const proposalId = String(res.proposalId ?? "");
+      if (proposalId) log.dim(`  proposal: ${proposalId}`);
+      if (res.reviewUrl) log.dim(`  review: ${String(res.reviewUrl)}`);
       return;
     }
 
     log.success(`Document created: ${opts.title}`);
     log.dim(`  id: ${id}`);
     log.dim(`  open in browser: synap open document ${id}`);
+
+    if (opts.open && id) {
+      await openInBrowser({ kind: "document", id });
+    }
+  } catch (e) {
+    log.error("Error: " + (e as Error).message);
+    process.exit(1);
+  }
+}
+
+/**
+ * synap doc reference <url> — create an external reference document (no bytes).
+ * Reuses the same POST /api/hub/documents door as `doc create`, sending a `url`
+ * field instead of `content`.
+ */
+export async function docReference(
+  url: string,
+  opts: DocReferenceOpts
+): Promise<void> {
+  try {
+    const cfg = await resolveHubConfig(opts);
+    const userId = await resolveUserId(cfg);
+    const workspaceId = opts.workspace ?? cfg.workspaceId;
+
+    const body: Record<string, unknown> = {
+      userId,
+      title: opts.title,
+      url,
+    };
+    // A reference can be pod-wide; only scope it when a workspace is available.
+    if (workspaceId) body.workspaceId = workspaceId;
+
+    const res = (await hubPost("/documents", body, cfg)) as Record<
+      string,
+      unknown
+    >;
+
+    // `/documents` returns the row directly — no `{ document: … }` wrapper.
+    const id = String(res.id ?? "");
+
+    if (opts.json) {
+      console.log(JSON.stringify(res, null, 2));
+      return;
+    }
+
+    if (writeGovernance(res) === "proposed") {
+      // A proposal is normal — the write is queued for review, not a failure.
+      // Mirror `synap upload`'s neutral phrasing (info, not warn).
+      log.info(`Reference: ${opts.title} — proposed (under review)`);
+      const proposalId = String(res.proposalId ?? "");
+      if (proposalId) log.dim(`  proposal: ${proposalId}`);
+      if (res.reviewUrl) log.dim(`  review: ${String(res.reviewUrl)}`);
+      return;
+    }
+
+    log.success(`Reference created: ${opts.title}`);
+    log.dim(`  url: ${url}`);
+    log.dim(`  id: ${id}`);
 
     if (opts.open && id) {
       await openInBrowser({ kind: "document", id });
@@ -166,8 +237,11 @@ export async function docUpdate(
 
     const isProposed = res.status === "proposed" || Boolean(res.proposalId);
     if (isProposed) {
-      log.warn(`Queued for approval (proposal: ${String(res.proposalId ?? "")})`);
-      if (res.reviewUrl) log.dim(`  Review: ${String(res.reviewUrl)}`);
+      // A proposal is normal — the write is queued for review, not a failure.
+      log.info(`Update: ${documentId.slice(0, 8)}… — proposed (under review)`);
+      const proposalId = String(res.proposalId ?? "");
+      if (proposalId) log.dim(`  proposal: ${proposalId}`);
+      if (res.reviewUrl) log.dim(`  review: ${String(res.reviewUrl)}`);
       return;
     }
 

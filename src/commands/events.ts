@@ -71,7 +71,9 @@ export async function listEvents(opts: ListEventsOpts): Promise<void> {
 
       const evType = String(ev.eventType ?? ev.type ?? "–");
       const subjectType = ev.subjectType ? chalk.dim(` [${ev.subjectType}]`) : "";
-      const subjectId = ev.subjectId ? chalk.dim(`  → ${String(ev.subjectId).slice(0, 8)}`) : "";
+      // Full id — the event's subject is usually an entity; feeds straight
+      // into `synap get entity <id>`.
+      const subjectId = ev.subjectId ? chalk.dim(`  → ${String(ev.subjectId)}`) : "";
 
       console.log(
         `  ${chalk.dim(ts.padEnd(17))}  ${chalk.cyan(evType.padEnd(36))}${subjectType}${subjectId}`

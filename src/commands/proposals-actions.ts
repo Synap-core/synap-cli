@@ -1,6 +1,7 @@
 import chalk from "chalk";
 import { log } from "../utils/logger.js";
 import { resolveHubConfig, hubPost, renderHubError } from "../lib/hub-client.js";
+import { requireFullId } from "../lib/id.js";
 import { type BaseOpts } from "./data.js";
 
 /** The bits of a capability.run proposal's post-execution `data` this command reads. */
@@ -55,6 +56,7 @@ export async function approveProposal(
   id: string,
   opts: BaseOpts & { reason?: string }
 ): Promise<void> {
+  requireFullId(id, "proposal", chalk, log);
   try {
     const cfg = await resolveHubConfig(opts);
 
@@ -84,6 +86,7 @@ export async function rejectProposal(
   id: string,
   opts: BaseOpts & { reason?: string }
 ): Promise<void> {
+  requireFullId(id, "proposal", chalk, log);
   try {
     const cfg = await resolveHubConfig(opts);
 

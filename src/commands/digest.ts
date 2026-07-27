@@ -88,9 +88,10 @@ function renderKeyEntities(entities: KeyEntity[]): void {
   }
   for (const e of entities) {
     const when = e.updatedAt ? chalk.dim(`  ${e.updatedAt.slice(0, 10)}`) : "";
+    // Full id — feeds straight into `synap get entity <id>`.
     console.log(
       `    ${chalk.bold(e.title || "(untitled)")} ${chalk.dim(`[${e.profileSlug}]`)} ${chalk.dim(
-        e.id.slice(0, 8)
+        e.id
       )}${when}`
     );
   }

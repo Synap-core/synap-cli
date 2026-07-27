@@ -29,6 +29,7 @@ import {
   type RemoteSourceStatus,
 } from "@synap-core/workspace-templates";
 import { getCpUrl, getStoredToken, isTokenLocallyExpired } from "./auth.js";
+import type { PackageDefinitionLike } from "./template-file.js";
 
 // Packages mount under `/api/packages` (CP `routes/index.ts`), unlike `/auth`
 // and `/pods` which sit at the root — hence the explicit `/api` segment here.
@@ -304,4 +305,219 @@ export async function fetchRemoteCatalog(
     tierBySlug,
     lockedSlugs,
   };
+}
+
+// ─── WRITE half: publish / unpublish ────────────────────────────────────────
+// Everything above is GET-only. These are the CLI's publish-loop write door to
+// `POST /api/packages` (upsert on (slug, authorId), content-hash version) and
+// `PATCH /api/packages/:slug` (owner-gated). All CP HTTP goes through THIS file
+// — the command layer never hand-rolls a `fetch`.
+
+/**
+ * A CP write failure carrying the server's OWN message + status, so the caller
+ * can surface `detail` (never swallow it — the `readErrorBody`/`detail` lesson)
+ * and special-case a 403 reserved-slug rejection.
+ */
+export class CpWriteError extends Error {
+  constructor(
+    readonly status: number,
+    readonly serverMessage: string,
+  ) {
+    super(serverMessage);
+    this.name = "CpWriteError";
+  }
+}
+
+/** Test seams — inject a fetch + token + base URL instead of touching the network / `~/.synap`. */
+export interface CpWriteDeps {
+  fetchImpl?: typeof fetch;
+  token?: string;
+  cpUrl?: string;
+}
+
+export interface PublishResult {
+  /** `created` (201) · `updated` (200, content changed) · `no-op` (200, identical content). */
+  outcome: "created" | "updated" | "no-op";
+  slug: string;
+  displayName: string;
+  /** The `h-<hash>` version the CP derived from the definition. */
+  version: string;
+  isPublic: boolean;
+}
+
+/**
+ * Extract the human cause from a CP error body, mirroring `hub-client`'s
+ * `readErrorBody` precedence (message → error+detail → error → detail) so the
+ * SPECIFIC cause in `detail` is never thrown away for the generic `error`.
+ */
+function extractServerMessage(raw: string, status: number): string {
+  const trimmed = raw.trim();
+  if (!trimmed) return `HTTP ${status}`;
+  try {
+    const o = JSON.parse(trimmed) as {
+      error?: unknown;
+      detail?: unknown;
+      message?: unknown;
+      issues?: unknown;
+    };
+    const str = (v: unknown) =>
+      typeof v === "string" && v.trim() ? v.trim() : undefined;
+    const err = str(o.error);
+    const detail = str(o.detail);
+    const msg = str(o.message);
+    const base = msg ?? (err && detail ? `${err}: ${detail}` : (err ?? detail));
+    if (base) {
+      if (Array.isArray(o.issues) && o.issues.length) {
+        return `${base} (${o.issues.length} validation issue(s))`;
+      }
+      return base;
+    }
+  } catch {
+    // not JSON — fall through to the plain-text body
+  }
+  return trimmed.length > 200 ? `${trimmed.slice(0, 200)}…` : trimmed;
+}
+
+function requireToken(deps: CpWriteDeps): string {
+  const token = deps.token ?? getStoredToken()?.token;
+  if (!token) throw new CpWriteError(401, "Not logged in — run: synap login");
+  return token;
+}
+
+/**
+ * `POST /api/packages` — publish (upsert) a package definition under the caller's
+ * account. `isPublic` decides visibility (default private — the command flips it
+ * with `--public`). The version is DERIVED server-side from the definition, so
+ * identical content re-published is a no-op. Surfaces a 403 reserved-slug
+ * rejection (and any other failure) as a `CpWriteError` carrying the server's
+ * own message.
+ *
+ * The definition's identity (`slug`, `displayName`) is read off its `_meta`/
+ * `workspaceName`; `_meta.icon`/`.color`/`.domain` are hoisted onto the
+ * definition's top level because the CP reads those off `definition.icon`/… for
+ * the list DTO (it strips the unknown `_meta` key).
+ */
+export async function publishPackage(
+  def: PackageDefinitionLike,
+  opts: { isPublic: boolean },
+  deps: CpWriteDeps = {},
+): Promise<PublishResult> {
+  const fetchImpl = deps.fetchImpl ?? fetch;
+  const token = requireToken(deps);
+  const base = deps.cpUrl ?? getCpUrl();
+
+  const slug = def._meta?.slug;
+  const displayName = def.workspaceName;
+  if (!slug) throw new CpWriteError(0, "Template has no slug (meta.slug) — cannot publish");
+  if (!displayName)
+    throw new CpWriteError(0, "Template has no workspace name — cannot publish");
+
+  // Best-effort pre-read of the caller's OWN row for this slug, so a
+  // content-identical no-op is told apart from an in-place update (the CP
+  // returns 200 for both). A failure here only loses that precision.
+  let priorVersion: string | undefined;
+  let existed = false;
+  try {
+    const pre = await fetchImpl(`${base}/api/packages/mine?limit=100`, {
+      headers: { Authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    });
+    if (pre.ok) {
+      const data = (await pre.json()) as { packages?: CpMineRow[] };
+      const row = (data.packages ?? []).find((r) => r.slug === slug);
+      if (row) {
+        existed = true;
+        priorVersion = row.version;
+      }
+    }
+  } catch {
+    // best-effort
+  }
+
+  const definition = {
+    ...def,
+    icon: def._meta?.icon ?? def.icon,
+    color: def._meta?.color ?? def.color,
+    domain: def._meta?.domain ?? def.domain,
+  };
+
+  const res = await fetchImpl(`${base}/api/packages`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      slug,
+      displayName,
+      description: def.description,
+      isPublic: opts.isPublic,
+      tags: def._meta?.tags,
+      category: "workspace",
+      definition,
+    }),
+    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+  });
+
+  if (!res.ok) {
+    const raw = await res.text().catch(() => "");
+    throw new CpWriteError(res.status, extractServerMessage(raw, res.status));
+  }
+
+  const data = (await res.json()) as {
+    package?: { version?: string; isPublic?: boolean };
+  };
+  const version = data.package?.version ?? "";
+  const outcome: PublishResult["outcome"] =
+    res.status === 201
+      ? "created"
+      : existed && priorVersion === version
+        ? "no-op"
+        : "updated";
+
+  return {
+    outcome,
+    slug,
+    displayName,
+    version,
+    isPublic: data.package?.isPublic ?? opts.isPublic,
+  };
+}
+
+/**
+ * `PATCH /api/packages/:slug` — owner-gated flip of a package to private.
+ *
+ * ⚠️ TODO(cp): the CP PATCH handler's body validator is
+ * `z.object({ podId: z.string().min(1).nullable() })` TODAY — it does NOT accept
+ * `isPublic`, so this call currently fails (400) until the CP adds `isPublic` to
+ * that PATCH allow-list. This is deliberately the INTENDED endpoint (not a
+ * faked flip): it will start working the moment the CP door is widened. The
+ * command surfaces the CP's message honestly meanwhile.
+ */
+export async function unpublishPackage(
+  slug: string,
+  deps: CpWriteDeps = {},
+): Promise<{ slug: string; isPublic: boolean }> {
+  const fetchImpl = deps.fetchImpl ?? fetch;
+  const token = requireToken(deps);
+  const base = deps.cpUrl ?? getCpUrl();
+
+  const res = await fetchImpl(
+    `${base}/api/packages/${encodeURIComponent(slug)}`,
+    {
+      method: "PATCH",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ isPublic: false }),
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    },
+  );
+  if (!res.ok) {
+    const raw = await res.text().catch(() => "");
+    throw new CpWriteError(res.status, extractServerMessage(raw, res.status));
+  }
+  const data = (await res.json()) as { isPublic?: boolean };
+  return { slug, isPublic: data.isPublic ?? false };
 }

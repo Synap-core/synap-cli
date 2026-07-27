@@ -62,7 +62,8 @@ export async function graphTraverse(opts: GraphTraverseOpts): Promise<void> {
       for (const n of nodes) {
         const profile = String(n.profileSlug ?? n.entityType ?? n.type ?? "entity").padEnd(14);
         const title = String(n.title ?? n.name ?? "–").slice(0, 40).padEnd(42);
-        const id = chalk.dim(String(n.id ?? "").slice(0, 8));
+        // Full id — feeds straight into `synap get entity <id>`.
+        const id = chalk.dim(String(n.id ?? ""));
         console.log(`  ${chalk.cyan("•")} ${profile} ${title} ${id}`);
       }
     }
@@ -73,8 +74,9 @@ export async function graphTraverse(opts: GraphTraverseOpts): Promise<void> {
     } else {
       for (const e of edges) {
         const relType = String(e.type ?? e.relationType ?? e.relationshipType ?? "–").padEnd(22);
-        const src = String(e.sourceEntityId ?? "?").slice(0, 8);
-        const tgt = String(e.targetEntityId ?? "?").slice(0, 8);
+        // Full ids — feed straight into `synap get entity <id>`.
+        const src = String(e.sourceEntityId ?? "?");
+        const tgt = String(e.targetEntityId ?? "?");
         console.log(`  ${chalk.dim(relType)}  ${chalk.dim(src)} → ${chalk.dim(tgt)}`);
       }
     }

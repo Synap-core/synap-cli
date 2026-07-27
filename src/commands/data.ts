@@ -4,6 +4,7 @@ import { resolveHubConfig, resolveUserId, hubGet, hubPost, hubPatch, readActiveS
 import { unwrapList } from "../lib/unwrapList.js";
 import { reportWrite } from "../lib/capture-lane.js";
 import { renderNextSteps, FLOW } from "../lib/next-steps.js";
+import { requireFullId } from "../lib/id.js";
 
 export interface BaseOpts {
   json?: boolean;
@@ -24,7 +25,10 @@ export function formatHit(hit: Record<string, unknown>): { title: string; type: 
     type: String(
       doc.entityType ?? doc.profileSlug ?? doc.type ?? hit.collection ?? ""
     ),
-    id: String(doc.id ?? hit.id ?? "").slice(0, 8),
+    // Full id, never truncated: this is the handle callers feed straight back
+    // into `synap get entity <id>` — an 8-char prefix isn't a valid UUID and
+    // 500s on the pod (see `renderHubError`'s uuid-shape hint).
+    id: String(doc.id ?? hit.id ?? ""),
   };
 }
 
@@ -310,7 +314,8 @@ export async function listEntities(
       const e = entity as Record<string, unknown>;
       const name = String(e.title ?? e.id ?? "");
       const profile = e.profileSlug ?? e.profile ?? e.type ?? "";
-      const id = String(e.id ?? "").slice(0, 8);
+      // Full id — this is the handle `synap get entity <id>` expects next.
+      const id = String(e.id ?? "");
       log.info(`${name} ${chalk.dim(`(${profile})`)} — ${chalk.dim(id)}`);
     }
     if (list.length === limit) {
@@ -328,6 +333,9 @@ export async function getEntity(
   id: string,
   opts: BaseOpts & { workspace?: string }
 ): Promise<void> {
+  // `synap ask`/`synap list entities` now print full UUIDs, so an 8-char
+  // value here is almost always a leftover short id from before this fix.
+  requireFullId(id, "entity", chalk, log);
   try {
     const cfg = await resolveHubConfig(opts);
     const userId = await resolveUserId(cfg);
@@ -431,7 +439,9 @@ function formatAskItem(substrate: string, item: Record<string, unknown>): string
           (desc.length > 90 ? desc.slice(0, 87) + "…" : desc).replace(/\s+/g, " ")
       )
     : "";
-  return `${title} ${chalk.dim(`[${type}]`)} ${chalk.dim(id)}${snippet}`;
+  // Full id trails at the end (never truncated — it's what `synap get entity`
+  // expects next) so it doesn't push the snippet off-screen on a narrow terminal.
+  return `${title} ${chalk.dim(`[${type}]`)}${snippet} ${chalk.dim(id)}`;
 }
 
 /**
@@ -602,7 +612,7 @@ function reportResolution(res: Record<string, unknown>): void {
   const existing = resolution.existingSameProfile;
   if (existing) {
     log.dim(
-      `⚠ an entity named "${String(existing.name ?? "?")}" already exists as profile ${String(existing.profileSlug ?? "?")} (${String(existing.id ?? "?").slice(0, 8)}) — consider updating it instead of duplicating`
+      `⚠ an entity named "${String(existing.name ?? "?")}" already exists as profile ${String(existing.profileSlug ?? "?")} (${String(existing.id ?? "?")}) — consider updating it instead of duplicating`
     );
   }
 

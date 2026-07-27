@@ -83,6 +83,19 @@ export interface ActiveProjectBinding {
   podName: string;
 }
 
+/**
+ * The active workspace pinned together with the pod profile it belongs to.
+ *
+ * A workspace exists on exactly ONE pod, but `activeWorkspaceId` is a single
+ * pod-agnostic global. Recording the pod it was set against lets resolution
+ * refuse to send a workspace to a pod it doesn't belong to (the cross-pod 403).
+ * Peer of {@link ActiveProjectBinding}.
+ */
+export interface ActiveWorkspaceBinding {
+  workspaceId: string;
+  podName: string;
+}
+
 export interface MultiPodConfig {
   activePod: string;
   /** Per-surface pod overrides. When set, takes priority over activePod for that surface. */
@@ -90,6 +103,8 @@ export interface MultiPodConfig {
   pods: Record<string, LocalPodConfig>;
   /** Active workspace override — set by `synap use <workspaceId>`. Takes priority over the pod's default workspaceId. */
   activeWorkspaceId?: string;
+  /** Pod-aware binding of the active workspace — records which pod `activeWorkspaceId` was set against, so cross-pod resolution can ignore it for other pods. */
+  activeWorkspace?: ActiveWorkspaceBinding;
   /** Active project override — set by `synap project use <projectId>`. Peer of activeWorkspaceId; independent (composable). */
   activeProjectId?: string;
   /** Pod-aware binding of the active project — set by cross-pod `synap project use <ref>` so later drift (active pod changed under the pin) can warn. */
@@ -111,7 +126,7 @@ function readMultiConfig(): MultiPodConfig {
   try {
     if (fs.existsSync(CONFIG_FILE)) {
       const parsed = JSON.parse(fs.readFileSync(CONFIG_FILE, "utf-8")) as Partial<MultiPodConfig>;
-      if (parsed.pods) return { activePod: parsed.activePod ?? "", pods: parsed.pods, activeWorkspaceId: parsed.activeWorkspaceId, activeProjectId: parsed.activeProjectId, activeProject: parsed.activeProject, surfaces: parsed.surfaces, agentKeys: parsed.agentKeys, agentWorkspaceRouting: parsed.agentWorkspaceRouting };
+      if (parsed.pods) return { activePod: parsed.activePod ?? "", pods: parsed.pods, activeWorkspaceId: parsed.activeWorkspaceId, activeWorkspace: parsed.activeWorkspace, activeProjectId: parsed.activeProjectId, activeProject: parsed.activeProject, surfaces: parsed.surfaces, agentKeys: parsed.agentKeys, agentWorkspaceRouting: parsed.agentWorkspaceRouting };
       // File exists but has old/unrecognized shape — fall through to migration
     }
   } catch { /* fall through */ }
@@ -275,18 +290,96 @@ export function setActivePod(name: string): LocalPodConfig {
   return config.pods[name];
 }
 
-/** Get the active workspace ID: explicit override first, then the pod default. */
-export function getActiveWorkspaceId(): string | undefined {
+/** The active pod's profile NAME (not its config), or undefined if none is set. */
+export function getActivePodName(): string | undefined {
   const config = readMultiConfig();
-  if (config.activeWorkspaceId) return config.activeWorkspaceId;
-  const pod = config.activePod ? config.pods[config.activePod] : undefined;
-  return pod?.workspaceId || undefined;
+  return config.activePod && config.pods[config.activePod] ? config.activePod : undefined;
 }
 
-/** Persist a workspace as the active context for all subsequent commands. */
-export function setActiveWorkspaceId(workspaceId: string): void {
+/** Find a saved pod profile NAME by its URL (trailing slashes ignored). */
+export function findPodNameByUrl(url: string): string | undefined {
+  if (!url) return undefined;
+  const norm = (u: string) => u.replace(/\/+$/, "");
+  const target = norm(url);
+  const config = readMultiConfig();
+  for (const [name, p] of Object.entries(config.pods)) {
+    if (norm(p.podUrl) === target) return name;
+  }
+  return undefined;
+}
+
+/**
+ * Resolve the workspace to use for a specific pod — PURE (no disk, no network),
+ * so the cross-pod rule is unit-testable.
+ *
+ * A workspace lives on exactly one pod, but `activeWorkspaceId` is a single
+ * pod-agnostic global. Sending it to the wrong pod is the "Access denied to
+ * workspace" 403. The rule: only honor the global override for the pod it
+ * actually belongs to; otherwise fall back to THAT pod's own default workspace.
+ *
+ *   1. No override set → the target pod's own default.
+ *   2. Override has a pod binding → honor it only for its bound pod; for any
+ *      other pod, use that pod's default.
+ *   3. Legacy override (no binding) that equals ANOTHER saved pod's default →
+ *      it clearly belongs to that pod → use the target's default.
+ *   4. Otherwise no evidence it's foreign → assume it's the target pod's (the
+ *      legacy `synap use <custom-ws-on-this-pod>` case) → honor it.
+ */
+export function resolveWorkspaceForPod(
+  config: MultiPodConfig,
+  podName: string | undefined
+): string | undefined {
+  const targetPod = podName ? config.pods[podName] : undefined;
+  const override = config.activeWorkspaceId;
+  if (!override) return targetPod?.workspaceId || undefined;
+
+  const binding = config.activeWorkspace;
+  if (binding && binding.workspaceId === override) {
+    if (binding.podName === podName) return override; // belongs to the target pod
+    return targetPod?.workspaceId || undefined; // bound to a different pod → ignore
+  }
+
+  const belongsToAnotherPod = Object.entries(config.pods).some(
+    ([name, p]) => name !== podName && p.workspaceId === override
+  );
+  if (belongsToAnotherPod) return targetPod?.workspaceId || undefined;
+
+  return override;
+}
+
+/**
+ * Get the active workspace ID for a pod (by profile NAME). Applies the cross-pod
+ * rule in {@link resolveWorkspaceForPod}. Omit `podName` for the active pod.
+ */
+export function getActiveWorkspaceIdForPod(podName?: string): string | undefined {
+  const config = readMultiConfig();
+  return resolveWorkspaceForPod(config, podName ?? (config.activePod || undefined));
+}
+
+/**
+ * Get the active workspace ID for the ACTIVE pod: explicit override first (only
+ * if it belongs to this pod), then the pod default. Cross-pod-safe: a global
+ * override left over from another pod is ignored rather than sent (avoids the
+ * "Access denied to workspace" 403).
+ */
+export function getActiveWorkspaceId(): string | undefined {
+  return getActiveWorkspaceIdForPod();
+}
+
+/**
+ * Persist a workspace as the active context for all subsequent commands.
+ * Records the pod the workspace belongs to (defaults to the active pod) so
+ * later cross-pod resolution can tell whether the override applies.
+ */
+export function setActiveWorkspaceId(workspaceId: string, podName?: string): void {
   const config = readMultiConfig();
   config.activeWorkspaceId = workspaceId;
+  const boundPod = podName ?? config.activePod;
+  if (boundPod && config.pods[boundPod]) {
+    config.activeWorkspace = { workspaceId, podName: boundPod };
+  } else {
+    delete config.activeWorkspace;
+  }
   writeMultiConfig(config);
 }
 
@@ -357,6 +450,7 @@ export function getAgentWorkspaceRouting(): AgentWorkspaceRouting | undefined {
 export function clearActiveWorkspaceId(): void {
   const config = readMultiConfig();
   delete config.activeWorkspaceId;
+  delete config.activeWorkspace;
   writeMultiConfig(config);
 }
 

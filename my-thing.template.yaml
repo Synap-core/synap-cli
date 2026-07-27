@@ -1,0 +1,21 @@
+# My Thing — Synap workspace template
+# Edit in place, then validate:  synap market validate my-thing.template.yaml
+# Publish (private by default):   synap market publish my-thing.template.yaml
+meta:
+  slug: my-thing
+  name: My Thing
+  description: A My Thing workspace.
+  icon: "📦"
+  color: "#6B7280"
+
+workspace:
+  name: My Thing
+  description: A My Thing workspace.
+
+profiles:
+  - slug: my-thing-item
+    displayName: My Thing Item
+    properties:
+      - slug: title
+        label: Title
+        valueType: string

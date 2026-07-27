@@ -113,8 +113,9 @@ export async function listSessions(
             : chalk.dim(status);
       const progress =
         typeof s.progress === "number" ? ` ${chalk.dim(`[${s.progress}%]`)}` : "";
+      // Full id — feeds straight into `synap session get/update/attach <id>`.
       console.log(
-        `  ${chalk.bold(String(s.id ?? "").slice(0, 8))}  ${statusColor}${progress}  ${chalk.white(String(s.goal ?? ""))}`
+        `  ${chalk.bold(String(s.id ?? ""))}  ${statusColor}${progress}  ${chalk.white(String(s.goal ?? ""))}`
       );
     }
   } catch (e) {

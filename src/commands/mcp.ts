@@ -5,11 +5,19 @@
  * command group is the turnkey funnel for pointing ANY MCP client at it:
  *
  *   synap mcp url      — print a ready-to-paste connection (URL + key + snippets)
- *                        for UI-only clients (ChatGPT, claude.ai connectors, …)
- *                        that can't be configured by writing a file.
+ *                        for UI-only clients that accept a custom header (e.g.
+ *                        Raycast) and for clients that need the raw values to
+ *                        wire up by hand. claude.ai's connector UI does NOT
+ *                        currently accept a bearer token here — see the note
+ *                        printed by this command.
  *   synap mcp verify   — health-check: is /mcp reachable and is the key valid?
  *   synap mcp connect  — alias of `synap connect` for file-configurable clients
  *                        (Claude Code, Cursor, Desktop, …) — writes the config.
+ *   synap mcp connect-claude — print the claude.ai (web) OAuth connection
+ *                        steps. claude.ai's connector UI is OAuth-only (no
+ *                        header field), so this prints paste-ready values
+ *                        instead of writing a file — claude.ai + the control
+ *                        plane drive the actual OAuth handshake.
  *
  * For file-configurable clients, prefer `synap mcp connect <client>` (it mints a
  * dedicated agent key + writes the client's config). `synap mcp url` is the
@@ -155,11 +163,23 @@ export async function mcpUrl(
     console.log(chalk.bold("\nClaude Desktop / stdio-only clients (mcp-remote bridge)"));
     console.log(chalk.dim(JSON.stringify(mcpRemote, null, 2)));
 
-    console.log(chalk.bold("\nUI clients (ChatGPT connectors, claude.ai, Raycast, …)"));
+    console.log(
+      chalk.bold("\nUI clients that accept an API key / custom header (ChatGPT, Raycast, …)")
+    );
     console.log(`  Paste the URL above and add the Authorization header.`);
     console.log(
       chalk.dim(
         "  Raycast: run “Install MCP Server” → transport HTTP → paste the URL + a “Authorization: Bearer …” header."
+      )
+    );
+    console.log(
+      chalk.dim(
+        "  ChatGPT: Settings → enable Developer mode → add a connector → paste the URL and choose API-key auth."
+      )
+    );
+    console.log(
+      chalk.yellow(
+        "\nclaude.ai (web/desktop/mobile connectors) can't take a custom header yet — its connector UI has no field for one. OAuth support is planned; until then, use Claude Code, Cursor, or another file-configurable client above."
       )
     );
     console.log(
@@ -242,6 +262,90 @@ export async function mcpVerify(opts: McpBaseOpts): Promise<void> {
     }
   } catch (e) {
     log.error(`Verify failed: ${(e as Error).message}`);
+    process.exit(1);
+  }
+}
+
+/**
+ * Derive the control-plane origin from a pod host, e.g.
+ * `pod.antoinesrvt.synap.live` → `https://api.synap.live`.
+ *
+ * Pods are provisioned at `pod.<owner>.<root-domain>`; the control plane lives
+ * at `api.<root-domain>` on the same root. Only strips when the host actually
+ * starts with `pod.` — anything else (localhost, a custom domain, …) can't be
+ * derived confidently, so the caller falls back to a placeholder + `--cp-url`.
+ */
+function deriveCpOrigin(podUrl: string): { cpOrigin: string; derived: boolean } {
+  try {
+    const host = new URL(podUrl).hostname;
+    const labels = host.split(".");
+    if (labels[0] === "pod" && labels.length >= 3) {
+      const rest = labels.slice(1); // drop "pod"
+      // rest = [<owner>, ...root] when there's an owner segment, or just
+      // [...root] when the pod is hosted directly under the root domain.
+      const root = rest.length > 2 ? rest.slice(1).join(".") : rest.join(".");
+      return { cpOrigin: `https://api.${root}`, derived: true };
+    }
+  } catch {
+    // fall through to placeholder
+  }
+  return { cpOrigin: "https://api.<your-domain>", derived: false };
+}
+
+/**
+ * `synap mcp connect-claude` — print the claude.ai (web) OAuth connection.
+ *
+ * claude.ai's "Add custom connector" UI is OAuth-only (Dynamic Client
+ * Registration) — it has no field for a bearer header, so the file/header
+ * based flows (`mcp connect`, `mcp url`) don't apply. The control plane's
+ * `/mcp` endpoint now speaks OAuth, so connecting is: paste a URL, approve in
+ * the browser. This command can't drive that click-through itself — claude.ai
+ * and the control plane own the OAuth handshake — it only prints the exact
+ * values so there's no guesswork.
+ */
+export async function mcpConnectClaudeWeb(
+  opts: McpBaseOpts & { cpUrl?: string }
+): Promise<void> {
+  try {
+    const cfg = await resolveHubConfig(opts);
+    const { cpOrigin, derived } = deriveCpOrigin(cfg.podUrl);
+    const finalCpOrigin = (opts.cpUrl ?? cpOrigin).replace(/\/$/, "");
+    const url = `${finalCpOrigin}/mcp`;
+    const wasDerived = opts.cpUrl ? "override" : derived;
+
+    const steps = [
+      "Open claude.ai → Settings → Connectors → Add custom connector",
+      "Name: Synap",
+      `URL: ${url}`,
+      "Leave Advanced settings (OAuth Client ID/Secret) blank",
+      "Click Add → you'll be redirected to sign in to Synap Cloud and approve → done",
+      'Then ask Claude to "list my Synap pods" to confirm',
+    ];
+
+    if (opts.json) {
+      console.log(
+        JSON.stringify({ url, cpOrigin: finalCpOrigin, derived: wasDerived, steps }, null, 2)
+      );
+      return;
+    }
+
+    log.heading("\nConnect claude.ai (web) to Synap");
+    if (!derived && !opts.cpUrl) {
+      log.warn(
+        "Could not derive the control-plane URL from your pod host — pass --cp-url <url> (e.g. https://api.yourdomain.com)."
+      );
+    }
+    console.log(`  ${chalk.dim("URL")}   ${url}`);
+    console.log();
+    steps.forEach((step, i) => console.log(`  ${chalk.bold(`${i + 1}.`)} ${step}`));
+    console.log();
+    console.log(
+      chalk.dim(
+        "This connects via the Synap control plane. A direct pod connection (no control plane) is coming."
+      )
+    );
+  } catch (e) {
+    log.error(`Could not build the claude.ai connection: ${(e as Error).message}`);
     process.exit(1);
   }
 }

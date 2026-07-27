@@ -35,6 +35,13 @@ import {
 } from "../lib/hub-client.js";
 import { unwrapList } from "../lib/unwrapList.js";
 import { formatLaneLine, resolveWorkspaceName, type LaneReport } from "../lib/capture-lane.js";
+import {
+  isDegraded,
+  degradedMessage,
+  readCaptureExecute,
+  type StructureResult,
+  type ExecuteResult,
+} from "../lib/capture-structure.js";
 
 export interface ImportOpts {
   workspace?: string;
@@ -195,44 +202,8 @@ function expandInputs(inputs: string[]): {
   return { items, failures, truncated };
 }
 
-// ─── structure / execute response shapes ──────────────────────────────────────
-
-interface StructureProposal {
-  tempId: string;
-  profileSlug: string;
-  title: string;
-  description?: string;
-  properties?: Record<string, unknown>;
-  content?: string;
-  existingEntityId?: string;
-}
-interface StructureRelation {
-  sourceTempId: string;
-  targetTempId: string;
-  relationType: string;
-}
-interface StructureResult {
-  proposals?: StructureProposal[];
-  relations?: StructureRelation[];
-  degraded?: boolean;
-  targetWorkspaceId?: string | null;
-  targetWorkspaceReason?: string | null;
-  targetWorkspaceConfidence?: number | null;
-  targetProjectId?: string | null;
-  targetProjectReason?: string | null;
-  targetProjectConfidence?: number | null;
-  // followUp is `string | { question, suggestions: chip[] } | null` (chips are
-  // objects, not strings). Typed honestly even though import doesn't render it.
-  followUp?:
-    | string
-    | { question?: string; suggestions?: Array<{ label: string; value: string }> }
-    | null;
-}
-interface ExecuteResult {
-  created?: Array<{ id?: string; entityId?: string; profileSlug?: string; linked?: boolean }>;
-  relations?: unknown[];
-  movedToWorkspace?: string | null;
-}
+// Structure/execute wire shapes + the degraded/execute interpreters are shared
+// with `synap capture` in lib/capture-structure.ts (ONE mirror, no drift).
 
 // ─── workspace / project name → id resolution ─────────────────────────────────
 
@@ -267,9 +238,6 @@ async function resolveProjectArg(value: string, cfg: HubConfig): Promise<string>
 
 function renderProposals(result: StructureResult): void {
   const proposals = result.proposals ?? [];
-  if (result.degraded) {
-    log.warn("AI structuring degraded — this source may not be fully extractable server-side.");
-  }
   if (proposals.length === 0) {
     log.dim("No entity proposals extracted.");
     return;
@@ -321,7 +289,7 @@ function renderRouting(result: StructureResult, wsOverride?: string, projOverrid
 
 interface ItemOutcome {
   label: string;
-  status: "stored" | "dry-run" | "skipped" | "empty" | "failed";
+  status: "stored" | "proposed" | "degraded" | "dry-run" | "skipped" | "empty" | "failed";
   entities?: number;
   relations?: number;
   workspaceId?: string | null;
@@ -355,6 +323,17 @@ async function processItem(
   const wsTarget = wsOverride ?? structureRes.targetWorkspaceId ?? cfg.workspaceId ?? null;
   const projTarget = projOverride ?? structureRes.targetProjectId ?? null;
   const proposals = structureRes.proposals ?? [];
+
+  // Degraded: the IS structurer is down. Create nothing (same as `synap
+  // capture` and the browser) — report it honestly instead of materializing the
+  // raw stand-in and counting it as a successful import.
+  if (isDegraded(structureRes)) {
+    if (!opts.json) {
+      log.heading(`▸ ${item.label}`);
+      log.warn(`  ${degradedMessage(structureRes)}`);
+    }
+    return { label: item.label, status: "degraded", workspaceId: wsTarget, projectId: projTarget };
+  }
 
   if (!opts.json) {
     log.heading(`▸ ${item.label}`);
@@ -416,12 +395,27 @@ async function processItem(
     relations: structureRes.relations ?? [],
   };
   const executeRes = (await hubPost("/capture/execute", executeBody, cfg, 60_000)) as ExecuteResult;
-  const created = Array.isArray(executeRes.created) ? executeRes.created : [];
-  const entityCount = created.filter((c) => !c.linked).length || created.length;
-  const relCount = Array.isArray(executeRes.relations) ? executeRes.relations.length : 0;
+
+  // Report what the pod ACTUALLY returned. A workspace policy can queue the
+  // write as a proposal instead of applying it — surface that honestly (real
+  // proposal/review handle) rather than hardcoding "auto"/"created".
+  const outcome = readCaptureExecute(executeRes);
+
+  if (outcome.proposed) {
+    if (!opts.json) {
+      log.heading(`▸ ${item.label}`);
+      log.info(`  Proposed — under review, not yet stored.`);
+      if (outcome.proposalId) log.dim(`    proposal: ${outcome.proposalId}`);
+      if (outcome.reviewUrl) log.dim(`    review: ${outcome.reviewUrl}`);
+    }
+    return { label: item.label, status: "proposed", entities: 0, relations: 0, workspaceId: wsTarget, projectId: projTarget };
+  }
+
+  const entityCount = outcome.entitiesCreated;
+  const relCount = outcome.relationsCreated;
   // Final resting workspace: the backend may have moved it (auto routing);
   // otherwise fall back to the pre-execute guess.
-  const finalWorkspaceId = executeRes.movedToWorkspace ?? wsTarget;
+  const finalWorkspaceId = outcome.movedToWorkspace ?? wsTarget;
 
   if (!opts.json) {
     const report: LaneReport = {
@@ -431,9 +425,12 @@ async function processItem(
       governance: "auto",
     };
     log.success(`  ${entityCount} entit${entityCount !== 1 ? "ies" : "y"} created${relCount ? `, ${relCount} relation${relCount !== 1 ? "s" : ""}` : ""}`);
+    if (outcome.entitiesLinked) {
+      log.dim(`  ${outcome.entitiesLinked} linked to existing entit${outcome.entitiesLinked !== 1 ? "ies" : "y"}`);
+    }
     console.log("  " + formatLaneLine(report) + (projTarget ? chalk.dim(` [project ${projTarget.slice(0, 8)}]`) : ""));
-    if (executeRes.movedToWorkspace) {
-      log.dim(`  → filed into workspace ${executeRes.movedToWorkspace}`);
+    if (outcome.movedToWorkspace) {
+      log.dim(`  → filed into workspace ${outcome.movedToWorkspace}`);
     }
   }
 
@@ -550,12 +547,16 @@ export async function importData(inputs: string[], opts: ImportOpts): Promise<vo
       const failed = outcomes.filter((o) => o.status === "failed");
       log.blank();
       log.heading("Import summary");
+      const proposed = outcomes.filter((o) => o.status === "proposed").length;
+      const degraded = outcomes.filter((o) => o.status === "degraded").length;
       log.info(
         `${outcomes.length} item${outcomes.length !== 1 ? "s" : ""} · ` +
           `${stored.length} stored (${totalEntities} entit${totalEntities !== 1 ? "ies" : "y"}) · ` +
+          (proposed ? `${proposed} proposed · ` : "") +
           `${outcomes.filter((o) => o.status === "dry-run").length} dry-run · ` +
           `${outcomes.filter((o) => o.status === "skipped").length} skipped · ` +
           `${outcomes.filter((o) => o.status === "empty").length} empty · ` +
+          (degraded ? `${degraded} degraded · ` : "") +
           `${failed.length} failed`
       );
       for (const f of failed) log.dim(`  ✗ ${f.label}: ${f.error ?? "unknown error"}`);

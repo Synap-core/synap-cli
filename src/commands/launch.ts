@@ -750,7 +750,7 @@ export async function launch(opts: {
         spinner.stop();
         const pid = project.proposalId;
         log.warn("Project not created yet — it needs your approval first.");
-        if (pid) log.hint(`Proposal ${pid.slice(0, 8)} — approve it, then re-run 'synap launch'.`);
+        if (pid) log.hint(`Proposal ${pid} — approve it, then re-run 'synap launch'.`);
         log.hint("Review it with: synap proposals list");
         return;
       }
@@ -907,7 +907,7 @@ export async function launch(opts: {
       `${proposed.length} ${proposed.length === 1 ? "workspace is" : "workspaces are"} NOT live yet — governance queued ${proposed.length === 1 ? "it" : "them"} for your approval:`
     );
     for (const r of proposed) {
-      log.hint(`${r.name}${r.proposalId ? ` — proposal ${r.proposalId.slice(0, 8)}` : ""}`);
+      log.hint(`${r.name}${r.proposalId ? ` — proposal ${r.proposalId}` : ""}`);
     }
     log.hint("Approve with: synap proposals list  →  synap proposals approve <id>");
     log.hint("(or review them in the browser under Proposals)");

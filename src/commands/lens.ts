@@ -438,7 +438,7 @@ export async function projectNew(
 
   if (proposed) {
     log.warn(`Project "${name}" isn't live yet — governance queued it for your approval.`);
-    if (created.proposalId) log.hint(`Approve proposal ${created.proposalId.slice(0, 8)}, then retry pinning it.`);
+    if (created.proposalId) log.hint(`Approve proposal ${created.proposalId}, then retry pinning it.`);
     renderNextSteps(steps);
     return;
   }

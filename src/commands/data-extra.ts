@@ -69,9 +69,10 @@ export async function showEntity(
         const r = rel as Record<string, unknown>;
         const type = String(r.type ?? r.relationType ?? "related");
         const otherId = String(r.targetEntityId ?? r.sourceEntityId ?? r.entityId ?? "");
-        const otherTitle = String(r.targetTitle ?? r.sourceTitle ?? r.title ?? otherId.slice(0, 8));
+        const otherTitle = String(r.targetTitle ?? r.sourceTitle ?? r.title ?? otherId);
         const direction = r.targetEntityId === id ? "←" : "→";
-        log.info(`${direction} ${chalk.cyan(type)}  ${otherTitle} ${chalk.dim(otherId.slice(0, 8))}`);
+        // Full id — feeds straight into `synap get entity <id>`.
+        log.info(`${direction} ${chalk.cyan(type)}  ${otherTitle} ${chalk.dim(otherId)}`);
       }
     } else {
       log.blank();
@@ -116,7 +117,8 @@ export async function listProposals(
     log.blank();
     for (const p of proposals) {
       const prop = p as Record<string, unknown>;
-      const id = String(prop.id ?? "").slice(0, 8);
+      // Full id — feeds straight into `synap proposals approve/reject <id>`.
+      const id = String(prop.id ?? "");
       const action = String(prop.action ?? prop.type ?? "write");
       const subject = String(prop.subjectType ?? prop.subject ?? "entity");
       // prefer human-readable summary; fall back to action description
@@ -189,7 +191,8 @@ export async function browseEntities(
       const entity = e as Record<string, unknown>;
       const title = String(entity.title ?? entity.name ?? entity.id ?? "");
       const profile = String(entity.profileSlug ?? entity.profile ?? "");
-      const id = String(entity.id ?? "").slice(0, 8);
+      // Full id — feeds straight into `synap get entity <id>`.
+      const id = String(entity.id ?? "");
       const updatedAt = entity.updatedAt ?? entity.createdAt;
       const dateStr = updatedAt
         ? chalk.dim(new Date(String(updatedAt)).toLocaleDateString())

@@ -138,6 +138,53 @@ async function renderConnectors(cfg: Awaited<ReturnType<typeof resolveHubConfig>
   );
 }
 
+/**
+ * Template behaviour-drift: an installed workspace whose stamped
+ * `settings.packageVersion` no longer matches the version its template resolves
+ * to today is running STALE behaviour (old views/automations/capabilities). This
+ * is the exact "why did the AI behave differently" question `diagnose` exists
+ * for, and it produces no run event. REUSES `market`'s ONE drift comparator
+ * (`computeUpdates` over `buildMarketCatalog` + `fetchInstalledTemplates`) — no
+ * second comparator. Non-fatal: a pod that can't be reached simply omits it.
+ */
+async function renderDrift(): Promise<void> {
+  const { buildMarketCatalog, computeUpdates } = await import("./market.js");
+  const { fetchInstalledTemplates } = await import("../lib/installed.js");
+
+  log.heading("Template drift");
+  let checks: Awaited<ReturnType<typeof computeUpdates>>;
+  try {
+    const [cat, installed] = await Promise.all([
+      buildMarketCatalog(),
+      fetchInstalledTemplates(),
+    ]);
+    checks = computeUpdates(installed, cat);
+  } catch {
+    log.dim("(couldn't read installed templates — skipped)");
+    return;
+  }
+
+  const drifted = checks.filter((c) => c.updateAvailable);
+  const unknown = checks.filter((c) => c.noVersionInfo);
+
+  if (drifted.length === 0) {
+    console.log(`  ${chalk.green("ok")}  no behaviour-drift across ${checks.length} installed template${checks.length === 1 ? "" : "s"}`);
+  } else {
+    console.log(
+      `  ${chalk.yellow("drift")}  ${drifted.length} workspace${drifted.length === 1 ? "" : "s"} on a stale template version`,
+    );
+    for (const c of drifted) {
+      console.log(
+        `    ${chalk.bold(c.slug)}  ${chalk.dim(c.installedVersion || "?")} → ${chalk.dim(c.latestVersion || "?")}`,
+      );
+    }
+    log.dim("Re-apply the current behaviour: synap market update");
+  }
+  if (unknown.length > 0) {
+    log.dim(`${unknown.length} installed template${unknown.length === 1 ? "" : "s"} carry no version stamp — drift can't be checked.`);
+  }
+}
+
 export async function diagnose(
   runId: string | undefined,
   opts: {
@@ -195,5 +242,8 @@ export async function diagnose(
   renderFeed(res.runs ?? []);
 
   // Only on the unfiltered feed: a `--flow`-scoped view asked for that flow.
-  if (!flow) await renderConnectors(cfg);
+  if (!flow) {
+    await renderConnectors(cfg);
+    await renderDrift();
+  }
 }

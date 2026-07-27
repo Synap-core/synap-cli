@@ -170,7 +170,8 @@ export async function contextSummary(opts: ContextOpts): Promise<void> {
     } else {
       for (const s of sessions as Array<Record<string, unknown>>) {
         const progress = typeof s.progress === "number" ? ` ${chalk.dim(`[${s.progress}%]`)}` : "";
-        const id = String(s.id ?? "").slice(0, 8);
+        // Full id — feeds straight into `synap session update/attach <id>`.
+        const id = String(s.id ?? "");
         console.log(`- ${chalk.cyan(id)}${progress}  ${String(s.goal ?? "")}`);
       }
     }

@@ -64,7 +64,9 @@ export async function gatherContext(opts: SkillOpts & { session: string }): Prom
         contextReport += "### Recent Entities\n\n";
         for (const e of entities) {
           const type = String(e.profileSlug ?? "unknown");
-          contextReport += `- **${String(e.title ?? e.id)}** (${type}): ${String(e.id).slice(0, 8)}\n`;
+          // Full id — this context report is read by an agent that may act
+          // on the entity next (e.g. `synap get entity <id>`).
+          contextReport += `- **${String(e.title ?? e.id)}** (${type}): ${String(e.id)}\n`;
         }
       } else {
         contextReport += "_(No recent entities found in pod)_\n\n";

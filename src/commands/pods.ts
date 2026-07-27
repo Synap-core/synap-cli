@@ -63,8 +63,9 @@ export async function podsList(): Promise<void> {
   }
 
   log.blank();
-  log.dim("synap pods use <name>  — switch active pod");
-  log.dim("synap pods add [name]  — connect another pod");
+  log.dim("synap pods use <name>        — switch active pod");
+  log.dim("synap pods add [name]        — connect another pod");
+  log.dim("synap pods update <name> <url> — change a pod's URL (e.g. after a domain move)");
 }
 
 // ─── add ──────────────────────────────────────────────────────────────────────
@@ -547,4 +548,165 @@ export async function podsReconnect(name?: string): Promise<void> {
 
   // Propagate the new key to connected surfaces (same as podsUse)
   await podsUse(targetName);
+}
+
+// ─── update (change URL in place) ─────────────────────────────────────────────
+
+/**
+ * Verify whether an existing Hub API key is still accepted by a pod at `podUrl`.
+ *
+ * Keys are NOT domain-linked — the pod validates a key by its stored hash,
+ * independent of the hostname it's reached on — so after a domain move the SAME
+ * key should still authenticate. This proves it (via the canonical `/users/me`
+ * identity call, the same one `resolveUserId` uses) rather than assuming:
+ *   "valid"        — 2xx: key works, no recreate needed
+ *   "rejected"     — 401/403: key genuinely refused → must recreate
+ *   "inconclusive" — network error / 5xx / other: can't tell, so don't destroy it
+ */
+async function verifyKeyAgainstPod(
+  podUrl: string,
+  apiKey: string
+): Promise<"valid" | "rejected" | "inconclusive"> {
+  try {
+    const res = await fetch(`${podUrl.replace(/\/$/, "")}/api/hub/users/me`, {
+      headers: { Authorization: `Bearer ${apiKey}` },
+      signal: AbortSignal.timeout(10000),
+    });
+    if (res.ok) return "valid";
+    if (res.status === 401 || res.status === 403) return "rejected";
+    return "inconclusive";
+  } catch {
+    return "inconclusive";
+  }
+}
+
+/**
+ * synap pods update <name> [newUrl] — change a saved pod's URL in place.
+ *
+ * The safe path for a domain move (e.g. pod.team.thearchitech.xyz →
+ * pod.thearch.synap.live): checks the pod is reachable at the new URL, verifies
+ * whether the existing key still authenticates there, and ONLY offers to recreate
+ * the key if the pod genuinely rejects it (keys survive a domain change, so a
+ * re-auth is usually unnecessary). Nothing is written until both checks pass, so
+ * a typo or a not-yet-live domain leaves the working profile untouched.
+ */
+export async function podsUpdate(
+  name: string,
+  newUrlArg?: string,
+  opts: { url?: string; yes?: boolean } = {}
+): Promise<void> {
+  const profiles = listPodProfiles();
+  const profile = profiles.find((p) => p.name === name);
+  if (!profile) {
+    log.error(podNotFoundMessage(name));
+    return;
+  }
+  const currentUrl = profile.config.podUrl;
+
+  // Resolve the new URL: positional arg > --url > prompt (default = current).
+  let newUrl = (newUrlArg ?? opts.url)?.trim();
+  if (!newUrl && !opts.yes) {
+    const { url } = await prompts({
+      type: "text",
+      name: "url",
+      message: `New URL for pod '${name}':`,
+      initial: currentUrl,
+      validate: (v: string) => v.startsWith("http") || "Must be a valid URL (https://…)",
+    });
+    if (!url) return;
+    newUrl = (url as string).trim();
+  }
+  if (!newUrl) {
+    log.error("No new URL provided. Usage: synap pods update <name> <url>");
+    return;
+  }
+  newUrl = newUrl.replace(/\/$/, "");
+
+  if (newUrl === currentUrl.replace(/\/$/, "")) {
+    log.info(`URL unchanged (${newUrl}). Re-verifying reachability + key…`);
+  } else {
+    log.info(`${chalk.dim(currentUrl)} → ${chalk.cyan(newUrl)}`);
+  }
+
+  // 1) Reachability — never point a profile at a dead URL.
+  const spinner = ora("Checking pod health at new URL…").start();
+  const health = await checkPodHealth(newUrl);
+  if (!health.healthy) {
+    spinner.fail(`Pod not reachable at ${newUrl} — profile left unchanged.`);
+    log.dim(`Verify the domain is live first: curl -sI ${newUrl}/health`);
+    return;
+  }
+  spinner.succeed(`Pod healthy at ${newUrl}${health.version ? `  (v${health.version})` : ""}`);
+
+  // 2) Does the EXISTING key still authenticate against the (possibly new) host?
+  let apiKey = profile.config.hubApiKey;
+  let workspaceId: string | undefined;
+  const keySpinner = ora("Verifying existing API key…").start();
+  const verdict = await verifyKeyAgainstPod(newUrl, apiKey);
+
+  if (verdict === "valid") {
+    keySpinner.succeed("Existing key still valid — no recreate needed.");
+  } else if (verdict === "inconclusive") {
+    keySpinner.warn("Could not verify the key (unexpected pod response). Keeping the existing key.");
+    log.dim(`If pod calls start failing, run: synap pods reconnect ${name}`);
+  } else {
+    // rejected — the key is genuinely refused; a recreate is required.
+    keySpinner.fail("Pod rejected the existing key — it must be recreated.");
+    if (opts.yes) {
+      log.warn("Non-interactive (--yes): profile left unchanged so nothing breaks.");
+      log.dim(`Recreate the key with: synap pods reconnect ${name}`);
+      return;
+    }
+    const { recreate } = await prompts({
+      type: "confirm",
+      name: "recreate",
+      message: "Recreate the key now via browser sign-in?",
+      initial: true,
+    });
+    if (!recreate) {
+      log.warn(`URL not updated (old profile kept). Re-run when ready, or: synap pods reconnect ${name}`);
+      return;
+    }
+    const browserSpinner = ora("Opening browser to approve new credentials…").start();
+    try {
+      const result = await runBrowserAuth({
+        podUrl: newUrl,
+        integration: "cli",
+        onUrlReady: (authUrl) => {
+          browserSpinner.stop();
+          log.info(`Opening ${chalk.cyan(authUrl)}`);
+          log.dim("Sign in and click Generate & connect.");
+        },
+      });
+      apiKey = result.apiKey;
+      workspaceId = result.workspaceId;
+      log.success("New key issued.");
+    } catch (err) {
+      browserSpinner.stop();
+      log.error(err instanceof Error ? err.message : "Browser flow failed");
+      log.warn("URL not updated (old profile kept). Re-run when ready.");
+      return;
+    }
+  }
+
+  // 3) Persist in place — preserve everything except the URL (and key/workspace
+  //    if it was recreated).
+  addPodProfile(name, {
+    ...profile.config,
+    podUrl: newUrl,
+    hubApiKey: apiKey,
+    ...(workspaceId ? { workspaceId } : {}),
+    savedAt: new Date().toISOString(),
+  });
+  log.success(`Pod '${name}' updated → ${newUrl}`);
+
+  // 4) Propagate to surfaces when this pod is active, so MCP configs (Claude
+  //    Code/Desktop/Cursor) pick up the new URL. When it's not active, switching
+  //    it would be a surprise — just tell the user how to propagate.
+  if (profile.active) {
+    log.blank();
+    await podsUse(name);
+  } else {
+    log.dim(`'${name}' is not the active pod. Run 'synap pods use ${name}' to propagate the new URL to agent surfaces.`);
+  }
 }

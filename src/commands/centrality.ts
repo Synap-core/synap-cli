@@ -97,7 +97,8 @@ export async function centralityStatus(opts: CentralityOpts): Promise<void> {
       for (const t of res.top) {
         const score = chalk.cyan(t.score.toFixed(4).padStart(8));
         const title = String(t.title ?? "–").slice(0, 48).padEnd(50);
-        const id = chalk.dim(t.id.slice(0, 8));
+        // Full id — feeds straight into `synap get entity <id>`.
+        const id = chalk.dim(t.id);
         console.log(`  ${score} · ${title} ${id}`);
       }
     }

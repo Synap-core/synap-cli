@@ -453,7 +453,7 @@ export async function podAdopt(
         return;
       }
       log.info(`Adopting into ${opts.template} — proposed (under review, not live yet).`);
-      if (proposalId) log.hint(`Approve: synap proposals approve ${proposalId.slice(0, 8)}`);
+      if (proposalId) log.hint(`Approve: synap proposals approve ${proposalId}`);
       return;
     }
 

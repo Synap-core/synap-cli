@@ -1,10 +1,11 @@
 import { existsSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
-import { getActivePodConfig, getActiveWorkspaceId, getActiveProjectId, listPodProfiles, getPodOverride, getSurfaceAgentKey } from "./pod.js";
+import { getActivePodConfig, getActiveWorkspaceId, getActiveWorkspaceIdForPod, findPodNameByUrl, getActiveProjectId, listPodProfiles, getPodOverride, getSurfaceAgentKey } from "./pod.js";
 import { resolveAgentOverride } from "./agents-config.js";
 import { resolveActiveLens } from "./session-lens.js";
 import { HubRestClient } from "@synap/hub-rest-client";
 import { log } from "../utils/logger.js";
+import chalk from "chalk";
 
 /**
  * A failed Hub call, carrying the structured facts callers need to branch on.
@@ -23,6 +24,10 @@ export class HubError extends Error {
   readonly rawBody: string;
   readonly path: string;
   readonly method: string;
+  /** Origin of the pod this call actually hit — for cross-pod diagnostics. */
+  readonly podUrl?: string;
+  /** Workspace this call actually sent — for cross-pod 403 diagnostics. */
+  readonly workspaceId?: string;
 
   constructor(init: {
     message: string;
@@ -33,6 +38,8 @@ export class HubError extends Error {
     rawBody: string;
     path: string;
     method: string;
+    podUrl?: string;
+    workspaceId?: string;
   }) {
     super(init.message);
     this.name = "HubError";
@@ -43,6 +50,8 @@ export class HubError extends Error {
     this.rawBody = init.rawBody;
     this.path = init.path;
     this.method = init.method;
+    this.podUrl = init.podUrl;
+    this.workspaceId = init.workspaceId;
   }
 }
 
@@ -242,12 +251,21 @@ function readErrorBody(
     const o = parsed as Record<string, unknown>;
     const code = typeof o.code === "string" ? o.code : undefined;
     const reason = typeof o.reason === "string" ? o.reason : undefined;
+    const str = (v: unknown): string | undefined =>
+      typeof v === "string" && v ? v : undefined;
+    // Backend error contract for the Hub package/workspace routes is
+    // `{ error: <category>, detail: <the real underlying cause> }`. The specific
+    // cause lives in `detail` — surfacing only `error` throws away the one thing
+    // that makes a 500 actionable (e.g. "profile X targets unknown profile Y").
+    // Precedence: message (tRPC-shaped) → error+detail combined → error → detail.
+    const message = str(o.message);
+    const errorField = str(o.error);
+    const detailField = str(o.detail);
     const detail =
-      typeof o.message === "string" && o.message
-        ? o.message
-        : typeof o.error === "string" && o.error
-          ? o.error
-          : statusPhrase(status);
+      message ??
+      (errorField && detailField
+        ? `${errorField}: ${detailField}`
+        : errorField ?? detailField ?? statusPhrase(status));
     return { detail, code, reason, parsed };
   }
   return { detail: statusPhrase(status), parsed };
@@ -259,7 +277,8 @@ function hubError(
   path: string,
   status: number,
   rawBody: string,
-  suffix?: string
+  suffix?: string,
+  ctx?: { podUrl?: string; workspaceId?: string }
 ): HubError {
   const { detail, code, reason, parsed } = readErrorBody(status, rawBody);
   return new HubError({
@@ -271,16 +290,55 @@ function hubError(
     rawBody,
     path,
     method,
+    podUrl: ctx?.podUrl ? originOf(ctx.podUrl) : undefined,
+    workspaceId: ctx?.workspaceId,
   });
+}
+
+/** Where to send users who hit a wall. */
+const DISCORD_INVITE_URL = "https://discord.gg/xhRdQ7hG5h";
+
+/** Wrap a URL in an OSC-8 terminal hyperlink so `label` is clickable. */
+function osc8Link(url: string, label: string): string {
+  return `\x1b]8;;${url}\x1b\\${label}\x1b]8;;\x1b\\`;
+}
+
+/**
+ * Once-per-process guard for the Discord help footer. A single CLI invocation
+ * runs one command; printing the footer at most once keeps it a footer, not a
+ * per-error/per-line spam.
+ */
+let _discordHelpShown = false;
+
+/**
+ * Append a one-line "need help?" footer with a clickable Discord invite. Prints
+ * to stderr (same stream as the error it follows, so `2>/dev/null` hides both)
+ * and only once per process. The invite is an OSC-8 hyperlink on an interactive
+ * terminal, a plain URL when the stream is redirected/piped.
+ */
+export function discordHelpLine(): void {
+  if (_discordHelpShown) return;
+  _discordHelpShown = true;
+  const link = process.stderr.isTTY
+    ? osc8Link(DISCORD_INVITE_URL, DISCORD_INVITE_URL)
+    : DISCORD_INVITE_URL;
+  console.error(chalk.dim(`    Need help? Join our Discord: ${link}`));
 }
 
 /**
  * Print a failed Hub call: its humanized message plus a hint for the classes
  * where the cause is not obvious from the message alone. Lives here rather than
  * in utils/logger so the logger stays domain-agnostic and the taxonomy and its
- * presentation sit in one file.
+ * presentation sit in one file. Always closes with the one-time Discord footer.
  */
 export function renderHubError(err: unknown): void {
+  renderHubErrorBody(err);
+  // ONE central place every failed Hub command flows through — append the help
+  // footer here so it prints once per failed command (guarded), not per line.
+  discordHelpLine();
+}
+
+function renderHubErrorBody(err: unknown): void {
   // Hints use log.hint (stderr), not log.dim (stdout): a hint belongs to the
   // error it explains, and splitting one message across two streams means
   // `2>/dev/null` shows a bare hint with no error above it.
@@ -294,12 +352,47 @@ export function renderHubError(err: unknown): void {
     return;
   }
   log.error(err.message);
+  // A 500 whose body carried a specific cause (detail/message) is already in
+  // `err.message` above — do NOT then claim "internal error, not in this
+  // command": a workspace/template creation failure is often an actionable
+  // template or data problem. Only add the generic pod-fault hint when the body
+  // gave nothing better than the status phrase.
+  const hasSpecificCause =
+    !!err.rawBody && !err.message.endsWith("the pod hit an internal error");
+  // A 403/message naming a workspace: the real cause is almost always "that
+  // workspace doesn't exist or isn't accessible ON THIS POD" (a stale saved
+  // workspace id after a pod switch), not a scopes problem — name it + the
+  // exact next command instead of the generic "credentials" hint.
+  const namesWorkspace = /workspace/i.test(err.message);
   if (err.status >= 500) {
-    log.hint("The pod hit an internal error — this is a fault on the pod side, not in this command.");
+    if (!hasSpecificCause) {
+      log.hint("The pod hit an internal error — check the pod logs for the stack trace.");
+    }
+  } else if (err.status === 403 && namesWorkspace) {
+    // Name the exact workspace + pod this call used: the usual cause is a global
+    // active workspace left over from ANOTHER pod (a stale `synap use` after a
+    // pod switch) being sent to a pod it doesn't belong to.
+    if (err.workspaceId && err.podUrl) {
+      log.hint(`Sent workspace ${err.workspaceId} to ${err.podUrl}.`);
+      log.hint("That workspace likely belongs to a different pod than the one you're calling.");
+      log.hint("Fix: pass --pod <name> to target the workspace's pod, or run `synap pods use <name>` to align your active pod + workspace. See valid workspaces with `synap orient`.");
+    } else {
+      log.hint("Workspace not found or not accessible on this pod — run: synap orient   (see valid workspaces), or: synap doctor");
+    }
   } else if (err.status === 401 || err.status === 403) {
-    log.hint("The pod rejected this key's credentials or its scopes for this operation.");
+    log.hint("The pod rejected this key's credentials or its scopes for this operation. Run: synap doctor");
   } else if (err.status === 404) {
-    log.hint("The pod has no such endpoint or record — it may be running an older build.");
+    // A structured JSON body (err.body set) means THIS app answered — the
+    // endpoint just doesn't exist here (older build / wrong record). A body
+    // that failed to parse as JSON (readErrorBody's plain-text fallback — a
+    // proxy default page, an HTML error, a completely different service)
+    // means the request never reached this app at all: the classic
+    // stale/migrated-domain failure, not an old build.
+    if (err.body === undefined && err.rawBody.trim()) {
+      log.hint("This host doesn't look like a Synap pod — your saved pod URL may be stale. Run: synap doctor");
+    } else {
+      log.hint("The pod has no such endpoint or record — it may be running an older build, or the id doesn't exist. Run: synap doctor");
+    }
   }
 }
 
@@ -406,8 +499,13 @@ export async function resolveHubConfig(opts?: { podUrl?: string; apiKey?: string
       apiKey,
       userId,
       // Per-Claude-session lens wins over the global env var, so concurrent
-      // sessions can each be scoped to a different workspace.
-      workspaceId: resolveActiveLens()?.workspaceId || envWorkspace || getActiveWorkspaceId(),
+      // sessions can each be scoped to a different workspace. The global-config
+      // fallback is resolved AGAINST THIS POD (envPod) — never send a workspace
+      // that belongs to a different pod (the "Access denied to workspace" 403).
+      workspaceId:
+        resolveActiveLens()?.workspaceId ||
+        envWorkspace ||
+        getActiveWorkspaceIdForPod(findPodNameByUrl(envPod)),
       // Project is a peer lens, threaded exactly like workspaceId.
       projectId: resolveActiveLens()?.projectId || envProject || getActiveProjectId(),
       scopes: envScopes ? envScopes.split(",") : undefined,
@@ -596,7 +694,7 @@ export async function hubGet(
   );
   if (!res.ok) {
     const body = await res.text().catch(() => "");
-    throw hubError("GET", path, res.status, body);
+    throw hubError("GET", path, res.status, body, undefined, cfg);
   }
   return res.json();
 }
@@ -627,7 +725,7 @@ export async function hubPost(
   );
   if (!res.ok) {
     const bodyText = await res.text().catch(() => "");
-    throw hubError("POST", path, res.status, bodyText);
+    throw hubError("POST", path, res.status, bodyText, undefined, cfg);
   }
   return res.json();
 }
@@ -658,7 +756,7 @@ export async function hubPostMultipart(
   );
   if (!res.ok) {
     const bodyText = await res.text().catch(() => "");
-    throw hubError("POST multipart", path, res.status, bodyText);
+    throw hubError("POST multipart", path, res.status, bodyText, undefined, cfg);
   }
   return res.json();
 }
@@ -692,7 +790,7 @@ export async function hubPostMultipartRetryable(
     if (res.status !== 429) {
       if (!res.ok) {
         const bodyText = await res.text().catch(() => "");
-        throw hubError("POST multipart", path, res.status, bodyText);
+        throw hubError("POST multipart", path, res.status, bodyText, undefined, cfg);
       }
       return res.json();
     }
@@ -731,7 +829,7 @@ export async function hubPatch(path: string, body: unknown, cfg: HubConfig): Pro
   }
   if (!res.ok) {
     const bodyText = await res.text().catch(() => "");
-    throw hubError("PATCH", path, res.status, bodyText);
+    throw hubError("PATCH", path, res.status, bodyText, undefined, cfg);
   }
   return res.json();
 }
@@ -750,7 +848,7 @@ export async function hubDelete(path: string, cfg: HubConfig): Promise<unknown> 
   }
   if (!res.ok) {
     const bodyText = await res.text().catch(() => "");
-    throw hubError("DELETE", path, res.status, bodyText);
+    throw hubError("DELETE", path, res.status, bodyText, undefined, cfg);
   }
   return res.json().catch(() => ({}));
 }

@@ -153,6 +153,16 @@ pods
   });
 
 pods
+  .command("update <name> [url]")
+  .description("Change a saved pod's URL in place (verifies health + whether the key must be recreated)")
+  .option("--url <url>", "New pod URL (alternative to the positional arg)")
+  .option("--yes", "Non-interactive: skip prompts (won't recreate a rejected key)")
+  .action(async (name: string, url: string | undefined, opts: { url?: string; yes?: boolean }) => {
+    const { podsUpdate } = await import("./commands/pods.js");
+    await podsUpdate(name, url, { url: opts.url, yes: opts.yes });
+  });
+
+pods
   .command("remove <name>")
   .alias("rm")
   .description("Remove a pod profile")
@@ -176,6 +186,15 @@ program
   .action(async (opts: { json?: boolean }) => {
     const { status } = await import("./commands/status.js");
     await status({ json: opts.json });
+  });
+
+program
+  .command("doctor")
+  .description("Coherence preflight: pod host resolves, key authenticates, workspace/project exist on THIS pod — catches config drift in one call")
+  .option("--json", "Output as JSON")
+  .action(async (opts: { json?: boolean }) => {
+    const { doctor } = await import("./commands/doctor.js");
+    await doctor(opts);
   });
 
 program
@@ -325,6 +344,18 @@ mcp
   .action(async (client: string | undefined, opts: { name?: string }) => {
     const { connect } = await import("./commands/connect.js");
     await connect({ target: client, name: opts.name });
+  });
+
+mcp
+  .command("connect-claude")
+  .description("Print the claude.ai (web) OAuth connection steps — paste a URL, approve in the browser, done")
+  .option("--cp-url <url>", "Control-plane origin override (default: derived from the pod host)")
+  .option("--json", "Output as JSON")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (opts) => {
+    const { mcpConnectClaudeWeb } = await import("./commands/mcp.js");
+    await mcpConnectClaudeWeb(opts);
   });
 
 program
@@ -617,6 +648,7 @@ program
   .option("--key <ns:slug>", "Stable key for a --global runbook (derived from --type + --claim if omitted)")
   .option("--team", "Write to the first product workspace instead of the active workspace")
   .option("--workspace <id>", "Explicit workspace override")
+  .option("--project <id|name>", "Pin the capture to a project (id or name) — overrides SYNAP_PROJECT_ID / the session lens")
   .option("--yes", "Skip the y/N confirmation prompt (smart mode)")
   .option("--json", "Output as JSON")
   .action(async (text, opts) => {
@@ -658,6 +690,33 @@ program
   .action(async (inputs: string[], opts) => {
     const { importData } = await import("./commands/import.js");
     await importData(inputs, opts);
+  });
+
+// ─── upload ───────────────────────────────────────────────────────────────────
+// Store a real file (arbitrary bytes) on the pod — the door an AI/CLI needs to
+// persist an actual file, not just text. POSTs multipart to /api/hub/files,
+// which mints a `file` entity for the bytes.
+
+program
+  .command("upload <path>")
+  .description("Upload a file (≤10MB) to the pod as a file entity")
+  .option("--workspace <id>", "Workspace to store the file in")
+  .option("--attach <entityId>", "After upload, link the document to this entity (references relation)")
+  .option("--title <title>", "Title for the created document")
+  .option("--open", "Open in the Synap desktop app after upload")
+  .option("--json", "Output as JSON")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .addHelpText("after", `
+Examples:
+  synap upload ./report.pdf
+  synap upload ./logo.png --title "Brand logo" --workspace <id>
+  synap upload ./spec.pdf --attach <entityId>
+  synap upload ./report.pdf --open
+  `)
+  .action(async (path: string, opts) => {
+    const { uploadFile } = await import("./commands/upload.js");
+    await uploadFile(path, opts);
   });
 
 program
@@ -1674,6 +1733,24 @@ Examples:
     await docUpdate(documentId, opts);
   });
 
+doc
+  .command("reference <url>")
+  .description("Create an external reference document (points at a URL — no bytes stored)")
+  .requiredOption("--title <title>", "Document title")
+  .option("--workspace <id>", "Workspace to create the reference in")
+  .option("--open", "Open in the Synap desktop app after creation")
+  .option("--json", "JSON output")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .addHelpText("after", `
+Examples:
+  synap doc reference https://example.com/spec --title "Vendor spec"
+  `)
+  .action(async (url: string, opts) => {
+    const { docReference } = await import("./commands/doc.js");
+    await docReference(url, opts);
+  });
+
 // ─── cell ─────────────────────────────────────────────────────────────────────
 
 const cell = program
@@ -1880,6 +1957,7 @@ market
   .description("Install a package by slug into a project — workspaces install now; other types route you to the right surface")
   .option("--project <id>", "Optionally tag the seeded entities to a project (installs are pod-wide by default)")
   .option("--onto <workspaceId>", "Reconcile this template ONTO an existing workspace (additive) instead of creating a new one")
+  .option("--dry-run", "Preview the create path write-free — report would-create / reuse / conflicts, install nothing")
   .option("--timeout <seconds>", "How long to wait for the apply to finish (default: 120)")
   .option("--json", "Output as JSON")
   .option("--pod-url <url>", "Pod URL override")
@@ -1926,6 +2004,57 @@ market
     const opts = cmd.optsWithGlobals();
     const { marketInstalled } = await import("./commands/market.js");
     await marketInstalled(opts);
+  });
+
+// ── Authoring loop: scaffold → validate → publish → unpublish ────────────────
+
+market
+  .command("scaffold <slug>")
+  .description("Write a minimal valid <slug>.template.yaml to edit in place (refuses to overwrite)")
+  .option("--json", "Output as JSON")
+  .action(async (slug: string, _opts, cmd) => {
+    // Same parent/child `--json` collision as `market install` — see its comment.
+    const opts = cmd.optsWithGlobals();
+    const { marketScaffold } = await import("./commands/market-authoring.js");
+    await marketScaffold(slug, opts);
+  });
+
+market
+  .command("validate <file>")
+  .description("Validate a local template file against the shared template validator — fast author feedback")
+  .option("--json", "Output the validator result as JSON")
+  .action(async (file: string, _opts, cmd) => {
+    // Same parent/child `--json` collision as `market install` — see its comment.
+    const opts = cmd.optsWithGlobals();
+    const { marketValidate } = await import("./commands/market-authoring.js");
+    await marketValidate(file, opts);
+  });
+
+market
+  .command("publish [file]")
+  .description("Validate then publish a template to the marketplace (private by default) — pass a file, or --from-workspace <id>")
+  .option("--public", "Publish as PUBLIC (default is private)")
+  .option("--private", "Publish as private (the default — stated explicitly)")
+  .option("--from-workspace <id>", "Serialize a live workspace into a template and publish it (instead of a file)")
+  .option("--json", "Output as JSON")
+  .option("--pod-url <url>", "Pod URL override (for --from-workspace)")
+  .option("--api-key <key>", "API key override (for --from-workspace)")
+  .action(async (file: string | undefined, _opts, cmd) => {
+    // Same parent/child `--json` collision as `market install` — see its comment.
+    const opts = cmd.optsWithGlobals();
+    const { marketPublish } = await import("./commands/market-authoring.js");
+    await marketPublish(file, opts);
+  });
+
+market
+  .command("unpublish <slug>")
+  .description("Flip a published package back to private (owner only)")
+  .option("--json", "Output as JSON")
+  .action(async (slug: string, _opts, cmd) => {
+    // Same parent/child `--json` collision as `market install` — see its comment.
+    const opts = cmd.optsWithGlobals();
+    const { marketUnpublish } = await import("./commands/market-authoring.js");
+    await marketUnpublish(slug, opts);
   });
 
 // ─── capability ───────────────────────────────────────────────────────────────
