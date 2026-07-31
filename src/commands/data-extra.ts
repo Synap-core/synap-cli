@@ -93,7 +93,14 @@ export async function listProposals(
   try {
     const cfg = await resolveHubConfig(opts);
     const limit = parseLimit(opts.limit, 20);
-    const workspaceId = opts.workspace ?? cfg.workspaceId;
+    // Governance inbox is USER-WIDE by default — matches the hub's user floor
+    // (`GET /proposals` with no workspaceId applies userVisibleWhere across all
+    // visible workspaces + pod-wide) AND the app's review board. Defaulting to
+    // cfg.workspaceId silently scoped the inbox to the active workspace, hiding
+    // every proposal in the user's OTHER workspaces (the same "|| wsIds[0]"
+    // fallback the backend already removed, reintroduced client-side). `--workspace`
+    // still narrows.
+    const workspaceId = opts.workspace;
 
     const res = await hubGet("/proposals", {
       status: "pending",
