@@ -48,6 +48,7 @@ import { fetchProjects } from "../lib/project.js";
 import { writeGovernance } from "../lib/capture-lane.js";
 import { renderNextSteps, FLOW } from "../lib/next-steps.js";
 import { getStoredToken, isTokenLocallyExpired } from "../lib/auth.js";
+import prompts from "prompts";
 import {
   fetchPublicBrowseRows,
   fetchMyRows,
@@ -58,7 +59,7 @@ import {
   type CpMineRow,
   type TierInfo,
 } from "../lib/cp-packages.js";
-import { fetchInstalledSlugs, fetchInstalledTemplates, type InstalledTemplateInfo } from "../lib/installed.js";
+import { fetchInstalledSlugs, fetchInstalledTemplates, fetchInstalledTemplatesStrict, fetchWorkspaceAttachments, fetchWorkspaceAttachmentsStrict, verifyStampLanded, type InstalledTemplateInfo, type WorkspaceAttachment } from "../lib/installed.js";
 import { isSuite } from "../lib/suite.js";
 import { capabilityAdd } from "./capability.js";
 import { bundledTemplatesVersion } from "../lib/bundle-version.js";
@@ -325,9 +326,19 @@ function detectStampContradiction(
   ws: WorkspaceApplyResult | undefined,
   seedSummary: SeedSummary | undefined,
   remoteVersionSent: string | undefined,
-  wasUnstamped: boolean
+  wasUnstamped: boolean,
+  stampVerified: boolean | null | undefined
 ): boolean {
-  if (!remoteVersionSent || !wasUnstamped) return false;
+  if (!remoteVersionSent) return false;
+  // GROUND TRUTH wins: a post-apply re-read of the workspace's stored stamp.
+  // `true` = it landed (never warn), `false` = reached the pod and it's still
+  // missing (warn — old pod, no stamp-on-reconcile). Only fall back to the
+  // proxy below when the re-read wasn't attempted/possible (`undefined`/`null`),
+  // because the proxy false-positives once the pod DOES stamp on an unchanged
+  // (content-identical) reconcile — `outcome` still comes back `"unchanged"`.
+  if (stampVerified === true) return false;
+  if (stampVerified === false) return true;
+  if (!wasUnstamped) return false;
   return ws?.outcome === "unchanged" || (ws?.outcome === undefined && seedSummary === undefined);
 }
 
@@ -361,11 +372,11 @@ export function classifyApplyResult(
   ws: WorkspaceApplyResult | undefined,
   dependencies: ResolvedDependencyLike[] | undefined,
   seedSummary: SeedSummary | undefined,
-  ctx: { remoteVersionSent?: string; wasUnstamped: boolean }
+  ctx: { remoteVersionSent?: string; wasUnstamped: boolean; stampVerified?: boolean | null }
 ): ApplyVerdict {
   const seedFailed = hasSeedFailure(dependencies, seedSummary);
 
-  if (detectStampContradiction(ws, seedSummary, ctx.remoteVersionSent, ctx.wasUnstamped)) {
+  if (detectStampContradiction(ws, seedSummary, ctx.remoteVersionSent, ctx.wasUnstamped, ctx.stampVerified)) {
     return {
       status: "stamp-contradiction",
       warnings: [
@@ -378,8 +389,13 @@ export function classifyApplyResult(
   if (ws?.outcome === "reconciled") return { status: seedFailed ? "updated-with-failures" : "updated", warnings: [] };
   if (ws?.outcome === "unchanged") return { status: "unchanged", warnings: [] };
   if (ws?.status === "composed") {
+    // Honest: a compose-overlay has no standalone workspace — it merges INTO
+    // its base. But it IS updatable: `market update <slug>` re-sends the
+    // package, the pod re-resolves the base and re-layers the latest content
+    // (idempotent, additive). So this agrees with `market update` listing the
+    // slug as a normal updatable row — don't tell the user it "isn't updatable".
     const warnings = [
-      `${entry.name} is a compose-overlay — it rides its base workspace and isn't independently updatable; update the base workspace to update this too.`,
+      `${entry.name} is a compose-overlay — it layers onto its base workspace rather than creating its own. Pull its latest anytime with: synap market update ${entry.slug}`,
     ];
     return { status: seedFailed ? "composed-with-failures" : "composed", warnings };
   }
@@ -989,11 +1005,20 @@ export async function marketInstall(
     const ws = res.workspace as WorkspaceApplyResult | undefined;
     const dependencies = res.dependencies as ResolvedDependencyLike[] | undefined;
     const seedSummary = res.seedSummary as SeedSummary | undefined;
+    // GROUND TRUTH: re-read the workspace's actual stored stamp instead of
+    // guessing "did it stamp?" from the apply-response `outcome` (which reads
+    // "unchanged" on a content-identical reconcile even when the stamp DID
+    // land). Only worth a call when we sent a version and know the workspace.
+    let stampVerified: boolean | null | undefined;
+    if (remoteVersion && ws?.workspaceId) {
+      stampVerified = await verifyStampLanded(ws.workspaceId, remoteVersion, cfg);
+    }
     const steps = FLOW.afterMarketInstall({ slug, proposed: false, projectName });
     s?.stop();
     const verdict = classifyApplyResult(entry, ws, dependencies, seedSummary, {
       remoteVersionSent: remoteVersion,
       wasUnstamped,
+      stampVerified,
     });
     if (opts.json) {
       console.log(
@@ -1062,25 +1087,43 @@ export interface UpdateCheck extends TemplateUpdateCheck {
 }
 
 /**
- * Per-installed-slug drift check. Starts from the shared `computeTemplateUpdates`
- * (handles bundled-only / private-only slugs via `bundleVersion`), then
- * overrides `latestVersion`/`updateAvailable` with the CP row's OWN version for
- * any slug in `remoteVersionBySlug` — the merge-winner bypass this command
- * needs (see `MarketCatalog.remoteVersionBySlug`'s doc). A slug the pod never
- * version-stamped is reported `noVersionInfo: true`, never silently "outdated".
+ * Per-installed-slug drift check. SERVER-FIRST: when the pod runs the
+ * server-side TemplateHealth code (Hub `/workspaces` returns `drifted`/
+ * `latestVersion`), that verdict wins — the CLI stops re-deriving drift, so it
+ * can't disagree with the pod (or the browser, which reads the same authority).
+ *
+ * FALLBACK (older pod, `drifted === undefined`): the legacy client derivation —
+ * the shared `computeTemplateUpdates` (handles bundled-only / private-only slugs
+ * via `bundleVersion`), then override `latestVersion`/`updateAvailable` with the
+ * CP row's OWN version for any slug in `remoteVersionBySlug` (the merge-winner
+ * bypass). A slug the pod never version-stamped is `noVersionInfo: true`, never
+ * silently "outdated".
  */
 export function computeUpdates(installedTemplates: InstalledTemplateInfo[], cat: MarketCatalog): UpdateCheck[] {
-  const withVersion = installedTemplates.filter(
-    (t): t is InstalledTemplateInfo & { version: string } => !!t.version
-  );
-  const base = computeTemplateUpdates(
-    withVersion.map((t) => ({ slug: t.slug, version: t.version })),
-    cat.entries,
-    bundledTemplatesVersion()
-  );
+  // Only the fallback path needs the client-derived base — compute it for the
+  // slugs the server didn't answer for, so a fully-modern pod does no extra work.
+  const needsFallback = installedTemplates.filter((t) => t.drifted === undefined && !!t.version);
+  const base = needsFallback.length
+    ? computeTemplateUpdates(
+        needsFallback.map((t) => ({ slug: t.slug, version: t.version! })),
+        cat.entries,
+        bundledTemplatesVersion()
+      )
+    : [];
   const baseBySlug = new Map(base.map((b) => [b.slug, b]));
 
   return installedTemplates.map((t): UpdateCheck => {
+    // ── Server-side TemplateHealth wins ──
+    if (t.drifted !== undefined) {
+      return {
+        slug: t.slug,
+        installedVersion: t.version ?? "",
+        latestVersion: t.latestVersion ?? undefined,
+        updateAvailable: t.drifted,
+        noVersionInfo: !t.version,
+      };
+    }
+    // ── Client fallback (older pod) ──
     if (!t.version) {
       return {
         slug: t.slug,
@@ -1221,7 +1264,25 @@ export async function marketUpdate(
   }
 ): Promise<void> {
   const applyTimeoutMs = parseApplyTimeoutMs(opts.timeout);
-  const [installedTemplates, cat] = await Promise.all([fetchInstalledTemplates(), buildMarketCatalog()]);
+  // STRICT fetch: distinguish "pod unreachable" (transient — don't claim the
+  // pod is empty, that reads as data loss) from "genuinely nothing installed".
+  const cat = await buildMarketCatalog();
+  let installedTemplates: InstalledTemplateInfo[];
+  try {
+    installedTemplates = await fetchInstalledTemplatesStrict();
+  } catch (e) {
+    // Unreachable ≠ success — a script checking `$?` (or `&&`-chaining) must see
+    // failure, not exit 0, even though the JSON payload also carries the reason.
+    process.exitCode = 1;
+    if (opts.json) {
+      console.log(JSON.stringify({ checks: [], loggedIn: cat.loggedIn, error: "pod-unreachable" }, null, 2));
+      return;
+    }
+    log.error("Couldn't reach your pod to read what's installed — not saying it's empty.");
+    renderHubError(e);
+    log.hint("Check the pod is up / you're on the right --pod, then retry.");
+    return;
+  }
 
   if (installedTemplates.length === 0) {
     if (opts.json) {
@@ -1325,6 +1386,11 @@ export async function marketUpdate(
       );
     } else {
       log.success("Nothing to update.");
+      // `market update` only checks TEMPLATE-ATTACHED workspaces — a hand-built
+      // one (no packageSlug) can't be "behind" a template, so it's silently
+      // absent here. Point at the fuller home so "nothing to update" never reads
+      // as "nothing to do" when an unattached workspace is waiting to be linked.
+      log.hint("See every workspace's template status (incl. unattached): synap templates");
     }
     return;
   }
@@ -1398,14 +1464,15 @@ export async function marketUpdate(
  * else (locked/proposed/fetch-failed/not-in-catalog/no-workspace/unknown)
  * rolls into "failed".
  */
-function summarizeApplyResults(
+export function summarizeApplyResults(
   results: Array<{ slug: string; status: string }>
-): { updated: number; unchanged: number; withFailures: number; failed: number; timedOut: number; line: string } {
+): { updated: number; unchanged: number; withFailures: number; failed: number; timedOut: number; proposed: number; line: string } {
   let updated = 0;
   let unchanged = 0;
   let withFailures = 0;
   let timedOut = 0;
   let failed = 0;
+  let proposed = 0;
   for (const r of results) {
     switch (r.status) {
       case "installed":
@@ -1416,6 +1483,12 @@ function summarizeApplyResults(
         break;
       case "unchanged":
         unchanged++;
+        break;
+      // A governed write queued for review — SUCCESS, not a failure. Counting
+      // this as `failed` (the old `default` fall-through) was dishonest: the
+      // whole point of governance is "proposed ≠ error". It just isn't LIVE yet.
+      case "proposed":
+        proposed++;
         break;
       case "installed-with-failures":
       case "updated-with-failures":
@@ -1431,18 +1504,23 @@ function summarizeApplyResults(
     }
   }
   const parts = [`${updated} updated`, `${unchanged} already current`];
+  if (proposed > 0) parts.push(`${proposed} proposed (awaiting review)`);
   if (withFailures > 0) parts.push(`${withFailures} completed with failures`);
   if (failed > 0) parts.push(`${failed} failed`);
   if (timedOut > 0) parts.push(`${timedOut} timed out`);
   const clean = withFailures === 0 && failed === 0 && timedOut === 0;
-  const color = clean ? chalk.green : chalk.yellow;
+  // Proposed isn't a failure (never ⚠) but isn't live yet (not a bare ✓) —
+  // a distinct "→ awaiting review" marker keeps the summary honest.
+  const marker = !clean ? "⚠" : proposed > 0 ? "→" : "✓";
+  const color = !clean ? chalk.yellow : proposed > 0 ? chalk.cyan : chalk.green;
   return {
     updated,
     unchanged,
     withFailures,
     failed,
     timedOut,
-    line: color(`${clean ? "✓" : "⚠"} ${parts.join(" · ")}`),
+    proposed,
+    line: color(`${marker} ${parts.join(" · ")}`),
   };
 }
 
@@ -1462,16 +1540,24 @@ function truncateVersion(v: string): string {
 function noVersionLabel(isPrivate: boolean, loggedIn: boolean): string {
   return isPrivate && !loggedIn
     ? chalk.dim("connect to the Control Plane to check/update — run: synap login")
-    : chalk.dim("version unknown — reinstall to enable update checks");
+    : chalk.dim("version unknown — run `synap market attach <workspace>` to stamp it");
 }
 
 /**
  * Human status cell for one installed row — distinguishes hash drift (no
  * ordering, just "changed") from semver drift ("update available").
  */
-function installedStatusLabel(c: UpdateCheck, isPrivate: boolean, loggedIn: boolean): string {
+export function installedStatusLabel(c: UpdateCheck, isPrivate: boolean, loggedIn: boolean): string {
   if (c.noVersionInfo) return noVersionLabel(isPrivate, loggedIn);
-  if (!c.updateAvailable) return chalk.green("up to date");
+  if (!c.updateAvailable) {
+    // Cache-cold honesty: stamped + no drift reported, but the catalog has no
+    // version to compare against (a freshly-deployed pod before its first sync,
+    // or a private/removed slug). Don't assert a green "up to date" we never
+    // actually verified — say we couldn't check (ArgoCD's Unknown ≠ Synced).
+    if (c.latestVersion == null && c.installedVersion)
+      return chalk.dim("can't check — catalog version unknown");
+    return chalk.green("up to date");
+  }
   const installed = truncateVersion(c.installedVersion);
   const latest = c.latestVersion ? truncateVersion(c.latestVersion) : "?";
   const hashPair = isHashVersion(c.installedVersion) || isHashVersion(c.latestVersion ?? "");
@@ -2076,4 +2162,692 @@ export async function marketInstalled(opts: {
 
   if (!cat.loggedIn) log.dim("Not logged in — private template updates aren't visible. Run: synap login");
   renderNextSteps(FLOW.afterMarketInstalledCheck(rows.filter((c) => c.updateAvailable).map((c) => c.slug)));
+}
+
+// ── `synap market workspaces` — workspace-centric attachment discovery ───────
+//
+// `market installed` is PACKAGE-centric (one row per slug, deduped across
+// workspaces, with composition tree/layers) — and by construction it drops
+// workspaces that have no `packageSlug`, i.e. exactly the pre-market / hand-
+// built ones a user needs to FIND and attach. This command is the inverse: one
+// row per WORKSPACE (a user thinks in workspaces, not slugs), each labelled with
+// its template-attachment status, so an unattached "builder CRM" is visible and
+// actionable. Pure read; pairs with `market attach <workspaceId>`.
+
+type AttachmentStatus =
+  | { kind: "unattached" }
+  | { kind: "no-version"; slug: string }
+  | { kind: "attached"; slug: string; version: string; updateAvailable: boolean; latestVersion?: string };
+
+/** Classify one workspace's attachment, reusing `computeUpdates`' drift verdict for the stamped case. */
+function classifyAttachment(ws: WorkspaceAttachment, check: UpdateCheck | undefined): AttachmentStatus {
+  if (!ws.packageSlug) return { kind: "unattached" };
+  if (!ws.packageVersion || check?.noVersionInfo) return { kind: "no-version", slug: ws.packageSlug };
+  return {
+    kind: "attached",
+    slug: ws.packageSlug,
+    version: ws.packageVersion,
+    updateAvailable: check?.updateAvailable ?? false,
+    latestVersion: check?.latestVersion,
+  };
+}
+
+/** Human status cell for one workspace row — the same vocabulary as `market installed`, keyed on attachment. */
+export function attachmentStatusLabel(s: AttachmentStatus): string {
+  switch (s.kind) {
+    case "unattached":
+      return chalk.yellow("⚠ not attached to a template");
+    case "no-version":
+      return (
+        chalk.yellow("⚠ attached to ") +
+        chalk.cyan(s.slug) +
+        chalk.yellow(" · no version stamp — reattach to enable updates")
+      );
+    case "attached": {
+      if (!s.updateAvailable) {
+        // Cache-cold: stamped but the catalog has no version to compare against
+        // → show the stamp without a green "up to date" claim we never verified.
+        if (s.latestVersion == null)
+          return chalk.cyan(s.slug) + chalk.dim(` @ ${truncateVersion(s.version)} · can't check`);
+        return chalk.green("✓ ") + chalk.cyan(s.slug) + chalk.dim(` @ ${truncateVersion(s.version)}`);
+      }
+      const latest = s.latestVersion ? truncateVersion(s.latestVersion) : "?";
+      return (
+        chalk.cyan(s.slug) +
+        chalk.dim(` @ ${truncateVersion(s.version)} → ${latest}  `) +
+        chalk.yellow("update available")
+      );
+    }
+  }
+}
+
+/**
+ * Pure-read discovery surface — every workspace on the pod with its template-
+ * attachment status. Sources the linkage from the SAME Hub `GET /workspaces`
+ * call `market installed` uses (`fetchWorkspaceAttachments`), and reuses
+ * `computeUpdates` for the stamped-drift verdict. Never writes.
+ */
+export async function marketWorkspaces(opts: {
+  json?: boolean;
+  unattached?: boolean;
+}): Promise<void> {
+  const [attachments, cat] = await Promise.all([fetchWorkspaceAttachments(), buildMarketCatalog()]);
+
+  if (attachments.length === 0) {
+    if (opts.json) {
+      console.log(JSON.stringify({ workspaces: [], loggedIn: cat.loggedIn }, null, 2));
+      return;
+    }
+    log.warn("No workspaces found on this pod.");
+    log.hint("Stand one up: synap launch  ·  or install a template: synap market --list");
+    return;
+  }
+
+  // Reuse the exact drift check `market installed`/`update` use. Only the
+  // STAMPED workspaces need it; `computeUpdates` preserves input order, so the
+  // result is index-aligned with `stamped` for a clean zip-back by workspace.
+  const stamped = attachments.filter((a) => a.packageSlug);
+  const stampedChecks = computeUpdates(
+    stamped.map((a) => ({
+      slug: a.packageSlug!,
+      version: a.packageVersion ?? undefined,
+      workspaceId: a.workspaceId,
+      workspaceName: a.workspaceName,
+      latestVersion: a.latestVersion,
+      drifted: a.drifted,
+    })),
+    cat
+  );
+  const checkByWorkspace = new Map<string, UpdateCheck>();
+  stamped.forEach((a, i) => checkByWorkspace.set(a.workspaceId, stampedChecks[i]!));
+
+  let rows = attachments.map((ws) => ({
+    ws,
+    status: classifyAttachment(ws, checkByWorkspace.get(ws.workspaceId)),
+  }));
+  if (opts.unattached) {
+    rows = rows.filter((r) => r.status.kind !== "attached");
+  }
+
+  if (opts.json) {
+    console.log(
+      JSON.stringify(
+        {
+          workspaces: rows.map((r) => ({
+            id: r.ws.workspaceId,
+            name: r.ws.workspaceName,
+            domain: r.ws.domain,
+            packageSlug: r.ws.packageSlug,
+            packageVersion: r.ws.packageVersion,
+            attachment: r.status.kind,
+            ...(r.status.kind === "attached"
+              ? { updateAvailable: r.status.updateAvailable, latestVersion: r.status.latestVersion ?? null }
+              : {}),
+          })),
+          loggedIn: cat.loggedIn,
+        },
+        null,
+        2
+      )
+    );
+    return;
+  }
+
+  if (rows.length === 0) {
+    log.success("Every workspace is attached to a template.");
+    return;
+  }
+
+  log.heading(opts.unattached ? "  Workspaces needing attention" : "  Your workspaces");
+  log.blank();
+
+  const nameW = Math.max(4, ...rows.map((r) => r.ws.workspaceName.length)) + 2;
+  for (const { ws, status } of rows) {
+    const domain = ws.domain ? chalk.dim(String(ws.domain)) : chalk.dim("—");
+    console.log(
+      "    " +
+        chalk.bold(ws.workspaceName.padEnd(nameW)) +
+        chalk.dim(ws.workspaceId) +
+        "  " +
+        domain +
+        "\n      " +
+        attachmentStatusLabel(status)
+    );
+  }
+  log.blank();
+
+  const needsAttach = rows.filter((r) => r.status.kind !== "attached");
+  if (needsAttach.length > 0) {
+    log.hint(
+      `Attach a template to a workspace: synap market attach <workspaceId> [--slug <slug>]`
+    );
+    log.dim("This is how you relink a workspace that was installed before the marketplace existed.");
+  }
+  if (!cat.loggedIn) log.dim("Not logged in — private template updates aren't visible. Run: synap login");
+}
+
+// ── `synap market attach <workspaceId>` — ergonomic reattach/relink ──────────
+//
+// A friendly wrapper over `market install <slug> --onto <workspaceId>`: it
+// resolves WHICH template to reconcile onto the workspace (from `--slug`, the
+// workspace's existing `packageSlug`, or an unambiguous domain match), then
+// hands off to `marketInstall` so the reconcile + version-stamp path is shared,
+// never duplicated. `market install --onto` reconciles ADDITIVELY and stamps —
+// this command just makes it discoverable per-workspace.
+
+export async function marketAttach(
+  workspaceId: string,
+  opts: {
+    slug?: string;
+    project?: string;
+    timeout?: string;
+    json?: boolean;
+    podUrl?: string;
+    apiKey?: string;
+  }
+): Promise<void> {
+  let cfg;
+  try {
+    cfg = await resolveHubConfig(opts);
+  } catch (e) {
+    renderHubError(e);
+    process.exit(1);
+  }
+
+  const attachments = await fetchWorkspaceAttachments(cfg);
+  const ws = attachments.find((a) => a.workspaceId === workspaceId);
+  if (!ws) {
+    log.error(`No workspace "${workspaceId}" found on this pod.`);
+    log.hint("List your workspaces: synap market workspaces");
+    process.exit(1);
+  }
+
+  // Resolve the slug to reconcile. Priority: explicit --slug > the workspace's
+  // own recorded packageSlug (the reattach case) > the SHARED `suggestTemplateFor`
+  // inference (same algorithm `synap templates attach` uses — domain/name match
+  // with the generic-domain guard) so the two attach doors never disagree on the
+  // same workspace. This non-interactive door only auto-uses a STRONG (exact
+  // domain) match; a weak/none guess is never silently written — it asks for --slug.
+  let slug = opts.slug;
+  let inferredFrom: string | undefined;
+  if (!slug && ws.packageSlug) {
+    slug = ws.packageSlug;
+    inferredFrom = "the workspace's existing attachment";
+  }
+  if (!slug) {
+    const cat = await buildMarketCatalog();
+    const suggestion = suggestTemplateFor(ws, cat.entries);
+    if (suggestion && suggestion.confidence === "strong") {
+      slug = suggestion.slug;
+      inferredFrom = `its domain "${ws.domain}"`;
+    } else {
+      log.error(`Couldn't confidently infer which template to attach to "${ws.workspaceName}".`);
+      if (suggestion) log.hint(`Best guess: ${chalk.cyan(suggestion.slug)} (${suggestion.confidence}) — confirm it with --slug ${suggestion.slug}`);
+      const templates = cat.entries.filter((e) => typeOf(e) === "workspace").slice(0, 12);
+      if (templates.length > 0) {
+        log.hint("Available workspace templates:");
+        for (const e of templates) {
+          console.log("    " + chalk.cyan(e.slug.padEnd(28)) + chalk.dim(e.name));
+        }
+      }
+      log.hint(`Re-run with the one you want: synap market attach ${workspaceId} --slug <slug>`);
+      log.hint(`Or use the name-friendly door: synap templates attach "${ws.workspaceName}"`);
+      process.exit(1);
+    }
+  }
+
+  if (!opts.json && inferredFrom) {
+    log.info(`Attaching ${chalk.cyan(slug)} — inferred from ${inferredFrom}.`);
+  }
+
+  // Hand off to the SAME reconcile+stamp door `market install --onto` uses. It
+  // prints the honest "Reconciled <slug> onto <workspace>" verdict, surfaces a
+  // governed proposal's review link when the write is queued, and stamps the
+  // version — none of which we re-implement here.
+  await marketInstall(slug, {
+    onto: workspaceId,
+    project: opts.project,
+    timeout: opts.timeout,
+    json: opts.json,
+    podUrl: opts.podUrl,
+    apiKey: opts.apiKey,
+  });
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// `synap templates` — the ONE home for workspace ↔ template health
+// ══════════════════════════════════════════════════════════════════════════
+// Consolidates what was scattered: `market update` (attached + drift ONLY — so a
+// hand-built "The arch CRM" with no packageSlug was invisible, and the command
+// lied "✓ Nothing to update"), `market workspaces` (all workspaces, but a
+// separate command nobody found), and `market installed`. ONE object: a
+// workspace's TEMPLATE LINK — absent, unstamped, drifted, or current. Grouped by
+// what-to-do, most-actionable first, each row carrying its exact next command.
+// Reduces free text: resolve a workspace by NAME and SUGGEST the template, so you
+// rarely type a uuid or guess a slug. `--slug`/`--yes`/`--json` keep it scriptable.
+
+interface TemplateSuggestion {
+  slug: string;
+  name: string;
+  /** "strong" = exact domain match (safe to auto-fill on --yes); "weak" = the name looks like it (confirm first). */
+  confidence: "strong" | "weak";
+}
+
+/** Best template guess for an unattached workspace: exact domain match wins; else the name containing a template slug. Null when nothing fits — we never invent a link. */
+export function suggestTemplateFor(
+  ws: WorkspaceAttachment,
+  entries: CatalogEntry[]
+): TemplateSuggestion | null {
+  const templates = entries.filter((e) => typeOf(e) === "workspace");
+  const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, "");
+  const wsDomain = ws.domain ? norm(String(ws.domain)) : "";
+  const wsName = norm(ws.workspaceName);
+  // Generic/default domains carry NO subject signal — `personal` is the default
+  // `workspaceType` for any hand-built or system workspace (Pod Admin, "New
+  // Workspace"). Matching those to a same-named base template is a false positive
+  // on every unconfigured workspace, so we never suggest from them.
+  // `personal` is the CONFIRMED default `workspaceType` (backend schema default);
+  // `general`/`foundation` are precautionary — not observed as real subtypes, but
+  // if a base template ever used one, matching it would be the same false positive.
+  const GENERIC_DOMAINS = new Set(["personal", "general", "foundation"]);
+  // STRONG: a SPECIFIC domain IS a template slug (or that template's domain).
+  if (wsDomain && !GENERIC_DOMAINS.has(wsDomain)) {
+    for (const e of templates) {
+      if (norm(e.slug) === wsDomain || norm(e.domain ?? "") === wsDomain) {
+        return { slug: e.slug, name: e.name, confidence: "strong" };
+      }
+    }
+  }
+  // WEAK: the workspace name contains a template's slug token (≥3 chars to avoid
+  // noise), skipping the generic base templates a name would falsely brush.
+  for (const e of templates) {
+    const s = norm(e.slug);
+    if (GENERIC_DOMAINS.has(s)) continue;
+    if (s.length >= 3 && wsName.includes(s)) {
+      return { slug: e.slug, name: e.name, confidence: "weak" };
+    }
+  }
+  return null;
+}
+
+type WorkspaceResolution =
+  | { kind: "found"; ws: WorkspaceAttachment }
+  | { kind: "none" }
+  | { kind: "ambiguous"; matches: WorkspaceAttachment[] };
+
+/** Resolve a user-typed workspace reference — exact id, else exact (case-insensitive) name, else a UNIQUE substring name match. No silent pick when >1 fits. */
+export function resolveWorkspaceQuery(
+  query: string,
+  attachments: WorkspaceAttachment[]
+): WorkspaceResolution {
+  const byId = attachments.find((a) => a.workspaceId === query);
+  if (byId) return { kind: "found", ws: byId };
+  const q = query.toLowerCase().trim();
+  const exact = attachments.filter((a) => a.workspaceName.toLowerCase() === q);
+  if (exact.length === 1) return { kind: "found", ws: exact[0] };
+  if (exact.length > 1) return { kind: "ambiguous", matches: exact };
+  const partial = attachments.filter((a) =>
+    a.workspaceName.toLowerCase().includes(q)
+  );
+  if (partial.length === 1) return { kind: "found", ws: partial[0] };
+  if (partial.length > 1) return { kind: "ambiguous", matches: partial };
+  return { kind: "none" };
+}
+
+type TemplateRowGroup = "attention" | "ok" | "unlinked";
+interface TemplateRow {
+  ws: WorkspaceAttachment;
+  status: AttachmentStatus;
+  suggestion: TemplateSuggestion | null;
+  group: TemplateRowGroup;
+  /** The exact next command for this row — null for a row with no action (current, or unlinked with no confident match). */
+  action: string | null;
+}
+
+/** Sort one workspace into the action-ranked home: drifted / unstamped / (unattached-with-suggestion) → attention; current → ok; unattached-no-match → unlinked. */
+export function classifyTemplateRow(
+  ws: WorkspaceAttachment,
+  check: UpdateCheck | undefined,
+  entries: CatalogEntry[]
+): TemplateRow {
+  const status = classifyAttachment(ws, check);
+  let suggestion: TemplateSuggestion | null = null;
+  let group: TemplateRowGroup = "ok";
+  let action: string | null = null;
+  switch (status.kind) {
+    case "attached":
+      if (status.updateAvailable) {
+        group = "attention";
+        action = `synap templates update ${status.slug}`;
+      }
+      break;
+    case "no-version":
+      group = "attention";
+      action = `synap templates attach "${ws.workspaceName}"`;
+      break;
+    case "unattached":
+      suggestion = suggestTemplateFor(ws, entries);
+      if (suggestion) {
+        group = "attention";
+        action = `synap templates attach "${ws.workspaceName}"`;
+      } else {
+        group = "unlinked";
+      }
+      break;
+  }
+  return { ws, status, suggestion, group, action };
+}
+
+function templateRowToJson(r: TemplateRow) {
+  return {
+    workspaceId: r.ws.workspaceId,
+    name: r.ws.workspaceName,
+    domain: r.ws.domain,
+    status: r.status.kind,
+    slug: r.ws.packageSlug,
+    version: r.ws.packageVersion,
+    latestVersion:
+      r.status.kind === "attached" ? r.status.latestVersion ?? null : null,
+    updateAvailable: r.status.kind === "attached" ? r.status.updateAvailable : false,
+    suggestedSlug: r.suggestion?.slug ?? null,
+    action: r.action,
+  };
+}
+
+function renderTemplateRow(r: TemplateRow): void {
+  const raw = r.ws.workspaceName;
+  const name = raw.length > 34 ? raw.slice(0, 33) + "…" : raw;
+  let label = attachmentStatusLabel(r.status);
+  if (r.status.kind === "unattached" && r.suggestion) {
+    label =
+      chalk.yellow("⚠ not attached") +
+      chalk.dim(" · looks like → ") +
+      chalk.cyan(r.suggestion.slug);
+  }
+  console.log("    " + chalk.bold(name.padEnd(36)) + label);
+  if (r.action) console.log("    " + " ".repeat(36) + chalk.dim(r.action));
+}
+
+/**
+ * `synap templates` — grouped, action-ranked view of every workspace's template
+ * link. Default surfaces "Needs attention" first (drifted + unattached-with-
+ * suggestion + unstamped), then up-to-date, then unlinked. `--needs-attention`
+ * shows only the first group; `--json` for scripts. Pure read.
+ */
+export async function marketTemplates(opts: {
+  json?: boolean;
+  needsAttention?: boolean;
+  podUrl?: string;
+  apiKey?: string;
+}): Promise<void> {
+  let cfg;
+  try {
+    cfg = await resolveHubConfig(opts);
+  } catch (e) {
+    renderHubError(e);
+    process.exit(1);
+  }
+
+  const cat = await buildMarketCatalog();
+  // STRICT: this is the consolidated home — "pod unreachable" must never render
+  // as "No workspaces found · stand one up", the exact false-empty lie the
+  // strict fetchers exist to prevent.
+  let attachments: WorkspaceAttachment[];
+  try {
+    attachments = await fetchWorkspaceAttachmentsStrict(cfg);
+  } catch (e) {
+    process.exitCode = 1;
+    if (opts.json) {
+      console.log(JSON.stringify({ needsAttention: [], upToDate: [], unlinked: [], loggedIn: cat.loggedIn, error: "pod-unreachable" }, null, 2));
+      return;
+    }
+    log.error("Couldn't reach your pod to read its workspaces — not saying it's empty.");
+    renderHubError(e);
+    log.hint("Check the pod is up / you're on the right --pod, then retry.");
+    return;
+  }
+
+  if (attachments.length === 0) {
+    if (opts.json) {
+      console.log(JSON.stringify({ needsAttention: [], upToDate: [], unlinked: [], loggedIn: cat.loggedIn }, null, 2));
+      return;
+    }
+    log.warn("No workspaces found on this pod.");
+    log.hint("Stand one up: synap launch  ·  browse templates: synap market --list");
+    return;
+  }
+
+  // Drift for the stamped rows via the server-first `computeUpdates`.
+  const stamped = attachments.filter((a) => a.packageSlug);
+  const checks = computeUpdates(
+    stamped.map((a) => ({
+      slug: a.packageSlug!,
+      version: a.packageVersion ?? undefined,
+      workspaceId: a.workspaceId,
+      workspaceName: a.workspaceName,
+      latestVersion: a.latestVersion,
+      drifted: a.drifted,
+    })),
+    cat
+  );
+  const checkByWs = new Map<string, UpdateCheck>();
+  stamped.forEach((a, i) => checkByWs.set(a.workspaceId, checks[i]!));
+
+  const rows = attachments.map((ws) =>
+    classifyTemplateRow(ws, checkByWs.get(ws.workspaceId), cat.entries)
+  );
+  const attention = rows.filter((r) => r.group === "attention");
+  const ok = rows.filter((r) => r.group === "ok");
+  const unlinked = rows.filter((r) => r.group === "unlinked");
+
+  if (opts.json) {
+    console.log(
+      JSON.stringify(
+        {
+          needsAttention: attention.map(templateRowToJson),
+          upToDate: ok.map(templateRowToJson),
+          unlinked: unlinked.map(templateRowToJson),
+          loggedIn: cat.loggedIn,
+        },
+        null,
+        2
+      )
+    );
+    return;
+  }
+
+  // Band — the one-line summary, most-actionable count first.
+  log.blank();
+  const bandParts: string[] = [];
+  if (attention.length) bandParts.push(chalk.yellow(`${attention.length} need attention`));
+  bandParts.push(chalk.green(`${ok.length} up to date`));
+  if (unlinked.length) bandParts.push(chalk.dim(`${unlinked.length} without a template`));
+  console.log("  " + bandParts.join(chalk.dim(" · ")));
+  log.blank();
+
+  if (attention.length) {
+    log.heading("  Needs attention");
+    for (const r of attention) renderTemplateRow(r);
+    log.blank();
+  } else {
+    log.success("  Everything attached is up to date.");
+    log.blank();
+  }
+
+  if (!opts.needsAttention) {
+    if (ok.length) {
+      console.log(chalk.dim("  Up to date"));
+      for (const r of ok) renderTemplateRow(r);
+      log.blank();
+    }
+    if (unlinked.length) {
+      console.log(chalk.dim("  No template (attach one if it should have it)"));
+      for (const r of unlinked) renderTemplateRow(r);
+      log.blank();
+    }
+  }
+
+  // Footer — the one-glance "what can I do from here". Only surfaces verbs that
+  // actually apply to the current state, so it's never a menu of dead options.
+  const driftedCount = attention.filter(
+    (r) => r.status.kind === "attached" && r.status.updateAvailable
+  ).length;
+  const attachableCount = attention.filter(
+    (r) => r.status.kind !== "attached"
+  ).length;
+  if (driftedCount > 0 || attachableCount > 0) {
+    log.blank();
+    if (driftedCount > 0)
+      log.hint(`Update all ${driftedCount} drifted: synap templates update all`);
+    if (attachableCount > 0)
+      log.hint(`Connect a workspace: synap templates attach "<name>"`);
+  }
+
+  if (!cat.loggedIn)
+    log.dim("Not logged in — private template updates aren't visible. Run: synap login");
+}
+
+/**
+ * `synap templates attach <workspace>` — the ONE natural connect command. Takes a
+ * workspace NAME (or id), suggests the template, confirms once. `--slug` forces a
+ * specific template; `--yes` accepts a strong suggestion non-interactively.
+ * Hands the actual reconcile+stamp to the same door `market install --onto` uses.
+ */
+export async function templatesAttach(
+  query: string,
+  opts: {
+    slug?: string;
+    yes?: boolean;
+    project?: string;
+    timeout?: string;
+    json?: boolean;
+    podUrl?: string;
+    apiKey?: string;
+  }
+): Promise<void> {
+  let cfg;
+  try {
+    cfg = await resolveHubConfig(opts);
+  } catch (e) {
+    renderHubError(e);
+    process.exit(1);
+  }
+  const attachments = await fetchWorkspaceAttachments(cfg);
+  const res = resolveWorkspaceQuery(query, attachments);
+
+  if (res.kind === "none") {
+    if (opts.json) {
+      console.log(JSON.stringify({ error: "workspace-not-found", query }, null, 2));
+      process.exitCode = 1;
+      return;
+    }
+    log.error(`No workspace matching "${query}" on this pod.`);
+    log.hint("See them all: synap templates");
+    process.exit(1);
+  }
+
+  let ws: WorkspaceAttachment;
+  if (res.kind === "ambiguous") {
+    const nonInteractive = opts.json || opts.yes || !process.stdout.isTTY;
+    if (nonInteractive) {
+      if (opts.json) {
+        console.log(JSON.stringify({ error: "ambiguous-workspace", query, matches: res.matches.map((m) => ({ workspaceId: m.workspaceId, name: m.workspaceName })) }, null, 2));
+        process.exitCode = 1;
+        return;
+      }
+      log.error(`"${query}" matches ${res.matches.length} workspaces — be more specific:`);
+      for (const m of res.matches) {
+        console.log("    " + chalk.bold(m.workspaceName) + chalk.dim(`  ${m.workspaceId}`));
+      }
+      process.exit(1);
+    }
+    const answer = await prompts({
+      type: "select",
+      name: "workspaceId",
+      message: `"${query}" matches several — which one?`,
+      choices: res.matches.map((m) => ({ title: m.workspaceName, value: m.workspaceId })),
+    });
+    if (!answer.workspaceId) {
+      log.warn("Cancelled.");
+      return;
+    }
+    ws = res.matches.find((m) => m.workspaceId === answer.workspaceId)!;
+  } else {
+    ws = res.ws;
+  }
+
+  const cat = await buildMarketCatalog();
+  let slug = opts.slug;
+  let note: string | undefined;
+
+  if (!slug && ws.packageSlug) {
+    slug = ws.packageSlug;
+    note = "its existing attachment";
+  }
+  if (!slug) {
+    const suggestion = suggestTemplateFor(ws, cat.entries);
+    if (suggestion) {
+      if (opts.yes) {
+        // Script path: --yes accepts the suggestion (any confidence) — the ONLY
+        // way a suggestion attaches without an interactive confirm.
+        slug = suggestion.slug;
+        note = `it looks like a ${suggestion.slug} workspace`;
+      } else if (process.stdout.isTTY && !opts.json) {
+        // Interactive: NEVER silent-attach — always confirm (a strong match just
+        // defaults the prompt to yes). Attaching reconciles a template onto a
+        // real workspace; that write must be consented to, not inferred.
+        const answer = await prompts({
+          type: "confirm",
+          name: "ok",
+          message: `"${ws.workspaceName}" looks like the ${chalk.cyan(suggestion.slug)} template (${suggestion.confidence} match). Attach it?`,
+          initial: suggestion.confidence === "strong",
+        });
+        if (!answer.ok) {
+          log.warn(`Cancelled. Pick another: synap templates attach "${ws.workspaceName}" --slug <slug>`);
+          return;
+        }
+        slug = suggestion.slug;
+      } else {
+        // Non-interactive without --yes: don't write on a guess. Surface the
+        // suggestion + how to accept it, and fail (so a script doesn't proceed
+        // thinking it attached).
+        if (opts.json) {
+          console.log(JSON.stringify({ error: "suggestion-needs-confirmation", workspaceId: ws.workspaceId, suggestedSlug: suggestion.slug, confidence: suggestion.confidence, hint: "re-run with --yes to accept, or --slug <slug>" }, null, 2));
+        } else {
+          log.warn(`"${ws.workspaceName}" looks like the ${chalk.cyan(suggestion.slug)} template (${suggestion.confidence}). Not attaching without confirmation.`);
+          log.hint(`Accept it: synap templates attach "${ws.workspaceName}" --yes   ·   or pick: --slug <slug>`);
+        }
+        process.exitCode = 1;
+        return;
+      }
+    }
+  }
+  if (!slug) {
+    if (opts.json) {
+      console.log(JSON.stringify({ error: "no-template-match", workspaceId: ws.workspaceId, name: ws.workspaceName }, null, 2));
+      process.exitCode = 1;
+      return;
+    }
+    log.error(`Couldn't tell which template fits "${ws.workspaceName}".`);
+    const templates = cat.entries.filter((e) => typeOf(e) === "workspace").slice(0, 15);
+    if (templates.length > 0) {
+      log.hint("Available templates:");
+      for (const e of templates) {
+        console.log("    " + chalk.cyan(e.slug.padEnd(28)) + chalk.dim(e.name));
+      }
+    }
+    log.hint(`Re-run with: synap templates attach "${ws.workspaceName}" --slug <slug>`);
+    process.exit(1);
+  }
+
+  if (!opts.json && note) log.info(`Attaching ${chalk.cyan(slug)} — ${note}.`);
+
+  await marketInstall(slug, {
+    onto: ws.workspaceId,
+    project: opts.project,
+    timeout: opts.timeout,
+    json: opts.json,
+    podUrl: opts.podUrl,
+    apiKey: opts.apiKey,
+  });
 }

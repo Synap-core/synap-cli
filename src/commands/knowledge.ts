@@ -31,6 +31,7 @@ import {
 } from "../lib/hub-client.js";
 import { unwrapList } from "../lib/unwrapList.js";
 import { getAgentWorkspaceRouting } from "../lib/pod.js";
+import { resolvePodWide } from "../lib/pod-wide.js";
 import {
   laneFromSource,
   resolveWorkspaceName,
@@ -129,7 +130,9 @@ export interface CaptureOpts {
    * a domain `knowledge` entity in the active workspace.
    */
   global?: boolean;
-  /** Optional stable key (namespace:slug) for a --global runbook; derived if absent. */
+  /** Canonical spelling of the same opt-in (`--pod-wide`); `global` is the alias. */
+  podWide?: boolean;
+  /** Optional stable key (namespace:slug) for a --pod-wide runbook; derived if absent. */
   key?: string;
   json?: boolean;
   /** Skip the y/N confirmation prompt (smart mode only) */
@@ -625,7 +628,8 @@ export async function captureKnowledge(opts: CaptureOpts): Promise<void> {
     const userId = await resolveUserId(cfg);
 
     // GLOBAL lane: pod-wide procedural runbook → knowledge_keys.
-    if (opts.global) {
+    // Canonical spelling is `--pod-wide`; `--global` is the retained alias.
+    if (resolvePodWide(opts)) {
       await captureGlobalRunbook(opts, cfg, userId);
       return;
     }

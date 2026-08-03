@@ -96,6 +96,8 @@ export interface PackageDefinitionLike {
   description?: string;
   profiles?: unknown[];
   views?: unknown[];
+  /** Cell definitions — only meaningful for a standalone `category: "cell"` package (see `lib/kind-package.ts`). */
+  cells?: unknown[];
   entityLinks?: unknown[];
   onboarding?: unknown;
   dependencies?: unknown[];

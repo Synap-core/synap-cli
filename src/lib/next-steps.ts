@@ -81,6 +81,15 @@ export const FLOW = {
     ];
   },
 
+  /** After pinning a workspace as the active lens (peer of afterProjectUse). */
+  afterWorkspaceUse(name: string): NextStep[] {
+    return [
+      { command: "synap orient", why: `see what's in ${name}` },
+      { command: "synap workspace list", why: "switch to another operational domain" },
+      { command: "synap project use <ref>", why: "compose the cross-cutting project lens on top" },
+    ];
+  },
+
   /** After listing projects (or after orient). */
   afterProjectList(): NextStep[] {
     return [

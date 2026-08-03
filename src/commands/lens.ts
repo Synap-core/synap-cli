@@ -10,7 +10,6 @@
 import chalk from "chalk";
 import { resolveHubConfig, hubGet, renderHubError } from "../lib/hub-client.js";
 import { getClaudeSessionId, writeLens, clearLensField, resolveActiveLens } from "../lib/session-lens.js";
-import { describeLens } from "../lib/describe-lens.js";
 import {
   setActiveProjectId,
   clearActiveProjectId,
@@ -59,9 +58,18 @@ function requireClaudeSession(): string {
  * tier as `synap use`. Composes with a Claude session: when one is active, the
  * session lens is ALSO updated so `resolveActiveLens()` reflects it immediately.
  * `--session`: ephemeral — scopes only this Claude Code session. Cross-pod refs
- * are REFUSED there: the session lens has no pod field.
+ * are REFUSED there: `--session` never switches the active pod, so the pin
+ * would name a project the session can't reach. Every write stamps the lens's
+ * `podUrl` so a later `synap pods use` can't leave it pointing at a foreign id.
  */
-export async function useProject(ref: string, opts: BaseOpts & { session?: boolean }): Promise<void> {
+export async function useProject(
+  ref: string,
+  opts: BaseOpts & { session?: boolean; global?: boolean }
+): Promise<void> {
+  if (opts.session && opts.global) {
+    log.error("--session and --global are opposite scopes — pass at most one.");
+    process.exit(1);
+  }
   const resolution = await resolveProjectRef(ref);
 
   switch (resolution.kind) {
@@ -110,25 +118,100 @@ export async function useProject(ref: string, opts: BaseOpts & { session?: boole
   }
 }
 
-/** uuid path — today's behavior exactly: pin against the active pod. */
-async function useProjectOnActivePod(projectId: string, opts: BaseOpts & { session?: boolean }): Promise<void> {
-  let name = projectId;
+/**
+ * Did the pod actually ANSWER with a project list? `unwrapList` flattens both
+ * "empty list" and "shape I don't recognise" to `[]`, and the two mean opposite
+ * things here: an empty list is a definitive "no such project on this pod",
+ * an unrecognised body proves nothing. Never infer pod state from the shape of
+ * a response you couldn't parse.
+ */
+function isProjectListEnvelope(res: unknown): boolean {
+  if (Array.isArray(res)) return true;
+  if (!res || typeof res !== "object") return false;
+  const obj = res as Record<string, unknown>;
+  return Array.isArray(obj.data) || Array.isArray(obj.projects);
+}
+
+export type ProjectCheck =
+  | { kind: "found"; name: string }
+  /** The pod answered a list, and this project is not in it. */
+  | { kind: "absent" }
+  /** We never got a parseable answer — the pin is unvalidated, not disproven. */
+  | { kind: "inconclusive"; detail: string };
+
+/**
+ * Classify what a pod's GET /projects body says about `projectId` — PURE, so
+ * the fail-open/fail-closed rule is unit-testable.
+ *
+ * Deployed pods return a BARE ARRAY from GET /projects (and may ignore `ids`),
+ * so read it through `unwrapList` exactly like `fetchProjects` and the
+ * cross-pod path do — matching on `res.projects` alone would call every
+ * project absent on those pods.
+ */
+export function classifyProjectLookup(res: unknown, projectId: string): ProjectCheck {
+  if (!isProjectListEnvelope(res)) {
+    return { kind: "inconclusive", detail: "the pod returned an unrecognised /projects response" };
+  }
+  const match = unwrapList<{ id: string; name?: string }>(res, ["projects"]).find((p) => p.id === projectId);
+  return match ? { kind: "found", name: String(match.name ?? projectId) } : { kind: "absent" };
+}
+
+/** Ask the pod whether `projectId` exists. Transport failure → inconclusive. */
+async function checkProjectOnPod(
+  projectId: string,
+  cfg: Awaited<ReturnType<typeof resolveHubConfig>>
+): Promise<ProjectCheck> {
   try {
-    const cfg = await resolveHubConfig(opts);
-    const res = (await hubGet(`/projects?ids=${encodeURIComponent(projectId)}`, {}, cfg)) as {
-      projects?: Array<{ id: string; name: string }>;
-    };
-    const match = res?.projects?.find((p) => p.id === projectId);
-    if (match) name = match.name;
-  } catch {
-    /* validation is best-effort — accept the id regardless */
+    const res = await hubGet(`/projects?ids=${encodeURIComponent(projectId)}`, {}, cfg);
+    return classifyProjectLookup(res, projectId);
+  } catch (e) {
+    return { kind: "inconclusive", detail: (e as Error).message };
+  }
+}
+
+/** uuid path — pin against the active pod, after asking the pod if it exists. */
+async function useProjectOnActivePod(
+  projectId: string,
+  opts: BaseOpts & { session?: boolean; global?: boolean }
+): Promise<void> {
+  let name = projectId;
+  let podUrl: string | undefined;
+  let unvalidated: string | undefined;
+
+  let cfg: Awaited<ReturnType<typeof resolveHubConfig>> | undefined;
+  try {
+    cfg = await resolveHubConfig(opts);
+    podUrl = cfg.podUrl;
+  } catch (e) {
+    unvalidated = (e as Error).message;
+  }
+
+  if (cfg) {
+    const check = await checkProjectOnPod(projectId, cfg);
+    if (check.kind === "found") {
+      name = check.name;
+    } else if (check.kind === "absent") {
+      // The pod REACHED and ANSWERED: this id is not a project here. Pinning it
+      // would silently mis-scope every subsequent call — fail instead.
+      log.error(`Project ${projectId} does not exist on ${cfg.podUrl}.`);
+      log.hint("List what's there: synap project list — or switch pods: synap pods use <name>");
+      process.exit(1);
+    } else {
+      unvalidated = check.detail;
+    }
+  }
+
+  // Unreachable pod → best-effort accept (offline pinning stays possible), but
+  // SAY SO rather than pretending the id was validated.
+  if (unvalidated) {
+    log.warn(`could not verify project ${projectId} against the pod (${unvalidated}) — pinning it unvalidated.`);
   }
 
   const steps = FLOW.afterProjectUse(name);
 
   if (opts.session) {
     const session = requireClaudeSession();
-    writeLens(session, { projectId });
+    writeLens(session, { projectId, podUrl });
     if (opts.json) {
       console.log(JSON.stringify({ projectId, name, scope: "session", nextSteps: steps }, null, 2));
       return;
@@ -139,21 +222,35 @@ async function useProjectOnActivePod(projectId: string, opts: BaseOpts & { sessi
   }
 
   // Default: mirror `synap use <workspace>` EXACTLY — inside a Claude Code
-  // session, scope to THIS session's lens (concurrent sessions stay independent);
-  // otherwise set the durable global default. `--session` (above) forces
-  // session-scope and errors when there's no session. This keeps project and
-  // workspace symmetric so a pin doesn't unexpectedly leak pod-wide from a session.
-  const session = getClaudeSessionId();
+  // session, scope to THIS session's lens (concurrent sessions stay
+  // independent); otherwise the per-DIRECTORY lens, which is the ratified
+  // durable default for a working tree. `--global` opts back into the
+  // machine-wide config; `--session` (above) forces session-scope and errors
+  // when there's no session. Project and workspace stay symmetric so a pin
+  // doesn't unexpectedly leak pod-wide from a session.
+  const session = opts.global ? undefined : getClaudeSessionId();
+  let scope: "session" | "directory" | "global";
+  let where: string | undefined;
   if (session) {
-    writeLens(session, { projectId });
-  } else {
+    writeLens(session, { projectId, podUrl });
+    scope = "session";
+  } else if (opts.global) {
     setActiveProjectId(projectId);
+    scope = "global";
+  } else {
+    const { writeDirectoryLens } = await import("../lib/directory-lens.js");
+    const written = writeDirectoryLens({ projectId, ...(podUrl ? { podUrl } : {}) });
+    scope = "directory";
+    where = written.file;
   }
   if (opts.json) {
-    console.log(JSON.stringify({ projectId, name, scope: session ? "session" : "global", nextSteps: steps }, null, 2));
+    console.log(JSON.stringify({ projectId, name, scope, ...(where ? { lensFile: where } : {}), nextSteps: steps }, null, 2));
     return;
   }
-  log.success(`Project focus: ${chalk.bold(name)} ${chalk.dim(session ? "(this session)" : "(persisted)")}`);
+  const scopeNote =
+    scope === "session" ? "(this session)" : scope === "global" ? "(global default)" : "(this directory)";
+  log.success(`Project focus: ${chalk.bold(name)} ${chalk.dim(scopeNote)}`);
+  if (where) log.dim(`  ${where}`);
   renderNextSteps(steps);
 }
 
@@ -180,7 +277,7 @@ async function useCrossPodProject(
       process.exit(1);
     }
     const session = requireClaudeSession();
-    writeLens(session, { projectId: project.projectId });
+    writeLens(session, { projectId: project.projectId, podUrl: project.podUrl });
     const steps = FLOW.afterProjectUse(project.name);
     if (opts.json) {
       console.log(JSON.stringify({ projectId: project.projectId, name: project.name, scope: "session", nextSteps: steps }, null, 2));
@@ -240,7 +337,7 @@ async function useCrossPodProject(
   if (switched) setActivePod(target.name);
   setActiveProjectBinding({ projectId: project.projectId, podName: target.name });
   const session = getClaudeSessionId();
-  if (session) writeLens(session, { projectId: project.projectId });
+  if (session) writeLens(session, { projectId: project.projectId, podUrl: target.config.podUrl });
 
   // Env pinning beats the config switch in resolveHubConfig — warn loudly.
   const envPinned = Boolean(process.env.SYNAP_POD_URL && process.env.SYNAP_HUB_API_KEY);
@@ -315,35 +412,105 @@ export async function clearProject(opts: BaseOpts & { session?: boolean }): Prom
     return;
   }
 
+  // Clear EVERY rung the CLI can write — global config, session lens, and the
+  // directory lens `project use` now writes by default. Leaving that last rung
+  // standing would report success while the scope survived.
   clearActiveProjectId();
   const session = getClaudeSessionId();
   if (session) clearLensField(session, "projectId");
+  const { clearDirectoryLensField } = await import("../lib/directory-lens.js");
+  const clearedFile = clearDirectoryLensField("projectId");
   if (opts.json) {
-    console.log(JSON.stringify({ cleared: "projectId", scope: "global" }));
+    console.log(JSON.stringify({ cleared: "projectId", scope: "global", ...(clearedFile ? { lensFile: clearedFile } : {}) }));
     return;
   }
   log.success("Project focus cleared");
+  if (clearedFile) log.dim(`  also cleared in ${clearedFile}`);
 }
 
+/**
+ * `synap lens` — what am I scoped to, and WHICH rung decided that.
+ *
+ * It no longer bails out with "Not in a Claude Code session": since the
+ * per-directory lens became the durable default, a session is one rung of
+ * several and its absence says nothing about whether a scope is in force.
+ * Every bound field is printed with its origin ("directory lens:
+ * /path/.synap/lens.json") because a silently-resolved scope is precisely what
+ * makes a later 403 unexplainable.
+ */
 export async function showLens(opts: BaseOpts): Promise<void> {
   const session = getClaudeSessionId();
-  const lens = resolveActiveLens();
+  const { resolveLensProvenance } = await import("../lib/describe-lens.js");
+  const { resolveDirectoryLensForPod, findDirectoryLens } = await import("../lib/directory-lens.js");
+  const { getActiveWorkspaceId } = await import("../lib/pod.js");
+
+  // Which pod are we resolving against? Needed to pod-qualify both lenses the
+  // same way `resolveHubConfig` does. An unreachable/unconfigured pod is not
+  // fatal — `lensMatchesPod` treats an unknown target pod as matching.
+  let podUrl: string | undefined;
+  try {
+    podUrl = (await resolveHubConfig(opts)).podUrl;
+  } catch {
+    /* not configured — provenance still renders */
+  }
+
+  const { resolveActiveLensForPod } = await import("../lib/session-lens.js");
+  const sessionLens = resolveActiveLensForPod(podUrl);
+  const dir = resolveDirectoryLensForPod(podUrl);
+  // A lens that EXISTS but belongs to another pod is the single most confusing
+  // state (`synap pods use` leaves it behind), so name it rather than silently
+  // skipping the rung.
+  const ignoredDir = !dir ? findDirectoryLens() : null;
+
+  // Highest precedence first — same order as the ladder in hub-client.ts.
+  const provenance = resolveLensProvenance([
+    { source: "session", detail: session ? session.slice(0, 8) : undefined, ...(sessionLens ?? {}) },
+    { source: "directory", detail: dir?.file, ...(dir?.lens ?? {}) },
+    {
+      source: "env",
+      detail: "SYNAP_WORKSPACE_ID",
+      workspaceId: process.env.SYNAP_WORKSPACE_ID,
+      projectId: process.env.SYNAP_PROJECT_ID,
+    },
+    { source: "global", detail: "~/.synap/config.json", workspaceId: getActiveWorkspaceId(), projectId: getActiveProjectId() },
+  ]);
+
   if (opts.json) {
-    console.log(JSON.stringify({ session, lens }, null, 2));
+    console.log(
+      JSON.stringify(
+        {
+          session,
+          podUrl,
+          lens: sessionLens,
+          directoryLens: dir ? { file: dir.file, lens: dir.lens } : null,
+          ignoredDirectoryLens: ignoredDir ? { file: ignoredDir.file, podUrl: ignoredDir.lens.podUrl } : null,
+          resolved: provenance,
+        },
+        null,
+        2
+      )
+    );
     return;
   }
-  if (!session) {
-    log.dim("Not in a Claude Code session.");
-    return;
+
+  console.log(chalk.bold("Lens"), session ? chalk.dim(`session ${session.slice(0, 8)}`) : chalk.dim("(no Claude session)"));
+  const rows: Array<[string, { id: string; origin: string } | undefined]> = [
+    ["Workspace", provenance.workspace],
+    ["Project", provenance.project],
+    ["Session", provenance.session],
+  ];
+  for (const [label, field] of rows) {
+    const pad = " ".repeat(Math.max(1, 10 - label.length));
+    if (!field) {
+      console.log(`  ${label}:${pad}${chalk.dim(label === "Workspace" ? "— (pod-wide)" : "— none")}`);
+      continue;
+    }
+    console.log(`  ${label}:${pad}${chalk.white(field.id)}  ${chalk.dim(`(${field.origin})`)}`);
   }
-  const described = describeLens({
-    workspace: lens?.workspaceId ? { id: lens.workspaceId } : undefined,
-    project: lens?.projectId ? { id: lens.projectId } : undefined,
-    session: lens?.focusSessionId ? { id: lens.focusSessionId } : undefined,
-  });
-  console.log(chalk.bold("Session lens"), chalk.dim(session.slice(0, 8)));
-  for (const { label, value, bound } of described.lines) {
-    console.log(`  ${label}:${" ".repeat(Math.max(1, 10 - label.length))}${bound ? chalk.white(value) : chalk.dim(value)}`);
+  if (ignoredDir) {
+    log.warn(
+      `ignoring ${ignoredDir.file} — it is stamped for ${ignoredDir.lens.podUrl ?? "another pod"}, not ${podUrl ?? "the active pod"}.`
+    );
   }
 }
 

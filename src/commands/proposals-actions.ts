@@ -2,6 +2,17 @@ import chalk from "chalk";
 import { log } from "../utils/logger.js";
 import { resolveHubConfig, hubPost, renderHubError } from "../lib/hub-client.js";
 import { requireFullId } from "../lib/id.js";
+import {
+  classifyActiveCredential,
+  isAgentReviewRejection,
+  renderCannotReview,
+} from "../lib/credential-class.js";
+import {
+  resolveReviewConfig,
+  reviewGuard,
+  terminalIo,
+  announceReviewCredential,
+} from "../lib/review-credential.js";
 import { type BaseOpts } from "./data.js";
 
 /** The bits of a capability.run proposal's post-execution `data` this command reads. */
@@ -57,8 +68,44 @@ export async function approveProposal(
   opts: BaseOpts & { reason?: string }
 ): Promise<void> {
   requireFullId(id, "proposal", chalk, log);
+
+  // ── Credential: the HUMAN key on disk, NOT the session's ambient key ───────
+  // Resolved through `resolveReviewConfig`, a door that never consults
+  // `$SYNAP_HUB_API_KEY`, `--api-key`, or `resolveHubConfig`'s ladder — in an
+  // agent session that ambient key IS the agent's. See review-credential.ts for
+  // the honest scope of this control (a guardrail against accident, not a
+  // security boundary).
+  const cred = resolveReviewConfig({ podUrl: opts.podUrl });
+  if (cred.kind === "absent") {
+    // No human key configured → the existing browser handoff, not an error.
+    // Approval is still possible; it just happens where the human already is.
+    log.info(`Approval is human review, and ${cred.reason}.`);
+    renderCannotReview(id, await resolveHubConfig(opts), "approve");
+    process.exit(1);
+    return;
+  }
+  const cfg = cred.config;
+
+  announceReviewCredential(cred);
+
+  const guard = await reviewGuard(id, cfg.podUrl, terminalIo());
+  if (!guard.ok) {
+    process.exit(1);
+    return;
+  }
+
   try {
-    const cfg = await resolveHubConfig(opts);
+    // PRE-FLIGHT: an agent credential can NEVER approve — the pod hard-rejects
+    // it (`rejectAgentReviewer`, _shared.ts:144-161). Still checked, because the
+    // profile key on disk is not GUARANTEED to be a human key (an agent-only
+    // install saves one too). Fail before the mutation attempt and point at the
+    // door that works. `unknown` deliberately PROCEEDS so a key we can't
+    // classify is never blocked locally — the 403 translation below is the
+    // authoritative backstop.
+    if ((await classifyActiveCredential(cfg)) === "agent") {
+      renderCannotReview(id, cfg, "approve");
+      process.exit(1);
+    }
 
     const res = await hubPost(
       `/proposals/${id}/approve`,
@@ -75,6 +122,13 @@ export async function approveProposal(
     if (opts.reason) log.dim(`  reason: ${opts.reason}`);
     printOutcome(res.proposal as Record<string, unknown> | undefined);
   } catch (e) {
+    // POST-HOC: the pre-flight classifier is a proxy (see credential-class.ts);
+    // the server's 403 is the truth. Translate it into the same explanatory
+    // message rather than dumping a raw "(HTTP 403)".
+    if (isAgentReviewRejection(e)) {
+      renderCannotReview(id, cfg, "approve");
+      process.exit(1);
+    }
     renderHubError(e);
     process.exit(1);
   }

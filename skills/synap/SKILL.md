@@ -187,13 +187,13 @@ Ask yourself: _who does this knowledge serve?_ **There is no private AI scratchp
 
 ### Data layers — the graph itself
 
-| Layer         | What it is                                     | When to use                                              |
-| ------------- | ---------------------------------------------- | -------------------------------------------------------- |
-| **Entities**  | Typed structured nodes (task, person, …)       | Anything worth filtering, sorting, or linking            |
-| **Relations** | Typed edges between entities                   | Making the graph traversable                             |
-| **Documents** | Long-form markdown attached to an entity       | Meeting notes, research writeups, articles               |
-| **Threads**   | Channel conversations, optional entity context | Posting to the user's personal AI channel                |
-| **Proposals** | Writes queued for human approval               | Governance for some mutations (not an error — see below) |
+| Layer         | What it is                                                                                                                                       | When to use                                                                                                  |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------ |
+| **Entities**  | Typed structured nodes (task, person, …)                                                                                                         | Anything worth filtering, sorting, or linking                                                                |
+| **Relations** | Typed edges between entities                                                                                                                     | Making the graph traversable                                                                                 |
+| **Documents** | Long-form versioned body attached to an entity — auto-materialized from an entity's `content`, or created standalone via `synap_create_document` | Meeting notes, research writeups, articles — **never** a `file`/`document`-kind entity for text you authored |
+| **Threads**   | Channel conversations, optional entity context                                                                                                   | Posting to the user's personal AI channel                                                                    |
+| **Proposals** | Writes queued for human approval                                                                                                                 | Governance for some mutations (not an error — see below)                                                     |
 
 ### Key profiles for AI use
 
@@ -830,7 +830,13 @@ fabricate, never silent give-up. Provider 200-with-error-body: always check
 
 ## Core writes
 
-### Create an entity (schema-first, complete intent)
+**Two write doors, one gradient.** `create_entity` is for exactly ONE
+fully-structured, typed entity you already have. For anything unstructured,
+several entities, or a graph — or **when in doubt** — use the capture door
+(`synap_capture`, see `capture.md`): precision comes from sending more structure
+in the SAME call, never from picking a different tool or a second commit step.
+
+### Create an entity (one exact typed entity)
 
 Before this call, use `/discover?userId=…&profileSlugs=<kind>` to read the
 real fields, required/default values, constraints and reference targets. Omit
@@ -852,15 +858,27 @@ POST /api/hub/entities
 ```
 
 The response has legacy `status`/`id` fields plus `writeReceipt`:
-`pending` means a proposal exists and no entity is live; `applied` means the
-reported direct write completed; `partial` means a follow-up (for example a
-facet) failed after the entity applied. Never claim completion from `pending`,
-and only enrich again when the receipt identifies a real missing fact.
+`pending`/`proposed` means a proposal exists and no entity is live yet;
+`applied` means the reported direct write completed; `partial` means a follow-up
+(for example a facet) failed after the entity applied. **A `proposed`/`pending`
+receipt is a governed success, not an error** — surface its `reviewUrl`, never
+claim completion, and only enrich again when the receipt identifies a real
+missing fact.
 
 For several entities, creation-time roles/facets, or relations that need one
-review, submit one `POST /api/hub/capture/graph` plan instead of sequencing
-independent creates. It returns a pending receipt and materializes on human
-approval.
+review, send the whole graph through the capture door (`synap_capture` with
+`entities[]` + `relations[]`) instead of sequencing independent creates. It is
+ONE governed call: policy auto-applies when every op is safe, otherwise the
+whole graph is proposed (atomic). There is no separate commit step.
+
+**Name-refs, not UUIDs.** Reference an existing project by name — the server
+resolves it against the caller's own projects (exact match files there; no match
+proposes, never mis-files). Never ask the user for a UUID.
+
+**Dedup is advisory across kinds.** Strong signals (`email`/`phone`/`website` —
+not a bare `url`) dedup within a kind; a same-title hit in a _different_ kind
+comes back as an advisory candidate, never an auto-merge. "No exact match" is not
+"safe to create" when advisory candidates are returned — review them first.
 
 ### Update an entity
 
@@ -870,6 +888,41 @@ PATCH /api/hub/entities/{entityId}
 ```
 
 **Properties are deep-merged — send only the keys you want to change.** An update with `{ "status": "done" }` leaves all other properties untouched. You never need to re-send the full properties object.
+
+### Authored text is content, not a `file`
+
+Something **you** author — a pitch deck, a strategic plan, a note body — is
+**never** a `file`- or `document`-kind entity. Create it as the right CONTENT
+kind (`note`, `knowledge`, or a fitting domain kind) with `content` set to the
+Markdown body; Synap **auto-materializes** that `content` into a real
+versioned document behind the scenes (`entities WHERE documentId = ?`) — no
+upload step needed. `file` is reserved for real uploaded bytes you actually
+have (the upload door / `synap upload`) — an agent has no filesystem, so it
+rarely touches `file` at all. Reach for `synap_create_document` /
+`POST /api/hub/documents` directly only for a standalone rich document that
+isn't itself a title-worthy entity (see below) — never as a substitute for an
+entity's `content`.
+
+### "I want to add a real FILE" — the decision tree
+
+You CAN store content you **hold** — you send it inline. Pick by what you have:
+
+| You have…                                                                                   | Do this                                                                                         | Result                                                               |
+| ------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- | -------------------------------------------------------------------- |
+| **Content in hand** — a report/CSV/image/PDF/etc. you generated or received (text or bytes) | **`synap_store_file`** (`content` for text, `contentBase64` for binary) + `mimeType`/`filename` | a `file` entity, content stored **as-is, never read** (≤10MB inline) |
+| Text you're **authoring as a note/idea** (not "a file") — a plan, a thought                 | `synap_create_entity` with `content` (a content kind)                                           | body auto-becomes a document — NOT a `file`                          |
+| Only a **URL/link** (no bytes) — a Google Doc, a PDF url, an article                        | `synap_create_document` with **`url`**, or attach via `entityId`                                | an external **reference** document (no bytes)                        |
+| A **large file on a local disk** you don't hold in context                                  | the CLI `synap upload <path>` (streams it) — an agent can't send bytes it doesn't have          | a `file` entity backed by stored bytes                               |
+| Only a file's **name**, nothing else                                                        | you **cannot** invent it — ask the human/client to provide the content or a link                | —                                                                    |
+
+**Store ≠ analyze.** `synap_store_file` / `synap_create_document` store content
+**deterministically — the file is NEVER read by an LLM.** Only fetch a document
+and reason over it when the user explicitly says "read/analyze this file."
+
+**Do NOT over-structure a file request.** "Store this file" / "how do I add this
+file" is ONE intent → at most one stored file (plus, only if asked, a linking
+relation). Never inflate it into a task + note + placeholder-file scaffold, and
+never dump the request text into a note and call it done.
 
 ### Create a document (attach to an entity)
 
@@ -928,21 +981,25 @@ Content is a **full replacement**, not a patch. Fetch the current content first 
 
 The reverse lookup is `entities WHERE documentId = ?`. Always attach the document to a meaningful entity (the meeting event, the project, the person) — a floating document is another orphan.
 
-### Store a fact (memory) — use sparingly
+### Remember a fact about the user — use sparingly
 
-```json
-POST /api/hub/memory
-{ "userId": "{userId}", "fact": "User prefers async communication over meetings" }
-```
+A fact _about the user_ goes through `remember_fact` (CLI: `synap capture --type
+observation`). It writes a governed `user_observation` — not an ungoverned
+throwaway row: a fact the user explicitly stated auto-approves; a fact you
+inferred returns `proposed` (normal — surface the review link). Because it's a
+real entity it's addressable, linkable and revertible.
 
-Always auto-approved. **Memory is for loose, unstructured, hard-to-title facts only.** The seductive thing about memory is it has zero friction — no dedup, no linking, no proposals. That makes it easy to misuse.
+**Use it only for loose, unstructured, hard-to-title facts about the user** — a
+stated preference, a throwaway detail. Everything with a title-worthy noun or
+something to link to is an ENTITY through the capture door, not an observation.
 
-**The test:** if the user later asked "show me all X," can memory answer? Memory can only keyword-match — it has no structure. So:
+**The test:** if the user later asked "show me all X," could a loose observation
+answer? It can only keyword-match — it has no structure. So:
 
 | Input                                                   | Use                                                             |
 | ------------------------------------------------------- | --------------------------------------------------------------- |
-| "User prefers async communication"                      | memory — it's a preference                                      |
-| "Garage code is 4321"                                   | memory — throwaway fact                                         |
+| "User prefers async communication"                      | observation — it's a preference                                 |
+| "Garage code is 4321"                                   | observation — throwaway fact                                    |
 | "Should we use LangGraph or CrewAI for Eve?"            | **entity `question`** — substantive inquiry, start of flow      |
 | "Here's what I found comparing LangGraph and CrewAI…"   | **entity `research`** — investigation with sources + conclusion |
 | "We decided to use LangGraph over OpenClaude's native…" | **entity `decision`** — has title, rationale, project           |
@@ -952,7 +1009,7 @@ Always auto-approved. **Memory is for loose, unstructured, hard-to-title facts o
 | "Action item from meeting: ship MVP by Friday"          | **entity `task`** linked to the `event` (meeting)               |
 | "Agreed with Sarah: we'll split backend & frontend"     | **entity `decision`** linked to Sarah + the project             |
 
-**Rule of thumb:** if it has a title-worthy noun OR context to link to (a project, a person, a meeting) OR a lifecycle (status/supersession) — it's an entity, not memory. Memory is the fallback, not the default.
+**Rule of thumb:** if it has a title-worthy noun OR context to link to (a project, a person, a meeting) OR a lifecycle (status/supersession) — it's an entity through the capture door, not an observation. A user observation is the fallback, not the default.
 
 **For decisions specifically** — use the `decision` system profile:
 
@@ -1271,14 +1328,16 @@ No SQL joins. The graph is the join.
 
 ## Multi-entity capture from free-form text
 
-When the user pastes a block of unstructured content (a meeting transcript, an email, a LinkedIn bio), use the capture pipeline instead of chaining manual creates:
+When the user pastes a block of unstructured content (a meeting transcript, an email, a LinkedIn bio) or when several related things come up at once, send it through the **one capture door** — `synap_capture` (CLI: `synap capture`). Don't chain manual creates, and don't run a two-step "structure then commit" dance.
+
+The payload is a gradient in a single call:
 
 ```
-POST /api/hub/capture/structure   → returns proposals + relations
-POST /api/hub/capture/execute     → commits (after user confirms)
+{ "text": "…paste the raw content…" }              → the AI structures it into entities
+{ "entities": [ … ], "relations": [ … ] }          → you supply the graph directly (refs link them)
 ```
 
-The pipeline extracts multiple entities with their relations in one LLM call. Read **`capture.md`** for the full flow.
+Everything lands as ONE reviewable proposal (or auto-applies when every op is safe), and you get back one receipt — `status: "applied" | "proposed" | "rejected"`. `proposed` is success: surface the review link. There is no separate commit step. Read **`capture.md`** for the full flow, dedup signals, name-refs, and reject reasons.
 
 ---
 
@@ -1335,6 +1394,27 @@ The pipeline extracts multiple entities with their relations in one LLM call. Re
    ```
 
 3. If the user said why ("interesting for the onboarding project"), also create a relation to that project — never drop the reason as a plain comment, turn it into a link.
+
+### Example 4 — "Write up a strategic plan for the Q3 launch"
+
+You are authoring this text yourself — it is not a file you have. Don't create
+a `file`/`document`-kind entity and stuff the Markdown into it.
+
+1. Search for an existing plan: `GET /entities?q=Q3 launch&profileSlug=knowledge&workspaceId=…` → none
+2. Create a CONTENT-kind entity carrying the plan as `content` (the doc auto-materializes):
+
+   ```json
+   POST /api/hub/entities
+   { "userId": "{userId}", "workspaceId": "{wsId}",
+     "profileSlug": "knowledge",
+     "title": "Q3 launch strategic plan",
+     "properties": { "ek_type": "reference" },
+     "content": "# Q3 Launch Plan\n\n## Goals\n…\n\n## Timeline\n…"
+   }
+   ```
+
+3. Link it to the relevant project: `POST /api/hub/relations` `{ sourceEntityId: "ent_new_plan", targetEntityId: "ent_project_q3", type: "related_to" }`.
+4. Confirm: "Plan captured and linked to Q3 launch." No upload, no `file` entity, no separate `synap_create_document` call.
 
 ---
 
@@ -1470,6 +1550,7 @@ An extraction that creates a duplicate "Sarah Chen", or a `person` titled "Unkno
 8. **Forgetting that `GET /channels/personal` needs `hub-protocol.write`** scope — it's get-or-create, not a pure read.
 9. **Routing known-structure data through free-text capture.** If you already know the profileSlug + fields, create the entity directly — smart capture can degrade to a single flat note.
 10. **Paragraph session goals.** The goal is one line; put detail and deliverables in expectedOutputs.
+11. **Creating a `file`/`document`-kind entity to hold text you wrote.** A pitch deck, plan, or note body you authored is `content` on a real CONTENT-kind entity (`note`, `knowledge`, a domain kind) — Synap auto-materializes it into a document. `file` is only for real uploaded bytes you actually have; an agent with no filesystem almost never needs it.
 
 ---
 

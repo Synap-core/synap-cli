@@ -20,6 +20,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { samePodOrigin } from "./project-ref.js";
 
 const LENS_DIR = path.join(os.homedir(), ".synap", "lenses");
 
@@ -27,6 +28,15 @@ export interface SessionLens {
   workspaceId?: string;
   projectId?: string;
   focusSessionId?: string;
+  /**
+   * The pod the ids above belong to. Workspace and project ids are POD-LOCAL:
+   * sending workspace W (pod A) to pod B is the "Access denied to workspace"
+   * 403. `synap pods use` switches the active pod without touching the session
+   * lens, so without this field a stale lens silently poisons every scoped call
+   * on the new pod. Stamped by every write path that sets workspaceId /
+   * projectId; compared through {@link lensMatchesPod}.
+   */
+  podUrl?: string;
   updatedAt?: number;
 }
 
@@ -81,4 +91,35 @@ export function clearLensField(sessionId: string, field?: keyof SessionLens): vo
 export function resolveActiveLens(): SessionLens | null {
   const id = getClaudeSessionId();
   return id ? readLens(id) : null;
+}
+
+/**
+ * Does this lens belong to the pod we're about to address?
+ *
+ * BACKWARD COMPATIBILITY — a lens with NO `podUrl` is treated as MATCHING
+ * (lenient). Every lens file written before this field existed lacks it; the
+ * strict reading would drop the session scope for every existing user on the
+ * next CLI upgrade — a silent, pod-wide widening that is worse and far more
+ * common than the cross-pod bug it would close. The lenient reading preserves
+ * today's behaviour exactly, and converges: the next `synap use` /
+ * `synap project use` stamps the pod, after which the check is exact.
+ *
+ * An unknown target pod (`podUrl` empty) likewise matches — there is nothing to
+ * compare against, and refusing would break `--pod-url`-less flows.
+ */
+export function lensMatchesPod(lens: SessionLens, podUrl: string | undefined): boolean {
+  if (!lens.podUrl || !podUrl) return true;
+  return samePodOrigin(lens.podUrl, podUrl);
+}
+
+/**
+ * The active session's lens, but ONLY if it belongs to `podUrl`. Returns null
+ * for a lens pinned to a different pod so callers fall through to their
+ * pod-qualified resolution (`getActiveWorkspaceIdForPod`) instead of sending a
+ * foreign workspace id. This is the ONE door for lens-vs-pod comparison.
+ */
+export function resolveActiveLensForPod(podUrl: string | undefined): SessionLens | null {
+  const lens = resolveActiveLens();
+  if (!lens) return null;
+  return lensMatchesPod(lens, podUrl) ? lens : null;
 }

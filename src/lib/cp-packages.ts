@@ -393,21 +393,24 @@ function requireToken(deps: CpWriteDeps): string {
  * own message.
  *
  * The definition's identity (`slug`, `displayName`) is read off its `_meta`/
- * `workspaceName`; `_meta.icon`/`.color`/`.domain` are hoisted onto the
+ * `workspaceName` by default (the workspace-template shape); `opts.slug`/
+ * `opts.displayName` override that for a standalone (non-workspace) package —
+ * e.g. a `category: "cell"` file, which has neither field (see
+ * `lib/kind-package.ts`). `_meta.icon`/`.color`/`.domain` are hoisted onto the
  * definition's top level because the CP reads those off `definition.icon`/… for
  * the list DTO (it strips the unknown `_meta` key).
  */
 export async function publishPackage(
   def: PackageDefinitionLike,
-  opts: { isPublic: boolean },
+  opts: { isPublic: boolean; category?: string; slug?: string; displayName?: string },
   deps: CpWriteDeps = {},
 ): Promise<PublishResult> {
   const fetchImpl = deps.fetchImpl ?? fetch;
   const token = requireToken(deps);
   const base = deps.cpUrl ?? getCpUrl();
 
-  const slug = def._meta?.slug;
-  const displayName = def.workspaceName;
+  const slug = opts.slug ?? def._meta?.slug;
+  const displayName = opts.displayName ?? def.workspaceName;
   if (!slug) throw new CpWriteError(0, "Template has no slug (meta.slug) — cannot publish");
   if (!displayName)
     throw new CpWriteError(0, "Template has no workspace name — cannot publish");
@@ -453,7 +456,7 @@ export async function publishPackage(
       description: def.description,
       isPublic: opts.isPublic,
       tags: def._meta?.tags,
-      category: "workspace",
+      category: opts.category ?? "workspace",
       definition,
     }),
     signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),

@@ -1,26 +1,34 @@
 /**
- * synap import — "capture, but for files and URLs".
+ * synap import — "capture, but for files and URLs" (personal OS intake).
  *
- * Routes EVERY input (local file, folder, or http(s) URL) through the SAME AI
- * capture centerpiece as free-text `capture`:
- *   POST /capture/structure  (AI entity extraction + workspace/project routing)
- *   POST /capture/execute    (materialize the chosen proposals + relations)
+ * Routing (INTAKE-CONSOLIDATION-PLAN Wave 1):
+ *   - Superwhisper store-first     → lib/superwhisper-import (unchanged)
+ *   - Single file OR single URL    → POST /capture/structure + /capture/execute
+ *   - N≥2 text-like files
+ *     (md / markdown / txt / csv)  → ONE batch via REST import:
+ *         POST /import/analyze  → human review (or --yes / --dry-run)
+ *         POST /import/apply    → materialize the EXACT previewed ops
+ *   - Mixed binary/URL + text      → capture path for URLs/binaries;
+ *                                    batch text via /import/* when N≥2
  *
- * One item per file/url. This inherits AI entity extraction, the relation graph,
- * workspace routing AND project routing for free — no separate /import/* path.
+ * Directory walks cap at DIR_FILE_CAP (sync analyze max); truncate is warned,
+ * never silent. After expansion, batch-eligible text is also capped at
+ * GLOBAL_BATCH_CAP (same ceiling) across all inputs — not only per-directory.
+ * Workspace/project from --workspace / --project (or cfg);
+ * session from --session (active session id).
  *
- * Inputs:
- *   - http(s) URL              → sent as `url`
- *   - directory                → recursively globbed (skips node_modules/.git/dotfiles)
- *   - file                     → text-like → utf8, everything else → base64
+ * Optional --home-map rewrites batch item paths so the backend path heuristic
+ * (workspace **name** as a path segment) pins multi-home destinations. Example:
+ *   --home-map "Projects=Builder,Posts=Content OS"
+ * rewrites `5. Projects/foo.md` → `Builder/5. Projects/foo.md`. No product
+ * defaults — user-supplied pairs only.
  *
- * Routing: --workspace / --project override the AI's suggestion; otherwise the
- * AI-proposed targetWorkspaceId / targetProjectId from /capture/structure win.
+ * No Company OS coupling — pure personal intake doors.
  */
 
 import chalk from "chalk";
 import { readFileSync, statSync, readdirSync, existsSync, type Dirent } from "node:fs";
-import { extname, basename, join } from "node:path";
+import { extname, basename, join, relative } from "node:path";
 import * as readline from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { log } from "../utils/logger.js";
@@ -52,6 +60,13 @@ export interface ImportOpts {
   json?: boolean;
   podUrl?: string;
   apiKey?: string;
+  /**
+   * Preferred-home map: comma-separated `pathSubstring=workspaceNameOrId`.
+   * Matched paths (case-insensitive substring) are rewritten so the first
+   * path segment is the resolved workspace **name** — backend deep structure
+   * matches workspace names in path segments.
+   */
+  homeMap?: string;
   /** Adapter name: "superwhisper" enables paired store-first path. */
   source?: string;
   /** Skip AI structure; store corpus units (Superwhisper). */
@@ -65,6 +80,9 @@ export interface ImportOpts {
 // ─── input classification ─────────────────────────────────────────────────────
 
 const TEXT_LIKE = new Set([".md", ".markdown", ".txt", ".csv", ".json", ".html", ".htm"]);
+
+/** Extensions eligible for the multi-file REST /import/analyze batch path. */
+const BATCH_TEXT_EXTS = new Set([".md", ".markdown", ".txt", ".csv"]);
 
 const MIME: Record<string, string> = {
   ".md": "text/markdown",
@@ -94,36 +112,103 @@ const MIME: Record<string, string> = {
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const URL_RE = /^https?:\/\//i;
 
-/** Cap on files pulled from a single directory — log + truncate, never silently drop. */
-const DIR_FILE_CAP = 200;
+/**
+ * Cap on files pulled from a single directory — log + truncate, never silently drop.
+ * Aligned with sync /import/analyze max items (2000).
+ */
+const DIR_FILE_CAP = 2000;
+
+/**
+ * Global cap on batch-eligible text items across ALL inputs (not only one dir).
+ * Same ceiling as sync /import/analyze max items.
+ */
+const GLOBAL_BATCH_CAP = 2000;
+
+/** Generous timeout: deep vault structure can take minutes on large corpora. */
+const IMPORT_ANALYZE_TIMEOUT_MS = 300_000;
+const IMPORT_APPLY_TIMEOUT_MS = 120_000;
+
+type ImportSource = "obsidian" | "markdown" | "csv";
 
 type ImportItem =
   | { kind: "url"; label: string; url: string }
   | {
       kind: "file";
       label: string;
+      /** Source-relative path for /import/analyze (vault structure). */
+      path: string;
       file: { content: string; mimeType: string; filename: string; encoding: "base64" | "utf8" };
     };
+
+type BatchTextItem = {
+  path: string;
+  content: string;
+  label: string;
+};
+
+/** Wire shape from POST /import/analyze (Wave 1 REST → ImportOrchestrator). */
+interface ImportAnalyzeResult {
+  workspaceId?: string | null;
+  source?: string;
+  mode?: string;
+  proposalId?: string | null;
+  sessionId?: string | null;
+  operations?: unknown[];
+  summary?: string;
+  stats?: Record<string, unknown>;
+  droppedReferences?: number;
+  aiTyped?: number;
+  tablePlan?: unknown;
+  /** Multi-home placement summary (create_entity destinations). */
+  homes?: {
+    byWorkspace?: Record<string, number>;
+    podWide?: number;
+    byProject?: Record<string, number>;
+    multiHome?: boolean;
+  };
+  /** Continuous-improvement quality report (stored on proposal too). */
+  quality?: {
+    score?: number;
+    summary?: string;
+    counts?: Record<string, unknown>;
+    hierarchy?: Record<string, unknown>;
+    findings?: Array<{ id?: string; severity?: string; message?: string }>;
+    nextUpgrades?: string[];
+  };
+  [key: string]: unknown;
+}
+
+/** Wire shape from POST /import/apply. */
+interface ImportApplyResult {
+  workspaceId?: string | null;
+  source?: string;
+  created?: number;
+  linked?: number;
+  [key: string]: unknown;
+}
 
 function mimeFor(path: string): string {
   return MIME[extname(path).toLowerCase()] ?? "application/octet-stream";
 }
 
 /** Read a single file into an ImportItem (utf8 for text-like, base64 otherwise). */
-function fileToItem(path: string): ImportItem {
+function fileToItem(path: string, displayPath?: string): ImportItem {
   const ext = extname(path).toLowerCase();
   const filename = basename(path);
   const mimeType = mimeFor(path);
+  const rel = displayPath ?? path;
   if (TEXT_LIKE.has(ext)) {
     return {
       kind: "file",
-      label: path,
+      label: rel,
+      path: rel,
       file: { content: readFileSync(path, "utf8"), mimeType, filename, encoding: "utf8" },
     };
   }
   return {
     kind: "file",
-    label: path,
+    label: rel,
+    path: rel,
     file: { content: readFileSync(path).toString("base64"), mimeType, filename, encoding: "base64" },
   };
 }
@@ -186,7 +271,9 @@ function expandInputs(inputs: string[]): {
       if (files.length >= DIR_FILE_CAP) truncated = true;
       for (const f of files) {
         try {
-          items.push(fileToItem(f));
+          // Preserve vault-relative paths so wikilink/relation resolution works.
+          const rel = relative(raw, f) || basename(f);
+          items.push(fileToItem(f, rel));
         } catch (e) {
           failures.push({ label: f, error: (e as Error).message });
         }
@@ -202,8 +289,158 @@ function expandInputs(inputs: string[]): {
   return { items, failures, truncated };
 }
 
+/** True when this item can join a multi-file /import/analyze batch. */
+function isBatchTextItem(item: ImportItem): item is ImportItem & { kind: "file" } {
+  if (item.kind !== "file") return false;
+  if (item.file.encoding !== "utf8") return false;
+  const ext = extname(item.path).toLowerCase() || extname(item.file.filename).toLowerCase();
+  return BATCH_TEXT_EXTS.has(ext);
+}
+
+/**
+ * Source heuristic for the batch door:
+ *   - any .csv → "csv"
+ *   - mostly .md/.markdown → "markdown"
+ *   - default → "markdown"
+ */
+function sourceForBatchItems(items: BatchTextItem[]): ImportSource {
+  if (items.some((i) => i.path.toLowerCase().endsWith(".csv"))) return "csv";
+  const mdCount = items.filter((i) => /\.(md|markdown)$/i.test(i.path)).length;
+  if (mdCount * 2 >= items.length) return "markdown";
+  return "markdown";
+}
+
+function toBatchTextItem(item: ImportItem & { kind: "file" }): BatchTextItem {
+  return {
+    path: item.path,
+    content: item.file.content,
+    label: item.label,
+  };
+}
+
 // Structure/execute wire shapes + the degraded/execute interpreters are shared
 // with `synap capture` in lib/capture-structure.ts (ONE mirror, no drift).
+
+// ─── --home-map (client prepass for multi-home path heuristic) ────────────────
+
+type HomeMapPair = { pathSubstring: string; workspace: string };
+/** Resolved map: path substring → workspace **name** (for path prefix rewrite). */
+type ResolvedHomeMapEntry = { pathSubstring: string; workspaceName: string };
+
+/**
+ * Parse `--home-map "Projects=Builder,Posts=Content OS"` into pairs.
+ * Values may be workspace names or UUIDs (resolved later).
+ */
+export function parseHomeMap(raw: string): HomeMapPair[] {
+  const pairs: HomeMapPair[] = [];
+  // Split on commas that separate pairs. Values may contain spaces but not commas.
+  for (const part of raw.split(",")) {
+    const trimmed = part.trim();
+    if (!trimmed) continue;
+    const eq = trimmed.indexOf("=");
+    if (eq <= 0 || eq === trimmed.length - 1) {
+      throw new Error(
+        `Invalid --home-map entry '${trimmed}'. Expected pathSubstring=workspaceNameOrId ` +
+          `(e.g. Projects=Builder,Posts=Content OS).`
+      );
+    }
+    const pathSubstring = trimmed.slice(0, eq).trim();
+    const workspace = trimmed.slice(eq + 1).trim();
+    if (!pathSubstring || !workspace) {
+      throw new Error(
+        `Invalid --home-map entry '${trimmed}'. Both pathSubstring and workspace are required.`
+      );
+    }
+    pairs.push({ pathSubstring, workspace });
+  }
+  if (pairs.length === 0) {
+    throw new Error(
+      `Empty --home-map. Expected pathSubstring=workspaceNameOrId pairs ` +
+        `(e.g. Projects=Builder,Posts=Content OS).`
+    );
+  }
+  return pairs;
+}
+
+/**
+ * Resolve home-map values to workspace **names** (id → name when UUID given).
+ * Backend path heuristic matches segment equality against workspace names.
+ */
+async function resolveHomeMap(
+  pairs: HomeMapPair[],
+  cfg: HubConfig
+): Promise<ResolvedHomeMapEntry[]> {
+  const res = (await hubGet("/workspaces", {}, cfg)) as Record<string, unknown>;
+  const list = unwrapList<Record<string, unknown>>(res, ["workspaces"]);
+  const names = list.map((w) => String(w.name ?? w.id)).join(", ");
+
+  return pairs.map(({ pathSubstring, workspace }) => {
+    if (UUID_RE.test(workspace)) {
+      const match = list.find((w) => String(w.id) === workspace);
+      if (!match) {
+        throw new Error(
+          `Home-map workspace id '${workspace}' not found.${names ? ` Available: ${names}` : ""}`
+        );
+      }
+      const workspaceName = String(match.name ?? "").trim();
+      if (!workspaceName) {
+        throw new Error(`Home-map workspace '${workspace}' has no name — cannot rewrite paths.`);
+      }
+      return { pathSubstring, workspaceName };
+    }
+    const match = list.find(
+      (w) => String(w.name ?? "").toLowerCase() === workspace.toLowerCase()
+    );
+    if (!match) {
+      throw new Error(
+        `Home-map workspace '${workspace}' not found.${names ? ` Available: ${names}` : ""}`
+      );
+    }
+    return { pathSubstring, workspaceName: String(match.name) };
+  });
+}
+
+/**
+ * If `path` contains any map pathSubstring (case-insensitive), prefix with the
+ * resolved workspace name so deep-structure segment match pins that home.
+ * First matching pair wins. Skips rewrite when the path already starts with the
+ * workspace name segment.
+ */
+export function applyHomeMapToPath(
+  path: string,
+  map: ResolvedHomeMapEntry[]
+): string {
+  if (map.length === 0 || !path) return path;
+  const lower = path.toLowerCase();
+  for (const { pathSubstring, workspaceName } of map) {
+    if (!pathSubstring) continue;
+    if (!lower.includes(pathSubstring.toLowerCase())) continue;
+    const prefix = workspaceName + "/";
+    // Already rewritten or vault already uses workspace name as root.
+    if (
+      path === workspaceName ||
+      path.startsWith(prefix) ||
+      path.toLowerCase().startsWith(prefix.toLowerCase())
+    ) {
+      return path;
+    }
+    return `${workspaceName}/${path}`;
+  }
+  return path;
+}
+
+/** Apply home-map path rewrite to batch text items (labels stay original). */
+function applyHomeMapToBatchItems(
+  items: BatchTextItem[],
+  map: ResolvedHomeMapEntry[]
+): BatchTextItem[] {
+  if (map.length === 0) return items;
+  return items.map((i) => {
+    const next = applyHomeMapToPath(i.path, map);
+    if (next === i.path) return i;
+    return { ...i, path: next };
+  });
+}
 
 // ─── workspace / project name → id resolution ─────────────────────────────────
 
@@ -285,9 +522,73 @@ function renderRouting(result: StructureResult, wsOverride?: string, projOverrid
   if (result.targetProjectReason && !projOverride) log.dim(`      ${result.targetProjectReason.slice(0, 90)}`);
 }
 
+function renderBatchAnalyze(result: ImportAnalyzeResult, fileCount: number, source: ImportSource): void {
+  const ops = result.operations ?? [];
+  log.heading(`▸ Batch import (${fileCount} file${fileCount !== 1 ? "s" : ""}, source=${source})`);
+  if (result.summary) log.info(`  ${result.summary}`);
+  log.dim(
+    `  ${ops.length} operation${ops.length !== 1 ? "s" : ""}` +
+      (result.mode ? ` · mode ${result.mode}` : "") +
+      (result.proposalId ? ` · proposal ${result.proposalId}` : "") +
+      (result.sessionId ? ` · session ${result.sessionId}` : "")
+  );
+  if (result.stats && typeof result.stats === "object") {
+    const s = result.stats;
+    const bits: string[] = [];
+    if (s.entityCount != null) bits.push(`${s.entityCount} entities`);
+    if (s.relationCount != null) bits.push(`${s.relationCount} relations`);
+    if (s.itemCount != null) bits.push(`${s.itemCount} items`);
+    if (s.typeCount != null) bits.push(`${s.typeCount} types`);
+    if (s.itemsProcessed != null) bits.push(`${s.itemsProcessed} processed`);
+    if (bits.length > 0) log.dim(`  stats: ${bits.join(" · ")}`);
+  }
+  // Multi-home: show where create_entity ops will land (per-op targetWorkspaceId).
+  const homes = result.homes;
+  if (homes && typeof homes === "object") {
+    const parts: string[] = [];
+    for (const [wid, n] of Object.entries(homes.byWorkspace ?? {})) {
+      parts.push(`${wid.slice(0, 8)}…×${n}`);
+    }
+    if (homes.podWide && homes.podWide > 0) parts.push(`pod-wide×${homes.podWide}`);
+    if (parts.length > 0) {
+      log.info(
+        `  homes${homes.multiHome ? " (multi)" : ""}: ${parts.join(" · ")}`
+      );
+    }
+    const proj = homes.byProject ?? {};
+    const projParts = Object.entries(proj).map(
+      ([pid, n]) => `${pid.slice(0, 8)}…×${n}`
+    );
+    if (projParts.length > 0) log.dim(`  projects: ${projParts.join(" · ")}`);
+  } else if (result.workspaceId) {
+    log.dim(`  → workspace: ${result.workspaceId}`);
+  }
+
+  // Quality report — refuse / improve / apply loop
+  const q = result.quality;
+  if (q && typeof q.score === "number") {
+    log.info(`  ${q.summary ?? `quality ${q.score}/100`}`);
+    const findings = q.findings ?? [];
+    for (const f of findings.slice(0, 8)) {
+      const tag = (f.severity ?? "info").toUpperCase();
+      log.dim(`    [${tag}] ${f.message ?? f.id}`);
+    }
+    const ups = q.nextUpgrades ?? [];
+    if (ups.length > 0) {
+      log.info("  next upgrades:");
+      for (const u of ups.slice(0, 5)) log.dim(`    → ${u}`);
+    }
+    if (result.proposalId) {
+      log.dim(
+        `  proposal ${result.proposalId} stores quality+ops — refuse in UI, re-import with upgrades, apply when score looks good`
+      );
+    }
+  }
+}
+
 // ─── per-item pipeline ─────────────────────────────────────────────────────────
 
-interface ItemOutcome {
+export interface ItemOutcome {
   label: string;
   status: "stored" | "proposed" | "degraded" | "dry-run" | "skipped" | "empty" | "failed";
   entities?: number;
@@ -295,6 +596,65 @@ interface ItemOutcome {
   workspaceId?: string | null;
   projectId?: string | null;
   error?: string;
+  /**
+   * Why the item degraded (`is_auth_error` | `is_invalid_response` |
+   * `is_empty_result`). The human path already prints this via
+   * `degradedMessage()`; carrying it here keeps `--json` from reporting a
+   * causeless "degraded" — a scripted import has no other way to see WHY it
+   * got zero entities.
+   */
+  degradedReason?: string;
+  /** Present for the multi-file /import/* batch path. */
+  batch?: {
+    source: ImportSource;
+    fileCount: number;
+    proposalId?: string | null;
+    sessionId?: string | null;
+    analyze?: ImportAnalyzeResult;
+    apply?: ImportApplyResult;
+  };
+}
+
+/**
+ * Build the outcome for an item the IS structurer could not structure.
+ *
+ * Carries `degradedReason` so `--json` reports the same cause the human path
+ * already prints via `degradedMessage()`. Without it a scripted import saw
+ * `{"status":"degraded"}` with no way to tell an auth error from an empty
+ * result — the reason existed on the wire and was dropped at this one seam.
+ */
+export function degradedOutcome(
+  label: string,
+  res: StructureResult,
+  workspaceId: string | null,
+  projectId: string | null
+): ItemOutcome {
+  return {
+    label,
+    status: "degraded",
+    workspaceId,
+    projectId,
+    ...(res.degradedReason ? { degradedReason: res.degradedReason } : {}),
+  };
+}
+
+/**
+ * The exit code for a finished import run.
+ *
+ * A degraded item produced ZERO entities — the IS structurer was down and the
+ * CLI deliberately created nothing. Exiting 0 on that told a scripted backfill
+ * "success" while most of its input was silently lost, so `degraded` is a
+ * non-zero outcome exactly like `failed`.
+ *
+ * Everything else stays 0, including a clean `--dry-run` (nothing was meant to
+ * be written), a `skipped` item (the user declined) and an `empty` one (the
+ * structurer ran fine and honestly found nothing to create).
+ *
+ * Scoped to `import` on purpose: this is `import`'s own final line, not a
+ * shared helper, so no other command's exit semantics change.
+ */
+export function importExitCode(outcomes: Array<{ status: ItemOutcome["status"] }>): number {
+  return outcomes.some((o) => o.status === "failed" || o.status === "degraded") ? 1 : 0;
 }
 
 async function processItem(
@@ -332,7 +692,7 @@ async function processItem(
       log.heading(`▸ ${item.label}`);
       log.warn(`  ${degradedMessage(structureRes)}`);
     }
-    return { label: item.label, status: "degraded", workspaceId: wsTarget, projectId: projTarget };
+    return degradedOutcome(item.label, structureRes, wsTarget, projTarget);
   }
 
   if (!opts.json) {
@@ -444,6 +804,184 @@ async function processItem(
   };
 }
 
+// ─── multi-file batch via /import/analyze + /import/apply ─────────────────────
+
+async function processBatchImport(
+  batchItems: BatchTextItem[],
+  opts: ImportOpts,
+  cfg: HubConfig,
+  userId: string,
+  wsOverride: string | undefined,
+  projOverride: string | undefined,
+  sessionId: string | undefined,
+  rl: readline.Interface | undefined,
+  homeMap: ResolvedHomeMapEntry[] = []
+): Promise<ItemOutcome> {
+  // Path rewrite for multi-home: backend matches workspace **names** in path
+  // segments. --home-map prefixes matched paths with the resolved name.
+  const mappedItems = applyHomeMapToBatchItems(batchItems, homeMap);
+  const homeMapRewrites =
+    homeMap.length > 0
+      ? mappedItems.filter((m, i) => m.path !== batchItems[i]?.path).length
+      : 0;
+
+  const source = sourceForBatchItems(mappedItems);
+  const label = `batch:${source} (${mappedItems.length} files)`;
+  const workspaceId = wsOverride ?? cfg.workspaceId;
+
+  const analyzeBody: Record<string, unknown> = {
+    userId,
+    source,
+    items: mappedItems.map((i) => ({ path: i.path, content: i.content })),
+    aiStructure: true,
+    // --dry-run must not file a durable import.graph proposal (inbox spam).
+    // Interactive / --yes still create a real proposal for HITL apply.
+    ...(opts.dryRun ? { previewOnly: true } : {}),
+    ...(workspaceId ? { workspaceId } : {}),
+    ...(projOverride ? { projectId: projOverride } : {}),
+    ...(sessionId ? { sessionId } : {}),
+  };
+
+  if (!opts.json) {
+    log.info(
+      `Analyzing ${mappedItems.length} text file${mappedItems.length !== 1 ? "s" : ""} via /import/analyze (source=${source})…`
+    );
+    if (homeMapRewrites > 0) {
+      log.dim(
+        `  home-map: rewrote ${homeMapRewrites} path${homeMapRewrites !== 1 ? "s" : ""} ` +
+          `(workspace name as first segment for multi-home placement)`
+      );
+    }
+  }
+
+  const analyzeRes = (await hubPost(
+    "/import/analyze",
+    analyzeBody,
+    cfg,
+    IMPORT_ANALYZE_TIMEOUT_MS
+  )) as ImportAnalyzeResult;
+
+  const ops = analyzeRes.operations ?? [];
+  const batchMeta = {
+    source,
+    fileCount: mappedItems.length,
+    proposalId: analyzeRes.proposalId ?? null,
+    sessionId: analyzeRes.sessionId ?? sessionId ?? null,
+    analyze: analyzeRes,
+  };
+
+  if (!opts.json) {
+    renderBatchAnalyze(analyzeRes, mappedItems.length, source);
+  }
+
+  if (ops.length === 0) {
+    return {
+      label,
+      status: "empty",
+      workspaceId: analyzeRes.workspaceId ?? workspaceId ?? null,
+      projectId: projOverride ?? null,
+      batch: batchMeta,
+    };
+  }
+
+  // Dry-run (or --json without --yes): analyze only — no apply.
+  if (opts.dryRun) {
+    return {
+      label,
+      status: "dry-run",
+      entities: ops.filter((o) => (o as { op?: string }).op === "create_entity").length || ops.length,
+      relations: ops.filter((o) => (o as { op?: string }).op === "create_relation").length,
+      workspaceId: analyzeRes.workspaceId ?? workspaceId ?? null,
+      projectId: projOverride ?? null,
+      batch: batchMeta,
+    };
+  }
+
+  // Human apply default: confirm y/N unless --yes.
+  // --json without --yes skips apply (same as per-item capture path).
+  let confirmed = Boolean(opts.yes);
+  if (!confirmed && !opts.json && rl) {
+    const answer = await rl.question(
+      chalk.bold(
+        `  Apply this import (${ops.length} operation${ops.length !== 1 ? "s" : ""})? [y/N] `
+      )
+    );
+    confirmed = answer.trim().toLowerCase() === "y";
+  }
+  if (!confirmed) {
+    if (!opts.json) log.dim("  Skipped.");
+    return {
+      label,
+      status: "skipped",
+      workspaceId: analyzeRes.workspaceId ?? workspaceId ?? null,
+      projectId: projOverride ?? null,
+      batch: batchMeta,
+    };
+  }
+
+  const applySessionId = analyzeRes.sessionId ?? sessionId;
+  // Prefer analyze-resolved placement so apply lands where the proposal was filed.
+  const applyWorkspaceId =
+    analyzeRes.workspaceId ?? workspaceId ?? undefined;
+  const applyBody: Record<string, unknown> = {
+    userId,
+    source,
+    operations: ops,
+    ...(applyWorkspaceId ? { workspaceId: applyWorkspaceId } : {}),
+    ...(projOverride ? { projectId: projOverride } : {}),
+    ...(applySessionId ? { sessionId: applySessionId } : {}),
+    // Client-stable idempotency namespace (U1): analyze proposalId.
+    ...(analyzeRes.proposalId
+      ? {
+          idempotencyKey: analyzeRes.proposalId,
+          proposalId: analyzeRes.proposalId,
+        }
+      : {}),
+  };
+
+  const applyRes = (await hubPost(
+    "/import/apply",
+    applyBody,
+    cfg,
+    IMPORT_APPLY_TIMEOUT_MS
+  )) as ImportApplyResult;
+
+  const created = applyRes.created ?? 0;
+  const linked = applyRes.linked ?? 0;
+  const finalWs = applyRes.workspaceId ?? analyzeRes.workspaceId ?? workspaceId ?? null;
+
+  if (!opts.json) {
+    log.success(
+      `  ${created} entit${created !== 1 ? "ies" : "y"} created` +
+        (linked ? `, ${linked} linked` : "")
+    );
+    if (finalWs) {
+      const report: LaneReport = {
+        lane: "work",
+        workspaceId: finalWs,
+        workspaceName: await resolveWorkspaceName(finalWs, cfg),
+        governance: "auto",
+      };
+      console.log(
+        "  " +
+          formatLaneLine(report) +
+          (projOverride ? chalk.dim(` [project ${projOverride.slice(0, 8)}]`) : "")
+      );
+    }
+    if (applySessionId) log.dim(`  session: ${applySessionId}`);
+  }
+
+  return {
+    label,
+    status: "stored",
+    entities: created,
+    relations: linked,
+    workspaceId: finalWs,
+    projectId: projOverride ?? null,
+    batch: { ...batchMeta, apply: applyRes },
+  };
+}
+
 // ─── command entrypoint ─────────────────────────────────────────────────────────
 
 export async function importData(inputs: string[], opts: ImportOpts): Promise<void> {
@@ -497,10 +1035,20 @@ export async function importData(inputs: string[], opts: ImportOpts): Promise<vo
     const projOverride = opts.project ? await resolveProjectArg(opts.project, cfg) : undefined;
     const sessionId = opts.session ? readActiveSessionId() : undefined;
 
-    const { items, failures, truncated } = expandInputs(inputs);
+    // Optional multi-home path map (no product defaults — user pairs only).
+    let homeMap: ResolvedHomeMapEntry[] = [];
+    if (opts.homeMap) {
+      homeMap = await resolveHomeMap(parseHomeMap(opts.homeMap), cfg);
+    }
 
-    if (truncated && !opts.json) {
-      log.warn(`A directory exceeded ${DIR_FILE_CAP} files — only the first ${DIR_FILE_CAP} were taken. Narrow the path or split the import.`);
+    const { items, failures, truncated: dirTruncated } = expandInputs(inputs);
+    let truncated = dirTruncated;
+
+    if (dirTruncated && !opts.json) {
+      log.warn(
+        `A directory exceeded ${DIR_FILE_CAP} files — only the first ${DIR_FILE_CAP} were taken ` +
+          `(sync /import/analyze max). Narrow the path, split the import, or use a smaller folder.`
+      );
     }
 
     if (items.length === 0) {
@@ -513,8 +1061,51 @@ export async function importData(inputs: string[], opts: ImportOpts): Promise<vo
       process.exit(failures.length > 0 ? 1 : 0);
     }
 
+    // Partition: N≥2 batch-eligible text → /import/*; rest → per-item capture.
+    // Single text file stays on capture structure/execute (same as a lone URL).
+    const batchFileItems: Array<ImportItem & { kind: "file" }> = [];
+    const captureItems: ImportItem[] = [];
+    for (const item of items) {
+      if (isBatchTextItem(item)) {
+        batchFileItems.push(item);
+      } else {
+        captureItems.push(item);
+      }
+    }
+
+    // Global batch cap: multi-dir / multi-file inputs can exceed the sync max
+    // even when no single directory hit DIR_FILE_CAP.
+    if (batchFileItems.length > GLOBAL_BATCH_CAP) {
+      truncated = true;
+      if (!opts.json) {
+        log.warn(
+          `Batch has ${batchFileItems.length} text files — truncating to ${GLOBAL_BATCH_CAP} ` +
+            `(sync /import/analyze max). Split the import or narrow the paths.`
+        );
+      }
+      batchFileItems.length = GLOBAL_BATCH_CAP;
+    }
+
+    const useBatch = batchFileItems.length >= 2;
+    const batchCandidates: BatchTextItem[] = useBatch
+      ? batchFileItems.map(toBatchTextItem)
+      : [];
+    if (!useBatch) {
+      captureItems.push(...batchFileItems);
+    }
+
     if (!opts.json) {
-      log.info(`Importing ${items.length} item${items.length !== 1 ? "s" : ""}${opts.dryRun ? " (dry run)" : ""}…`);
+      const parts: string[] = [];
+      if (useBatch) parts.push(`${batchCandidates.length} text files (batch import)`);
+      if (captureItems.length > 0) {
+        parts.push(
+          `${captureItems.length} item${captureItems.length !== 1 ? "s" : ""} (capture pipeline)`
+        );
+      }
+      log.info(
+        `Importing ${parts.join(" + ") || `${items.length} item${items.length !== 1 ? "s" : ""}`}` +
+          `${opts.dryRun ? " (dry run)" : ""}…`
+      );
     }
 
     const outcomes: ItemOutcome[] = [];
@@ -522,9 +1113,37 @@ export async function importData(inputs: string[], opts: ImportOpts): Promise<vo
     const interactive = !opts.json && !opts.dryRun && !opts.yes;
     const rl = interactive ? readline.createInterface({ input, output }) : undefined;
     try {
-      for (const item of items) {
+      if (useBatch) {
         try {
-          outcomes.push(await processItem(item, opts, cfg, userId, wsOverride, projOverride, sessionId, rl));
+          outcomes.push(
+            await processBatchImport(
+              batchCandidates,
+              opts,
+              cfg,
+              userId,
+              wsOverride,
+              projOverride,
+              sessionId,
+              rl,
+              homeMap
+            )
+          );
+        } catch (e) {
+          const error = (e as Error).message;
+          if (!opts.json) log.error(`  batch import: ${error}`);
+          outcomes.push({
+            label: `batch (${batchCandidates.length} files)`,
+            status: "failed",
+            error,
+          });
+        }
+      }
+
+      for (const item of captureItems) {
+        try {
+          outcomes.push(
+            await processItem(item, opts, cfg, userId, wsOverride, projOverride, sessionId, rl)
+          );
         } catch (e) {
           // Never abort the whole run on one bad item — collect + continue.
           const error = (e as Error).message;
@@ -540,7 +1159,20 @@ export async function importData(inputs: string[], opts: ImportOpts): Promise<vo
     for (const f of failures) outcomes.push({ label: f.label, status: "failed", error: f.error });
 
     if (opts.json) {
-      console.log(JSON.stringify({ imported: outcomes, truncated }, null, 2));
+      // Surface analyze/apply payloads for the batch path (agents need ops + receipt).
+      const batchOutcome = outcomes.find((o) => o.batch);
+      console.log(
+        JSON.stringify(
+          {
+            imported: outcomes,
+            truncated,
+            ...(batchOutcome?.batch?.analyze ? { analyze: batchOutcome.batch.analyze } : {}),
+            ...(batchOutcome?.batch?.apply ? { apply: batchOutcome.batch.apply } : {}),
+          },
+          null,
+          2
+        )
+      );
     } else {
       const stored = outcomes.filter((o) => o.status === "stored");
       const totalEntities = stored.reduce((n, o) => n + (o.entities ?? 0), 0);
@@ -562,8 +1194,10 @@ export async function importData(inputs: string[], opts: ImportOpts): Promise<vo
       for (const f of failed) log.dim(`  ✗ ${f.label}: ${f.error ?? "unknown error"}`);
     }
 
-    const anyFailed = outcomes.some((o) => o.status === "failed");
-    if (anyFailed) process.exit(1);
+    // Only hard-exit on a non-zero code: a plain `return` lets Node flush the
+    // (possibly large) --json payload it just wrote to stdout.
+    const code = importExitCode(outcomes);
+    if (code !== 0) process.exit(code);
   } catch (e) {
     renderHubError(e);
     process.exit(1);

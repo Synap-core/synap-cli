@@ -275,7 +275,16 @@ export async function closeSession(
 
     // Close via PATCH — the /focus-sessions/:id endpoint sets closedAt automatically
     // when status transitions to "closed"
-    const body: Record<string, string | number | undefined> = { workspaceId: wsId, status: "closed" };
+    //
+    // `--recap` lands in `verificationReport.summary`. VERIFIED against the
+    // server: `UpdateBodySchema` accepts `verificationReport: z.unknown()`
+    // (hub-protocol/rest/focus-sessions.ts:114) and applies it verbatim
+    // (:549-550); `{ summary }` is the key the canonical close path writes into
+    // that column (services/focus-sessions/complete-session.ts:86-96). There is
+    // no `recap` field on the route — sending one would have been silently
+    // dropped, which is exactly the bug this replaces.
+    const body: Record<string, unknown> = { workspaceId: wsId, status: "closed" };
+    if (opts.recap) body.verificationReport = { summary: opts.recap };
 
     await hubPatch(`/focus-sessions/${id}`, body, cfg);
 
@@ -288,6 +297,7 @@ export async function closeSession(
     }
 
     log.success(`Session closed  ${chalk.dim(id.slice(0, 8))}`);
+    if (opts.recap) log.dim(`  recap: ${opts.recap}`);
   } catch (e) {
     renderHubError(e);
     process.exit(1);

@@ -2,7 +2,8 @@ import { existsSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { getActivePodConfig, getActiveWorkspaceId, getActiveWorkspaceIdForPod, findPodNameByUrl, getActiveProjectId, listPodProfiles, getPodOverride, getSurfaceAgentKey } from "./pod.js";
 import { resolveAgentOverride } from "./agents-config.js";
-import { resolveActiveLens } from "./session-lens.js";
+import { resolveActiveLens, resolveActiveLensForPod } from "./session-lens.js";
+import { resolveDirectoryLensForPod } from "./directory-lens.js";
 import { HubRestClient } from "@synap/hub-rest-client";
 import { log } from "../utils/logger.js";
 import chalk from "chalk";
@@ -494,32 +495,52 @@ export async function resolveHubConfig(opts?: { podUrl?: string; apiKey?: string
       apiKey = surfaceKey.hubApiKey;
       userId = surfaceKey.agentUserId || envUser;
     }
+    // Per-Claude-session lens wins over the global env var, so concurrent
+    // sessions can each be scoped to a different workspace — but ONLY when the
+    // lens belongs to THIS pod. A lens stamped with another pod is ignored so
+    // the pod-qualified fallback below applies (the "Access denied to
+    // workspace" 403 after `synap pods use`).
+    const lens = resolveActiveLensForPod(envPod);
+    // …and the per-DIRECTORY lens sits directly beneath it: the durable default
+    // for this working tree, overridden by the session lens when one is set.
+    // Pod-qualified through the same door, for the same reason — a directory
+    // lens outlives many `synap pods use` switches, so it is MORE exposed to
+    // the cross-pod 403 than the session lens is.
+    const dirLens = resolveDirectoryLensForPod(envPod)?.lens;
     return {
       podUrl: envPod,
       apiKey,
       userId,
-      // Per-Claude-session lens wins over the global env var, so concurrent
-      // sessions can each be scoped to a different workspace. The global-config
-      // fallback is resolved AGAINST THIS POD (envPod) — never send a workspace
-      // that belongs to a different pod (the "Access denied to workspace" 403).
+      // The global-config fallback is resolved AGAINST THIS POD (envPod) —
+      // never send a workspace that belongs to a different pod.
       workspaceId:
-        resolveActiveLens()?.workspaceId ||
+        lens?.workspaceId ||
+        dirLens?.workspaceId ||
         envWorkspace ||
         getActiveWorkspaceIdForPod(findPodNameByUrl(envPod)),
       // Project is a peer lens, threaded exactly like workspaceId.
-      projectId: resolveActiveLens()?.projectId || envProject || getActiveProjectId(),
+      projectId:
+        lens?.projectId || dirLens?.projectId || envProject || getActiveProjectId(),
       scopes: envScopes ? envScopes.split(",") : undefined,
     };
   }
   // 4. Active CLI pod profile
   const config = getActivePodConfig();
   if (!config) throw new Error("No pod configured. Run: synap pods add");
+  // Same pod-qualification as step 3: a lens stamped with another pod must not
+  // short-circuit `getActiveWorkspaceId()`, which IS cross-pod-safe.
+  const activeLens = resolveActiveLensForPod(config.podUrl);
+  const activeDirLens = resolveDirectoryLensForPod(config.podUrl)?.lens;
   return {
     podUrl: config.podUrl,
     apiKey: config.hubApiKey,
     userId: config.agentUserId,
-    workspaceId: resolveActiveLens()?.workspaceId || getActiveWorkspaceId(),
-    projectId: resolveActiveLens()?.projectId || getActiveProjectId(),
+    // session lens › directory lens › global config. (No env rung here: this
+    // branch is only reached when SYNAP_POD_URL is unset.)
+    workspaceId:
+      activeLens?.workspaceId || activeDirLens?.workspaceId || getActiveWorkspaceId(),
+    projectId:
+      activeLens?.projectId || activeDirLens?.projectId || getActiveProjectId(),
   };
 }
 

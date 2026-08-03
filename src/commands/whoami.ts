@@ -11,9 +11,17 @@
  *   1. resolves the winning cfg (the key every command uses),
  *   2. independently reads env key + `claude-code` surface key and reproduces
  *      the surface-over-env preference rule from hub-client.ts:394-403,
- *   3. introspects the winner via `/auth/status`, and
+ *   3. introspects the winner via BOTH `/auth/status` (who OWNS the key) and
+ *      `/users/me` (who the pod ACTS AS, + server-derived `isAgent`), and
  *   4. when env and surface keys diverge, names the winner AND the ignored key,
  *      probing the loser too so the operator sees both states side by side.
+ *
+ * Step 3 used to show only `/auth/status`'s `userEmail`, labelled "Identity".
+ * For an agent key that is the AGENT, never the human the pod attributes its
+ * writes to — so the command answered a different question than it appeared to,
+ * and an earlier analysis concluded from it that the CLI and the MCP connector
+ * were different people. Key owner, effective user, and isAgent are now printed
+ * together; any one of them alone is misleading.
  *
  * It never mutates state and never relies on resolveHubConfig's stderr swap
  * warning (hub-client.ts:398-400) — it reads the divergence itself.
@@ -21,28 +29,18 @@
 
 import chalk from "chalk";
 import { log, banner } from "../utils/logger.js";
-import { resolveHubConfig, hubGet, HubError, type HubConfig } from "../lib/hub-client.js";
+import { resolveHubConfig, HubError, type HubConfig } from "../lib/hub-client.js";
 import { getSurfaceAgentKey } from "../lib/pod.js";
-
-/**
- * Shape of `GET /api/hub/auth/status`. `keyType` and `workspaceId` are NEW
- * fields being added by a parallel backend change — they may be absent until
- * that lands, so both are optional and rendered as "unknown" when missing.
- */
-interface AuthStatus {
-  keyId?: string;
-  keyIdPrefix?: string;
-  userId?: string;
-  userEmail?: string | null;
-  userName?: string | null;
-  name?: string | null;
-  scopes?: string[];
-  createdAt?: string;
-  expiresAt?: string | null;
-  isActive?: boolean;
-  keyType?: string | null;
-  workspaceId?: string | null;
-}
+// `AuthStatus` + the `/auth/status` fetch moved to lib/credential-class.ts so
+// the proposals surface classifies the calling key through the SAME door this
+// command reports on, instead of re-deriving it.
+import {
+  fetchAuthStatus,
+  fetchEffectiveIdentity,
+  classifyReviewer,
+  type AuthStatus,
+  type EffectiveIdentity,
+} from "../lib/credential-class.js";
 
 /** Last 6+ chars of a key, for eyeballing which secret is in play without leaking it. */
 function keyTail(apiKey: string): string {
@@ -57,7 +55,7 @@ type ProbeResult =
 /** Introspect a specific key by cloning the winning cfg and swapping the secret. */
 async function probeKey(cfg: HubConfig, apiKey: string): Promise<ProbeResult> {
   try {
-    const status = (await hubGet("/auth/status", {}, { ...cfg, apiKey })) as AuthStatus;
+    const status = await fetchAuthStatus(cfg, apiKey);
     return { kind: "ok", status };
   } catch (err: unknown) {
     const is401 =
@@ -69,20 +67,71 @@ async function probeKey(cfg: HubConfig, apiKey: string): Promise<ProbeResult> {
   }
 }
 
-function renderAuthStatus(s: AuthStatus): void {
+/**
+ * The three identity lines, printed together because any ONE of them alone is
+ * misleading.
+ *
+ * `Key owner` came from `/auth/status` and used to be the ONLY thing shown —
+ * labelled just "Identity". For an agent key that is the AGENT, so `whoami`
+ * silently answered a different question than the operator asked, and an
+ * earlier analysis read the CLI and the MCP connector as different people on
+ * the strength of it. The pod attributes an agent key's writes to the human it
+ * is linked to (`userId = keyRecord.linkedUserId`, hub-protocol-rest.ts:407),
+ * and `GET /users/me` is where that effective identity is visible.
+ */
+function renderIdentityTriple(s: AuthStatus, me: EffectiveIdentity | null): void {
+  const owner = s.userEmail ?? s.userName ?? s.userId ?? "unknown";
+  log.info(`Key owner  : ${owner} ${chalk.dim("(who owns this key)")}`);
+  if (!me) {
+    log.info(`Effective  : ${chalk.dim("could not resolve (GET /users/me failed)")}`);
+    return;
+  }
+  const effective = me.id ?? "unknown";
+  // Same id on both lines = a plain human key: the key owner IS the actor.
+  const sameActor = Boolean(me.id) && me.id === s.userId;
+  log.info(
+    `Effective  : ${effective} ${chalk.dim(
+      sameActor ? "(same — this key acts as its own owner)" : "(who the pod attributes writes to)"
+    )}`
+  );
+  log.info(
+    `Is agent   : ${
+      me.isAgent === true
+        ? `${chalk.yellow("yes")} ${chalk.dim("(server-derived — writes are attributed to the effective user)")}`
+        : me.isAgent === false
+          ? chalk.green("no")
+          : chalk.dim("unknown")
+    }`
+  );
+}
+
+function renderAuthStatus(s: AuthStatus, me: EffectiveIdentity | null): void {
   log.info(`Key ID     : ${s.keyIdPrefix ?? "unknown"}`);
   log.info(`Key type   : ${s.keyType ?? chalk.dim("unknown")}`);
-  log.info(`Identity   : ${s.userEmail ?? s.userName ?? s.userId ?? "unknown"}`);
+  renderIdentityTriple(s, me);
   if (s.name) log.info(`Key name   : ${s.name}`);
   log.info(`Workspace  : ${s.workspaceId ?? chalk.dim("unknown")}`);
   log.info(`Scopes     : ${s.scopes && s.scopes.length ? s.scopes.join(", ") : chalk.dim("(none)")}`);
+  // Whether this key may perform a HUMAN review (proposal approve/revert). The
+  // pod blocks agent self-review, so say it here rather than letting
+  // `synap proposals approve` discover it as a 403.
+  const reviewer = classifyReviewer(s);
+  log.info(
+    `Can approve: ${
+      reviewer === "agent"
+        ? `${chalk.red("no")} ${chalk.dim("(agent credential — approve is human review)")}`
+        : reviewer === "human"
+          ? chalk.green("yes")
+          : chalk.dim("unknown")
+    }`
+  );
   const active = s.isActive === true ? chalk.green("active") : s.isActive === false ? chalk.red("revoked") : chalk.dim("unknown");
   log.info(`Status     : ${active}`);
   log.info(`Expires    : ${s.expiresAt ?? chalk.dim("never")}`);
 }
 
-export async function whoami(): Promise<void> {
-  banner();
+export async function whoami(opts: { json?: boolean } = {}): Promise<void> {
+  if (!opts.json) banner();
 
   // 1. The key that actually authenticates every command.
   let cfg: HubConfig;
@@ -112,13 +161,48 @@ export async function whoami(): Promise<void> {
       : "env"
     : "other";
 
-  // 3. Introspect the winning key.
+  // 3. Introspect the winning key — BOTH questions, because "who owns this
+  //    key" and "who does the pod act as" have different answers for an agent
+  //    key, and showing only the first is what made this command misleading.
+  const winnerProbe = await probeKey(cfg, cfg.apiKey);
+  const effective: EffectiveIdentity | null = await fetchEffectiveIdentity(cfg).catch(() => null);
+
+  if (opts.json) {
+    console.log(
+      JSON.stringify(
+        {
+          podUrl: cfg.podUrl,
+          keyOwner:
+            winnerProbe.kind === "ok"
+              ? {
+                  userId: winnerProbe.status.userId,
+                  email: winnerProbe.status.userEmail,
+                  keyId: winnerProbe.status.keyIdPrefix,
+                  keyType: winnerProbe.status.keyType,
+                  isActive: winnerProbe.status.isActive,
+                }
+              : null,
+          effectiveUser: effective ? { userId: effective.id, scopes: effective.scopes } : null,
+          isAgent: effective?.isAgent ?? null,
+          canApprove:
+            winnerProbe.kind === "ok" ? classifyReviewer(winnerProbe.status) : "unknown",
+          probe: winnerProbe.kind,
+          divergence: diverges
+            ? { winner, envKey: keyTail(envKey!), surfaceKey: keyTail(surfaceKey!.hubApiKey) }
+            : null,
+        },
+        null,
+        2
+      )
+    );
+    return;
+  }
+
   log.heading("Winning key (resolved)");
   log.info(`Pod        : ${cfg.podUrl}`);
   log.dim(`Secret     : ${keyTail(cfg.apiKey)}`);
-  const winnerProbe = await probeKey(cfg, cfg.apiKey);
   if (winnerProbe.kind === "ok") {
-    renderAuthStatus(winnerProbe.status);
+    renderAuthStatus(winnerProbe.status, effective);
   } else if (winnerProbe.kind === "revoked") {
     log.error("This key is revoked or expired — /auth/status returned 401.");
     log.hint("Refresh it with: synap login --reconnect");

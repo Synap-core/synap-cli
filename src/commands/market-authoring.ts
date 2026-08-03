@@ -36,6 +36,12 @@ import {
   CpWriteError,
 } from "../lib/cp-packages.js";
 import { resolveHubConfig, hubPost, renderHubError } from "../lib/hub-client.js";
+import {
+  isStandalonePackageFile,
+  parseStandalonePackageFile,
+  validateStandalonePackage,
+  scaffoldStandalonePackageJson,
+} from "../lib/kind-package.js";
 
 /** Print a validator failure list human-readably: `rule` · `path` — `message`. */
 function printValidationErrors(errors: ValidationError[]): void {
@@ -84,8 +90,56 @@ export async function marketValidate(
 
 export async function marketScaffold(
   slug: string,
-  opts: { json?: boolean },
+  opts: { json?: boolean; kind?: string },
 ): Promise<void> {
+  // `--kind cell|view` scaffolds a STANDALONE package file instead of a
+  // workspace template — see `lib/kind-package.ts`. `skill` is refused: there
+  // is no known-good standalone shape yet (the CP schema has no slot for one),
+  // so a scaffold would just produce a file that can't publish.
+  if (opts.kind && opts.kind !== "workspace") {
+    if (opts.kind === "skill") {
+      if (opts.json) {
+        console.log(
+          JSON.stringify(
+            { ok: false, error: "unsupported-kind", kind: "skill" },
+            null,
+            2,
+          ),
+        );
+      } else {
+        log.error(`--kind skill isn't scaffoldable yet.`);
+        log.hint(
+          "The CP's package schema has no standalone slot for a skill (skills only exist nested inside a capability's skills[]) — see lib/kind-package.ts.",
+        );
+      }
+      process.exit(1);
+    }
+    if (opts.kind !== "cell" && opts.kind !== "view") {
+      log.error(`Unknown --kind "${opts.kind}" — expected one of: cell, view, skill.`);
+      process.exit(1);
+    }
+    const fileName = `${slug}.${opts.kind}.json`;
+    const target = resolvePath(process.cwd(), fileName);
+    if (existsSync(target)) {
+      if (opts.json) {
+        console.log(JSON.stringify({ ok: false, error: "exists", path: target }, null, 2));
+      } else {
+        log.error(`${fileName} already exists — refusing to overwrite.`);
+        log.hint("Edit it in place, or choose a different slug.");
+      }
+      process.exit(1);
+    }
+    writeFileSync(target, scaffoldStandalonePackageJson(opts.kind, slug), "utf-8");
+    if (opts.json) {
+      console.log(JSON.stringify({ ok: true, path: target, slug, kind: opts.kind }, null, 2));
+      return;
+    }
+    log.success(`Wrote ${fileName}`);
+    log.dim("Edit it in place, then:");
+    log.dim(`  synap market publish ${fileName}`);
+    return;
+  }
+
   const fileName = `${slug}.template.yaml`;
   const target = resolvePath(process.cwd(), fileName);
 
@@ -164,6 +218,76 @@ function reportCpWriteError(err: CpWriteError, slug: string | undefined): void {
   log.error(`Publish failed${err.status ? ` (HTTP ${err.status})` : ""}: ${err.serverMessage}`);
 }
 
+/**
+ * Publish a STANDALONE (non-workspace) package file — a view/cell/skill,
+ * discriminated by a top-level `category` key the workspace-template envelope
+ * never carries (see `lib/kind-package.ts`). Reuses the SAME `publishPackage`
+ * CP transport as the workspace path — no second fetch, just a different
+ * identity (`opts.slug`/`opts.displayName`/`opts.category` instead of
+ * `_meta.slug`/`workspaceName`).
+ */
+async function marketPublishStandalone(
+  file: string,
+  opts: { public?: boolean; json?: boolean },
+): Promise<void> {
+  const isPublic = opts.public === true;
+
+  let pkg;
+  try {
+    pkg = parseStandalonePackageFile(file);
+  } catch (e) {
+    log.error((e as Error).message);
+    process.exit(1);
+  }
+
+  const structuralErrors = validateStandalonePackage(pkg);
+  if (structuralErrors.length) {
+    if (opts.json) {
+      console.log(
+        JSON.stringify({ ok: false, stage: "validate", errors: structuralErrors }, null, 2),
+      );
+    } else {
+      log.error(`${file} failed validation — not published:`);
+      for (const e of structuralErrors) log.hint(e);
+    }
+    process.exit(1);
+  }
+
+  try {
+    const r = await publishPackage(
+      { ...pkg.definition, description: pkg.description },
+      {
+        isPublic,
+        category: pkg.category,
+        slug: pkg.slug,
+        displayName: pkg.displayName,
+      },
+    );
+    if (opts.json) {
+      console.log(JSON.stringify({ ok: true, ...r }, null, 2));
+      return;
+    }
+    reportPublish(r);
+  } catch (e) {
+    if (e instanceof CpWriteError) {
+      if (opts.json) {
+        console.log(
+          JSON.stringify(
+            { ok: false, stage: "publish", status: e.status, error: e.serverMessage, slug: pkg.slug },
+            null,
+            2,
+          ),
+        );
+      } else {
+        reportCpWriteError(e, pkg.slug);
+      }
+      process.exit(1);
+    }
+    log.error(`Publish failed: ${(e as Error).message}`);
+    process.exit(1);
+  }
+}
+
 export async function marketPublish(
   file: string | undefined,
   opts: {
@@ -175,6 +299,25 @@ export async function marketPublish(
     apiKey?: string;
   },
 ): Promise<void> {
+  // A standalone view/cell/skill file branches off IMMEDIATELY — it has no
+  // `meta`/`workspace` envelope, so the WorkspaceYaml parser below would
+  // reject it. `--from-workspace` never produces this shape, so only the
+  // `file` path is checked. `isStandalonePackageFile` peeks the SAME parse
+  // `parseStandalonePackageFile` will redo — cheap, and keeps the discriminator
+  // logic in ONE place (`kind-package.ts`).
+  if (file && !opts.fromWorkspace) {
+    let peeked: unknown;
+    try {
+      peeked = parseTemplateFile(file);
+    } catch {
+      peeked = undefined;
+    }
+    if (isStandalonePackageFile(peeked)) {
+      await marketPublishStandalone(file, opts);
+      return;
+    }
+  }
+
   // Default PRIVATE; `--public` flips it. `--private` is accepted as the explicit
   // default so a script can state intent.
   const isPublic = opts.public === true;

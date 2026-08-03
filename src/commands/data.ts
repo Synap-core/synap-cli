@@ -181,10 +181,30 @@ export async function orient(opts: BaseOpts): Promise<void> {
 
 // ─── useWorkspace ─────────────────────────────────────────────────────────────
 
+/**
+ * Pin the active workspace — the peer of `synap project use`.
+ *
+ * SCOPE LADDER (ratified): the durable default for a working tree is the
+ * per-DIRECTORY lens (`./.synap/lens.json`), not the machine-global config.
+ * Pinning a workspace while standing in a repo should describe THAT repo, not
+ * silently re-scope every other project on the machine.
+ *
+ *   `--global`   → the pod's global config (the old default; now opt-in)
+ *   `--session`  → this Claude session only; errors outside one
+ *   (default)    → inside a Claude session, the session lens; otherwise the
+ *                  DIRECTORY lens
+ *
+ * Reached by both `synap use <workspace>` (the original short form) and
+ * `synap workspace use <workspace>` (the symmetric long form).
+ */
 export async function useWorkspace(
   workspaceId: string,
-  opts: BaseOpts
+  opts: BaseOpts & { session?: boolean; global?: boolean }
 ): Promise<void> {
+  if (opts.session && opts.global) {
+    console.error(chalk.red("--session and --global are opposite scopes — pass at most one."));
+    process.exit(1);
+  }
   try {
     const cfg = await resolveHubConfig(opts);
     const userId = await resolveUserId(cfg);
@@ -200,27 +220,104 @@ export async function useWorkspace(
       process.exit(1);
     }
 
-    // In a Claude Code session, scope to THIS session's lens (so concurrent
-    // sessions can be on different workspaces). Otherwise set the global default.
+    // Resolve WHERE this pin lands, then say so — an unnamed scope is what
+    // makes a later 403 unexplainable.
     const { getClaudeSessionId, writeLens } = await import("../lib/session-lens.js");
-    const claudeSession = getClaudeSessionId();
+    const claudeSession = opts.session
+      ? requireClaudeSession(getClaudeSessionId())
+      : opts.global
+        ? undefined
+        : getClaudeSessionId();
+
+    let scope: "session" | "directory" | "global";
+    let where: string | undefined;
     if (claudeSession) {
-      writeLens(claudeSession, { workspaceId: String(match.id) });
-    } else {
+      // Stamp the pod: a workspace id is pod-local, and `synap pods use` can
+      // switch the pod out from under this lens (see SessionLens.podUrl).
+      writeLens(claudeSession, { workspaceId: String(match.id), podUrl: cfg.podUrl });
+      scope = "session";
+    } else if (opts.global) {
       const { setActiveWorkspaceId } = await import("../lib/pod.js");
       setActiveWorkspaceId(String(match.id));
+      scope = "global";
+    } else {
+      const { writeDirectoryLens } = await import("../lib/directory-lens.js");
+      const written = writeDirectoryLens({ workspaceId: String(match.id), podUrl: cfg.podUrl });
+      scope = "directory";
+      where = written.file;
     }
 
+    const steps = FLOW.afterWorkspaceUse(String(match.name ?? match.id));
     if (opts.json) {
-      console.log(JSON.stringify({ workspaceId: match.id, name: match.name, scope: claudeSession ? "session" : "global" }, null, 2));
+      console.log(JSON.stringify({ workspaceId: match.id, name: match.name, scope, ...(where ? { lensFile: where } : {}), nextSteps: steps }, null, 2));
       return;
     }
-    const scopeNote = claudeSession ? chalk.dim(" (this session)") : "";
+    const scopeNote =
+      scope === "session"
+        ? chalk.dim(" (this session)")
+        : scope === "global"
+          ? chalk.dim(" (global default)")
+          : chalk.dim(" (this directory)");
     log.success(`Now in workspace: ${chalk.bold(String(match.name ?? match.id))} ${chalk.dim(String(match.id ?? ""))}${scopeNote}`);
+    if (where) log.dim(`  ${where}`);
+    renderNextSteps(steps);
   } catch (e) {
     renderHubError(e);
     process.exit(1);
   }
+}
+
+/**
+ * `--session` requires a Claude session — same contract as
+ * `synap project use --session`. Takes the id (from the ONE door
+ * `getClaudeSessionId`) rather than re-reading the env itself.
+ */
+function requireClaudeSession(id: string | undefined): string {
+  if (!id) {
+    console.error(chalk.red("Not in a Claude Code session (CLAUDE_CODE_SESSION_ID unset)."));
+    log.dim("--session scoping is per-Claude-session. Drop --session to persist the workspace globally instead.");
+    process.exit(1);
+  }
+  return id;
+}
+
+// ─── clearWorkspace ───────────────────────────────────────────────────────────
+
+/**
+ * Clear the active workspace focus — the peer of `synap project clear`.
+ *
+ * `--session` clears only this Claude session's lens. Otherwise every rung the
+ * CLI can write is cleared: the global config, the session lens, AND the
+ * directory lens. `use` can now durably pin a workspace in `./.synap/lens.json`,
+ * so a `clear` that left that rung standing would report success while the
+ * scope survived — the "cleared it but it's still scoped" trap.
+ */
+export async function clearWorkspace(opts: BaseOpts & { session?: boolean }): Promise<void> {
+  const { getClaudeSessionId, clearLensField } = await import("../lib/session-lens.js");
+  const { clearActiveWorkspaceId } = await import("../lib/pod.js");
+
+  if (opts.session) {
+    const session = requireClaudeSession(getClaudeSessionId());
+    clearLensField(session, "workspaceId");
+    if (opts.json) {
+      console.log(JSON.stringify({ cleared: "workspaceId", scope: "session" }));
+      return;
+    }
+    log.success("Workspace focus cleared (this session)");
+    return;
+  }
+
+  clearActiveWorkspaceId();
+  const session = getClaudeSessionId();
+  if (session) clearLensField(session, "workspaceId");
+  const { clearDirectoryLensField } = await import("../lib/directory-lens.js");
+  const clearedFile = clearDirectoryLensField("workspaceId");
+  if (opts.json) {
+    console.log(JSON.stringify({ cleared: "workspaceId", scope: "global", ...(clearedFile ? { lensFile: clearedFile } : {}) }));
+    return;
+  }
+  log.success("Workspace focus cleared");
+  if (clearedFile) log.dim(`  also cleared in ${clearedFile}`);
 }
 
 // ─── listWorkspaces ───────────────────────────────────────────────────────────

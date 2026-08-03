@@ -208,10 +208,11 @@ program
 
 program
   .command("whoami")
-  .description("Show the winning API key's identity/scopes/workspace and flag env-vs-surface key divergence")
-  .action(async () => {
+  .description("Show key owner vs EFFECTIVE user (+ isAgent), scopes/workspace, and flag env-vs-surface key divergence")
+  .option("--json", "Output as JSON")
+  .action(async (opts: { json?: boolean }) => {
     const { whoami } = await import("./commands/whoami.js");
-    await whoami();
+    await whoami(opts);
   });
 
 // Hidden: compact ANSI line for the Claude Code statusLine (reads stdin JSON).
@@ -519,9 +520,9 @@ program
 // timeline (for a capture: WHY a facet/entity dropped, with a fixHint).
 
 program
-  .command("diagnose [runId]")
-  .description("See what an AI did — the run feed, or one run's activity (why it did what it did)")
-  .option("--flow <automation|playbook|capture|session>", "Restrict the feed, or the run's flow (default capture for a runId)")
+  .command("diagnose [run]")
+  .description("See what an AI did — the run feed, or one run's nodes (by id or flow name)")
+  .option("--flow <automation|playbook|capture|capability|session|chat>", "Restrict the feed, or narrow the run lookup to one flow")
   .option("--flow-id <id>", "Restrict the feed to one flow's runs (automationId / playbookId)")
   .option("--limit <n>", "Max runs in the feed")
   .option("--json", "Output raw JSON")
@@ -536,7 +537,9 @@ program
 
 program
   .command("use <workspace>")
-  .description("Set the active workspace (by ID or name) — persisted to ~/.synap/config.json")
+  .description("Set the active workspace (by ID or name) — short form of `synap workspace use`. Default scope: this directory")
+  .option("--session", "Ephemeral: scope only this Claude Code session, don't persist")
+  .option("--global", "Durable machine-wide default (~/.synap/config.json) instead of this directory's .synap/lens.json")
   .option("--json", "Output as JSON")
   .option("--pod-url <url>", "Pod URL override")
   .option("--api-key <key>", "API key override")
@@ -574,6 +577,7 @@ project
   .command("use <ref>")
   .description("Pin the active project (durable, like `synap use <workspace>`). Ref = uuid, slug, or <pod>/<slug> — cross-pod refs switch the active pod too")
   .option("--session", "Ephemeral: scope only this Claude Code session, don't persist (cross-pod refs refused)")
+  .option("--global", "Durable machine-wide default (~/.synap/config.json) instead of this directory's .synap/lens.json")
   .option("--json", "Output as JSON")
   .option("--pod-url <url>", "Pod URL override")
   .option("--api-key <key>", "API key override")
@@ -605,8 +609,10 @@ project
 
 program
   .command("lens")
-  .description("Show this Claude session's lens (workspace + project + focus session)")
+  .description("Show the effective lens (workspace + project + focus session) and WHICH rung set each one")
   .option("--json", "Output as JSON")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
   .action(async (opts) => {
     const { showLens } = await import("./commands/lens.js");
     await showLens(opts);
@@ -644,8 +650,9 @@ program
   .option("--evidence <text>", "Supporting file path, URL, or code snippet")
   .option("--tags <csv>", "Comma-separated tags e.g. repo:synap-backend,layer:migrations")
   .option("--session", "Link captured knowledge to the active session")
-  .option("--global", "GLOBAL lane: pod-wide cross-cutting runbook (→ knowledge_keys), visible in every workspace")
-  .option("--key <ns:slug>", "Stable key for a --global runbook (derived from --type + --claim if omitted)")
+  .option("--pod-wide", "GLOBAL lane: pod-wide cross-cutting runbook (→ knowledge_keys), visible in every workspace")
+  .option("--global", "Alias for --pod-wide")
+  .option("--key <ns:slug>", "Stable key for a --pod-wide runbook (derived from --type + --claim if omitted)")
   .option("--team", "Write to the first product workspace instead of the active workspace")
   .option("--workspace <id>", "Explicit workspace override")
   .option("--project <id|name>", "Pin the capture to a project (id or name) — overrides SYNAP_PROJECT_ID / the session lens")
@@ -668,6 +675,13 @@ program
   )
   .option("--workspace <id|name>", "Override AI workspace routing")
   .option("--project <id|name>", "Override AI project routing")
+  .option(
+    "--home-map <pairs>",
+    "Multi-home path map: pathSubstring=workspaceNameOrId pairs " +
+      '(e.g. "Projects=Builder,Posts=Content OS"). Matched batch paths are ' +
+      "rewritten with the workspace name as the first segment so placement " +
+      "heuristics pin the right home. No product defaults."
+  )
   .option("--dry-run", "Preview only — do not write")
   .option("--yes", "Skip confirmation / auto-confirm store-first")
   .option("--session", "Link created entities to the active session")
@@ -778,7 +792,45 @@ program
 
 const workspace = program
   .command("workspace")
-  .description("Set up and switch workspace context (run once — persisted to ~/.synap/config.json)");
+  .description("Manage + focus the workspace lens (an operational domain): list, use, clear");
+
+// `workspace use|list|clear` mirror `project use|list|clear` so the two
+// composable lenses read as siblings. ADDITIVE: the original short form
+// `synap use <workspace>` and `synap list workspaces` are untouched and keep
+// working exactly as before — these are aliases, not replacements.
+workspace
+  .command("use <workspace>")
+  .description("Pin the active workspace by ID or name (durable, like `synap use <workspace>`). Default scope: this directory")
+  .option("--session", "Ephemeral: scope only this Claude Code session, don't persist")
+  .option("--global", "Durable machine-wide default (~/.synap/config.json) instead of this directory's .synap/lens.json")
+  .option("--json", "Output as JSON")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (ws: string, opts) => {
+    const { useWorkspace } = await import("./commands/data.js");
+    await useWorkspace(ws, opts);
+  });
+
+workspace
+  .command("list", { isDefault: true })
+  .description("List workspaces you belong to (bare `synap workspace` runs this)")
+  .option("--json", "Output as JSON")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (opts) => {
+    const { listWorkspaces } = await import("./commands/data.js");
+    await listWorkspaces(opts);
+  });
+
+workspace
+  .command("clear")
+  .description("Clear the active workspace focus (durable by default)")
+  .option("--session", "Ephemeral: clear only this Claude Code session's workspace")
+  .option("--json", "Output as JSON")
+  .action(async (opts) => {
+    const { clearWorkspace } = await import("./commands/data.js");
+    await clearWorkspace(opts);
+  });
 
 workspace
   .command("provision-agent")
@@ -933,8 +985,14 @@ const proposals = program
 
 proposals
   .command("list", { isDefault: true })
-  .description("List pending governance proposals for this agent")
+  .description("List governance proposals (default: the pending queue)")
+  .option(
+    "--status <status>",
+    "pending (default) | approved | auto_approved (what the agent already did) | rejected | all",
+    "pending"
+  )
   .option("--workspace <id>", "Scope to a specific workspace")
+  .option("--session <id>", "Scope to one focus session (the agent run that filed them)")
   .option("--limit <n>", "Max results", "20")
   .option("--json", "Output as JSON")
   .option("--pod-url <url>", "Pod URL override")
@@ -946,8 +1004,12 @@ proposals
 
 proposals
   .command("approve <id>")
-  .description("Approve a pending proposal")
+  .description("Approve a pending proposal (interactive only — requires a TTY and a typed confirmation)")
   .option("--reason <text>", "Optional approval note")
+  .option(
+    "--yes",
+    "Accepted for symmetry with other commands, but does NOT skip the typed confirmation — approval is always deliberate"
+  )
   .option("--json", "Output as JSON")
   .option("--pod-url <url>", "Pod URL override")
   .option("--api-key <key>", "API key override")
@@ -1212,6 +1274,30 @@ observe
   .option("--pod-url <url>", "Pod URL override")
   .option("--api-key <key>", "API key override")
   .action(async (text: string, opts) => {
+    // `write` is the DEFAULT subcommand, so an unrecognized token lands here as
+    // `text` instead of erroring — and this default WRITES. `synap observe recal`
+    // therefore recorded an observation literally reading "recal" into the
+    // AI-maintained user model, silently. Every other `isDefault` group in this
+    // file has a zero-arg default, which commander rejects on its own; this is
+    // the only one that can absorb a typo, and the only one where absorbing it
+    // is a mutation.
+    //
+    // The guard keys off whether `write` was named EXPLICITLY, not off the text:
+    // a mistyped subcommand is always a single bare token, and a real
+    // observation is a sentence. Going through `observe write <text>` skips the
+    // check entirely, so the escape hatch is real rather than circular.
+    const argv = process.argv;
+    const observeAt = argv.indexOf("observe");
+    const explicitWrite = observeAt !== -1 && argv[observeAt + 1] === "write";
+    if (!explicitWrite && !/\s/.test(text.trim())) {
+      const siblings = observe.commands.map((c) => c.name()).filter((n) => n !== "write");
+      console.error(
+        `error: '${text}' looks like a subcommand, not observation text — nothing was recorded.\n` +
+          `  Available: ${siblings.map((n) => `synap observe ${n}`).join(", ")}\n` +
+          `  To record it as an observation anyway: synap observe write ${JSON.stringify(text)}`
+      );
+      process.exit(1);
+    }
     const { observeWrite } = await import("./commands/observe.js");
     await observeWrite(text, opts);
   });
@@ -1450,6 +1536,25 @@ agent
   .action(async (opts: { dryRun?: boolean; podUrl?: string; apiKey?: string }) => {
     const { agentTick } = await import("./commands/agent-run.js");
     await agentTick(opts);
+  });
+
+// ─── automate ───────────────────────────────────────────────────────────────
+// The natural-language automation door. It stays deliberately separate from
+// `automation create`, which remains the expert, explicit-DSL path.
+
+program
+  .command("automate <instruction>")
+  .description("Ask the workspace agent to prepare a governed automation proposal")
+  .option("--workspace <id|name>", "Workspace to use (uses active workspace/lens if omitted)")
+  .option("--thread <id>", "Continue an existing agent thread/channel")
+  .option("--new", "Start a fresh agent thread")
+  .option("--timeout <seconds>", "How long to wait for the agent's reply (default: 90)")
+  .option("--json", "Machine-readable output { ok, reply, threadId, workspaceId }")
+  .option("--pod-url <url>", "Override pod URL")
+  .option("--api-key <key>", "Override API key")
+  .action(async (instruction: string, opts: Record<string, unknown>) => {
+    const { automate } = await import("./commands/automate.js");
+    await automate(instruction, opts as Parameters<typeof automate>[1]);
   });
 
 // ─── automation ──────────────────────────────────────────────────────────────
@@ -1767,7 +1872,7 @@ cell
     "--deps <json>",
     'Dependency map JSON, e.g. \'{"recharts":"2.12.0"}\' (sent in payload; backend support pending)'
   )
-  .option("--workspace <id>", "Workspace to scope the cell to (omit for pod-global)")
+  .option("--workspace <id>", "Workspace to scope the cell to (omit for pod-wide)")
   .option("--description <text>", "Short description")
   .option("--open", "Open in the Synap desktop app after define")
   .option("--json", "JSON output")
@@ -2006,11 +2111,97 @@ market
     await marketInstalled(opts);
   });
 
+market
+  .command("workspaces")
+  .description("List your workspaces with their template-attachment status — find the one that isn't attached yet (pure read)")
+  .option("--unattached", "Only show workspaces that need attention (unattached or missing a version stamp)")
+  .option("--json", "Output as JSON")
+  .action(async (_opts, cmd) => {
+    // Same parent/child `--json` collision as `market install` — see its comment.
+    const opts = cmd.optsWithGlobals();
+    const { marketWorkspaces } = await import("./commands/market.js");
+    await marketWorkspaces(opts);
+  });
+
+market
+  .command("attach <workspaceId>")
+  .description("Reconcile a marketplace template onto an existing workspace + version-stamp it — how you relink a workspace installed before the marketplace")
+  .option("--slug <slug>", "Template to attach (inferred from the workspace's existing attachment or domain when omitted)")
+  .option("--project <id>", "Optionally tag the reconciled entities to a project")
+  .option("--timeout <seconds>", "How long to wait for the apply to finish (default: 120)")
+  .option("--json", "Output as JSON")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (workspaceId: string, _opts, cmd) => {
+    // Same parent/child `--json` collision as `market install` — see its comment.
+    const opts = cmd.optsWithGlobals();
+    const { marketAttach } = await import("./commands/market.js");
+    await marketAttach(workspaceId, opts);
+  });
+
+// ── `synap templates` — the ONE home for workspace ↔ template health ─────────
+// Consolidates `market update`/`workspaces`/`installed`: one grouped, action-
+// ranked view where an UNATTACHED workspace is visible (it wasn't in `update`),
+// with a suggested template and a one-word attach. The `market *` subcommands
+// still work — this is the front door, not a breaking rename.
+const templates = program
+  .command("templates")
+  .description("See every workspace's template status (attached, drifted, or unattached) and connect them — the one home for template health")
+  .option("--needs-attention", "Show only workspaces that need action (drifted / unstamped / unattached-with-suggestion)")
+  .option("--json", "Output as JSON")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (_opts, cmd) => {
+    const opts = cmd.optsWithGlobals();
+    const { marketTemplates } = await import("./commands/market.js");
+    await marketTemplates(opts);
+  });
+
+templates
+  .command("attach <workspace>")
+  .description("Connect a workspace (by NAME or id) to a template — suggests the right one so you don't guess a slug")
+  .option("--slug <slug>", "Force a specific template instead of the suggestion")
+  .option("--yes", "Accept a confident (domain-match) suggestion without prompting — for scripts")
+  .option("--project <id>", "Optionally tag the reconciled entities to a project")
+  .option("--timeout <seconds>", "How long to wait for the apply to finish (default: 120)")
+  .option("--json", "Output as JSON")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (workspace: string, _opts, cmd) => {
+    const opts = cmd.optsWithGlobals();
+    const { templatesAttach } = await import("./commands/market.js");
+    await templatesAttach(workspace, opts);
+  });
+
+templates
+  .command("update [slugs...]")
+  .alias("updates")
+  .description("Apply template updates — 'update all' (or --yes) for every drifted workspace, or name specific slugs. Bare 'update' previews what's available.")
+  .option("--yes", "Apply every available update without prompting (same as 'update all')")
+  .option("--dry-run", "Preview only — never apply")
+  .option("--timeout <seconds>", "How long to wait for each apply (default: 120)")
+  .option("--json", "Output as JSON")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (slugs: string[] | undefined, _opts, cmd) => {
+    const opts = cmd.optsWithGlobals();
+    // `update all` reads more naturally than `--yes` and is what people type —
+    // treat the literal word "all" as "apply every available update".
+    const wantsAll = !!slugs?.some((s) => s.toLowerCase() === "all");
+    const explicit = (slugs ?? []).filter((s) => s.toLowerCase() !== "all");
+    const { marketUpdate } = await import("./commands/market.js");
+    await marketUpdate(
+      explicit.length > 0 ? explicit : undefined,
+      wantsAll ? { ...opts, yes: true } : opts
+    );
+  });
+
 // ── Authoring loop: scaffold → validate → publish → unpublish ────────────────
 
 market
   .command("scaffold <slug>")
   .description("Write a minimal valid <slug>.template.yaml to edit in place (refuses to overwrite)")
+  .option("--kind <kind>", "Scaffold a standalone package instead of a workspace template: cell, view, or skill")
   .option("--json", "Output as JSON")
   .action(async (slug: string, _opts, cmd) => {
     // Same parent/child `--json` collision as `market install` — see its comment.
@@ -2032,7 +2223,7 @@ market
 
 market
   .command("publish [file]")
-  .description("Validate then publish a template to the marketplace (private by default) — pass a file, or --from-workspace <id>")
+  .description("Validate then publish a template (or a standalone cell/view package) to the marketplace (private by default) — pass a file, or --from-workspace <id>")
   .option("--public", "Publish as PUBLIC (default is private)")
   .option("--private", "Publish as private (the default — stated explicitly)")
   .option("--from-workspace <id>", "Serialize a live workspace into a template and publish it (instead of a file)")

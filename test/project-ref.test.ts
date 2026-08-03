@@ -190,12 +190,12 @@ describe("sessionScopeRefusal", () => {
 
   it("refuses a cross-pod ref with a clear message", () => {
     const refusal = sessionScopeRefusal(RESOLUTION, "https://pod.team.thearchitech.xyz");
-    expect(refusal).toContain("session lens has no pod field");
+    expect(refusal).toContain("never switches the active pod");
     expect(refusal).toContain(RESOLUTION.podUrl);
   });
 
   it("refuses when there is no active pod at all", () => {
-    expect(sessionScopeRefusal(RESOLUTION, undefined)).toContain("session lens has no pod field");
+    expect(sessionScopeRefusal(RESOLUTION, undefined)).toContain("never switches the active pod");
   });
 });
 

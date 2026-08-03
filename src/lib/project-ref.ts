@@ -172,9 +172,15 @@ export function samePodOrigin(a: string | undefined, b: string | undefined): boo
 }
 
 /**
- * Session-lens guard: the per-Claude-session lens has NO pod field, so a
- * `--session` pin can only target a project on the ACTIVE pod. Returns the
- * refusal message for a cross-pod ref, or null when the pin is allowed.
+ * Session-lens guard: `--session` scopes ONLY the session lens — it never
+ * switches the active pod — so a `--session` pin can only target a project on
+ * the ACTIVE pod. Returns the refusal message for a cross-pod ref, or null when
+ * the pin is allowed.
+ *
+ * NOTE: this compares the REF's pod against the ACTIVE pod. That is a different
+ * question from `resolveActiveLensForPod` (which compares a STORED lens against
+ * the pod being addressed), so the two deliberately do not share a helper
+ * beyond `samePodOrigin`.
  */
 export function sessionScopeRefusal(
   project: CpProjectResolution,
@@ -182,7 +188,7 @@ export function sessionScopeRefusal(
 ): string | null {
   if (samePodOrigin(activePodUrl, project.podUrl)) return null;
   return (
-    `--session scopes only this Claude session, and the session lens has no pod field — ` +
+    `--session scopes only this Claude session and never switches the active pod — ` +
     `it cannot bind a project on another pod (${project.podUrl}). ` +
     `Re-run without --session to switch the active pod, or pick a project on the active pod.`
   );
