@@ -730,7 +730,7 @@ function reportResolution(res: Record<string, unknown>): void {
 // ─── createEntity ─────────────────────────────────────────────────────────────
 
 export async function createEntity(
-  opts: BaseOpts & { profile: string; name: string; workspace?: string; props?: string }
+  opts: BaseOpts & { profile: string; name: string; workspace?: string; props?: string; content?: string }
 ): Promise<void> {
   try {
     const cfg = await resolveHubConfig(opts);
@@ -742,6 +742,7 @@ export async function createEntity(
       title: opts.name,
       workspaceId: opts.workspace,
       properties,
+      ...(opts.content?.trim().length ? { content: opts.content } : {}),
     }, cfg);
 
     const entity = res as Record<string, unknown>;
@@ -795,7 +796,7 @@ export async function listProfiles(
 
     log.heading(`Profiles in workspace ${workspaceId}`);
     for (const p of profiles) {
-      const scope = String(p.entityScope ?? "workspace");
+      const scope = String(p.entityScope ?? "pod");
       const desc = p.description ? chalk.dim(` — ${String(p.description).slice(0, 60)}`) : "";
       // A role-profile (client, partner, …) is a hat an existing entity wears
       // via `synap facet attach` — never created as its own entity. Label it

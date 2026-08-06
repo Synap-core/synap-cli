@@ -368,7 +368,12 @@ function accountLabel(account: string | undefined): string | null {
   return isUuid ? null : account;
 }
 
-/** A USABLE pack: name + each runnable verb as a ready-to-run command. */
+/**
+ * A USABLE pack: name + its verbs grouped by exec-mode as compact NAME lists.
+ * The full `--param` signature is NOT dumped per verb here — that turned a pack
+ * with 20+ verbs into an unscannable wall. The list answers "what can this do?";
+ * `synap cap show <verb>` gives the exact run command for the one you pick.
+ */
 function renderUsable(card: CapabilityCard): void {
   const label = accountLabel(card.connection?.account);
   const acct = label
@@ -376,14 +381,25 @@ function renderUsable(card: CapabilityCard): void {
     : card.connection?.provider
       ? chalk.dim(` · ${card.connection.provider} connected`)
       : "";
-  console.log(`  ${chalk.green("●")} ${chalk.bold(card.name)}${acct}`);
-  for (const v of card.verbs.filter((x) => x.runnable)) {
-    const mark = v.type !== "read" ? chalk.yellow("✋") : chalk.green("▸");
-    const note =
-      v.type !== "read"
-        ? chalk.yellow(" — asks approval")
-        : chalk.dim(" — instant");
-    console.log(`      ${mark} ${chalk.cyan(runCommand(v))}${note}`);
+  const runnable = card.verbs.filter((x) => x.runnable);
+  const instant = runnable.filter((v) => v.type === "read");
+  const approval = runnable.filter((v) => v.type !== "read");
+  const count = chalk.dim(
+    ` · ${runnable.length} verb${runnable.length === 1 ? "" : "s"}` +
+      (approval.length ? `, ${approval.length} need approval` : "")
+  );
+  console.log(`  ${chalk.green("●")} ${chalk.bold(card.name)}${acct}${count}`);
+  if (instant.length > 0) {
+    console.log(
+      `      ${chalk.green("▸")} ${chalk.dim("instant ")} ` +
+        instant.map((v) => chalk.cyan(v.verbId)).join("  ")
+    );
+  }
+  if (approval.length > 0) {
+    console.log(
+      `      ${chalk.yellow("✋")} ${chalk.dim("approval")} ` +
+        approval.map((v) => chalk.cyan(v.verbId)).join("  ")
+    );
   }
   const off = card.verbs.filter((v) => !v.runnable);
   if (off.length > 0) {
@@ -404,6 +420,14 @@ function renderSetup(card: CapabilityCard): void {
   console.log(
     `      ${chalk.cyan("→")} ${card.nextAction.hint || `synap cap enable "${card.name}"`}`
   );
+  // An expired connection reads as "needs a step", but the fix is a RECONNECT, not
+  // an enable — show the exact command so the hint's "Reconnect …" prose is
+  // actionable (the state word tells WHAT, this tells HOW).
+  if (card.connection?.state === "expired") {
+    console.log(
+      `        ${chalk.dim(`synap cap connect "${card.name}" --reconnect`)}`
+    );
+  }
 }
 
 /** An AVAILABLE pack: one line — name · what it offers · add command. */
@@ -579,10 +603,16 @@ async function pollUntilConnected(
 async function ensureConnection(
   cfg: HubCfg,
   workspaceId: string,
-  card: CapabilityCard
+  card: CapabilityCard,
+  // Force a re-auth even when the card reports `state === "connected"`. The card
+  // reflects a connection RECORD's existence, not its token's HEALTH, so an
+  // expired/revoked token still reads "connected" — only a forced fresh OAuth
+  // fixes it. Threaded to the provider door as `forceReauth`.
+  forceReconnect = false
 ): Promise<boolean> {
   const conn = card.connection;
-  if (!conn || !conn.required || conn.state === "connected") return true;
+  if (!conn || !conn.required) return true;
+  if (conn.state === "connected" && !forceReconnect) return true;
 
   // NOTE: `state === "unavailable"` is deliberately NOT short-circuited here.
   // Resolving the door is not an OAuth attempt — it returns 200 with the pod's
@@ -636,7 +666,9 @@ async function ensureConnection(
   const spinner = ora({ text: `Resolving ${chalk.bold(provider)} connection…`, color: "cyan" }).start();
   let res: Record<string, unknown>;
   try {
-    res = (await hubPost("/connectors/connect", { provider, workspaceId }, cfg)) as Record<string, unknown>;
+    const connectBody: Record<string, unknown> = { provider, workspaceId };
+    if (forceReconnect) connectBody.forceReauth = true;
+    res = (await hubPost("/connectors/connect", connectBody, cfg)) as Record<string, unknown>;
     spinner.stop();
   } catch (err) {
     spinner.fail(chalk.red("Failed to resolve connection"));
@@ -784,13 +816,15 @@ async function connectProviderFlow(
   cfg: HubCfg,
   provider: string,
   displayName: string,
-  workspaceId: string | undefined
+  workspaceId: string | undefined,
+  forceReauth = false
 ): Promise<boolean> {
   const spinner = ora({ text: `Connecting ${chalk.bold(displayName)}…`, color: "cyan" }).start();
   let res: Record<string, unknown>;
   try {
     const body: Record<string, unknown> = { provider };
     if (workspaceId) body.workspaceId = workspaceId;
+    if (forceReauth) body.forceReauth = true;
     res = (await hubPost("/connectors/connect", body, cfg)) as Record<string, unknown>;
     spinner.stop();
   } catch (err) {
@@ -1272,6 +1306,8 @@ export async function capabilityEnable(
 
 export interface CapConnectOpts {
   workspace?: string;
+  /** Force a fresh OAuth even if a connection record exists (expired-token reconnect). */
+  reconnect?: boolean;
 }
 
 export async function capabilityConnect(
@@ -1327,17 +1363,21 @@ export async function capabilityConnect(
     }
     const connectable = providers.filter((p) => !p.connected);
     const connected = providers.filter((p) => p.connected);
-    if (connectable.length === 0) {
+    // --reconnect: the point is to re-auth an ALREADY-connected (but expired)
+    // service, so connected rows become selectable (a fresh OAuth) rather than
+    // disabled, and "everything already connected" is no longer a dead end.
+    if (connectable.length === 0 && !opts.reconnect) {
       log.heading("Everything connectable here is already connected.");
       for (const p of connected) log.dim(`  ${chalk.green("✓")} ${p.displayName ?? p.provider}`);
+      log.dim("Reconnect an expired one:  synap cap connect --reconnect");
       return;
     }
     const answer = await prompts({
       type: "select",
       name: "id",
-      message: `Connect a service ${chalk.dim(`→ ${podHostLabel(cfg)}`)}`,
-      // Connectable first; already-connected (disabled) grouped at the end —
-      // mirrors the `cap add` picker so the disabled rows don't scatter.
+      message: `${opts.reconnect ? "Reconnect" : "Connect"} a service ${chalk.dim(`→ ${podHostLabel(cfg)}`)}`,
+      // Connectable first; already-connected grouped at the end — disabled in the
+      // normal flow, but SELECTABLE (for a forced re-auth) under --reconnect.
       choices: [
         ...connectable.map((p) => ({
           title: p.displayName ?? p.provider,
@@ -1345,9 +1385,9 @@ export async function capabilityConnect(
         })),
         ...connected.map((p) => ({
           title: `${p.displayName ?? p.provider} ${chalk.green("✓ connected")}`,
-          description: "already connected",
+          description: opts.reconnect ? "re-authenticate" : "already connected",
           value: p.id,
-          disabled: true,
+          disabled: !opts.reconnect,
         })),
       ],
     });
@@ -1360,7 +1400,8 @@ export async function capabilityConnect(
       cfg,
       chosen.id,
       chosen.displayName ?? chosen.provider,
-      workspaceId
+      workspaceId,
+      opts.reconnect ?? false
     );
     // A connect that did not connect must not report success to a caller/script.
     if (!ok) process.exit(1);
@@ -1395,7 +1436,11 @@ export async function capabilityConnect(
     return;
   }
 
-  const ok = await ensureConnection(cfg, workspaceId, card);
+  if (opts.reconnect) {
+    log.heading(`Reconnecting ${card.name}`);
+    log.dim("Forcing a fresh sign-in — your previous access had expired or was revoked.");
+  }
+  const ok = await ensureConnection(cfg, workspaceId, card, opts.reconnect ?? false);
   if (!ok) process.exit(1);
   log.dim(`Now enable its verbs:  synap cap enable "${card.name}"`);
 }
@@ -1597,6 +1642,13 @@ export async function capabilityShow(name: string, opts: CapShowOpts): Promise<v
       stateColor(c.state),
     ].filter(Boolean);
     console.log(`  ${chalk.bold("Connection")}  ${parts.join(" ")}`);
+    // Expired = previously connected, token now dead. Surface the exact command to
+    // fix it — the state word alone tells WHAT, not HOW (the user's original ask).
+    if (c.state === "expired") {
+      console.log(
+        `      ${chalk.yellow("→")} its access expired — reconnect:  synap cap connect "${card.name}" --reconnect`
+      );
+    }
   } else {
     console.log(`  ${chalk.bold("Connection")}  ${chalk.dim("none required")}`);
   }

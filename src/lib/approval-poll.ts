@@ -33,6 +33,15 @@ export interface PollForApprovalOptions<T> {
   rejectedError?: string;
   /** Error thrown when the deadline elapses. */
   timeoutError?: string;
+  /**
+   * Called once per loop iteration, after the fetch attempt. `data` is the
+   * parsed body, or null when the tick was a network blip / non-2xx / unparsable.
+   *
+   * Exists so a caller waiting minutes (corpus import) can show a heartbeat
+   * WITHOUT forking a second poll loop. Optional and default-undefined — the
+   * approval callers (CP login, agent-key) are byte-for-byte unaffected.
+   */
+  onTick?: (info: { data: unknown | null; elapsedMs: number }) => void;
 }
 
 /**
@@ -47,7 +56,10 @@ export async function pollForApproval<T>(
   const intervalMs = opts.intervalMs ?? 2000;
   const timeoutMs = opts.timeoutMs ?? 120_000;
   const requestTimeoutMs = opts.requestTimeoutMs ?? 30_000;
-  const deadline = Date.now() + timeoutMs;
+  const startedAt = Date.now();
+  const deadline = startedAt + timeoutMs;
+  const tick = (data: unknown | null): void =>
+    opts.onTick?.({ data, elapsedMs: Date.now() - startedAt });
 
   while (Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, intervalMs));
@@ -59,12 +71,20 @@ export async function pollForApproval<T>(
         signal: AbortSignal.timeout(requestTimeoutMs),
       });
     } catch {
+      tick(null);
       continue; // network blip — retry
     }
-    if (!res.ok) continue; // transient (throttle/5xx) — retry
+    if (!res.ok) {
+      tick(null);
+      continue; // transient (throttle/5xx) — retry
+    }
 
     const data = (await res.json().catch(() => null)) as unknown;
-    if (data === null) continue;
+    if (data === null) {
+      tick(null);
+      continue;
+    }
+    tick(data);
 
     if (opts.isRejected(data)) {
       throw new Error(opts.rejectedError ?? "Request was rejected.");

@@ -1,13 +1,11 @@
 /**
  * Two "the flag never left the process" defects, pinned at the wire.
  *
- * Task 3 — `synap session close --recap "…"` accepted the text and then built a
- * PATCH body of only `{workspaceId, status}`. The recap was silently discarded.
- * The server field is `verificationReport` (UpdateBodySchema,
- * synap-backend/.../hub-protocol/rest/focus-sessions.ts:114, applied :549-550);
- * `{ summary }` is the key the canonical close path writes into that column
- * (services/focus-sessions/complete-session.ts:86-96). There is NO `recap` field
- * on the route — asserting the exact key is the point of this test.
+ * Task 3 — `synap session close --recap "…"` must reach the pod as `summary`
+ * on POST /focus-sessions/:id/complete (canonical pack close). On older pods
+ * (404) it falls back to PATCH with verificationReport.summary — same key the
+ * complete path writes (services/focus-sessions/complete-session.ts). There is
+ * NO `recap` field on either route — asserting the exact key is the point.
  *
  * Task 2 — `synap proposals list` never sent `sessionId`, though the hub has
  * read it since proposals.ts:207 and forwards it at :225.
@@ -19,13 +17,32 @@
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
-const hubPatch = vi.fn(async () => ({}));
-const hubGet = vi.fn(async () => ({ proposals: [] }));
+const { hubPatch, hubGet, hubPost, MockHubError } = vi.hoisted(() => {
+  class MockHubError extends Error {
+    status: number;
+    constructor(message: string, status: number) {
+      super(message);
+      this.name = "HubError";
+      this.status = status;
+    }
+  }
+  return {
+    hubPatch: vi.fn(async () => ({})),
+    hubGet: vi.fn(async () => ({ proposals: [] })),
+    hubPost: vi.fn(async () => ({
+      session: { id: "7f3a9c21-1111-4a2b-8c3d-99887766aabb", status: "closed" },
+      pendingProposals: [],
+      counts: { pending: 0, unfinishedOutputs: 0 },
+      warnings: [],
+    })),
+    MockHubError,
+  };
+});
 
 vi.mock("../src/lib/hub-client.js", () => ({
   hubPatch,
   hubGet,
-  hubPost: vi.fn(async () => ({})),
+  hubPost,
   resolveHubConfig: vi.fn(async () => ({
     podUrl: "http://127.0.0.1:1",
     apiKey: "test-key",
@@ -35,7 +52,7 @@ vi.mock("../src/lib/hub-client.js", () => ({
   renderHubError: vi.fn(),
   readActiveSessionId: vi.fn(() => undefined),
   clearActiveSessionId: vi.fn(),
-  HubError: class HubError extends Error {},
+  HubError: MockHubError,
 }));
 
 // The list footer classifies the calling key; stub it so these tests stay
@@ -49,30 +66,76 @@ const SESSION_ID = "7f3a9c21-1111-4a2b-8c3d-99887766aabb";
 beforeEach(() => {
   hubPatch.mockClear();
   hubGet.mockClear();
+  hubPost.mockClear();
+  hubPost.mockResolvedValue({
+    session: { id: SESSION_ID, status: "closed" },
+    pendingProposals: [],
+    counts: { pending: 0, unfinishedOutputs: 0 },
+    warnings: [],
+  });
+  hubPatch.mockResolvedValue({});
 });
 
 describe("session close --recap reaches the pod", () => {
-  it("sends the recap as verificationReport.summary", async () => {
+  it("POSTs complete with summary (not a bare recap field)", async () => {
     const { closeSession } = await import("../src/commands/sessions.js");
     await closeSession(SESSION_ID, { recap: "Shipped the credential guard." } as never);
 
-    expect(hubPatch).toHaveBeenCalledTimes(1);
-    const [path, body] = hubPatch.mock.calls[0] as unknown as [string, Record<string, unknown>];
-    expect(path).toBe(`/focus-sessions/${SESSION_ID}`);
-    expect(body.status).toBe("closed");
-    expect(body.verificationReport).toEqual({ summary: "Shipped the credential guard." });
-    // Regression tripwire for the whole defect class: guessing a field name
-    // reproduces the silent discard with extra steps. The route has no `recap`.
+    expect(hubPost).toHaveBeenCalledTimes(1);
+    const [path, body] = hubPost.mock.calls[0] as unknown as [
+      string,
+      Record<string, unknown>,
+    ];
+    expect(path).toBe(`/focus-sessions/${SESSION_ID}/complete`);
+    expect(body.summary).toBe("Shipped the credential guard.");
+    // Regression: CLI flag name must not leak onto the wire.
     expect(body).not.toHaveProperty("recap");
+    expect(hubPatch).not.toHaveBeenCalled();
   });
 
-  it("omits verificationReport entirely when no recap was given", async () => {
+  it("omits summary entirely when no recap was given", async () => {
     const { closeSession } = await import("../src/commands/sessions.js");
     await closeSession(SESSION_ID, {} as never);
 
-    const [, body] = hubPatch.mock.calls[0] as unknown as [string, Record<string, unknown>];
-    expect(body).not.toHaveProperty("verificationReport");
+    const [, body] = hubPost.mock.calls[0] as unknown as [
+      string,
+      Record<string, unknown>,
+    ];
+    expect(body).not.toHaveProperty("summary");
+    expect(body).not.toHaveProperty("recap");
+    expect(hubPatch).not.toHaveBeenCalled();
+  });
+
+  it("falls back to PATCH verificationReport.summary when complete is 404", async () => {
+    hubPost.mockRejectedValueOnce(
+      new MockHubError("Hub POST failed (HTTP 404)", 404)
+    );
+
+    const { closeSession } = await import("../src/commands/sessions.js");
+    await closeSession(SESSION_ID, {
+      recap: "Closed on an older pod.",
+    } as never);
+
+    expect(hubPost).toHaveBeenCalledTimes(1);
+    expect(hubPatch).toHaveBeenCalledTimes(1);
+    const [path, body] = hubPatch.mock.calls[0] as unknown as [
+      string,
+      Record<string, unknown>,
+    ];
+    expect(path).toBe(`/focus-sessions/${SESSION_ID}`);
     expect(body.status).toBe("closed");
+    expect(body.verificationReport).toEqual({
+      summary: "Closed on an older pod.",
+    });
+    expect(body).not.toHaveProperty("recap");
+  });
+
+  it("does not require --workspace for complete", async () => {
+    const { closeSession } = await import("../src/commands/sessions.js");
+    // No workspace on opts; mock resolveHubConfig still has one, but close must
+    // not refuse when workspace is absent from the flag surface.
+    await closeSession(SESSION_ID, { recap: "no workspace flag" } as never);
+    expect(hubPost).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -82,7 +145,10 @@ describe("proposals list --session reaches the pod", () => {
     await listProposals({ session: SESSION_ID } as never);
 
     expect(hubGet).toHaveBeenCalled();
-    const [path, params] = hubGet.mock.calls[0] as unknown as [string, Record<string, unknown>];
+    const [path, params] = hubGet.mock.calls[0] as unknown as [
+      string,
+      Record<string, unknown>,
+    ];
     expect(path).toBe("/proposals");
     expect(params.sessionId).toBe(SESSION_ID);
   });
@@ -91,7 +157,10 @@ describe("proposals list --session reaches the pod", () => {
     const { listProposals } = await import("../src/commands/data-extra.js");
     await listProposals({} as never);
 
-    const [, params] = hubGet.mock.calls[0] as unknown as [string, Record<string, unknown>];
+    const [, params] = hubGet.mock.calls[0] as unknown as [
+      string,
+      Record<string, unknown>,
+    ];
     expect(params).not.toHaveProperty("sessionId");
     // And still not workspace-scoped by default — the inbox is the user floor.
     expect(params).not.toHaveProperty("workspaceId");

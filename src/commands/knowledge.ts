@@ -12,8 +12,10 @@
  *     `engineering_knowledge`). A formal decision RECORD (rationale/alternatives/status
  *     lifecycle) comes from smart `capture "<text>"` or `create entity --profile=decision`.
  *
- * Workspace routing: --workspace > --team (first product ws) > memory ws (default,
- * auto-approved, agent-private) > active ws.
+ * Workspace routing for Work-lane knowledge: --workspace (explicit pin) >
+ * --team (first product ws, when configured) > omit workspaceId (server-derived
+ * / pod-wide preferred). Never default-pin to the active profile workspace —
+ * that commonly is Pod Admin and would dump domain knowledge into admin.
  */
 
 import chalk from "chalk";
@@ -111,12 +113,14 @@ export interface CaptureOpts {
   /** Typed mode: one of gotcha|lesson|decision|reference */
   type?: KnowledgeType;
   claim?: string;
+  /** Typed mode: full Markdown explanation, stored through the canonical body door. */
+  content?: string;
   why?: string;
   evidence?: string;
   tags?: string;
-  /** Override to first product workspace instead of the active workspace */
+  /** Pin to first product workspace (from connect routing); otherwise omit workspaceId */
   team?: boolean;
-  /** Explicit workspace override — highest priority */
+  /** Explicit workspace pin — highest priority (otherwise workspaceId is omitted) */
   workspace?: string;
   /**
    * Explicit project pin (id or name) — highest priority for the project lens.
@@ -127,7 +131,7 @@ export interface CaptureOpts {
   /**
    * GLOBAL lane: write a pod-wide procedural runbook to `knowledge_keys`
    * (cross-cutting best-practice/how-to, visible in every workspace) instead of
-   * a domain `knowledge` entity in the active workspace.
+   * a domain `knowledge` entity (Work lane).
    */
   global?: boolean;
   /** Canonical spelling of the same opt-in (`--pod-wide`); `global` is the alias. */
@@ -143,21 +147,23 @@ export interface CaptureOpts {
 
 /**
  * Resolve the workspace for a DOMAIN capture (the `knowledge` entity, the Work
- * lane). Knowledge is workspace-scoped, so the destination IS the separation:
- * a Builder lesson stays in Builder, a marketing one in marketing.
+ * lane).
  *
- * Priority: --workspace > --team (first product ws) > active ws.
+ * Priority: --workspace (explicit pin) > --team (first product ws when
+ * configured) > omit workspaceId.
  *
- * NOTE: the agent-memory ("AI-self") lane was removed — the AI no longer dumps
- * captures into a private agent workspace. Everything it learns routes to a real
- * lane: Work (here), Global (`--global` → knowledge_keys), or User
- * (`record_observation` → user_observation). The per-adjunct memory workspace is
- * being decommissioned.
+ * Default is intentional omit: sending an ambient/active workspaceId is a
+ * backend rung-1 pin. Team profiles often default active workspace to Pod Admin,
+ * which dumped domain knowledge into admin. Leaving workspaceId out lets the
+ * server place knowledge (pod-wide preferred for knowledge kinds / AI routing on
+ * smart capture).
+ *
+ * NOTE: the agent-memory ("AI-self") lane was removed — everything routes to a
+ * real lane: Work (here), Global (`--global` → knowledge_keys), or User
+ * (`record_observation` → user_observation).
  */
 async function resolveKnowledgeWorkspace(
-  opts: { team?: boolean; workspace?: string },
-  _cfg: HubConfig,
-  activeWorkspaceId: string | undefined
+  opts: { team?: boolean; workspace?: string }
 ): Promise<{ workspaceId: string | undefined; source: string }> {
   if (opts.workspace) {
     return { workspaceId: opts.workspace, source: "explicit" };
@@ -165,11 +171,19 @@ async function resolveKnowledgeWorkspace(
   if (opts.team) {
     const routing = getAgentWorkspaceRouting();
     const teamWs = routing?.productWorkspaceIds?.[0];
-    return { workspaceId: teamWs ?? activeWorkspaceId, source: teamWs ? "team" : "active (no team workspace configured)" };
+    if (teamWs) {
+      return { workspaceId: teamWs, source: "team" };
+    }
+    // --team asked for a product pin but none is configured: still omit.
+    // Do not fall back to active workspace (that reintroduces the Admin dump).
+    return {
+      workspaceId: undefined,
+      source: "server-derived (no team workspace configured — pod-wide preferred for knowledge)",
+    };
   }
   return {
-    workspaceId: activeWorkspaceId,
-    source: activeWorkspaceId ? "active" : "active (run `synap use <id>` to set a workspace)",
+    workspaceId: undefined,
+    source: "server-derived (pod-wide preferred for knowledge)",
   };
 }
 
@@ -388,17 +402,14 @@ async function runSmartCapture(rawText: string, opts: CaptureOpts): Promise<void
 
   const cfg = await resolveHubConfig();
   const userId = await resolveUserId(cfg);
-  const { workspaceId, source } = await resolveKnowledgeWorkspace(opts, cfg, cfg.workspaceId);
+  // Do NOT default-pin cfg.workspaceId — omit unless --workspace / --team.
+  const { workspaceId, source } = await resolveKnowledgeWorkspace(opts);
 
-  if (!workspaceId) {
-    console.error(
-      chalk.red(
-        "No workspace set. Run:\n" +
-        "  synap connect   (sets up memory + team workspace routing)\n" +
-        "  synap use <workspace-id>   (manual override)"
-      )
-    );
-    process.exit(1);
+  // Default Work-lane knowledge omits workspaceId so the pod can place it
+  // (AI routing on smart capture / pod-wide preferred for knowledge kinds).
+  if (!workspaceId && !opts.json) {
+    log.dim(`  Placement: ${source} — workspaceId omitted.`);
+    log.dim("  Pin with --workspace <id> or --team (first product workspace).");
   }
 
   // Project pin: explicit --project (id or name) wins; otherwise the ambient
@@ -414,7 +425,12 @@ async function runSmartCapture(rawText: string, opts: CaptureOpts): Promise<void
 
   // 1. Structure
   const smartSessionId = opts.session ? readActiveSessionId() : undefined;
-  const structureBody: Record<string, unknown> = { userId, text, workspaceId, ...(smartSessionId ? { sessionId: smartSessionId } : {}) };
+  const structureBody: Record<string, unknown> = {
+    userId,
+    text,
+    ...(workspaceId ? { workspaceId } : {}),
+    ...(smartSessionId ? { sessionId: smartSessionId } : {}),
+  };
   const structureRes = await hubPost("/capture/structure", structureBody, cfg) as StructureResult;
 
   // Degraded: the IS structurer is down. The server returns a raw `item`
@@ -472,7 +488,7 @@ async function runSmartCapture(rawText: string, opts: CaptureOpts): Promise<void
     // --json + --yes: also execute and print combined result
     const executeRes = await hubPost("/capture/execute", {
       userId,
-      workspaceId,
+      ...(workspaceId ? { workspaceId } : {}),
       ...(smartSessionId ? { sessionId: smartSessionId } : {}),
       ...routingFields,
       entities: structureRes.proposals,
@@ -517,7 +533,7 @@ async function runSmartCapture(rawText: string, opts: CaptureOpts): Promise<void
   // 4. Execute
   const executeRes = await hubPost("/capture/execute", {
     userId,
-    workspaceId,
+    ...(workspaceId ? { workspaceId } : {}),
     ...(smartSessionId ? { sessionId: smartSessionId } : {}),
     ...routingFields,
     entities: structureRes.proposals,
@@ -557,14 +573,16 @@ async function runSmartCapture(rawText: string, opts: CaptureOpts): Promise<void
  */
 async function buildSmartLaneReport(
   executeRes: ExecuteResult,
-  workspaceId: string,
+  workspaceId: string | undefined,
   source: string,
   cfg: HubConfig
 ): Promise<LaneReport> {
   return {
     lane: laneFromSource(source),
     workspaceId,
-    workspaceName: await resolveWorkspaceName(workspaceId, cfg),
+    workspaceName: workspaceId
+      ? await resolveWorkspaceName(workspaceId, cfg)
+      : "server-derived (pod-wide preferred)",
     governance: readCaptureExecute(executeRes).proposed ? "proposed" : "auto",
   };
 }
@@ -634,17 +652,14 @@ export async function captureKnowledge(opts: CaptureOpts): Promise<void> {
       return;
     }
 
-    const { workspaceId, source } = await resolveKnowledgeWorkspace(opts, cfg, cfg.workspaceId);
+    // Do NOT default-pin cfg.workspaceId — omit unless --workspace / --team.
+    const { workspaceId, source } = await resolveKnowledgeWorkspace(opts);
 
-    if (!workspaceId) {
-      console.error(
-        chalk.red(
-          "No workspace set. Run:\n" +
-          "  synap connect   (sets up memory + team workspace routing)\n" +
-          "  synap use <workspace-id>   (manual override)"
-        )
-      );
-      process.exit(1);
+    // Default Work-lane knowledge omits workspaceId so the pod can place it
+    // (server-derived / pod-wide preferred for knowledge kinds).
+    if (!workspaceId && !opts.json) {
+      log.dim(`  Placement: ${source} — workspaceId omitted.`);
+      log.dim("  Pin with --workspace <id> or --team (first product workspace).");
     }
 
     // Project pin: explicit --project (id or name) wins; otherwise the ambient
@@ -675,18 +690,20 @@ export async function captureKnowledge(opts: CaptureOpts): Promise<void> {
 
     const res = await hubPost("/entities", {
       userId,
-      workspaceId,
+      ...(workspaceId ? { workspaceId } : {}),
       profileSlug: "knowledge",
       title,
       ...(sessionId ? { sessionId } : {}),
       ...(projectId ? { projectId } : {}),
       properties: {
+        knowledgeForm: opts.type === "gotcha" ? "caution" : "insight",
         ek_type: opts.type,
         ek_claim: opts.claim,
         ...(opts.why ? { ek_why: opts.why } : {}),
         ...(opts.evidence ? { ek_evidence: opts.evidence } : {}),
         ...(tags.length > 0 ? { ek_tags: tags } : {}),
       },
+      ...(opts.content?.trim().length ? { content: opts.content } : {}),
     }, cfg) as Record<string, unknown>;
 
     // Governance may queue the write as a proposal rather than creating
@@ -698,7 +715,9 @@ export async function captureKnowledge(opts: CaptureOpts): Promise<void> {
     const report: LaneReport = {
       lane: laneFromSource(source),
       workspaceId,
-      workspaceName: await resolveWorkspaceName(workspaceId, cfg),
+      workspaceName: workspaceId
+        ? await resolveWorkspaceName(workspaceId, cfg)
+        : "server-derived (pod-wide preferred)",
       governance: isProposed ? "proposed" : "auto",
     };
 

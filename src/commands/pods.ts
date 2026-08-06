@@ -25,6 +25,9 @@ import {
   SURFACE_NAMES,
   type SurfaceName,
 } from "../lib/pod.js";
+// Origin comparison — the SAME helper the lens uses to decide whether a stored
+// pod matches the one being addressed. One normalizer, not two.
+import { samePodOrigin } from "../lib/project-ref.js";
 import {
   TARGETS,
   writeMcpServerEntry,
@@ -60,6 +63,31 @@ export async function podsList(): Promise<void> {
     const health = p.healthy ? chalk.green("healthy") : chalk.red("unreachable");
     const label = p.config.label ? chalk.dim(` (${p.config.label})`) : "";
     console.log(`  ${chalk.bold(p.name.padEnd(14))}${active}  ${health}  ${chalk.dim(p.config.podUrl)}${label}`);
+  }
+
+  // ── EFFECTIVE ≠ ACTIVE ────────────────────────────────────────────────────
+  // `● active` above is the CONFIGURED profile (`~/.synap/config.json`). It is
+  // NOT necessarily the pod commands actually talk to: `resolveHubConfig`'s
+  // precedence ladder puts the ambient `SYNAP_POD_URL` / `SYNAP_HUB_API_KEY`
+  // ABOVE the active profile, so an inherited env var silently redirects every
+  // command while this list still shows the profile as active.
+  //
+  // That divergence produced a real, expensive confusion: `pods list` said
+  // `perso`, every write went to the TEAM pod, and the symptom surfaced far
+  // downstream as `403 Access denied to workspace` on a workspace that plainly
+  // exists — because it exists on the OTHER pod. Same shape as `gh`, whose docs
+  // note `GH_TOKEN` "takes precedence over previously stored credentials".
+  //
+  // Reporting configured state as though it were effective state is the defect;
+  // naming it costs three lines.
+  const envPod = process.env.SYNAP_POD_URL?.trim();
+  const activeProfile = checks.find((p) => p.active);
+  if (envPod && activeProfile && !samePodOrigin(envPod, activeProfile.config.podUrl)) {
+    log.blank();
+    log.warn(
+      `SYNAP_POD_URL overrides the active profile — commands are talking to ${envPod}, not ${activeProfile.config.podUrl}.`
+    );
+    log.dim("  The env var wins over `● active`. Unset it, or run `synap whoami` to see the pod actually in use.");
   }
 
   log.blank();

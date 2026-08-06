@@ -157,6 +157,12 @@ function isNewer(from: string | undefined, to: string | undefined): boolean | un
     name: "cmp",
     tags: [],
     isPrivate: false,
+    // `items` became required on `CatalogEntryBase` when the type split into a
+    // bundled/remote union (`@synap-core/workspace-templates` 0.11.0). This is a
+    // SYNTHETIC entry that exists only to reuse the shared version comparator —
+    // it summarises no real package, so `[]` is the honest value, exactly as the
+    // field's own contract prescribes for an entry that carries no cells.
+    items: [],
     source: "remote",
     remote: { slug: "__cmp__", name: "cmp", definition: { sourcePackage: { version: to } } },
   };

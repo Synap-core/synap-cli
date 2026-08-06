@@ -87,4 +87,33 @@ describe("resolveWorkspaceForPod", () => {
     expect(resolveWorkspaceForPod(cfg, "ghost")).toBeUndefined();
     expect(resolveWorkspaceForPod(cfg, undefined)).toBeUndefined();
   });
+
+  it("prefers perso binding over a drifted activeWorkspaceId + wrong profile default", () => {
+    // Real dual-pod dogfood: perso profile.workspaceId was team CRM UUID;
+    // binding points at Brand Library. Resolution must use the binding.
+    const brand = "f001a1a7-brand-library";
+    const teamCrm = "499328b7-team-crm";
+    const cfg = baseConfig({
+      activeWorkspaceId: teamCrm,
+      activeWorkspace: { workspaceId: brand, podName: "perso" },
+      pods: {
+        perso: {
+          podUrl: "https://pod.perso.example",
+          workspaceId: teamCrm, // drifted profile default
+          agentUserId: "",
+          hubApiKey: "k-perso",
+          savedAt: "2026-07-24",
+        },
+        team: {
+          podUrl: "https://pod.team.example",
+          workspaceId: TEAM_WS,
+          agentUserId: "",
+          hubApiKey: "k-team",
+          savedAt: "2026-07-24",
+        },
+      },
+    });
+    expect(resolveWorkspaceForPod(cfg, "perso")).toBe(brand);
+    expect(resolveWorkspaceForPod(cfg, "team")).toBe(TEAM_WS);
+  });
 });

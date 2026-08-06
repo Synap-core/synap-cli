@@ -38,20 +38,22 @@ export const SURFACE_NAMES = [
   "goose",
   "zed",
   "vscode",
+  "grok",
   "discord",
+  "proton",
+  "generic",
 ] as const;
 export type SurfaceName = (typeof SURFACE_NAMES)[number];
 
 /**
- * agentTypes already owned by OTHER doors — `POST /setup/agent` treats agentType
- * as a POD-WIDE SINGLETON, so `agents create` deriving a slug that collides with
- * one of these would silently hijack that door's agent + key. Superset of the
- * surfaces above plus the non-surface provisioning types (generic/openwebui MCP
- * mappings; openclaw/cli/memory). Single source of truth for the collision guard.
+ * agentTypes already owned by OTHER doors — provisioning is singleton per
+ * (createdByUserId, agentType), so `agents create` deriving a slug that collides
+ * with one of these would reuse that surface's agent for this user. Superset of
+ * the surfaces above plus the non-surface provisioning types (generic/openwebui
+ * MCP mappings; openclaw/cli/memory). Single source of truth for the collision guard.
  */
 export const RESERVED_AGENT_TYPES: ReadonlySet<string> = new Set<string>([
   ...SURFACE_NAMES,
-  "generic",
   "openwebui",
   "openclaw",
   "cli",
@@ -111,6 +113,12 @@ export interface MultiPodConfig {
   activeProject?: ActiveProjectBinding;
   /** Per-surface dedicated agent keys (provisioned with named agentType). Separate from pod profile keys. */
   agentKeys?: Partial<Record<SurfaceName, SurfaceAgentKey>>;
+  /**
+   * Multi-pod surface keys: surface → normalized podUrl → key.
+   * `agentKeys[surface]` remains the last-written default for backward compat;
+   * this map is the source of truth when a consumer knows which pod it is talking to.
+   */
+  agentKeysByPod?: Partial<Record<SurfaceName, Record<string, SurfaceAgentKey>>>;
   /** Workspace routing set by `synap connect` wizard — drives capture/recall defaults. */
   agentWorkspaceRouting?: AgentWorkspaceRouting;
 }
@@ -126,7 +134,7 @@ function readMultiConfig(): MultiPodConfig {
   try {
     if (fs.existsSync(CONFIG_FILE)) {
       const parsed = JSON.parse(fs.readFileSync(CONFIG_FILE, "utf-8")) as Partial<MultiPodConfig>;
-      if (parsed.pods) return { activePod: parsed.activePod ?? "", pods: parsed.pods, activeWorkspaceId: parsed.activeWorkspaceId, activeWorkspace: parsed.activeWorkspace, activeProjectId: parsed.activeProjectId, activeProject: parsed.activeProject, surfaces: parsed.surfaces, agentKeys: parsed.agentKeys, agentWorkspaceRouting: parsed.agentWorkspaceRouting };
+      if (parsed.pods) return { activePod: parsed.activePod ?? "", pods: parsed.pods, activeWorkspaceId: parsed.activeWorkspaceId, activeWorkspace: parsed.activeWorkspace, activeProjectId: parsed.activeProjectId, activeProject: parsed.activeProject, surfaces: parsed.surfaces, agentKeys: parsed.agentKeys, agentKeysByPod: parsed.agentKeysByPod, agentWorkspaceRouting: parsed.agentWorkspaceRouting };
       // File exists but has old/unrecognized shape — fall through to migration
     }
   } catch { /* fall through */ }
@@ -244,13 +252,18 @@ export function setPodOverrideByName(name: string): LocalPodConfig {
 }
 
 /** Top-level commands that declare their OWN `--pod <name>` — their native handling must win. */
-const NATIVE_POD_FLAG_COMMANDS = new Set(["agents", "bridge-setup"]);
+// bridge-setup owns a command-local --pod with custom prompt UX — leave it alone.
+// agents used to be here too, but commander root also registers --pod and the
+// flag never reached `agents create` (opts.pod stayed undefined), so create
+// fell through to env agent keys → SURFACE_AGENT_TYPE_REQUIRED. Agents now
+// rely on this bootstrap override like every other command.
+const NATIVE_POD_FLAG_COMMANDS = new Set(["bridge-setup"]);
 
 /**
  * Consume a position-independent `--pod <name>` (or `--pod=<name>`) from argv and
  * register it as the per-invocation override. Mutates `argv` in place so commander
  * never sees the flag (it isn't registered per-command). No-op when the argv
- * targets a command that owns `--pod` itself (agents, bridge-setup). Throws with a
+ * targets a command that owns `--pod` itself (bridge-setup). Throws with a
  * helpful message when the named profile is unknown.
  */
 export function bootstrapPodOverride(argv: string[]): void {
@@ -331,20 +344,51 @@ export function resolveWorkspaceForPod(
 ): string | undefined {
   const targetPod = podName ? config.pods[podName] : undefined;
   const override = config.activeWorkspaceId;
-  if (!override) return targetPod?.workspaceId || undefined;
-
   const binding = config.activeWorkspace;
-  if (binding && binding.workspaceId === override) {
-    if (binding.podName === podName) return override; // belongs to the target pod
-    return targetPod?.workspaceId || undefined; // bound to a different pod → ignore
+
+  // Prefer a binding that matches the target pod even when activeWorkspaceId
+  // drifted to a foreign UUID (common after dual-pod work).
+  if (binding && binding.podName === podName) {
+    return binding.workspaceId;
+  }
+  if (binding && binding.podName !== podName) {
+    // Binding is for another pod — never use its workspace; only the target
+    // profile default if it doesn't look stolen from another profile.
+    return safePodDefaultWorkspace(config, podName, targetPod?.workspaceId);
+  }
+
+  if (!override) {
+    return safePodDefaultWorkspace(config, podName, targetPod?.workspaceId);
   }
 
   const belongsToAnotherPod = Object.entries(config.pods).some(
     ([name, p]) => name !== podName && p.workspaceId === override
   );
-  if (belongsToAnotherPod) return targetPod?.workspaceId || undefined;
+  if (belongsToAnotherPod) {
+    return safePodDefaultWorkspace(config, podName, targetPod?.workspaceId);
+  }
 
   return override;
+}
+
+/**
+ * Profile `workspaceId` can drift to a UUID that belongs on another pod
+ * (dual-pod dogfood). Never return a default that is another profile's
+ * configured workspaceId. If the default is still suspect and differs from
+ * every other profile default, we cannot prove it's foreign without the
+ * server — return it only when unique among profile defaults.
+ */
+function safePodDefaultWorkspace(
+  config: MultiPodConfig,
+  podName: string | undefined,
+  defaultWs: string | undefined
+): string | undefined {
+  if (!defaultWs || !podName) return defaultWs || undefined;
+  const stolenAsOtherDefault = Object.entries(config.pods).some(
+    ([name, p]) => name !== podName && p.workspaceId === defaultWs
+  );
+  if (stolenAsOtherDefault) return undefined;
+  return defaultWs;
 }
 
 /**
@@ -389,10 +433,21 @@ export function getActiveProjectId(): string | undefined {
   return config.activeProjectId || undefined;
 }
 
-/** Persist a project as the active context for all subsequent commands. */
-export function setActiveProjectId(projectId: string): void {
+/**
+ * Persist a project as the active context for all subsequent commands.
+ * Records the pod it was set against (defaults to the active pod) so
+ * {@link resolveHubConfig} can refuse to send it to a foreign pod.
+ * Peer of {@link setActiveWorkspaceId}.
+ */
+export function setActiveProjectId(projectId: string, podName?: string): void {
   const config = readMultiConfig();
   config.activeProjectId = projectId;
+  const boundPod = podName ?? config.activePod;
+  if (boundPod && config.pods[boundPod]) {
+    config.activeProject = { projectId, podName: boundPod };
+  } else {
+    delete config.activeProject;
+  }
   writeMultiConfig(config);
 }
 
@@ -417,23 +472,53 @@ export function getActiveProjectBinding(): ActiveProjectBinding | undefined {
 export function clearActiveProjectId(): void {
   const config = readMultiConfig();
   delete config.activeProjectId;
+  delete config.activeProject;
   writeMultiConfig(config);
 }
 
 // ─── Surface agent keys ───────────────────────────────────────────────────────
 
-/** Store a dedicated agent key for a specific surface (e.g. "raycast", "claude-code"). */
+/** Normalize a pod URL for map keys (strip trailing slashes). */
+function normalizePodUrl(url: string): string {
+  return url.replace(/\/+$/, "");
+}
+
+/**
+ * Store a dedicated agent key for a specific surface (e.g. "raycast", "claude-code").
+ * Always writes `agentKeys[surface]` (last-write, backward compat). When `key.podUrl`
+ * is set, also stores under `agentKeysByPod[surface][normalizedPodUrl]` so multi-pod
+ * surfaces can look up the key for the pod they are actually talking to.
+ */
 export function setSurfaceAgentKey(surface: SurfaceName, key: SurfaceAgentKey): void {
   const config = readMultiConfig();
   config.agentKeys = config.agentKeys ?? {};
-  config.agentKeys[surface] = key;
+  config.agentKeys[surface] = key; // last write for backward compat
+  if (key.podUrl) {
+    config.agentKeysByPod = config.agentKeysByPod ?? {};
+    const bySurface = config.agentKeysByPod[surface] ?? {};
+    bySurface[normalizePodUrl(key.podUrl)] = key;
+    config.agentKeysByPod[surface] = bySurface;
+  }
   writeMultiConfig(config);
 }
 
-/** Read back the stored agent key for a surface. Returns null if not provisioned. */
-export function getSurfaceAgentKey(surface: SurfaceName): SurfaceAgentKey | null {
+/**
+ * Read back the stored agent key for a surface.
+ * When `podUrl` is provided, prefer `agentKeysByPod` for that pod; if only a legacy
+ * `agentKeys[surface]` entry exists, return it only when its podUrl matches (or is
+ * unset). Never return a key known to belong to a different pod.
+ */
+export function getSurfaceAgentKey(surface: SurfaceName, podUrl?: string): SurfaceAgentKey | null {
   const config = readMultiConfig();
-  return config.agentKeys?.[surface] ?? null;
+  if (podUrl && config.agentKeysByPod?.[surface]) {
+    const hit = config.agentKeysByPod[surface][normalizePodUrl(podUrl)];
+    if (hit) return hit;
+  }
+  const legacy = config.agentKeys?.[surface] ?? null;
+  if (podUrl && legacy?.podUrl && normalizePodUrl(legacy.podUrl) !== normalizePodUrl(podUrl)) {
+    return null; // do not return wrong-pod key
+  }
+  return legacy;
 }
 
 export function setAgentWorkspaceRouting(routing: AgentWorkspaceRouting): void {

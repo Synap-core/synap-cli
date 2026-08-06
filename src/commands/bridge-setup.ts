@@ -18,9 +18,13 @@
  * Hidden on purpose: this is a dogfood/dev convenience, not a first-class
  * surface. Not shown in `synap --help`.
  *
+ * The bridge lands data POD-WIDE by default. An OPTIONAL project scope can be
+ * picked interactively (or via --project-id); --workspace-id remains an
+ * advanced/legacy escape hatch to pin a single workspace, never prompted.
+ *
  * Usage:
  *   synap bridge-setup --client-id <discord-app-id> [--bridge-dir <path>]
- *     [--pod <profile-name>] [--workspace-id <uuid>]
+ *     [--pod <profile-name>] [--workspace-id <uuid>] [--project-id <uuid>]
  *     [--proactive-channel <discord-channel-id>] [--enable-react]
  *     [--pod-url <url>] [--api-key <key>]
  */
@@ -35,6 +39,7 @@ import ora from "ora";
 import prompts from "prompts";
 import { resolveHubConfig, hubGet, hubPost, hubPatch, resolveUserId, type HubConfig } from "../lib/hub-client.js";
 import { unwrapList } from "../lib/unwrapList.js";
+import { fetchProjects } from "../lib/project.js";
 import { discoverSkillDirs, parseSkillDir, importSkill } from "../lib/skill-import.js";
 import {
   checkPodHealth,
@@ -63,7 +68,10 @@ export interface BridgeSetupOpts {
   apiKey?: string;
   bridgeDir?: string;
   clientId?: string;
+  /** Advanced/legacy escape hatch — pins the bridge to one workspace instead of pod-wide. */
   workspaceId?: string;
+  /** Scopes the bridge to one project (peer lens to workspace). Skips the project prompt. */
+  projectId?: string;
   proactiveChannel?: string;
   enableReact?: boolean;
   /** Discord bot token — provisioned INTO the pod vault (not a loose env var). */
@@ -206,13 +214,10 @@ export async function bridgeSetup(opts: BridgeSetupOpts): Promise<void> {
   }
   log.success(`Pod healthy: ${cfg.podUrl}${bridgePodName ? ` (profile: ${bridgePodName})` : ""}`);
 
-  // ── 3. Resolve workspace ───────────────────────────────────────────────
-  const workspaceId = await resolveWorkspaceId(opts.workspaceId, cfg.workspaceId, cfg);
-  if (!workspaceId) {
-    log.error("Could not resolve a workspace. Pass --workspace-id <uuid>.");
-    process.exit(1);
-  }
-  log.dim(`Workspace: ${workspaceId}`);
+  // ── 3. Resolve scope — pod-wide by default, workspace/project optional ───
+  const { workspaceId, projectId } = await resolveScope(opts, cfg);
+  log.dim(workspaceId ? `Workspace: ${workspaceId} (explicit pin)` : "Workspace: pod-wide (no pin)");
+  if (projectId) log.dim(`Project: ${projectId}`);
 
   // ── 3b. Key + scope sanity check (GET /capabilities needs hub-protocol.read) ─
   const probe = ora("Checking key scope…").start();
@@ -289,8 +294,11 @@ export async function bridgeSetup(opts: BridgeSetupOpts): Promise<void> {
   }
 
   // ── 5. Proactive delivery routing (optional) ─────────────────────────────
-  if (opts.proactiveChannel) {
+  // Delivery preferences live ON a workspace — pod-wide has none to route to.
+  if (opts.proactiveChannel && workspaceId) {
     await configureProactive(workspaceId, opts.proactiveChannel, cfg);
+  } else if (opts.proactiveChannel) {
+    log.warn("Proactive routing needs a workspace — pass --workspace-id to enable it.");
   }
 
   // ── 6. Write the bridge .env ─────────────────────────────────────────────
@@ -301,11 +309,12 @@ export async function bridgeSetup(opts: BridgeSetupOpts): Promise<void> {
     // the operator's raw key. Reads remap to the operator floor; writes are
     // governed as the agent.
     SYNAP_HUB_API_KEY: agentKey,
-    SYNAP_WORKSPACE_ID: workspaceId,
   };
-  // Project is a peer lens to workspace — only injected when the resolved
-  // config carries one (e.g. via the durable `activeProjectId` or session lens).
-  if (cfg.projectId) managed.SYNAP_PROJECT_ID = cfg.projectId;
+  // Pod-wide by default: SYNAP_WORKSPACE_ID/SYNAP_PROJECT_ID are only written
+  // when the operator explicitly pinned a workspace (--workspace-id) or chose
+  // a project in the picker. Neither is required.
+  if (workspaceId) managed.SYNAP_WORKSPACE_ID = workspaceId;
+  if (projectId) managed.SYNAP_PROJECT_ID = projectId;
   // The token is NEVER written to .env — it lives in the pod vault and the
   // bridge redeems it on boot via this ref. (Requires the grant below to land;
   // if it didn't, we warn loudly rather than leaking the token to env.)
@@ -314,8 +323,15 @@ export async function bridgeSetup(opts: BridgeSetupOpts): Promise<void> {
   if (opts.proactiveChannel) managed.SYNAP_PROACTIVE_CHANNEL_ID = opts.proactiveChannel;
 
   try {
-    // Once the token is in the vault, purge any stale env copy of it.
-    upsertEnv(envPath, managed, vaultRef ? ["DISCORD_BOT_TOKEN"] : []);
+    // Once the token is in the vault, purge any stale env copy of it. Also
+    // purge a stale scope pin from a prior run — re-running pod-wide (no
+    // --workspace-id / no project picked) must actually clear an old pin.
+    const removeKeys = [
+      ...(vaultRef ? ["DISCORD_BOT_TOKEN"] : []),
+      ...(workspaceId ? [] : ["SYNAP_WORKSPACE_ID"]),
+      ...(projectId ? [] : ["SYNAP_PROJECT_ID"]),
+    ];
+    upsertEnv(envPath, managed, removeKeys);
     log.success(`Wrote pod credentials → ${envPath}`);
   } catch (err) {
     log.warn(`Could not write ${envPath}: ${(err as Error).message}`);
@@ -434,13 +450,19 @@ function resolveAutomationsTemplatesDir(): string | null {
  */
 async function applyAgencyCapabilities(
   cfg: Awaited<ReturnType<typeof resolveHubConfig>>,
-  workspaceId: string
+  workspaceId: string | undefined
 ): Promise<void> {
   log.dim("Seeding agency capabilities from the Control Plane catalog…");
 
   for (const item of AGENCY_CAPABILITY_PLAN) {
     if (item.needs && !process.env[item.needs]) {
       log.dim(`  [skip] ${item.key} — set ${item.needs} to seed it`);
+      continue;
+    }
+    // Playbook-bundling capabilities require a workspace to land in — pod-wide
+    // (no --workspace-id) has none, so skip rather than round-trip a known 4xx.
+    if (item.workspaceScoped && !workspaceId) {
+      log.dim(`  [skip] ${item.key} — bundles playbooks; pass --workspace-id to seed it`);
       continue;
     }
 
@@ -640,7 +662,7 @@ export function validateFlowStructure(flow: {
  */
 async function setDiscordToolConfig(
   cfg: Awaited<ReturnType<typeof resolveHubConfig>>,
-  workspaceId: string,
+  workspaceId: string | undefined,
   patch: Record<string, unknown>
 ): Promise<void> {
   try {
@@ -679,7 +701,7 @@ const UUID_RE =
  */
 async function resolveGoogleConnectionId(
   cfg: Awaited<ReturnType<typeof resolveHubConfig>>,
-  workspaceId: string
+  workspaceId: string | undefined
 ): Promise<string | null> {
   try {
     const res = await hubGet("/capabilities/containers", { workspaceId }, cfg);
@@ -715,7 +737,7 @@ async function resolveGoogleConnectionId(
  */
 async function applyAutomationTemplates(
   cfg: Awaited<ReturnType<typeof resolveHubConfig>>,
-  workspaceId: string,
+  workspaceId: string | undefined,
   feedChannelId?: string
 ): Promise<void> {
   const templatesDir = resolveAutomationsTemplatesDir();
@@ -1008,35 +1030,41 @@ async function provisionDiscordAgentKey(
   return hubApiKey;
 }
 
-async function resolveWorkspaceId(
-  explicit: string | undefined,
-  defaultWs: string | undefined,
+/**
+ * Resolve the OPTIONAL scope the bridge writes into — pod-wide by default.
+ *
+ * Workspace: an explicit --workspace-id is the only way to pin one (advanced/
+ * legacy escape hatch) — never prompted, never required.
+ *
+ * Project: a peer, independent lens. --project-id skips the prompt; otherwise
+ * offer a picker with "Pod-wide (no project)" as the default alongside the
+ * operator's existing projects. No projects on the pod → skip the prompt.
+ */
+async function resolveScope(
+  opts: { workspaceId?: string; projectId?: string },
   cfg: Awaited<ReturnType<typeof resolveHubConfig>>
-): Promise<string | undefined> {
-  // An explicit --workspace-id wins outright. Otherwise ALWAYS ask (with the
-  // saved profile workspace pre-selected) — the operator must consciously pick
-  // the workspace every channel + entity the bridge creates will live in (e.g.
-  // your CRM workspace), instead of silently inheriting the saved default.
-  if (explicit) return explicit;
-  let list: Array<{ id: string; name?: string }> = [];
-  try {
-    const res = (await hubGet("/workspaces", {}, cfg)) as unknown;
-    const arr = unwrapList<{ id: string; name?: string }>(res, ["workspaces"]);
-    list = arr.filter((w) => w?.id);
-  } catch {
-    return defaultWs;
+): Promise<{ workspaceId?: string; projectId?: string }> {
+  const workspaceId = opts.workspaceId;
+
+  let projectId = opts.projectId;
+  if (!projectId) {
+    const projects = await fetchProjects(cfg);
+    if (projects.length > 0) {
+      const { picked } = await prompts({
+        type: "select",
+        name: "picked",
+        message: "Which project should the bridge write into? (optional — pod-wide by default)",
+        initial: 0,
+        choices: [
+          { title: "Pod-wide (no project)", value: "" },
+          ...projects.map((p) => ({ title: p.name, description: p.id, value: p.id })),
+        ],
+      });
+      projectId = (picked as string) || undefined;
+    }
   }
-  if (list.length === 0) return defaultWs;
-  if (list.length === 1) return list[0].id;
-  const defaultIdx = defaultWs ? list.findIndex((w) => w.id === defaultWs) : -1;
-  const { ws } = await prompts({
-    type: "select",
-    name: "ws",
-    message: "Which workspace should the bridge write into? (channels + entities land here)",
-    choices: list.map((w) => ({ title: `${w.name ?? "(unnamed)"}  ${chalk.dim(w.id)}`, value: w.id })),
-    initial: defaultIdx >= 0 ? defaultIdx : 0,
-  });
-  return (ws as string) || defaultWs;
+
+  return { workspaceId, projectId };
 }
 
 async function resolveBotToken(provided?: string): Promise<string | undefined> {
@@ -1051,7 +1079,7 @@ async function resolveBotToken(provided?: string): Promise<string | undefined> {
 
 async function applyBridgeCapability(
   bridgeDir: string,
-  workspaceId: string,
+  workspaceId: string | undefined,
   cfg: Awaited<ReturnType<typeof resolveHubConfig>>,
   botToken: string | undefined
 ): Promise<{ vaultRef?: string; secretId?: string }> {
@@ -1262,7 +1290,7 @@ function upsertEnv(
  */
 async function printSynapNextSteps(
   cfg: Awaited<ReturnType<typeof resolveHubConfig>>,
-  workspaceId: string
+  workspaceId: string | undefined
 ): Promise<void> {
   log.blank();
   log.heading("Next in Synap — review + activate (nothing else auto-runs until you do)");

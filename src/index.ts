@@ -84,7 +84,8 @@ program
   .option("--bot-token <token>", "Discord bot token — provisioned into the pod vault")
   .option("--guild-id <id>", "Discord server (guild) id — written to the bridge .env")
   .option("--bridge-dir <path>", "Path to the telegram-discord-bridge repo")
-  .option("--workspace-id <uuid>", "Target workspace (default: pod profile's)")
+  .option("--workspace-id <uuid>", "Advanced/legacy: pin the bridge to one workspace (default: pod-wide, never prompted)")
+  .option("--project-id <uuid>", "Scope the bridge to one project (default: prompt, pod-wide if declined)")
   .option("--proactive-channel <id>", "Discord channel id for the agent's proactive posts")
   .option("--enable-react", "Turn on ✅-react capture")
   .option("--pod <name>", "Pod profile to connect the bridge to (default: prompt)")
@@ -96,14 +97,36 @@ program
     await bridgeSetup(opts);
   });
 
+// Hidden: one-shot Proton Mail↔Synap bridge provisioning (dogfood/dev convenience).
+// Fork of bridge-setup for the sovereign self-host Proton Bridge path — see
+// synap-control-plane-api/src/seeds/capability-templates/proton.capability.json.
+program
+  .command("proton-setup", { hidden: true })
+  .description("(hidden) One-shot Proton Mail↔Synap bridge provisioning")
+  .option("--proton-email <email>", "Proton account email — provisioned into the pod vault")
+  .option("--proton-password <password>", "Proton account password (not a bridge-generated value) — provisioned into the pod vault")
+  .option("--proton-totp-seed <seed>", "Proton account 2FA/TOTP seed, base32 (optional) — provisioned into the pod vault")
+  .option("--proton-mailbox-password <password>", "Proton mailbox password — ONLY for two-password-mode accounts (optional) — provisioned into the pod vault")
+  .option("--bridge-dir <path>", "Path to the synap-proton-bridge repo")
+  .option("--workspace-id <uuid>", "Advanced/legacy: pin the bridge to one workspace (default: pod-wide, never prompted)")
+  .option("--project-id <uuid>", "Scope the bridge to one project (default: prompt, pod-wide if declined)")
+  .option("--pod <name>", "Pod profile to connect the bridge to (default: prompt)")
+  .option("--governance <mode>", "Agent governance preset: safe | normal | crazy (default: prompt)")
+  .option("--pod-url <url>", "Synap pod URL (override)")
+  .option("--api-key <key>", "Hub Protocol API key (override)")
+  .action(async (opts) => {
+    const { protonSetup } = await import("./commands/proton-setup.js");
+    await protonSetup(opts);
+  });
+
 program
   .command("connect")
   .description(
-    "Connect an AI surface (Claude Code, Claude Desktop, Cursor, Raycast) to a Synap pod"
+    "Connect an AI surface (Claude Code, Cursor, Grok, Raycast, …) to a Synap pod"
   )
   .option(
     "--target <name>",
-    "AI surface: claude-code | claude-desktop | cursor | raycast | custom"
+    "AI surface: claude-code | claude-desktop | cursor | raycast | grok | codex | vscode | generic | … (synap connect --list)"
   )
   .option("--pod-url <url>", "Synap pod URL")
   .option("--api-key <key>", "Hub Protocol API key")
@@ -638,14 +661,16 @@ program
   });
 
 // ─── capture ──────────────────────────────────────────────────────────────────
-// Uses the active pod + workspace from config (set via `synap pods use` /
-// `synap use` / `synap workspace provision-agent`). No auth flags needed.
+// Uses the active pod from config. Work-lane knowledge does NOT default-pin
+// the active workspace (omit workspaceId → server-derived / pod-wide preferred);
+// pin only with --workspace or --team.
 
 program
   .command("capture [text]")
-  .description("Capture knowledge: smart `capture \"<free text>\"` (AI structures it) OR typed `capture --type gotcha --claim \"…\"`")
-  .option("--type <type>", "Typed mode: gotcha|lesson|decision|reference")
+  .description("Capture knowledge: smart `capture \"<free text>\"` (AI structures it). For canonical typed Knowledge, use `create entity --profile=knowledge --props='{\"knowledgeForm\":\"insight|caution\"}'`.")
+  .option("--type <type>", "Legacy compatibility typed mode (gotcha|lesson|decision|reference); new automation should use knowledgeForm")
   .option("--claim <text>", "Typed mode: one-line assertion (required with --type)")
+  .option("--content <markdown>", "Typed mode: full Markdown explanation, stored as the linked Knowledge note")
   .option("--why <text>", "Reasoning or context")
   .option("--evidence <text>", "Supporting file path, URL, or code snippet")
   .option("--tags <csv>", "Comma-separated tags e.g. repo:synap-backend,layer:migrations")
@@ -653,8 +678,8 @@ program
   .option("--pod-wide", "GLOBAL lane: pod-wide cross-cutting runbook (→ knowledge_keys), visible in every workspace")
   .option("--global", "Alias for --pod-wide")
   .option("--key <ns:slug>", "Stable key for a --pod-wide runbook (derived from --type + --claim if omitted)")
-  .option("--team", "Write to the first product workspace instead of the active workspace")
-  .option("--workspace <id>", "Explicit workspace override")
+  .option("--team", "Pin to the first product workspace (default: omit workspaceId — server-derived / pod-wide preferred for knowledge)")
+  .option("--workspace <id>", "Explicit workspace pin (otherwise workspaceId is omitted for knowledge)")
   .option("--project <id|name>", "Pin the capture to a project (id or name) — overrides SYNAP_PROJECT_ID / the session lens")
   .option("--yes", "Skip the y/N confirmation prompt (smart mode)")
   .option("--json", "Output as JSON")
@@ -669,7 +694,7 @@ program
 // inherits entity extraction, the relation graph, and workspace/project routing.
 
 program
-  .command("import <inputs...>")
+  .command("import [inputs...]")
   .description(
     "Import files, folders, or URLs into the pod (AI capture pipeline, or Superwhisper store-first)"
   )
@@ -701,9 +726,17 @@ program
   .option("--limit <n>", "Max Superwhisper units to process", (v) => parseInt(v, 10))
   .option("--concurrency <n>", "Parallel unit uploads (1–4)", (v) => parseInt(v, 10))
   .option("--no-resume", "Ignore local import ledger (re-import all)")
+  .option(
+    "--job-status <jobId>",
+    "Re-poll a background corpus import started by an earlier run (no waiting)"
+  )
   .action(async (inputs: string[], opts) => {
-    const { importData } = await import("./commands/import.js");
-    await importData(inputs, opts);
+    const mod = await import("./commands/import.js");
+    if (opts.jobStatus) {
+      await mod.importJobStatus(opts.jobStatus, opts);
+      return;
+    }
+    await mod.importData(inputs ?? [], opts);
   });
 
 // ─── upload ───────────────────────────────────────────────────────────────────
@@ -1070,8 +1103,8 @@ session
 
 session
   .command("get <id>")
-  .description("Show details for a specific focus session")
-  .option("--workspace <id>", "Workspace that owns the session (required for scoped fetch)")
+  .description("Show details for a specific focus session (works for project-scoped sessions)")
+  .option("--workspace <id>", "Workspace hint if the pod still requires it for GET")
   .option("--json", "Output as JSON")
   .option("--pod-url <url>", "Pod URL override")
   .option("--api-key <key>", "API key override")
@@ -1097,10 +1130,10 @@ session
 
 session
   .command("close <id>")
-  .description("Close a focus session and optionally attach a recap")
-  .requiredOption("--workspace <id>", "Workspace that owns the session")
-  .option("--recap <text>", "Short summary of what was accomplished")
-  .option("--json", "Output as JSON")
+  .description("Complete a focus session (proposal pack) and optionally attach a recap")
+  .option("--workspace <id>", "Workspace hint (optional; not required for complete)")
+  .option("--recap <text>", "Short summary of what was accomplished (maps to summary)")
+  .option("--json", "Output full pack (or close result) as JSON")
   .option("--pod-url <url>", "Pod URL override")
   .option("--api-key <key>", "API key override")
   .action(async (id: string, opts) => {
@@ -1344,6 +1377,7 @@ create
   .description("Create a new entity")
   .requiredOption("--profile <slug>", "Profile slug (e.g. person, note, task)")
   .requiredOption("--name <name>", "Entity name")
+  .option("--content <markdown>", "Long-form Markdown body, stored as the entity's linked document")
   .option("--workspace <id>", "Create in this workspace")
   .option("--props <json>", "Properties as JSON string", "{}")
   .option("--json", "Output as JSON")
@@ -1392,15 +1426,18 @@ set
 
 const agents = program
   .command("agents")
-  .description("Manage named agent identities (different keys, different pod access)");
+  .description("Manage agent principals on your pod (one per type for you; local keys are a cache)");
 
 agents
   .command("list", { isDefault: true })
-  .description("List configured agent identities")
+  .description(
+    "List your agents on this pod (one per type). Use --local for ~/.synap cache only."
+  )
   .option("--json", "Output as JSON")
-  .action(async (opts: { json?: boolean }) => {
+  .option("--local", "List only the local ~/.synap agent cache")
+  .action(async (opts: { json?: boolean; local?: boolean }) => {
     const { agentsList } = await import("./commands/agents.js");
-    agentsList(opts);
+    await agentsList(opts);
   });
 
 agents
@@ -1418,7 +1455,7 @@ agents
 
 agents
   .command("create")
-  .description("Create a new agent on the pod (template-aware). Replaces `add` for new agents.")
+  .description("Create or reuse an agent principal on the pod (template-aware). Replaces `add` for new agents.")
   .option("--template <tmpl>", "Agent template: twin | assistant | custom (default: custom)")
   .option("--name <name>", "Agent name (not needed for twin — auto-generated)")
   .option("--type <type>", "Agent type string for custom agents (default: matches template)")
@@ -1432,7 +1469,7 @@ agents
 
 agents
   .command("rotate-key <name-or-id>")
-  .description("Rotate the Hub Protocol API key for an agent (invalidates the current key)")
+  .description("Rotate the Hub Protocol API key for an agent (local cache only)")
   .action(async (nameOrId: string) => {
     const { agentsRotateKey } = await import("./commands/agents.js");
     await agentsRotateKey(nameOrId);
@@ -1441,7 +1478,7 @@ agents
 agents
   .command("remove <name>")
   .alias("rm")
-  .description("Remove a named agent identity")
+  .description("Remove a named agent identity (local cache only)")
   .action(async (name: string) => {
     const { agentsRemove } = await import("./commands/agents.js");
     agentsRemove(name);
@@ -1449,7 +1486,7 @@ agents
 
 agents
   .command("info <name>")
-  .description("Show details for a named agent identity")
+  .description("Show details for a named agent identity (local cache only)")
   .action(async (name: string) => {
     const { agentsInfo } = await import("./commands/agents.js");
     agentsInfo(name);
@@ -2307,6 +2344,10 @@ capability
   .command("connect [name]")
   .description("Connect a service — omit the name to pick from connectable services")
   .option("--workspace <id>", "Workspace context")
+  .option(
+    "--reconnect",
+    "Force a fresh sign-in even if a connection already exists — fixes an expired or revoked token"
+  )
   .action(async (name: string | undefined, opts) => {
     const { capabilityConnect } = await import("./commands/capability.js");
     await capabilityConnect(name, opts);

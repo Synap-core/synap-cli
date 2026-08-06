@@ -133,11 +133,11 @@ function sectionTools(): void {
 
 function sectionAgents(): void {
   console.log(chalk.bold("\n## Agents"));
-  console.log(chalk.dim("  Named agent identities (separate keys) + autonomous runner + recurring schedules."));
+  console.log(chalk.dim("  Pod agent principals (one per type for you) + autonomous runner + schedules."));
   console.log("");
-  console.log(`  ${chalk.cyan("synap agents list")}          ${chalk.dim("→ configured agent identities")}`);
-  console.log(`  ${chalk.cyan("synap agents create")}        ${chalk.dim("→ --template twin|assistant|custom --name X")}`);
-  console.log(`  ${chalk.cyan("synap agents add")}           ${chalk.dim("→ register pre-existing credential")}`);
+  console.log(`  ${chalk.cyan("synap agents list")}          ${chalk.dim("→ your agents on this pod")}`);
+  console.log(`  ${chalk.cyan("synap agents create")}        ${chalk.dim("→ create or reuse --template twin|assistant|custom --name X")}`);
+  console.log(`  ${chalk.cyan("synap agents add")}           ${chalk.dim("→ register pre-existing credential (local cache)")}`);
   console.log(`  ${chalk.cyan("synap agent run")}            ${chalk.dim("→ --goal 'text' --persona researcher")}`);
   console.log(`  ${chalk.cyan("synap agent schedule")}       ${chalk.dim("→ --goal X --name Y --every daily")}`);
   console.log(`  ${chalk.cyan("synap agent tick")}           ${chalk.dim("→ run due schedules (wire to crontab)")}`);

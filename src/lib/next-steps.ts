@@ -162,6 +162,18 @@ export const FLOW = {
     return steps;
   },
 
+  /**
+   * After a background corpus import (`synap import` → /import/enqueue-corpus)
+   * finished. The result is a PENDING proposal, so every step here is about
+   * reviewing it — nothing is in the graph until it is approved.
+   */
+  afterCorpusImport(): NextStep[] {
+    return [
+      { command: "synap proposals list", why: "see the import.graph proposal this run filed" },
+      { command: "synap open proposal <id>", why: "review the graph and approve it — approval is what writes it" },
+    ];
+  },
+
   /** After `synap market update` applied one or more updates. */
   afterMarketUpdateApply(): NextStep[] {
     return [

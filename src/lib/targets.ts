@@ -40,6 +40,7 @@ export type TargetName =
   | "goose"
   | "zed"
   | "vscode"
+  | "grok"
   | "generic";
 
 export interface TargetConnectionConfig {
@@ -213,6 +214,14 @@ export const TARGETS: Record<TargetName, TargetInfo> = {
     label: "VS Code (Kilo Code / Cline / Continue / Copilot)",
     description: "VS Code native MCP — one config read by Kilo Code, Cline, Continue, and Copilot",
     supports: { skills: false, mcp: true },
+  },
+  grok: {
+    name: "grok",
+    label: "Grok (Grok Build TUI)",
+    description:
+      "xAI Grok Build — provisions an agent key and writes [mcp_servers.*] into ~/.grok/config.toml",
+    supports: { skills: false, mcp: true },
+    mcpConfigPath: () => path.join(os.homedir(), ".grok", "config.toml"),
   },
   generic: {
     name: "generic",
@@ -393,6 +402,7 @@ export async function installForTarget(
     case "goose":         result = await installGoose(cfg); break;
     case "zed":           result = await installZed(cfg); break;
     case "vscode":        result = await installVSCode(cfg); break;
+    case "grok":          result = await installGrok(info, cfg); break;
     case "generic":       result = await installGeneric(cfg); break;
   }
 
@@ -692,33 +702,50 @@ export async function writeClaudeCodeEnv(
   // synap tools.
   if (writeMcp) {
     const mcpUrl = buildMcpUrl(cfg.podUrl, cfg.workspaceId, cfg.projectId);
-    registerClaudeCodeMcp(mcpUrl, effectiveApiKey);
+    const serverName = mcpServerNameFromPodUrl(cfg.podUrl);
+    registerClaudeCodeMcp(mcpUrl, effectiveApiKey, serverName);
   }
 }
 
 /**
  * Register the Synap MCP server with Claude Code via the official CLI, into the
  * user-scope registry (`claude mcp list` truth). Idempotent: drops any prior
- * entry first. Best-effort: if the `claude` binary isn't on PATH, prints the
- * exact command to run by hand rather than failing the whole connect.
+ * entry first (legacy `"synap"` and the pod-derived name). Best-effort: if the
+ * `claude` binary isn't on PATH, prints the exact command to run by hand
+ * rather than failing the whole connect.
+ *
+ * Server name is pod-derived (`mcpServerNameFromPodUrl`) so multi-pod setups
+ * (perso + team) do not overwrite each other — same pattern as Grok/Cursor.
  */
-function registerClaudeCodeMcp(mcpUrl: string, apiKey: string): void {
+function registerClaudeCodeMcp(mcpUrl: string, apiKey: string, serverName: string): void {
   const header = `Authorization: Bearer ${apiKey}`;
   try {
-    try {
-      execFileSync("claude", ["mcp", "remove", "synap"], { stdio: "ignore" });
-    } catch {
-      /* no prior entry — fine */
+    // Remove legacy single-name entry and any prior pod-derived name.
+    for (const name of new Set(["synap", serverName])) {
+      try {
+        execFileSync("claude", ["mcp", "remove", name], { stdio: "ignore" });
+      } catch {
+        /* no prior entry — fine */
+      }
     }
     execFileSync(
       "claude",
-      ["mcp", "add", "--transport", "http", "synap", mcpUrl, "--header", header, "--scope", "user"],
+      ["mcp", "add", "--transport", "http", serverName, mcpUrl, "--header", header, "--scope", "user"],
       { stdio: "ignore" }
     );
-    log.success("MCP server registered with Claude Code (`claude mcp add`, user scope). Relaunch Claude Code to load the synap tools.");
+    log.success(
+      `MCP server '${serverName}' registered with Claude Code (\`claude mcp add\`, user scope). Relaunch Claude Code to load the tools.`
+    );
+    if (serverName !== "synap") {
+      log.dim(
+        "Multi-pod: connect each profile separately — server names are derived from the pod host so they don't overwrite:"
+      );
+      log.dim("  synap connect --target=claude-code --name=perso");
+      log.dim("  synap connect --target=claude-code --name=team");
+    }
   } catch {
     log.dim("Could not run `claude mcp add` (is the claude CLI on PATH?). Register it by hand:");
-    log.dim(`  claude mcp add --transport http synap ${mcpUrl} --header "${header}" --scope user`);
+    log.dim(`  claude mcp add --transport http ${serverName} ${mcpUrl} --header "${header}" --scope user`);
   }
 }
 
@@ -972,10 +999,14 @@ async function installClaudeDesktop(
   saveDesktopKey("claude-desktop", { hubApiKey: effectiveApiKey, agentUserId, podUrl: cfg.podUrl });
   await enrollAgentIfNeeded(cfg.podUrl, cfg.apiKey, agentUserId, cfg.workspaceId);
   const desktopMcpUrl = buildMcpUrl(cfg.podUrl, cfg.workspaceId, cfg.projectId);
-  writeMcpServerEntry(mcpPath, "synap", {
+  // Pod-derived name so connecting a SECOND pod adds an entry instead of
+  // overwriting the first (same rule as Claude Code / Cursor / Grok).
+  const desktopServerName = mcpServerNameFromPodUrl(cfg.podUrl);
+  writeMcpServerEntry(mcpPath, desktopServerName, {
     command: "npx",
     args: ["-y", "mcp-remote", desktopMcpUrl, "--header", `Authorization: Bearer ${effectiveApiKey}`],
   });
+  if (desktopServerName !== "synap") removeMcpServerEntry(mcpPath, "synap");
 
   log.blank();
   log.success(
@@ -1033,14 +1064,28 @@ async function installCursor(
   saveCursorKey("cursor", { hubApiKey: effectiveApiKey, agentUserId, podUrl: cfg.podUrl });
   await enrollAgentIfNeeded(cfg.podUrl, cfg.apiKey, agentUserId, cfg.workspaceId);
   const cursorMcpUrl = buildMcpUrl(cfg.podUrl, cfg.workspaceId, cfg.projectId);
-  writeMcpServerEntry(mcpPath, "synap", {
+  // Pod-derived name so multi-pod connects don't overwrite each other (peer of Grok).
+  const serverName = mcpServerNameFromPodUrl(cfg.podUrl);
+  writeMcpServerEntry(mcpPath, serverName, {
     url: cursorMcpUrl,
     headers: { Authorization: `Bearer ${effectiveApiKey}` },
   });
+  // Drop legacy single-name entry when we wrote a pod-qualified name, so reconnects
+  // don't leave a stale "synap" next to "synap-thearch".
+  if (serverName !== "synap") {
+    removeMcpServerEntry(mcpPath, "synap");
+  }
 
   log.blank();
-  log.success(`MCP server 'synap' added to ${path.relative(os.homedir(), mcpPath)}`);
+  log.success(`MCP server '${serverName}' added to ${path.relative(os.homedir(), mcpPath)}`);
   if (cfg.workspaceId) log.dim(`Scoped to workspace: ${cfg.workspaceId}`);
+  if (serverName !== "synap") {
+    log.dim(
+      "Multi-pod: connect each profile separately — server names are derived from the pod host so they don't overwrite:"
+    );
+    log.dim("  synap connect --target=cursor --name=perso");
+    log.dim("  synap connect --target=cursor --name=team");
+  }
   log.dim("Restart Cursor. The synap tool set will appear in agent mode.");
   log.blank();
   log.info("Cursor reads Claude-format skills from ~/.claude/skills/ too.");
@@ -1094,7 +1139,10 @@ async function installRaycast(cfg: TargetConnectionConfig): Promise<boolean> {
         try { fs.copyFileSync(existingPath, `${existingPath}.bak`); } catch { /* best-effort */ }
       }
       mcpConfig.mcpServers = mcpConfig.mcpServers ?? {};
-      mcpConfig.mcpServers["synap"] = synapServerEntry;
+      // Pod-derived name — a second pod must not overwrite the first.
+      const raycastServerName = mcpServerNameFromPodUrl(cfg.podUrl);
+      mcpConfig.mcpServers[raycastServerName] = synapServerEntry;
+      if (raycastServerName !== "synap") delete mcpConfig.mcpServers["synap"];
       fs.writeFileSync(existingPath, JSON.stringify(mcpConfig, null, 2) + "\n", { mode: 0o600 });
       wrote = true;
       log.success(`Synap MCP server added to Raycast: ${existingPath}`);
@@ -1203,7 +1251,10 @@ async function installWindsurf(
   const configPath = info.mcpConfigPath?.() ?? path.join(os.homedir(), ".codeium", "windsurf", "mcp_config.json");
   const { effectiveApiKey, agentUserId, mcpUrl } = await prepareMcpSurface(cfg, "windsurf");
 
-  writeMcpServerEntry(configPath, "synap", { url: mcpUrl, headers: { Authorization: `Bearer ${effectiveApiKey}` } });
+  // Pod-derived name — a second pod must not overwrite the first.
+  const windsurfServerName = mcpServerNameFromPodUrl(cfg.podUrl);
+  writeMcpServerEntry(configPath, windsurfServerName, { url: mcpUrl, headers: { Authorization: `Bearer ${effectiveApiKey}` } });
+  if (windsurfServerName !== "synap") removeMcpServerEntry(configPath, "synap");
 
   const { setSurfaceAgentKey: save } = await import("./pod.js");
   save("windsurf", { hubApiKey: effectiveApiKey, agentUserId, podUrl: cfg.podUrl });
@@ -1290,7 +1341,10 @@ async function installZed(cfg: TargetConnectionConfig): Promise<boolean> {
   }
 
   const contextServers = (settings.context_servers ?? {}) as Record<string, unknown>;
-  contextServers["synap"] = {
+  // Pod-derived name — a second pod must not overwrite the first.
+  const zedServerName = mcpServerNameFromPodUrl(cfg.podUrl);
+  if (zedServerName !== "synap") delete contextServers["synap"];
+  contextServers[zedServerName] = {
     source: "custom",
     command: {
       path: "npx",
@@ -1335,7 +1389,10 @@ async function installVSCode(cfg: TargetConnectionConfig): Promise<boolean> {
   }
 
   existing.servers = existing.servers ?? {};
-  existing.servers["synap"] = {
+  // Pod-derived name — a second pod must not overwrite the first.
+  const vscodeServerName = mcpServerNameFromPodUrl(cfg.podUrl);
+  if (vscodeServerName !== "synap") delete existing.servers["synap"];
+  existing.servers[vscodeServerName] = {
     type: "http",
     url: mcpUrl,
     headers: { Authorization: `Bearer ${effectiveApiKey}` },
@@ -1352,28 +1409,141 @@ async function installVSCode(cfg: TargetConnectionConfig): Promise<boolean> {
   return true;
 }
 
-async function installGeneric(cfg: TargetConnectionConfig): Promise<boolean> {
-  const mcpUrl = buildMcpUrl(cfg.podUrl, cfg.workspaceId, cfg.projectId);
+/**
+ * Derive a stable MCP server name from the pod URL so multi-pod setups
+ * (perso + team) don't overwrite each other. e.g. pod.thearch.synap.live → synap-thearch
+ */
+function mcpServerNameFromPodUrl(podUrl: string, fallback = "synap"): string {
+  try {
+    const host = new URL(podUrl).hostname; // pod.thearch.synap.live
+    const parts = host.split(".").filter(Boolean);
+    if (parts[0] === "pod" && parts[1]) return `synap-${parts[1]}`;
+    if (parts[0]) return `synap-${parts[0]}`;
+  } catch {
+    /* ignore */
+  }
+  return fallback;
+}
 
+/** Merge/replace [mcp_servers.<name>] in a Grok config.toml without a TOML dep. */
+function writeGrokTomlMcpServer(
+  configPath: string,
+  serverName: string,
+  opts: { url: string; bearer: string }
+): void {
+  const dir = path.dirname(configPath);
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  }
+
+  let existing = "";
+  if (fs.existsSync(configPath)) {
+    try {
+      existing = fs.readFileSync(configPath, "utf-8");
+    } catch {
+      /* start fresh */
+    }
+  }
+
+  // Strip any previous section for this server (header through next top-level section)
+  const sectionHeader = `[mcp_servers.${serverName}]`;
+  const sectionRe = new RegExp(
+    // eslint-disable-next-line no-useless-escape
+    `\\n?\\[mcp_servers\\.${serverName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\][\\s\\S]*?(?=\\n\\[|$)`,
+    "g"
+  );
+  let next = existing.replace(sectionRe, "").replace(/\n{3,}/g, "\n\n").trimEnd();
+
+  const block = [
+    "",
+    sectionHeader,
+    `url = "${opts.url}"`,
+    `headers = { Authorization = "Bearer ${opts.bearer}" }`,
+    `enabled = true`,
+    `startup_timeout_sec = 30`,
+    "",
+  ].join("\n");
+
+  next = (next ? next + "\n" : "") + block;
+  fs.writeFileSync(configPath, next.endsWith("\n") ? next : next + "\n", {
+    mode: 0o600,
+  });
+}
+
+// ─── Grok (Grok Build TUI) ───────────────────────────────────────────────────
+
+async function installGrok(
+  info: TargetInfo,
+  cfg: TargetConnectionConfig
+): Promise<boolean> {
+  const configPath =
+    info.mcpConfigPath?.() ?? path.join(os.homedir(), ".grok", "config.toml");
+  const serverName = mcpServerNameFromPodUrl(cfg.podUrl);
+  const { effectiveApiKey, agentUserId, mcpUrl } = await prepareMcpSurface(
+    cfg,
+    "grok"
+  );
+
+  writeGrokTomlMcpServer(configPath, serverName, {
+    url: mcpUrl,
+    bearer: effectiveApiKey,
+  });
+
+  const { setSurfaceAgentKey: save } = await import("./pod.js");
+  save("grok", {
+    hubApiKey: effectiveApiKey,
+    agentUserId,
+    podUrl: cfg.podUrl,
+  });
+
+  log.success(`Grok MCP config updated: ${configPath}`);
+  log.info(`  Server table: [mcp_servers.${serverName}]`);
+  log.info(`  URL:          ${mcpUrl}`);
+  log.dim("  Agent key provisioned (not the human profile key).");
+  log.blank();
+  if (serverName !== "synap") {
+    log.dim(
+      "Multi-pod: connect each profile separately — server names are derived from the pod host so they don't overwrite:"
+    );
+    log.dim("  synap connect --target=grok --name=perso");
+    log.dim("  synap connect --target=grok --name=team");
+  }
+  log.dim("Restart Grok (or open a new session) and run: grok mcp doctor");
+  return true;
+}
+
+async function installGeneric(cfg: TargetConnectionConfig): Promise<boolean> {
+  // Provision a real agent key (same as other MCP surfaces) — never paste the
+  // human profile key into MCP configs (agents can't approve; human keys on MCP
+  // write path are rejected by the pod).
+  const { effectiveApiKey, agentUserId, mcpUrl } = await prepareMcpSurface(
+    cfg,
+    "generic"
+  );
+
+  const serverName = mcpServerNameFromPodUrl(cfg.podUrl);
   const httpConfig = {
-    synap: {
+    [serverName]: {
       url: mcpUrl,
       transport: "http",
-      headers: { Authorization: `Bearer ${cfg.apiKey}` },
+      headers: { Authorization: `Bearer ${effectiveApiKey}` },
     },
   };
 
-  log.info("Universal MCP connection config:");
+  log.info("Universal MCP connection config (agent key):");
   log.blank();
   log.info("HTTP direct:");
   log.dim(JSON.stringify(httpConfig, null, 2));
   log.blank();
-  log.info("stdio bridge (mcp-remote):");
-  log.dim(`  command: npx -y mcp-remote ${mcpUrl} --header "Authorization: Bearer ${cfg.apiKey}"`);
+  log.info("Grok Build (~/.grok/config.toml):");
+  log.dim(`[mcp_servers.${serverName}]`);
+  log.dim(`url = "${mcpUrl}"`);
+  log.dim(`headers = { Authorization = "Bearer ${effectiveApiKey}" }`);
   log.blank();
-  log.info("Environment variable form:");
-  log.dim(`  MCP_SERVER_URL=${mcpUrl}`);
-  log.dim(`  MCP_API_KEY=${cfg.apiKey}`);
+  log.info("stdio bridge (mcp-remote):");
+  log.dim(
+    `  command: npx -y mcp-remote ${mcpUrl} --header "Authorization: Bearer ${effectiveApiKey}"`
+  );
   log.blank();
 
   const synapDir = path.join(os.homedir(), ".synap");
@@ -1382,9 +1552,32 @@ async function installGeneric(cfg: TargetConnectionConfig): Promise<boolean> {
   }
 
   const configFile = path.join(synapDir, "mcp-config.json");
-  fs.writeFileSync(configFile, JSON.stringify(httpConfig, null, 2) + "\n", { mode: 0o600 });
+  // Merge with existing so dual-pod generic installs don't clobber each other
+  let existing: Record<string, unknown> = {};
+  if (fs.existsSync(configFile)) {
+    try {
+      existing = JSON.parse(fs.readFileSync(configFile, "utf-8")) as Record<
+        string,
+        unknown
+      >;
+    } catch {
+      /* replace */
+    }
+  }
+  const merged = { ...existing, ...httpConfig };
+  fs.writeFileSync(configFile, JSON.stringify(merged, null, 2) + "\n", {
+    mode: 0o600,
+  });
 
-  log.success(`MCP config written to ~/.synap/mcp-config.json`);
+  const { setSurfaceAgentKey: save } = await import("./pod.js");
+  save("generic", {
+    hubApiKey: effectiveApiKey,
+    agentUserId,
+    podUrl: cfg.podUrl,
+  });
+
+  log.success(`MCP config written to ~/.synap/mcp-config.json (server: ${serverName})`);
+  log.dim("Prefer: synap connect --target=grok  to auto-write ~/.grok/config.toml");
   return true;
 }
 
@@ -1590,7 +1783,10 @@ export async function installOpencode(cfg: ProviderInstallConfig & { workspaceId
   const mcpUrl = buildMcpUrl(cfg.podUrl, cfg.workspaceId, cfg.projectId);
 
   const mcpBlock = (existing.mcp ?? {}) as Record<string, unknown>;
-  mcpBlock["synap"] = { type: "remote", url: mcpUrl, headers: { Authorization: `Bearer ${agentKey}` } };
+  // Pod-derived name — a second pod must not overwrite the first.
+  const opencodeServerName = mcpServerNameFromPodUrl(cfg.podUrl);
+  if (opencodeServerName !== "synap") delete mcpBlock["synap"];
+  mcpBlock[opencodeServerName] = { type: "remote", url: mcpUrl, headers: { Authorization: `Bearer ${agentKey}` } };
 
   const updated = {
     $schema: "https://opencode.ai/config.json",
@@ -1680,6 +1876,24 @@ export function writeMcpServerEntry(
   fs.writeFileSync(configPath, JSON.stringify(config, null, 2) + "\n", {
     mode: 0o600,
   });
+}
+
+/** Best-effort remove of a named MCP server entry (e.g. legacy `"synap"`). */
+function removeMcpServerEntry(configPath: string, serverName: string): void {
+  if (!fs.existsSync(configPath)) return;
+  try {
+    const config = JSON.parse(fs.readFileSync(configPath, "utf-8")) as {
+      mcpServers?: Record<string, McpServerConfig>;
+    };
+    if (!config.mcpServers?.[serverName]) return;
+    delete config.mcpServers[serverName];
+    if (Object.keys(config.mcpServers).length === 0) delete config.mcpServers;
+    fs.writeFileSync(configPath, JSON.stringify(config, null, 2) + "\n", {
+      mode: 0o600,
+    });
+  } catch {
+    /* leave config alone if unreadable */
+  }
 }
 
 /**

@@ -41,12 +41,13 @@ export interface LaneReport {
 
 /**
  * Derive the lane from the workspace-routing `source` returned by
- * `resolveKnowledgeWorkspace`. A domain capture always lands in a real product
- * workspace → the Work lane. (The backend routing endpoint P7b is the SSoT for
- * resolving user/global lanes; the CLI's lane detection is a best-effort hint.)
+ * `resolveKnowledgeWorkspace`. Domain capture is the Work lane (even when
+ * workspaceId is omitted for server-derived / pod-wide preferred placement).
+ * (The backend routing endpoint P7b is the SSoT for resolving user/global
+ * lanes; the CLI's lane detection is a best-effort hint.)
  *
- *   source                              → lane
- *   "explicit" / "team" / "active …"    → work
+ *   source                                           → lane
+ *   "explicit" / "team" / "server-derived …"         → work
  */
 export function laneFromSource(_source: string): CaptureLane {
   return "work";

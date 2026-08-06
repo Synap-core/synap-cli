@@ -4,10 +4,17 @@
  * Routing (INTAKE-CONSOLIDATION-PLAN Wave 1):
  *   - Superwhisper store-first     → lib/superwhisper-import (unchanged)
  *   - Single file OR single URL    → POST /capture/structure + /capture/execute
- *   - N≥2 text-like files
- *     (md / markdown / txt / csv)  → ONE batch via REST import:
+ *   - 2 text-like files
+ *     (md / markdown / txt / csv)  → ONE batch via SYNCHRONOUS REST import:
  *         POST /import/analyze  → human review (or --yes / --dry-run)
  *         POST /import/apply    → materialize the EXACT previewed ops
+ *   - ≥CORPUS_THRESHOLD (3) such
+ *     files                        → ONE BACKGROUND job (the sync door times out):
+ *         POST /import/enqueue-corpus  → { jobId }, returns immediately
+ *         GET  /import/corpus-job/{id} → poll to "completed"
+ *       On completion the result is ONE pending governed `import.graph`
+ *       proposal — NOT stored entities. `--dry-run` never takes this door
+ *       (enqueueing is itself a write).
  *   - Mixed binary/URL + text      → capture path for URLs/binaries;
  *                                    batch text via /import/* when N≥2
  *
@@ -21,7 +28,10 @@
  * (workspace **name** as a path segment) pins multi-home destinations. Example:
  *   --home-map "Projects=Builder,Posts=Content OS"
  * rewrites `5. Projects/foo.md` → `Builder/5. Projects/foo.md`. No product
- * defaults — user-supplied pairs only.
+ * defaults — user-supplied pairs only. It applies to the corpus door too: the
+ * background job forwards `items` verbatim into the SAME
+ * `ImportOrchestrator.analyzeLarge` the sync door reaches, so the path
+ * heuristic is identical on both.
  *
  * No Company OS coupling — pure personal intake doors.
  */
@@ -42,6 +52,8 @@ import {
   renderHubError,
 } from "../lib/hub-client.js";
 import { unwrapList } from "../lib/unwrapList.js";
+import { pollForApproval } from "../lib/approval-poll.js";
+import { FLOW, renderNextSteps } from "../lib/next-steps.js";
 import { formatLaneLine, resolveWorkspaceName, type LaneReport } from "../lib/capture-lane.js";
 import {
   isDegraded,
@@ -75,6 +87,8 @@ export interface ImportOpts {
   limit?: number;
   concurrency?: number;
   resume?: boolean;
+  /** `--job-status <uuid>`: re-poll a background corpus job instead of importing. */
+  jobStatus?: string;
 }
 
 // ─── input classification ─────────────────────────────────────────────────────
@@ -127,6 +141,40 @@ const GLOBAL_BATCH_CAP = 2000;
 /** Generous timeout: deep vault structure can take minutes on large corpora. */
 const IMPORT_ANALYZE_TIMEOUT_MS = 300_000;
 const IMPORT_APPLY_TIMEOUT_MS = 120_000;
+
+/**
+ * At or above this many batch-eligible text files, route to the BACKGROUND
+ * corpus door (`POST /import/enqueue-corpus`) instead of the synchronous
+ * `/import/analyze`.
+ *
+ * Why 3, measured rather than guessed: 3 markdown files complete in ~2m01s on
+ * the background worker, and the SAME 3 files fail 0/5 through /import/analyze,
+ * each dying at 45–48s against the pod's 45s request timeout. So 3 is the
+ * smallest N at which the synchronous door is observed to be unusable.
+ *
+ * Below it (1–2 files) the synchronous path stays: it is proven to work at that
+ * size and it is strictly more interactive — it renders the operation list, the
+ * multi-home placement and the quality report, then applies on a y/N confirm.
+ * The corpus door can offer none of that; it returns a job handle and files ONE
+ * governed proposal for later review. Routing everything through it would trade
+ * a working interactive preview for a background job on inputs that never
+ * needed one.
+ */
+export const CORPUS_THRESHOLD = 3;
+
+/** Gap between corpus-job polls. 12 req/min — well under the hub RPM budget. */
+const CORPUS_POLL_INTERVAL_MS = 5_000;
+/** Heartbeat cadence for the human progress line (poll ticks are quieter). */
+const CORPUS_PROGRESS_EVERY_MS = 30_000;
+/** Observed worker throughput: 3 files → ~2m01s ≈ 40s/file. Rounded up. */
+const CORPUS_MS_PER_ITEM = 45_000;
+/** Never wait less than this, even for a 3-file corpus. */
+const CORPUS_MIN_WAIT_MS = 10 * 60_000;
+/**
+ * Never block a terminal longer than this. Hitting it is NOT a failure — the
+ * job keeps running server-side and the CLI prints how to re-poll.
+ */
+const CORPUS_MAX_WAIT_MS = 2 * 60 * 60_000;
 
 type ImportSource = "obsidian" | "markdown" | "csv";
 
@@ -590,7 +638,21 @@ function renderBatchAnalyze(result: ImportAnalyzeResult, fileCount: number, sour
 
 export interface ItemOutcome {
   label: string;
-  status: "stored" | "proposed" | "degraded" | "dry-run" | "skipped" | "empty" | "failed";
+  status:
+    | "stored"
+    | "proposed"
+    | "degraded"
+    | "dry-run"
+    | "skipped"
+    | "empty"
+    | "failed"
+    /**
+     * Background corpus job accepted, but not observed to finish inside this
+     * invocation's wait window. Nothing was lost — the job keeps running on the
+     * pod. Exit code stays 0 (see importExitCode): a still-running job is not a
+     * degraded one.
+     */
+    | "queued";
   entities?: number;
   relations?: number;
   workspaceId?: string | null;
@@ -612,6 +674,26 @@ export interface ItemOutcome {
     sessionId?: string | null;
     analyze?: ImportAnalyzeResult;
     apply?: ImportApplyResult;
+    /** Present for the background /import/enqueue-corpus path. */
+    corpus?: {
+      jobId: string | null;
+      /** Last pg-boss state we observed, or "unknown" if we never got one. */
+      state: string;
+      /** True when the wait window elapsed with the job still running. */
+      timedOut: boolean;
+      waitedMs: number;
+      itemCount: number;
+      /**
+       * File-level truth from the job's own output. `outcomeKnown: false` means
+       * the pod did not report it (older pod, or job unfinished) — a script must
+       * treat that as UNKNOWN, not as "0 failed".
+       */
+      outcomeKnown?: boolean;
+      filesProcessed?: number | null;
+      filesFailed?: number | null;
+      findings?: Array<{ id?: string; severity?: string; message?: string }>;
+      proposalId?: string | null;
+    };
   };
 }
 
@@ -804,6 +886,430 @@ async function processItem(
   };
 }
 
+// ─── background corpus door (/import/enqueue-corpus + poll) ───────────────────
+
+/** Wire shape from POST /import/enqueue-corpus (HTTP 202). */
+interface EnqueueCorpusResult {
+  queued?: boolean;
+  jobId?: string | null;
+  itemCount?: number;
+  workspaceId?: string | null;
+}
+
+/**
+ * The finished run's FILE-LEVEL outcome, as the pod stores it on the pg-boss job
+ * (`output`) and returns it from GET /import/corpus-job/{jobId}.
+ *
+ * This is the only place a partially failed corpus import is visible. The pod
+ * records `filesFailed` on the resulting import.graph proposal; before the pod
+ * returned this object the CLI could not see it and printed `0 failed` for a run
+ * that had dropped 2 of 3 files.
+ */
+export interface CorpusJobOutput {
+  proposalId?: string | null;
+  workspaceId?: string | null;
+  filesProcessed?: number;
+  filesFailed?: number;
+  qualityScore?: number;
+  findings?: Array<{ id?: string; severity?: string; message?: string }>;
+}
+
+/** Wire shape from GET /import/corpus-job/{jobId}. */
+interface CorpusJobStatus {
+  jobId?: string;
+  state?: string;
+  createdOn?: string | null;
+  completedOn?: string | null;
+  /**
+   * Absent on a pod older than the worker that returns its result, and on any
+   * unfinished job. Absence is UNKNOWN — never read it as "nothing failed".
+   */
+  output?: CorpusJobOutput | null;
+}
+
+/** What a completed corpus job actually did, once the wire value is judged. */
+export type CorpusFileOutcome =
+  | { known: false }
+  | { known: true; filesProcessed: number | null; filesFailed: number };
+
+/**
+ * Judge a completed job's `output`.
+ *
+ * The ONE place absence is turned into `known: false`. A pod that predates the
+ * result-carrying worker returns no output; so does a job whose handler reported
+ * nothing. Neither is evidence that every file landed, so neither may collapse
+ * into `filesFailed: 0`.
+ */
+export function readCorpusFileOutcome(
+  output: CorpusJobOutput | null | undefined
+): CorpusFileOutcome {
+  if (!output || typeof output.filesFailed !== "number") return { known: false };
+  return {
+    known: true,
+    filesProcessed:
+      typeof output.filesProcessed === "number" ? output.filesProcessed : null,
+    filesFailed: output.filesFailed,
+  };
+}
+
+/**
+ * The outcome status a COMPLETED corpus job earns.
+ *
+ * The ONE decision point: files were dropped → `degraded`, which `importExitCode`
+ * already treats as non-zero (no second exit-code path). An unknown outcome stays
+ * `proposed` — the proposal genuinely exists — but the caller must print
+ * CORPUS_OUTCOME_UNAVAILABLE so the unknown is never read as "0 failed".
+ */
+export function corpusCompletionOutcome(
+  output: CorpusJobOutput | null | undefined
+): { status: "proposed" | "degraded"; degradedReason?: string } {
+  const outcome = readCorpusFileOutcome(output);
+  if (outcome.known && outcome.filesFailed > 0) {
+    return {
+      status: "degraded",
+      degradedReason: `corpus_files_failed:${outcome.filesFailed}`,
+    };
+  }
+  return { status: "proposed" };
+}
+
+/** The message shown when the pod cannot tell us what happened per file. */
+export const CORPUS_OUTCOME_UNAVAILABLE =
+  "file-level outcome unavailable from this pod — it did not report how many files were structured or dropped. " +
+  "This is NOT a confirmation that every file landed: open the import.graph proposal and read quality.counts.";
+
+/**
+ * Human lines for a completed corpus run's file-level outcome.
+ *
+ * Exported so the run summary, the `--job-status` re-poll and the tests all read
+ * the SAME judgement — a second copy is how "0 failed" survived on one path.
+ */
+export function corpusOutcomeLines(
+  output: CorpusJobOutput | null | undefined,
+  itemCount?: number
+): string[] {
+  const outcome = readCorpusFileOutcome(output);
+  if (!outcome.known) return [CORPUS_OUTCOME_UNAVAILABLE];
+
+  const processed = outcome.filesProcessed ?? "?";
+  const total = typeof itemCount === "number" ? ` of ${itemCount}` : "";
+  const lines = [
+    `files: ${processed}${total} structured · ${outcome.filesFailed} failed`,
+  ];
+  if (outcome.filesFailed > 0) {
+    lines.push(
+      `${outcome.filesFailed} file(s) produced NOTHING and are absent from the proposal — re-import them alone once the cause below is addressed.`
+    );
+  }
+  for (const f of (output?.findings ?? []).slice(0, 8)) {
+    if (!f?.message) continue;
+    lines.push(`[${(f.severity ?? "info").toUpperCase()}] ${f.message}`);
+  }
+  return lines;
+}
+
+/** pg-boss states that mean "this job is over and it did not succeed". */
+const CORPUS_DEAD_STATES = new Set(["failed", "cancelled", "expired"]);
+
+/**
+ * Which batch door to use. The ONE place the threshold is applied — the human
+ * message, the --json payload and the actual POST all read this.
+ *
+ * `--dry-run` always stays on `/import/analyze`: the corpus door has no preview
+ * mode (`previewOnly` is an /import/analyze field), and enqueueing is itself a
+ * durable write. A dry run that queued a background job would be a dry run that
+ * writes — the exact thing the flag promises not to do.
+ */
+export function chooseBatchDoor(args: {
+  fileCount: number;
+  dryRun?: boolean;
+}): "analyze" | "enqueue-corpus" {
+  if (args.dryRun) return "analyze";
+  return args.fileCount >= CORPUS_THRESHOLD ? "enqueue-corpus" : "analyze";
+}
+
+/**
+ * How long to wait for a corpus job before handing the terminal back.
+ *
+ * Scaled from measured throughput (~45s/file) so a small corpus is not waited on
+ * for an hour and a 257-file backfill is not abandoned after five minutes, then
+ * clamped: never under 10 minutes, never over 2 hours. The ceiling is safe
+ * precisely because expiry is not failure — see corpusTimeoutLines().
+ */
+export function corpusPollTimeoutMs(itemCount: number): number {
+  const scaled = itemCount * CORPUS_MS_PER_ITEM;
+  return Math.min(Math.max(scaled, CORPUS_MIN_WAIT_MS), CORPUS_MAX_WAIT_MS);
+}
+
+function humanDuration(ms: number): string {
+  const totalMin = Math.round(ms / 60_000);
+  if (totalMin < 60) return `${Math.max(totalMin, 1)}m`;
+  const h = Math.floor(totalMin / 60);
+  const m = totalMin % 60;
+  return m ? `${h}h${m}m` : `${h}h`;
+}
+
+/**
+ * What we print when the wait window elapses.
+ *
+ * The job is STILL RUNNING — pg-boss holds it, the worker keeps chunking, and
+ * the governed `import.graph` proposal will still be written. Saying "failed"
+ * (or exiting non-zero) here would send a user to re-run a 257-file import that
+ * is already half-done. So: state plainly that nothing was lost, and give the
+ * exact command to re-poll.
+ */
+export function corpusTimeoutLines(jobId: string, waitedMs: number): string[] {
+  return [
+    `Still running after ${humanDuration(waitedMs)} — this is not a failure.`,
+    `The job is queued on the pod and keeps going after this command exits; nothing was lost and nothing was imported twice.`,
+    `Re-check it with:  synap import --job-status ${jobId}`,
+    `Or watch the review inbox — the finished import lands there as ONE import.graph proposal:  synap proposals list`,
+  ];
+}
+
+/** Poll a corpus job to completion. Returns the last observed status. */
+async function pollCorpusJob(
+  jobId: string,
+  cfg: HubConfig,
+  userId: string,
+  itemCount: number,
+  quiet: boolean
+): Promise<{ status: CorpusJobStatus | null; timedOut: boolean; waitedMs: number }> {
+  const timeoutMs = corpusPollTimeoutMs(itemCount);
+  const url = new URL(`${cfg.podUrl}/api/hub/import/corpus-job/${jobId}`);
+  url.searchParams.set("userId", userId);
+
+  let lastState = "created";
+  let lastProgressAt = 0;
+  const startedAt = Date.now();
+
+  try {
+    // REUSE the shared approval poll — same create→poll shape as CP login and
+    // agent-key approval. No second loop, no second backoff policy.
+    const status = await pollForApproval<CorpusJobStatus>({
+      url: url.toString(),
+      headers: { Authorization: `Bearer ${cfg.apiKey}` },
+      intervalMs: CORPUS_POLL_INTERVAL_MS,
+      timeoutMs,
+      isApproved: (d) => (d as CorpusJobStatus)?.state === "completed",
+      isRejected: (d) => {
+        const state = String((d as CorpusJobStatus)?.state ?? "");
+        // Record the terminal state here too, not only in onTick: the rejected
+        // path throws, and the catch below reports `lastState`. Reading it only
+        // from onTick would make a failed job report the state BEFORE it failed.
+        if (state) lastState = state;
+        return CORPUS_DEAD_STATES.has(state);
+      },
+      onApproved: (d) => d as CorpusJobStatus,
+      rejectedError: "corpus import job did not complete",
+      timeoutError: "__corpus_timeout__",
+      onTick: ({ data, elapsedMs }) => {
+        const state = (data as CorpusJobStatus | null)?.state;
+        if (state) lastState = state;
+        if (quiet) return;
+        if (elapsedMs - lastProgressAt < CORPUS_PROGRESS_EVERY_MS) return;
+        lastProgressAt = elapsedMs;
+        log.dim(
+          `  … ${lastState} · ${humanDuration(elapsedMs)} elapsed (waiting up to ${humanDuration(timeoutMs)})`
+        );
+      },
+    });
+    return { status, timedOut: false, waitedMs: Date.now() - startedAt };
+  } catch (e) {
+    const waitedMs = Date.now() - startedAt;
+    if ((e as Error).message === "__corpus_timeout__") {
+      return { status: { jobId, state: lastState }, timedOut: true, waitedMs };
+    }
+    // Rejected: the job reached a terminal non-success state. Report the state
+    // we actually saw rather than a generic "failed".
+    return { status: { jobId, state: lastState }, timedOut: false, waitedMs };
+  }
+}
+
+/**
+ * Enqueue a text corpus on the background door and wait for the worker.
+ *
+ * The door is ADDITIVE onto the same `ImportOrchestrator.analyzeLarge` that
+ * `/import/analyze` reaches — chunking, cross-chunk dedup and the single
+ * governed `import.graph` proposal all live server-side. This function only
+ * posts, polls, and reports.
+ */
+async function processCorpusImport(
+  mappedItems: BatchTextItem[],
+  source: ImportSource,
+  opts: ImportOpts,
+  cfg: HubConfig,
+  userId: string,
+  workspaceId: string | undefined,
+  projOverride: string | undefined,
+  sessionId: string | undefined
+): Promise<ItemOutcome> {
+  const label = `corpus:${source} (${mappedItems.length} files)`;
+  const itemCount = mappedItems.length;
+
+  // The enqueue payload the pod builds is {userId, workspaceId, source, items}
+  // (hub-protocol/rest/capture.ts) — projectId and sessionId are accepted by the
+  // schema and then DROPPED before the job. Warn rather than let a passed flag
+  // vanish: on this path they genuinely do not apply.
+  if (!opts.json && (projOverride || sessionId)) {
+    const dropped = [projOverride ? "--project" : null, sessionId ? "--session" : null]
+      .filter(Boolean)
+      .join(" and ");
+    log.warn(
+      `  ${dropped} ${projOverride && sessionId ? "do" : "does"} not apply to the background corpus import — ` +
+        `the pod's enqueue payload carries only userId, workspaceId, source and items. ` +
+        `Set the project/session on the resulting proposal when you review it.`
+    );
+  }
+
+  if (!opts.json) {
+    log.info(
+      `Enqueuing ${itemCount} text file${itemCount !== 1 ? "s" : ""} on the background corpus door ` +
+        `(source=${source}) — the synchronous /import/analyze door times out at this size.`
+    );
+  }
+
+  const enqueueRes = (await hubPost(
+    "/import/enqueue-corpus",
+    {
+      userId,
+      source,
+      items: mappedItems.map((i) => ({ path: i.path, content: i.content })),
+      ...(workspaceId ? { workspaceId } : {}),
+    },
+    cfg,
+    60_000
+  )) as EnqueueCorpusResult;
+
+  const jobId = enqueueRes.jobId ?? null;
+  const finalWs = enqueueRes.workspaceId ?? workspaceId ?? null;
+  const corpusBase = { jobId, itemCount, waitedMs: 0 };
+
+  // pg-boss can accept a send and still return no id (dedup/throttle). We were
+  // told "queued", so nothing failed — but we cannot poll a job we cannot name.
+  if (!jobId) {
+    if (!opts.json) {
+      log.warn(
+        "  The pod accepted the corpus but returned no job id — it is running, but this command cannot follow it."
+      );
+      log.dim("  Watch for the import.graph proposal with:  synap proposals list");
+    }
+    return {
+      label,
+      status: "queued",
+      workspaceId: finalWs,
+      projectId: null,
+      batch: {
+        source,
+        fileCount: itemCount,
+        proposalId: null,
+        sessionId: null,
+        corpus: { ...corpusBase, state: "unknown", timedOut: false },
+      },
+    };
+  }
+
+  if (!opts.json) {
+    log.dim(`  job ${jobId} · polling every ${CORPUS_POLL_INTERVAL_MS / 1000}s`);
+  }
+
+  const { status, timedOut, waitedMs } = await pollCorpusJob(
+    jobId,
+    cfg,
+    userId,
+    itemCount,
+    Boolean(opts.json)
+  );
+  const state = status?.state ?? "unknown";
+  const corpus = { jobId, itemCount, state, timedOut, waitedMs };
+  const batchMeta = {
+    source,
+    fileCount: itemCount,
+    proposalId: null,
+    sessionId: null,
+    corpus,
+  };
+
+  if (timedOut) {
+    if (!opts.json) {
+      log.blank();
+      for (const line of corpusTimeoutLines(jobId, waitedMs)) log.info(`  ${line}`);
+    }
+    return { label, status: "queued", workspaceId: finalWs, projectId: null, batch: batchMeta };
+  }
+
+  if (state !== "completed") {
+    if (!opts.json) {
+      log.error(`  corpus job ${jobId} ended in state "${state}" — nothing was imported.`);
+      log.hint("Check the pod's job logs, then re-run the import.");
+    }
+    return {
+      label,
+      status: "failed",
+      error: `corpus job ended in state "${state}"`,
+      workspaceId: finalWs,
+      projectId: null,
+      batch: batchMeta,
+    };
+  }
+
+  // Completed. The result is a PENDING governed proposal — not stored entities.
+  // Say exactly that; "created N entities" here would be a lie.
+  //
+  // And "completed" is NOT "every file landed": the pod structures each file
+  // separately and records `filesFailed` on the proposal. Read that number here
+  // or the run reports success over an unknown amount of loss.
+  const output = status?.output ?? null;
+  const fileOutcome = readCorpusFileOutcome(output);
+  const lostFiles = fileOutcome.known && fileOutcome.filesFailed > 0;
+  const corpusFull = {
+    ...corpus,
+    outcomeKnown: fileOutcome.known,
+    filesProcessed: fileOutcome.known ? fileOutcome.filesProcessed : null,
+    filesFailed: fileOutcome.known ? fileOutcome.filesFailed : null,
+    ...(output?.findings ? { findings: output.findings } : {}),
+    proposalId: output?.proposalId ?? null,
+  };
+  const fullBatchMeta = {
+    ...batchMeta,
+    proposalId: output?.proposalId ?? null,
+    corpus: corpusFull,
+  };
+
+  if (!opts.json) {
+    const headline = `  Corpus import finished in ${humanDuration(waitedMs)}${
+      lostFiles ? " with FILES MISSING" : ""
+    } — ONE import.graph proposal is waiting for review.`;
+    if (lostFiles) log.warn(headline);
+    else log.success(headline);
+    for (const line of corpusOutcomeLines(output, itemCount)) {
+      if (fileOutcome.known && !lostFiles) log.dim(`  ${line}`);
+      else log.warn(`  ${line}`);
+    }
+    log.dim("  Nothing is in the graph yet: approving the proposal is what materializes it.");
+    renderNextSteps(FLOW.afterCorpusImport());
+  }
+
+  // Files dropped → `degraded`, the existing non-zero outcome (importExitCode);
+  // otherwise `proposed`, the same meaning the capture path already carries.
+  // The judgement lives in corpusCompletionOutcome so the tests exercise the
+  // real decision rather than a copy of it.
+  const completion = corpusCompletionOutcome(output);
+
+  return {
+    label,
+    status: completion.status,
+    ...(completion.degradedReason
+      ? { degradedReason: completion.degradedReason }
+      : {}),
+    entities: 0,
+    relations: 0,
+    workspaceId: finalWs,
+    projectId: null,
+    batch: fullBatchMeta,
+  };
+}
+
 // ─── multi-file batch via /import/analyze + /import/apply ─────────────────────
 
 async function processBatchImport(
@@ -828,6 +1334,28 @@ async function processBatchImport(
   const source = sourceForBatchItems(mappedItems);
   const label = `batch:${source} (${mappedItems.length} files)`;
   const workspaceId = wsOverride ?? cfg.workspaceId;
+
+  // Above CORPUS_THRESHOLD the synchronous door cannot finish inside the pod's
+  // request timeout — hand the SAME mapped items (home-map already applied, caps
+  // already enforced, source already resolved) to the background door instead.
+  if (chooseBatchDoor({ fileCount: mappedItems.length, dryRun: opts.dryRun }) === "enqueue-corpus") {
+    if (!opts.json && homeMapRewrites > 0) {
+      log.dim(
+        `  home-map: rewrote ${homeMapRewrites} path${homeMapRewrites !== 1 ? "s" : ""} ` +
+          `(workspace name as first segment for multi-home placement)`
+      );
+    }
+    return processCorpusImport(
+      mappedItems,
+      source,
+      opts,
+      cfg,
+      userId,
+      workspaceId,
+      projOverride,
+      sessionId
+    );
+  }
 
   const analyzeBody: Record<string, unknown> = {
     userId,
@@ -980,6 +1508,91 @@ async function processBatchImport(
     projectId: projOverride ?? null,
     batch: { ...batchMeta, apply: applyRes },
   };
+}
+
+// ─── `synap import --job-status <jobId>` ──────────────────────────────────────
+
+/**
+ * Re-poll a corpus job started by an earlier `synap import`.
+ *
+ * This is the command `corpusTimeoutLines()` tells the user to run, so it has to
+ * exist: a timeout message naming a command that does not resolve is worse than
+ * no message. One GET, no waiting — it reports the current state and exits.
+ */
+export async function importJobStatus(
+  jobId: string,
+  opts: ImportOpts
+): Promise<void> {
+  try {
+    if (!UUID_RE.test(jobId)) {
+      console.error(chalk.red(`'${jobId}' is not a job id — pass the UUID printed when the import was enqueued.`));
+      process.exit(1);
+    }
+    const cfg = await resolveHubConfig(opts);
+    const userId = await resolveUserId(cfg);
+    const res = (await hubGet(
+      `/import/corpus-job/${jobId}`,
+      { userId },
+      cfg
+    )) as CorpusJobStatus;
+    const state = res.state ?? "unknown";
+
+    const output = res.output ?? null;
+    const fileOutcome = readCorpusFileOutcome(output);
+    const lostFiles = fileOutcome.known && fileOutcome.filesFailed > 0;
+
+    if (opts.json) {
+      console.log(
+        JSON.stringify(
+          {
+            jobId,
+            state,
+            createdOn: res.createdOn ?? null,
+            completedOn: res.completedOn ?? null,
+            // Same UNKNOWN-vs-zero distinction the run path makes.
+            outcomeKnown: state === "completed" ? fileOutcome.known : false,
+            filesProcessed: fileOutcome.known ? fileOutcome.filesProcessed : null,
+            filesFailed: fileOutcome.known ? fileOutcome.filesFailed : null,
+            ...(output?.findings ? { findings: output.findings } : {}),
+            proposalId: output?.proposalId ?? null,
+          },
+          null,
+          2
+        )
+      );
+      if (state === "completed" && lostFiles) process.exit(1);
+      return;
+    }
+
+    log.heading(`Corpus import job ${jobId}`);
+    log.info(`  state: ${state}`);
+    if (res.createdOn) log.dim(`  created:   ${res.createdOn}`);
+    if (res.completedOn) log.dim(`  completed: ${res.completedOn}`);
+
+    if (state === "completed") {
+      if (lostFiles) {
+        log.warn("  Finished with FILES MISSING — ONE import.graph proposal is waiting for review.");
+      } else {
+        log.success("  Finished — ONE import.graph proposal is waiting for review.");
+      }
+      for (const line of corpusOutcomeLines(output)) {
+        if (fileOutcome.known && !lostFiles) log.dim(`  ${line}`);
+        else log.warn(`  ${line}`);
+      }
+      renderNextSteps(FLOW.afterCorpusImport());
+      // A run that lost files is not a success on the re-poll path either.
+      if (lostFiles) process.exit(1);
+      return;
+    }
+    if (CORPUS_DEAD_STATES.has(state)) {
+      log.error(`  The job ended in state "${state}" — nothing was imported.`);
+      process.exit(1);
+    }
+    log.info("  Still running — nothing was lost. Re-run this command later.");
+  } catch (e) {
+    renderHubError(e);
+    process.exit(1);
+  }
 }
 
 // ─── command entrypoint ─────────────────────────────────────────────────────────
@@ -1168,6 +1781,11 @@ export async function importData(inputs: string[], opts: ImportOpts): Promise<vo
             truncated,
             ...(batchOutcome?.batch?.analyze ? { analyze: batchOutcome.batch.analyze } : {}),
             ...(batchOutcome?.batch?.apply ? { apply: batchOutcome.batch.apply } : {}),
+            // Background corpus path: a script needs the jobId + final state to
+            // decide whether to re-poll, and nextSteps to chain the review.
+            ...(batchOutcome?.batch?.corpus
+              ? { corpus: batchOutcome.batch.corpus, nextSteps: FLOW.afterCorpusImport() }
+              : {}),
           },
           null,
           2
@@ -1181,17 +1799,41 @@ export async function importData(inputs: string[], opts: ImportOpts): Promise<vo
       log.heading("Import summary");
       const proposed = outcomes.filter((o) => o.status === "proposed").length;
       const degraded = outcomes.filter((o) => o.status === "degraded").length;
+      const queued = outcomes.filter((o) => o.status === "queued").length;
+
+      // Background corpus path: ONE outcome represents ONE JOB covering N files.
+      // So this line's counters are denominated in JOBS, and the file-level truth
+      // is a separate line below.
+      const corpusMeta = outcomes.find((o) => o.batch?.corpus)?.batch?.corpus;
+      const corpusLost = (corpusMeta?.filesFailed ?? 0) > 0;
+      const noun = corpusMeta ? "job" : "item";
       log.info(
-        `${outcomes.length} item${outcomes.length !== 1 ? "s" : ""} · ` +
+        `${outcomes.length} ${noun}${outcomes.length !== 1 ? "s" : ""} · ` +
           `${stored.length} stored (${totalEntities} entit${totalEntities !== 1 ? "ies" : "y"}) · ` +
           (proposed ? `${proposed} proposed · ` : "") +
+          (queued ? `${queued} still running · ` : "") +
           `${outcomes.filter((o) => o.status === "dry-run").length} dry-run · ` +
           `${outcomes.filter((o) => o.status === "skipped").length} skipped · ` +
           `${outcomes.filter((o) => o.status === "empty").length} empty · ` +
           (degraded ? `${degraded} degraded · ` : "") +
-          `${failed.length} failed`
+          // A corpus run that LOST files expresses that loss one line below, in
+          // files. Printing "0 failed" here too — same word, different
+          // denominator, three lines apart — restates the exact sentence this
+          // whole wave existed to delete. Job-level failure is already carried
+          // by `degraded`, so the counter is dropped rather than qualified.
+          (corpusLost ? "" : `${failed.length} failed`)
       );
       for (const f of failed) log.dim(`  ✗ ${f.label}: ${f.error ?? "unknown error"}`);
+
+      if (corpusMeta && !corpusMeta.timedOut) {
+        if (corpusMeta.outcomeKnown) {
+          const line = `files: ${corpusMeta.filesProcessed ?? "?"} of ${corpusMeta.itemCount} structured · ${corpusMeta.filesFailed ?? 0} failed`;
+          if (corpusLost) log.warn(`  ${line}`);
+          else log.info(`  ${line}`);
+        } else if (corpusMeta.state === "completed") {
+          log.warn(`  ${CORPUS_OUTCOME_UNAVAILABLE}`);
+        }
+      }
     }
 
     // Only hard-exit on a non-zero code: a plain `return` lets Node flush the

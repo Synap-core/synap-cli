@@ -1,12 +1,70 @@
 import { existsSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
-import { getActivePodConfig, getActiveWorkspaceId, getActiveWorkspaceIdForPod, findPodNameByUrl, getActiveProjectId, listPodProfiles, getPodOverride, getSurfaceAgentKey } from "./pod.js";
+import {
+  getActivePodConfig,
+  getActiveWorkspaceId,
+  getActiveWorkspaceIdForPod,
+  findPodNameByUrl,
+  getActiveProjectBinding,
+  getActiveProjectId,
+  listPodProfiles,
+  getPodOverride,
+  getSurfaceAgentKey,
+} from "./pod.js";
 import { resolveAgentOverride } from "./agents-config.js";
 import { resolveActiveLens, resolveActiveLensForPod } from "./session-lens.js";
 import { resolveDirectoryLensForPod } from "./directory-lens.js";
+import { preferClaudeCodeSurfaceKey } from "./key-source.js";
+import { samePodOrigin } from "./project-ref.js";
 import { HubRestClient } from "@synap/hub-rest-client";
 import { log } from "../utils/logger.js";
 import chalk from "chalk";
+
+/**
+ * Resolve a projectId safe to send to `podUrl`.
+ *
+ * Order: pod-qualified lens → directory lens → env project when co-located with
+ * this pod (trustEnvProject — same model as SYNAP_WORKSPACE_ID under env rung) →
+ * ActiveProjectBinding for this pod → legacy activeProjectId only when the
+ * active profile is this pod.
+ *
+ * Write paths should consume `resolveHubConfig().projectId` rather than bare
+ * `getActiveProjectId()` / env.
+ */
+function resolveProjectIdForPod(
+  podUrl: string,
+  opts: {
+    lensProjectId?: string;
+    dirLensProjectId?: string;
+    envProject?: string;
+    /** True only on resolveHubConfig env rung — env is co-located with SYNAP_POD_URL. */
+    trustEnvProject?: boolean;
+  }
+): string | undefined {
+  if (opts.lensProjectId) return opts.lensProjectId;
+  if (opts.dirLensProjectId) return opts.dirLensProjectId;
+
+  // Env pin co-located with env pod (connect --pin-project, Claude settings.env).
+  if (opts.trustEnvProject && opts.envProject) return opts.envProject;
+
+  const profiles = listPodProfiles();
+  const binding = getActiveProjectBinding();
+  if (binding) {
+    const boundPod = profiles.find((x) => x.name === binding.podName);
+    if (boundPod && samePodOrigin(boundPod.config.podUrl, podUrl)) {
+      return binding.projectId;
+    }
+    // Binding is for another pod — do not send it.
+    return undefined;
+  }
+
+  // Legacy: activeProjectId with no binding — only when active profile is this pod.
+  const active = getActivePodConfig();
+  if (active && samePodOrigin(active.podUrl, podUrl)) {
+    return getActiveProjectId() || undefined;
+  }
+  return undefined;
+}
 
 /**
  * A failed Hub call, carrying the structured facts callers need to branch on.
@@ -352,7 +410,44 @@ function renderHubErrorBody(err: unknown): void {
     log.error(err instanceof Error ? err.message : String(err));
     return;
   }
+  // Connection-class failure — the execute door returns 424 with a machine
+  // `errorClass` (+ `providerRef`) precisely so it SURVIVES the pod's 5xx egress
+  // sanitizer. This is client-ACTIONABLE (reconnect), not a server fault, so name
+  // the cause + the exact fix instead of the generic status hint. Mirrors the
+  // browser's P1 self-heal reconnect chip.
+  const errBody = err.body as
+    | { errorClass?: string; providerRef?: string }
+    | undefined;
+  const errorClass = errBody?.errorClass;
+  if (errorClass === "auth" || errorClass === "no_connection") {
+    const provider = errBody?.providerRef
+      ? chalk.bold(errBody.providerRef)
+      : "this capability's";
+    log.error(
+      `The ${provider} connection needs reconnecting — its access has expired or was revoked.`
+    );
+    log.hint('Reconnect it:  synap cap connect "<capability>" --reconnect');
+    log.hint("Find the capability name with:  synap cap list");
+    return;
+  }
+  if (errorClass === "target_missing") {
+    log.error(err.message);
+    log.hint(
+      "The workspace or target this run needs no longer exists on this pod. Run: synap orient"
+    );
+    return;
+  }
   log.error(err.message);
+  // A 500 carries an `errorId` (the egress sanitizer logs the real cause under
+  // it server-side) — surface it so "quote errorId when reporting it" is
+  // actionable rather than a dead end.
+  const errorId =
+    typeof (err.body as { errorId?: unknown } | undefined)?.errorId === "string"
+      ? (err.body as { errorId: string }).errorId
+      : undefined;
+  if (err.status >= 500 && errorId) {
+    log.hint(`errorId: ${errorId}`);
+  }
   // A 500 whose body carried a specific cause (detail/message) is already in
   // `err.message` above — do NOT then claim "internal error, not in this
   // command": a workspace/template creation failure is often an actionable
@@ -437,14 +532,22 @@ export async function resolveHubConfig(opts?: { podUrl?: string; apiKey?: string
   //    Beats the env vars deliberately — that is the whole point of the flag.
   const podOverride = getPodOverride();
   if (podOverride) {
+    // Prefer cross-pod-safe resolution (binding + "not another pod's default")
+    // over the profile's baked `workspaceId`, which can drift to a foreign UUID
+    // after dual-pod work (dogfood: perso profile held team CRM ws → 403).
+    const overrideName = findPodNameByUrl(podOverride.podUrl);
+    const safeWs =
+      getActiveWorkspaceIdForPod(overrideName) ||
+      // Only fall back to profile default when it isn't known to belong elsewhere
+      // (getActiveWorkspaceIdForPod already applied that rule against the profile).
+      undefined;
     return {
       podUrl: podOverride.podUrl,
       apiKey: podOverride.hubApiKey,
       // A profile's agentUserId may be empty; "cli" makes resolveUserId fetch /users/me.
       userId: podOverride.agentUserId || "cli",
-      // Use the TARGET pod's own workspace — NOT this session's lens, which
-      // belongs to the default pod and would be meaningless on the target.
-      workspaceId: podOverride.workspaceId || undefined,
+      workspaceId: safeWs,
+      projectId: resolveProjectIdForPod(podOverride.podUrl, {}),
     };
   }
   // 1. Explicit flags (escape hatch)
@@ -484,17 +587,21 @@ export async function resolveHubConfig(opts?: { podUrl?: string; apiKey?: string
     // the pinned key so a leaked/inherited env var can't silently redefine
     // which agent this session acts as. Conservative: only applies here, in
     // step 3 — steps 0-2 (--pod, explicit flags, SYNAP_AGENT) still win
-    // outright, untouched.
-    const surfaceKey = getSurfaceAgentKey("claude-code");
-    let apiKey = envKey;
-    let userId = envUser;
-    if (surfaceKey && surfaceKey.podUrl === envPod && surfaceKey.hubApiKey && surfaceKey.hubApiKey !== envKey) {
+    // outright, untouched. Preference logic lives in key-source.ts so whoami
+    // reports the same rule (no drift).
+    const preferred = preferClaudeCodeSurfaceKey({
+      envPod,
+      envKey,
+      envUser,
+      surface: getSurfaceAgentKey("claude-code", envPod),
+    });
+    if (preferred.usedSurface) {
       process.stderr.write(
         `[synap] warning: ambient SYNAP_HUB_API_KEY does not match the claude-code surface key pinned to ${envPod} — using the pinned key instead of the inherited one.\n`
       );
-      apiKey = surfaceKey.hubApiKey;
-      userId = surfaceKey.agentUserId || envUser;
     }
+    const apiKey = preferred.apiKey;
+    const userId = preferred.userId;
     // Per-Claude-session lens wins over the global env var, so concurrent
     // sessions can each be scoped to a different workspace — but ONLY when the
     // lens belongs to THIS pod. A lens stamped with another pod is ignored so
@@ -518,9 +625,16 @@ export async function resolveHubConfig(opts?: { podUrl?: string; apiKey?: string
         dirLens?.workspaceId ||
         envWorkspace ||
         getActiveWorkspaceIdForPod(findPodNameByUrl(envPod)),
-      // Project is a peer lens, threaded exactly like workspaceId.
-      projectId:
-        lens?.projectId || dirLens?.projectId || envProject || getActiveProjectId(),
+      // Project is a peer lens. Lens/dir-lens are already pod-qualified;
+      // env/global active project only when ActiveProjectBinding matches this pod.
+      // Write paths must use this resolveHubConfig output — never bare
+      // getActiveProjectId() / SYNAP_PROJECT_ID without the pod check.
+      projectId: resolveProjectIdForPod(envPod, {
+        lensProjectId: lens?.projectId,
+        dirLensProjectId: dirLens?.projectId,
+        envProject,
+        trustEnvProject: true,
+      }),
       scopes: envScopes ? envScopes.split(",") : undefined,
     };
   }
@@ -539,8 +653,11 @@ export async function resolveHubConfig(opts?: { podUrl?: string; apiKey?: string
     // branch is only reached when SYNAP_POD_URL is unset.)
     workspaceId:
       activeLens?.workspaceId || activeDirLens?.workspaceId || getActiveWorkspaceId(),
-    projectId:
-      activeLens?.projectId || activeDirLens?.projectId || getActiveProjectId(),
+    // Project: same pod-qualification as step 3 (no bare getActiveProjectId).
+    projectId: resolveProjectIdForPod(config.podUrl, {
+      lensProjectId: activeLens?.projectId,
+      dirLensProjectId: activeDirLens?.projectId,
+    }),
   };
 }
 

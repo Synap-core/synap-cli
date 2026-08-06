@@ -39,6 +39,7 @@ export async function connections(): Promise<void> {
     detectClaudeDesktop(urlToProfile),
     detectCursor(urlToProfile),
     detectRaycast(urlToProfile),
+    detectGrok(urlToProfile),
   ];
 
   const configured = surfaces.filter((s) => s.configured);
@@ -134,6 +135,42 @@ function detectCursor(urlToProfile: Record<string, string>): SurfaceStatus {
     return { label: "Cursor", configured: true, podUrl, profile, configPath };
   } catch {
     return { label: "Cursor", configured: false, configPath };
+  }
+}
+
+/** Detect Grok Build MCP: any [mcp_servers.synap*] with a /mcp URL in ~/.grok/config.toml */
+function detectGrok(urlToProfile: Record<string, string>): SurfaceStatus {
+  const configPath = path.join(os.homedir(), ".grok", "config.toml");
+  try {
+    if (!fs.existsSync(configPath)) {
+      return { label: "Grok", configured: false, configPath };
+    }
+    const text = fs.readFileSync(configPath, "utf-8");
+    // Match [mcp_servers.synap...] blocks and their url =
+    const blockRe =
+      /\[mcp_servers\.(synap[^\]]*)\][\s\S]*?url\s*=\s*"([^"]+)"/g;
+    let match: RegExpExecArray | null;
+    const urls: string[] = [];
+    while ((match = blockRe.exec(text)) !== null) {
+      urls.push(match[2].replace(/\/mcp\/?$/, ""));
+    }
+    if (urls.length === 0) {
+      return { label: "Grok", configured: false, configPath };
+    }
+    // Prefer first; multi-pod shows primary + count in label
+    const podUrl = urls[0];
+    const profile = urlToProfile[podUrl.replace(/\/$/, "")];
+    const label =
+      urls.length > 1 ? `Grok (${urls.length} pods)` : "Grok";
+    return {
+      label,
+      configured: true,
+      podUrl,
+      profile,
+      configPath,
+    };
+  } catch {
+    return { label: "Grok", configured: false, configPath };
   }
 }
 

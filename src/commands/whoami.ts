@@ -10,7 +10,8 @@
  * but a valid surface key is pinned (or vice-versa). This command:
  *   1. resolves the winning cfg (the key every command uses),
  *   2. independently reads env key + `claude-code` surface key and reproduces
- *      the surface-over-env preference rule from hub-client.ts:394-403,
+ *      the surface-over-env preference rule via `preferClaudeCodeSurfaceKey`
+ *      (shared with hub-client — no drift),
  *   3. introspects the winner via BOTH `/auth/status` (who OWNS the key) and
  *      `/users/me` (who the pod ACTS AS, + server-derived `isAgent`), and
  *   4. when env and surface keys diverge, names the winner AND the ignored key,
@@ -31,6 +32,11 @@ import chalk from "chalk";
 import { log, banner } from "../utils/logger.js";
 import { resolveHubConfig, HubError, type HubConfig } from "../lib/hub-client.js";
 import { getSurfaceAgentKey } from "../lib/pod.js";
+import {
+  formatKeySource,
+  preferClaudeCodeSurfaceKey,
+  resolveKeySource,
+} from "../lib/key-source.js";
 // `AuthStatus` + the `/auth/status` fetch moved to lib/credential-class.ts so
 // the proposals surface classifies the calling key through the SAME door this
 // command reports on, instead of re-deriving it.
@@ -65,6 +71,28 @@ async function probeKey(cfg: HubConfig, apiKey: string): Promise<ProbeResult> {
     if (is401) return { kind: "revoked" };
     return { kind: "error", message: err instanceof Error ? err.message : String(err) };
   }
+}
+
+/**
+ * Parse agentType from the synthetic agent email
+ * `agent-<type>-<8hex>@synap.agent` (agent-identity-service). AuthStatus and
+ * /users/me do not currently expose agentType as a field.
+ */
+export function parseAgentTypeFromEmail(
+  email: string | null | undefined
+): string | null {
+  if (!email) return null;
+  const m = email
+    .trim()
+    .toLowerCase()
+    .match(/^agent-(.+)-([0-9a-f]{8})@synap\.agent$/);
+  return m?.[1] ?? null;
+}
+
+/** Resolve agentType when acting as an agent: email parse (AuthStatus has no field). */
+export function resolveAgentType(s: AuthStatus, me: EffectiveIdentity | null): string | null {
+  if (me?.isAgent !== true) return null;
+  return parseAgentTypeFromEmail(s.userEmail);
 }
 
 /**
@@ -103,6 +131,22 @@ function renderIdentityTriple(s: AuthStatus, me: EffectiveIdentity | null): void
           : chalk.dim("unknown")
     }`
   );
+  // Agent principal: key owner is the agent user; effective is the human creator.
+  // Singleton is (effective human, agentType) — list with `synap agents list`.
+  if (me.isAgent === true && s.userId && me.id && s.userId !== me.id) {
+    const agentType = resolveAgentType(s, me);
+    if (agentType) {
+      log.info(
+        `Agent type : ${agentType} ${chalk.dim("(from agent email — one principal per you×type)")}`
+      );
+    }
+    log.info(
+      `Agent id   : ${s.userId} ${chalk.dim("(agent principal — key owner)")}`
+    );
+    log.info(
+      `Creator    : ${me.id} ${chalk.dim("(human — singleton key with agentType)")}`
+    );
+  }
 }
 
 function renderAuthStatus(s: AuthStatus, me: EffectiveIdentity | null): void {
@@ -143,23 +187,35 @@ export async function whoami(opts: { json?: boolean } = {}): Promise<void> {
   }
 
   // 2. Independently read the two candidate keys and reproduce the preference
-  //    rule from hub-client.ts:394-403 — do NOT depend on resolveHubConfig's
-  //    stderr swap warning, read the state ourselves.
+  //    rule via preferClaudeCodeSurfaceKey (same helper hub-client uses) —
+  //    do NOT depend on resolveHubConfig's stderr swap warning.
   const envKey = process.env.SYNAP_HUB_API_KEY;
   const envPod = process.env.SYNAP_POD_URL;
-  const surfaceKey = getSurfaceAgentKey("claude-code");
+  const envUser = process.env.SYNAP_USER_ID ?? "";
+  // Pod-qualified: never treat another pod's surface key as "pinned here".
+  const surfaceKey = getSurfaceAgentKey("claude-code", envPod);
   const surfacePinnedHere =
-    !!surfaceKey && !!surfaceKey.hubApiKey && surfaceKey.podUrl === envPod;
+    !!surfaceKey && !!surfaceKey.hubApiKey;
   const diverges =
     !!envKey &&
     surfacePinnedHere &&
     surfaceKey!.hubApiKey !== envKey;
-  // Which candidate did resolveHubConfig actually pick?
-  const winner: "surface" | "env" | "other" = diverges
-    ? cfg.apiKey === surfaceKey!.hubApiKey
+  // Which candidate does the shared preference rule pick when both are present?
+  const preferred =
+    envPod && envKey
+      ? preferClaudeCodeSurfaceKey({
+          envPod,
+          envKey,
+          envUser,
+          surface: surfaceKey,
+        })
+      : null;
+  const winner: "surface" | "env" | "other" = !diverges
+    ? "other"
+    : preferred?.usedSurface || cfg.apiKey === surfaceKey!.hubApiKey
       ? "surface"
-      : "env"
-    : "other";
+      : "env";
+  const keySource = resolveKeySource();
 
   // 3. Introspect the winning key — BOTH questions, because "who owns this
   //    key" and "who does the pod act as" have different answers for an agent
@@ -168,10 +224,15 @@ export async function whoami(opts: { json?: boolean } = {}): Promise<void> {
   const effective: EffectiveIdentity | null = await fetchEffectiveIdentity(cfg).catch(() => null);
 
   if (opts.json) {
+    const agentType =
+      winnerProbe.kind === "ok"
+        ? resolveAgentType(winnerProbe.status, effective)
+        : null;
     console.log(
       JSON.stringify(
         {
           podUrl: cfg.podUrl,
+          keySource,
           keyOwner:
             winnerProbe.kind === "ok"
               ? {
@@ -184,6 +245,7 @@ export async function whoami(opts: { json?: boolean } = {}): Promise<void> {
               : null,
           effectiveUser: effective ? { userId: effective.id, scopes: effective.scopes } : null,
           isAgent: effective?.isAgent ?? null,
+          agentType,
           canApprove:
             winnerProbe.kind === "ok" ? classifyReviewer(winnerProbe.status) : "unknown",
           probe: winnerProbe.kind,
@@ -200,6 +262,9 @@ export async function whoami(opts: { json?: boolean } = {}): Promise<void> {
 
   log.heading("Winning key (resolved)");
   log.info(`Pod        : ${cfg.podUrl}`);
+  // Always name the key path — even when env and surface agree — so the operator
+  // can see whether this shell is env-pinned, surface-swapped, or profile-based.
+  log.info(`Key source : ${formatKeySource(keySource)}`);
   log.dim(`Secret     : ${keyTail(cfg.apiKey)}`);
   if (winnerProbe.kind === "ok") {
     renderAuthStatus(winnerProbe.status, effective);
@@ -210,7 +275,7 @@ export async function whoami(opts: { json?: boolean } = {}): Promise<void> {
     log.warn(`Could not introspect key: ${winnerProbe.message}`);
   }
 
-  // 4. Divergence report — the whole point of the command.
+  // 4. Divergence report — still the headline when env vs surface disagree.
   if (!diverges) {
     if (envKey && surfacePinnedHere) {
       log.dim("\nEnv key and claude-code surface key agree — no divergence.");

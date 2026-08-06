@@ -34,6 +34,15 @@ vi.mock("../src/lib/hub-client.js", () => ({
 
 vi.mock("../src/lib/pod.js", () => ({
   getSurfaceAgentKey: vi.fn(() => undefined),
+  // resolveKeySource (via whoami) reads these — supply no-ops so the test
+  // env is not profile-resolved against a real ~/.synap.
+  getPodOverride: vi.fn(() => null),
+  getActivePodConfig: vi.fn(() => null),
+  listPodProfiles: vi.fn(() => []),
+}));
+
+vi.mock("../src/lib/agents-config.js", () => ({
+  resolveAgentOverride: vi.fn(() => null),
 }));
 
 /** An AGENT key: the pod attributes its writes to the linked HUMAN. */
@@ -41,7 +50,7 @@ const AGENT_AUTH_STATUS = {
   keyIdPrefix: "sk_ag_1234",
   keyType: "agent",
   userId: "agent-user-id",
-  userEmail: "agent-claude-code-a1b2@synap.agent",
+  userEmail: "agent-claude-code-a1b2c3d4@synap.agent",
   scopes: ["hub-protocol.read", "hub-protocol.write"],
   isActive: true,
 };
@@ -78,6 +87,8 @@ describe("whoami --json", () => {
       keyOwner: { userId: string; email: string };
       effectiveUser: { userId: string };
       isAgent: boolean;
+      agentType: string | null;
+      keySource: { source: string };
     };
 
     expect(parsed.keyOwner.userId).toBe("agent-user-id");
@@ -86,6 +97,11 @@ describe("whoami --json", () => {
     // reading either one as "who am I" gives the wrong answer.
     expect(parsed.keyOwner.userId).not.toBe(parsed.effectiveUser.userId);
     expect(parsed.isAgent).toBe(true);
+    // agent-<type>-<8hex>@synap.agent → type (AuthStatus has no agentType field)
+    expect(parsed.agentType).toBe("claude-code");
+    // Always present — lens honesty Phase 0.
+    expect(parsed.keySource).toBeDefined();
+    expect(typeof parsed.keySource.source).toBe("string");
   });
 
   it("actually calls GET /users/me — the effective identity door", async () => {
@@ -133,11 +149,25 @@ describe("whoami human-readable output", () => {
     expect(text).toContain("Key owner");
     expect(text).toContain("Effective");
     expect(text).toContain("Is agent");
+    // Agent type parsed from synthetic email when isAgent.
+    expect(text).toContain("Agent type");
+    expect(text).toContain("claude-code");
+    // Key source is always printed (Phase 0 lens honesty) — not only on divergence.
+    expect(text).toContain("Key source");
     // Both identities are visible, not just the key owner.
-    expect(text).toContain("agent-claude-code-a1b2@synap.agent");
+    expect(text).toContain("agent-claude-code-a1b2c3d4@synap.agent");
     expect(text).toContain("human-user-id");
     // The old, ambiguous label is gone.
     expect(text).not.toContain("Identity   :");
+  });
+
+  it("parseAgentTypeFromEmail handles hyphenated types", async () => {
+    const { parseAgentTypeFromEmail } = await import("../src/commands/whoami.js");
+    expect(parseAgentTypeFromEmail("agent-claude-code-a1b2c3d4@synap.agent")).toBe(
+      "claude-code"
+    );
+    expect(parseAgentTypeFromEmail("agent-cursor-deadbeef@synap.agent")).toBe("cursor");
+    expect(parseAgentTypeFromEmail("sam@example.test")).toBeNull();
   });
 
   it("says so when the key acts as its own owner (a plain human key)", async () => {

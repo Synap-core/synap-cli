@@ -22,8 +22,11 @@
 
 import chalk from "chalk";
 import { log, banner } from "../utils/logger.js";
-import { getActivePodConfig, listPodProfiles, checkPodHealth } from "../lib/pod.js";
+import { getActivePodConfig, getActiveWorkspaceId, getActiveProjectId, listPodProfiles, checkPodHealth } from "../lib/pod.js";
 import { resolveHubConfig, hubGet, HubError, type HubConfig } from "../lib/hub-client.js";
+import { formatKeySource, resolveKeySource } from "../lib/key-source.js";
+import { resolveLensProvenance, type LensRung } from "../lib/describe-lens.js";
+import { samePodOrigin } from "../lib/project-ref.js";
 
 interface DoctorOpts {
   json?: boolean;
@@ -196,9 +199,20 @@ export async function doctor(opts: DoctorOpts = {}): Promise<void> {
   const checks: CheckResult[] = [];
   const activeName = listPodProfiles().find((p) => p.active)?.name ?? "default";
 
+  // Resolve lens FIRST so `--pod` / env / profile agree on URL + workspace
+  // (host check used to use only active profile → `synap --pod team doctor`
+  // reported perso's host while Active Lens showed team).
+  let cfgResolved: HubConfig | undefined;
+  try {
+    cfgResolved = await resolveHubConfig();
+  } catch {
+    /* fall through to profile/env */
+  }
+
   // ── (a) Host resolves — the pod is actually served at this URL ───────────
   const localConfig = getActivePodConfig();
-  const podUrl = localConfig?.podUrl ?? process.env.SYNAP_POD_URL;
+  const podUrl =
+    cfgResolved?.podUrl ?? localConfig?.podUrl ?? process.env.SYNAP_POD_URL;
 
   if (!podUrl) {
     checks.push({
@@ -233,7 +247,6 @@ export async function doctor(opts: DoctorOpts = {}): Promise<void> {
 
   // ── (b) Key authenticates against this pod ────────────────────────────────
   let keyValid = false;
-  let cfgResolved: HubConfig | undefined;
   if (!hostServed) {
     checks.push({
       name: "API key authenticates",
@@ -243,7 +256,7 @@ export async function doctor(opts: DoctorOpts = {}): Promise<void> {
     });
   } else {
     try {
-      const cfg = await resolveHubConfig();
+      const cfg = cfgResolved ?? (await resolveHubConfig());
       cfgResolved = cfg;
       await hubGet("/users/me", {}, cfg);
       keyValid = true;
@@ -339,7 +352,9 @@ export async function doctor(opts: DoctorOpts = {}): Promise<void> {
   }
 
   await finish(checks, opts, {
-    podUrl,
+    // Prefer the pod resolveHubConfig actually hit — health-check URL can lag
+    // the active profile when the shell is env-pinned to another pod.
+    podUrl: cfgResolved?.podUrl ?? podUrl,
     workspaceId: cfgResolved?.workspaceId,
     projectId: cfgResolved?.projectId,
   });
@@ -380,6 +395,37 @@ async function probeIntelligence(cfg: HubConfig): Promise<IsHealthVerdict> {
   }
 }
 
+/**
+ * Build the same provenance rungs as `synap lens` (session › directory › env ›
+ * global), pod-qualified against the active pod so a cross-pod directory lens
+ * is not claimed as the origin.
+ */
+async function activeLensProvenance(podUrl?: string) {
+  const { getClaudeSessionId, resolveActiveLensForPod } = await import("../lib/session-lens.js");
+  const { resolveDirectoryLensForPod } = await import("../lib/directory-lens.js");
+  const session = getClaudeSessionId();
+  const sessionLens = resolveActiveLensForPod(podUrl);
+  const dir = resolveDirectoryLensForPod(podUrl);
+
+  const rungs: LensRung[] = [
+    { source: "session", detail: session ? session.slice(0, 8) : undefined, ...(sessionLens ?? {}) },
+    { source: "directory", detail: dir?.file, ...(dir?.lens ?? {}) },
+    {
+      source: "env",
+      detail: "SYNAP_WORKSPACE_ID",
+      workspaceId: process.env.SYNAP_WORKSPACE_ID,
+      projectId: process.env.SYNAP_PROJECT_ID,
+    },
+    {
+      source: "global",
+      detail: "~/.synap/config.json",
+      workspaceId: getActiveWorkspaceId(),
+      projectId: getActiveProjectId(),
+    },
+  ];
+  return resolveLensProvenance(rungs);
+}
+
 async function finish(
   checks: CheckResult[],
   opts: DoctorOpts,
@@ -392,6 +438,8 @@ async function finish(
   const anyFailed = checks.some((c) => !c.ok && !c.unknown);
   const anyUnknown = checks.some((c) => c.unknown);
   const activeName = listPodProfiles().find((p) => p.active)?.name ?? "default";
+  const keySource = resolveKeySource();
+  const provenance = await activeLensProvenance(lens.podUrl);
 
   if (opts.json) {
     console.log(
@@ -400,7 +448,14 @@ async function finish(
           ok: allOk,
           undetermined: anyUnknown,
           checks,
-          lens: { pod: activeName, podUrl: lens.podUrl, workspaceId: lens.workspaceId, projectId: lens.projectId },
+          lens: {
+            pod: activeName,
+            podUrl: lens.podUrl,
+            workspaceId: lens.workspaceId,
+            projectId: lens.projectId,
+            keySource,
+            provenance,
+          },
         },
         null,
         2
@@ -421,9 +476,50 @@ async function finish(
 
   log.blank();
   log.heading("Active Lens");
-  console.log(`  Pod       : ${chalk.bold(activeName)}${lens.podUrl ? `  ${chalk.dim(lens.podUrl)}` : ""}`);
-  console.log(`  Workspace : ${lens.workspaceId ? lens.workspaceId : chalk.dim("none (pod-wide)")}`);
-  console.log(`  Project   : ${lens.projectId ? lens.projectId : chalk.dim("none")}`);
+  // Prefer the pod we actually talked to (cfg / --pod), not only ● active profile.
+  const lensPodName =
+    (lens.podUrl &&
+      listPodProfiles().find(
+        (p) =>
+          p.config.podUrl.replace(/\/$/, "") === lens.podUrl!.replace(/\/$/, "")
+      )?.name) ||
+    activeName;
+  console.log(
+    `  Pod       : ${chalk.bold(lensPodName)}${lens.podUrl ? `  ${chalk.dim(lens.podUrl)}` : ""}`
+  );
+  console.log(`  Key       : ${formatKeySource(keySource)}`);
+  // Prefer resolved cfg ids (what writes use) over provenance of global config.
+  const resolvedWs = lens.workspaceId;
+  const resolvedProj = lens.projectId;
+  const ws = provenance.workspace;
+  const proj = provenance.project;
+  console.log(
+    `  Workspace : ${
+      resolvedWs
+        ? `${resolvedWs}${ws?.origin ? `  ${chalk.dim(`(${ws.origin})`)}` : ""}`
+        : chalk.dim("— (pod-wide)")
+    }`
+  );
+  console.log(
+    `  Project   : ${
+      resolvedProj
+        ? `${resolvedProj}${proj?.origin ? `  ${chalk.dim(`(${proj.origin})`)}` : ""}`
+        : chalk.dim("— none")
+    }`
+  );
+
+  // Env pin beats the active profile in resolveHubConfig — same divergence
+  // `synap pods list` already names. Surface it here so doctor alone is enough
+  // to catch "profile says perso, every write goes to team".
+  const envPod = process.env.SYNAP_POD_URL?.trim();
+  const activeProfile = listPodProfiles().find((p) => p.active);
+  if (envPod && activeProfile && !samePodOrigin(envPod, activeProfile.config.podUrl)) {
+    log.blank();
+    log.warn(
+      `SYNAP_POD_URL overrides the active profile — commands are talking to ${envPod}, not ${activeProfile.config.podUrl}.`
+    );
+    log.dim("  The env var wins over the ● active profile. Unset it (or open a fresh shell) for the profile to apply.");
+  }
 
   log.blank();
   if (allOk) {

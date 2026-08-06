@@ -9,6 +9,7 @@ import {
   clearActiveSessionId,
   readActiveSessionId,
   renderHubError,
+  HubError,
 } from "../lib/hub-client.js";
 import { type BaseOpts } from "./data.js";
 
@@ -126,27 +127,63 @@ export async function listSessions(
 
 // ─── getSession ───────────────────────────────────────────────────────────────
 
+/**
+ * Fetch a focus session by id.
+ *
+ * Prefer GET without workspaceId so project-scoped sessions (workspaceId null)
+ * resolve. Older pods still require the query param — if the bare GET fails
+ * with 400 and we have a workspace, retry with it.
+ */
+async function fetchSessionById(
+  id: string,
+  cfg: Awaited<ReturnType<typeof resolveHubConfig>>,
+  workspaceHint?: string
+): Promise<Record<string, unknown>> {
+  try {
+    return (await hubGet(`/focus-sessions/${id}`, {}, cfg)) as Record<
+      string,
+      unknown
+    >;
+  } catch (e) {
+    const wsId = workspaceHint || cfg.workspaceId;
+    if (e instanceof HubError && e.status === 400 && wsId) {
+      return (await hubGet(
+        `/focus-sessions/${id}`,
+        { workspaceId: wsId },
+        cfg
+      )) as Record<string, unknown>;
+    }
+    throw e;
+  }
+}
+
 export async function getSession(
   id: string,
   opts: BaseOpts & { workspace?: string }
 ): Promise<void> {
   try {
     const cfg = await resolveHubConfig(opts);
-    const params: Record<string, string | number | undefined> = {};
-    const wsId = opts.workspace || cfg.workspaceId;
-    if (wsId) params.workspaceId = wsId;
-
-    const res = await hubGet(`/focus-sessions/${id}`, params, cfg);
+    const res = await fetchSessionById(id, cfg, opts.workspace);
 
     if (opts.json) {
       console.log(JSON.stringify(res, null, 2));
       return;
     }
 
-    const s = res as Record<string, unknown>;
+    const s = res;
     log.info(`Session  ${chalk.bold(String(s.id ?? ""))}`);
     console.log(`  Goal:       ${chalk.white(String(s.goal ?? ""))}`);
     console.log(`  Status:     ${chalk.cyan(String(s.status ?? ""))}`);
+    // Project-scoped sessions have workspaceId null — show scope honestly.
+    if (s.workspaceId != null && s.workspaceId !== "") {
+      console.log(`  Workspace:  ${chalk.dim(String(s.workspaceId))}`);
+    } else if (s.projectId) {
+      console.log(`  Project:    ${chalk.dim(String(s.projectId))}  ${chalk.dim("(no workspace)")}`);
+    } else {
+      console.log(`  Scope:      ${chalk.dim("project/unscoped (workspace null)")}`);
+    }
+    if (s.projectId && s.workspaceId)
+      console.log(`  Project:    ${chalk.dim(String(s.projectId))}`);
     if (typeof s.progress === "number") console.log(`  Progress:   ${s.progress}%`);
     if (s.templateId) console.log(`  Template:   ${chalk.dim(String(s.templateId))}`);
     if (Array.isArray(s.agentIds) && s.agentIds.length)
@@ -205,12 +242,10 @@ export async function attachSession(
   id: string,
   opts: BaseOpts
 ): Promise<void> {
-  // Validate the session exists before attaching
+  // Validate the session exists before attaching (project-scoped OK — no workspace required)
   try {
     const cfg = await resolveHubConfig(opts);
-    const params: Record<string, string | number | undefined> = {};
-    if (cfg.workspaceId) params.workspaceId = cfg.workspaceId;
-    await hubGet(`/focus-sessions/${id}`, params, cfg);
+    await fetchSessionById(id, cfg, opts.workspace);
   } catch (e) {
     console.error(chalk.red("Error: session not found — " + (e as Error).message));
     process.exit(1);
@@ -260,44 +295,118 @@ export function sessionStatus(opts: { json?: boolean }): void {
 
 // ─── closeSession ─────────────────────────────────────────────────────────────
 
+/** Pack shape returned by POST /focus-sessions/:id/complete (Gate 2). */
+type CompletePackResult = {
+  session?: Record<string, unknown>;
+  pendingProposals?: Array<Record<string, unknown>>;
+  counts?: { pending?: number; unfinishedOutputs?: number };
+  warnings?: string[];
+  status?: string;
+  note?: string;
+};
+
+/**
+ * Close a focus session via Hub complete (proposal pack).
+ *
+ * Prefer POST /focus-sessions/:id/complete with `{ summary }` from `--recap`.
+ * On 404 (older pods without the route) fall back to PATCH status=closed and
+ * write verificationReport.summary — graceful degrade, pack unavailable.
+ *
+ * --workspace is optional: complete loads the row by id; PATCH also scopes
+ * from the row (workspaceId body is back-compat only).
+ */
 export async function closeSession(
   id: string,
   opts: BaseOpts & { workspace?: string; recap?: string }
 ): Promise<void> {
   try {
     const cfg = await resolveHubConfig(opts);
-
     const wsId = opts.workspace || cfg.workspaceId;
-    if (!wsId) {
-      console.error(chalk.red("Error: no active workspace — pass --workspace <id> or set one with `synap use`"));
-      process.exit(1);
+
+    let pack: CompletePackResult | null = null;
+    let usedPack = false;
+
+    try {
+      // Canonical close: completeFocusSession — returns proposal pack.
+      // Map CLI --recap → body.summary (server field; there is no `recap` key).
+      const body: Record<string, unknown> = {};
+      if (opts.recap) body.summary = opts.recap;
+      pack = (await hubPost(
+        `/focus-sessions/${id}/complete`,
+        body,
+        cfg
+      )) as CompletePackResult;
+      usedPack = true;
+    } catch (e) {
+      if (!(e instanceof HubError) || e.status !== 404) throw e;
+
+      // Older pod: no complete route — close via PATCH and warn that pack is
+      // unavailable. verificationReport.summary is the field the complete path
+      // writes (complete-session.ts); UpdateBodySchema accepts it as z.unknown().
+      log.dim(
+        "Pack unavailable on this pod (POST …/complete → 404); falling back to status close."
+      );
+      const patchBody: Record<string, unknown> = { status: "closed" };
+      if (wsId) patchBody.workspaceId = wsId;
+      if (opts.recap) patchBody.verificationReport = { summary: opts.recap };
+      await hubPatch(`/focus-sessions/${id}`, patchBody, cfg);
     }
-
-    // Close via PATCH — the /focus-sessions/:id endpoint sets closedAt automatically
-    // when status transitions to "closed"
-    //
-    // `--recap` lands in `verificationReport.summary`. VERIFIED against the
-    // server: `UpdateBodySchema` accepts `verificationReport: z.unknown()`
-    // (hub-protocol/rest/focus-sessions.ts:114) and applies it verbatim
-    // (:549-550); `{ summary }` is the key the canonical close path writes into
-    // that column (services/focus-sessions/complete-session.ts:86-96). There is
-    // no `recap` field on the route — sending one would have been silently
-    // dropped, which is exactly the bug this replaces.
-    const body: Record<string, unknown> = { workspaceId: wsId, status: "closed" };
-    if (opts.recap) body.verificationReport = { summary: opts.recap };
-
-    await hubPatch(`/focus-sessions/${id}`, body, cfg);
 
     // Detach if this was the active terminal session
     if (readActiveSessionId() === id) clearActiveSessionId();
 
     if (opts.json) {
-      console.log(JSON.stringify({ ok: true }));
+      if (usedPack && pack) {
+        console.log(JSON.stringify(pack, null, 2));
+      } else {
+        console.log(
+          JSON.stringify(
+            {
+              ok: true,
+              status: "closed",
+              pack: false,
+              summary: opts.recap ?? null,
+            },
+            null,
+            2
+          )
+        );
+      }
       return;
     }
 
-    log.success(`Session closed  ${chalk.dim(id.slice(0, 8))}`);
+    const sessionStatus =
+      (pack?.session && String(pack.session.status ?? "")) ||
+      pack?.status ||
+      "closed";
+    log.success(
+      `Session closed  ${chalk.dim(id.slice(0, 8))}  ${chalk.cyan(sessionStatus)}`
+    );
     if (opts.recap) log.dim(`  recap: ${opts.recap}`);
+
+    if (usedPack && pack) {
+      const pending =
+        pack.counts?.pending ??
+        (Array.isArray(pack.pendingProposals) ? pack.pendingProposals.length : 0);
+      const unfinished = pack.counts?.unfinishedOutputs ?? 0;
+      console.log(
+        `  Pack:       ${chalk.white(String(pending))} pending proposal(s)` +
+          (unfinished > 0
+            ? `  ${chalk.yellow(`${unfinished} unfinished output(s)`)}`
+            : "")
+      );
+      if (Array.isArray(pack.warnings)) {
+        for (const w of pack.warnings) {
+          log.warn(String(w));
+        }
+      }
+      if (pack.note) log.dim(`  ${pack.note}`);
+      if (pending > 0) {
+        log.dim(
+          `  Review: synap proposals list --session ${id}`
+        );
+      }
+    }
   } catch (e) {
     renderHubError(e);
     process.exit(1);

@@ -1,12 +1,12 @@
 /**
- * synap agents — manage named agent identities
+ * synap agents — manage agent principals on your pod
  *
- *   synap agents list              list all configured agent identities
+ *   synap agents list              list your agents on this pod (default) or --local cache
  *   synap agents add               add a named agent identity (legacy — use create for new agents)
- *   synap agents create            create a new agent on the pod with template support
- *   synap agents remove <name>     remove an agent identity
- *   synap agents info <name>       show details for an agent identity
- *   synap agents rotate-key <n>    rotate the API key for an agent
+ *   synap agents create            create or reuse an agent principal on the pod
+ *   synap agents remove <name>     remove from local cache only
+ *   synap agents info <name>       show local cache details only
+ *   synap agents rotate-key <n>    rotate key using local cache only
  */
 
 import chalk from "chalk";
@@ -20,9 +20,10 @@ import {
   removeAgent,
   type AgentProfile,
 } from "../lib/agents-config.js";
-import { getActivePodConfig, listPodProfiles, podNotFoundMessage, RESERVED_AGENT_TYPES } from "../lib/pod.js";
+import { getActivePodConfig, getPodOverride, findPodNameByUrl, listPodProfiles, podNotFoundMessage, RESERVED_AGENT_TYPES } from "../lib/pod.js";
 import { resolveHubConfig, hubGet, hubPost, renderHubError } from "../lib/hub-client.js";
 import { unwrapList } from "../lib/unwrapList.js";
+import { samePodOrigin } from "../lib/project-ref.js";
 import { provisionAgentKey, enrollAgentIfNeeded, configureAgentContext } from "../lib/targets.js";
 
 function maskKey(key: string): string {
@@ -39,21 +40,101 @@ function resolveGovernance(profile: AgentProfile): string {
 
 // ─── list ─────────────────────────────────────────────────────────────────────
 
-export function agentsList(opts: { json?: boolean } = {}): void {
-  const agents = listAgents();
+type PodAgentRow = {
+  id: string;
+  name: string | null;
+  agentType: string | null;
+  agentTemplate?: string | null;
+  createdByUserId?: string | null;
+  createdVia?: string | null;
+  createdAt?: string | null;
+  focusWorkspaceId?: string | null;
+};
+
+/**
+ * List agent principals.
+ * Default: pod roster (`GET /agent-users?mine=1`) — one row per (you, agentType).
+ * `--local`: only ~/.synap config cache (legacy surface keys / named profiles).
+ */
+export async function agentsList(
+  opts: { json?: boolean; local?: boolean; pod?: string } = {}
+): Promise<void> {
+  if (opts.local) {
+    const agents = listAgents();
+    if (opts.json) {
+      console.log(
+        JSON.stringify(
+          agents.map(({ name, profile }) => ({
+            source: "local-cache",
+            name,
+            pod: profile.podName,
+            workspaceId: profile.workspaceId ?? null,
+            label: profile.label ?? null,
+            template: profile.template ?? null,
+            governance: resolveGovernance(profile),
+            createdAt: profile.createdAt,
+          })),
+          null,
+          2
+        )
+      );
+      return;
+    }
+    if (agents.length === 0) {
+      log.info(
+        "No local agent cache. Use: synap agents create | synap connect  (or omit --local for pod roster)"
+      );
+      return;
+    }
+    log.heading("Local agent cache (~/.synap)");
+    log.dim("Local keys only — not the pod roster. Default list: synap agents list");
+    for (const { name, profile } of agents) {
+      const workspace = profile.workspaceId
+        ? chalk.dim(` ws:${profile.workspaceId.slice(0, 8)}…`)
+        : "";
+      const label = profile.label ? chalk.dim(` (${profile.label})`) : "";
+      console.log(
+        `  ${chalk.bold(name.padEnd(16))}` +
+          `  pod:${chalk.cyan(profile.podName.padEnd(12))}` +
+          `  key:${chalk.dim(maskKey(profile.apiKey))}` +
+          workspace +
+          label
+      );
+    }
+    log.blank();
+    return;
+  }
+
+  // ── Pod roster ────────────────────────────────────────────────────────────
+  let cfg;
+  try {
+    // resolveHubConfig is async — missing await ships a Promise as HubConfig
+    // and every default list falls into the catch (pod roster never works).
+    cfg = await resolveHubConfig();
+  } catch (err) {
+    log.error(err instanceof Error ? err.message : String(err));
+    log.dim("Fall back to local cache: synap agents list --local");
+    return;
+  }
+
+  let rows: PodAgentRow[] = [];
+  try {
+    const raw = await hubGet("/agent-users?mine=1", {}, cfg);
+    rows = unwrapList<PodAgentRow>(raw);
+  } catch (err) {
+    renderHubError(err);
+    log.dim("Fall back to local cache: synap agents list --local");
+    return;
+  }
 
   if (opts.json) {
     console.log(
       JSON.stringify(
-        agents.map(({ name, profile }) => ({
-          name,
-          pod: profile.podName,
-          workspaceId: profile.workspaceId ?? null,
-          label: profile.label ?? null,
-          template: profile.template ?? null,
-          governance: resolveGovernance(profile),
-          createdAt: profile.createdAt,
-        })),
+        {
+          source: "pod",
+          singleton: "(createdByUserId, agentType)",
+          agents: rows,
+        },
         null,
         2
       )
@@ -61,32 +142,34 @@ export function agentsList(opts: { json?: boolean } = {}): void {
     return;
   }
 
-  if (agents.length === 0) {
-    log.info("No agent identities configured. Use: synap agents create --template=assistant --name <n>");
+  if (rows.length === 0) {
+    log.info(
+      "No agents on this pod for you yet. Use: synap connect --target=<surface>  or  synap agents create --name <n>"
+    );
+    log.dim("You get one agent per type; multi-machine reuses the same principal.");
     return;
   }
 
-  log.heading("Configured agent identities");
+  log.heading("Your agents on this pod");
+  log.dim("One agent per type for you · local keys are just a cache");
+  log.blank();
 
-  for (const { name, profile } of agents) {
-    const workspace = profile.workspaceId ? chalk.dim(` ws:${profile.workspaceId.slice(0, 8)}…`) : "";
-    const label = profile.label ? chalk.dim(` (${profile.label})`) : "";
-    const template = chalk.dim((profile.template ?? "—").padEnd(10));
-    const governance = chalk.dim(resolveGovernance(profile).padEnd(10));
+  for (const row of rows) {
+    const type = (row.agentType ?? "—").padEnd(14);
+    const id = row.id.slice(0, 8);
+    const focus = row.focusWorkspaceId
+      ? chalk.dim(` pin-ws:${row.focusWorkspaceId.slice(0, 8)}…`)
+      : "";
+    const via = row.createdVia ? chalk.dim(` via:${row.createdVia}`) : "";
     console.log(
-      `  ${chalk.bold(name.padEnd(16))}` +
-        `  pod:${chalk.cyan(profile.podName.padEnd(12))}` +
-        `  key:${chalk.dim(maskKey(profile.apiKey))}` +
-        `  tmpl:${template}` +
-        `  gov:${governance}` +
-        workspace +
-        label
+      `  ${chalk.bold(type)}  ${chalk.cyan(row.name ?? "—")}  id:${chalk.dim(id)}…${via}${focus}`
     );
   }
 
   log.blank();
-  log.dim("synap agents create    — create a new agent on the pod");
-  log.dim("synap agents info <n>  — show full details");
+  log.dim("synap agents create / synap connect  — create or reuse (you × type)");
+  log.dim("synap agents list --local            — ~/.synap cache only");
+  log.dim("synap whoami                        — current agent principal");
 }
 
 // ─── add (legacy) ─────────────────────────────────────────────────────────────
@@ -137,7 +220,16 @@ export async function agentsAdd(opts: {
   }
 
   // ── pod ───────────────────────────────────────────────────────────────────
-  let podName = opts.pod;
+  // `--pod <name>` never arrives as `opts.pod`: `bootstrapPodOverride` consumes
+  // it from argv before commander parses (pod.ts:255 — `agents` is deliberately
+  // NOT in NATIVE_POD_FLAG_COMMANDS, so the override reaches resolveHubConfig
+  // like every other command). But this block decides which pod the agent is
+  // LINKED to, and reading only `opts.pod` meant the flag was silently dropped
+  // here: non-TTY fell through to the ACTIVE profile and validated the key
+  // against the wrong pod URL below → "Key validation failed (HTTP 401)".
+  // Read the override that actually holds the flag's value.
+  const override = getPodOverride();
+  let podName = opts.pod ?? (override ? findPodNameByUrl(override.podUrl) : undefined);
   if (!podName) {
     const profiles = listPodProfiles();
     if (profiles.length === 0) {
@@ -320,22 +412,25 @@ export async function agentsCreate(opts: {
     return;
   }
 
-  // Resolve pod profile
+  // Hub config: `--pod <name>` is consumed from argv by `bootstrapPodOverride`
+  // (pod.ts:255 — `agents` is NOT in NATIVE_POD_FLAG_COMMANDS), so `opts.pod` is
+  // always undefined here and `resolveHubConfig()` already honours the override.
+  // This block used to branch on `opts.pod` and hand-build `cfg` — an unreachable
+  // second config path that skipped resolveHubConfig's cross-pod `safeWs` rule.
+  // ONE door.
   const allProfiles = listPodProfiles();
-  if (allProfiles.length === 0) {
-    log.error("No pod profiles configured. Run: synap pods add");
+  let cfg: Awaited<ReturnType<typeof resolveHubConfig>>;
+  try {
+    cfg = await resolveHubConfig();
+  } catch (err) {
+    log.error(err instanceof Error ? err.message : String(err));
     return;
   }
-  const activePod = opts.pod
-    ? allProfiles.find((p) => p.name === opts.pod)
-    : allProfiles.find((p) => p.active) ?? allProfiles[0];
-
-  if (!activePod) {
-    log.error(podNotFoundMessage(String(opts.pod)));
-    return;
-  }
-
-  const cfg = await resolveHubConfig();
+  const activePod =
+    allProfiles.find((p) => samePodOrigin(p.config.podUrl, cfg.podUrl)) ??
+    allProfiles.find((p) => p.active) ??
+    allProfiles[0] ??
+    null;
 
   // Resolve workspace
   let workspaceId: string;
@@ -383,29 +478,19 @@ export async function agentsCreate(opts: {
   // CAPABILITY DELTA vs the old agentUsers.create tRPC path: that endpoint
   // created a brand-new named agent user on every call, so one workspace
   // could hold many distinct "custom"/"assistant" agents side by side.
-  // `/api/hub/setup/agent` (the canonical door, via provisionAgentKey) treats
-  // agentType as a POD-WIDE SINGLETON key — one agent user per agentType,
-  // full stop. To preserve distinctness for differently-NAMED agents when the
-  // caller doesn't pin --type explicitly, we fall back to a slug of the
-  // chosen name (e.g. "bob", "alice") rather than the generic template label
-  // ("custom"/"assistant"): two `agents create --name Bob` calls now
-  // idempotently resolve to the same singleton (an improvement), but "Bob"
-  // and "Alice" still get separate agent users. Passing --type explicitly
-  // still opts into deliberately sharing one singleton across names.
-  // Genuinely lost: creating two differently-named agents that intentionally
-  // share one --type (e.g. two "assistant"-type agents named differently) no
-  // longer produces two agent users — they collapse onto the one singleton.
+  // `/api/hub/setup/agent` (via provisionAgentKey → provisionSurfaceAgentKey)
+  // treats (createdByUserId, agentType) as the SINGLETON — one agent user per
+  // human per type. Multi-machine reuses the same principal with key instanceId.
+  // Differently-NAMED agents without --type use a slug of the name as agentType
+  // so "Bob" and "Alice" stay separate; two creates with the same name reuse.
   let agentType = opts.type;
   if (!agentType) {
     agentType = template === "twin" ? "twin" : localName;
   }
 
-  // GUARD — the pod treats agentType as a singleton key, so a derived slug that
-  // collides with a built-in surface's agentType (claude-code, cursor, discord,
-  // zed…) would resolve `agents create` onto THAT surface's agent — silently
-  // reusing the key a live connection depends on. Only guard the DERIVED case;
-  // passing --type explicitly is a deliberate choice. Uses the shared SSOT set
-  // from pod.ts so it can't drift from the actual surface list.
+  // GUARD — derived name must not collide with a reserved surface agentType
+  // (claude-code, cursor, …) for THIS user, or create reuses that surface
+  // principal. Explicit --type is deliberate.
   if (!opts.type && RESERVED_AGENT_TYPES.has(agentType)) {
     console.error(
       chalk.red(`The name "${agentName}" maps to the reserved surface type "${agentType}".`)
@@ -437,8 +522,9 @@ export async function agentsCreate(opts: {
     // use. Replaces the direct agentUsers.create + apiKeys.create tRPC calls;
     // those tRPC procedures still exist for other consumers, the CLI just no
     // longer calls them here.
-    const { hubApiKey, agentUserId } = await provisionAgentKey(
-      activePod.config.podUrl,
+    const podUrl = cfg.podUrl;
+    const { hubApiKey, agentUserId, reused } = await provisionAgentKey(
+      podUrl,
       cfg.apiKey,
       agentType,
       // idempotent: re-running `agents create` for the same name REUSES the
@@ -447,9 +533,13 @@ export async function agentsCreate(opts: {
       { requireApproval: false, idempotent: true }
     );
 
-    await enrollAgentIfNeeded(activePod.config.podUrl, cfg.apiKey, agentUserId, workspaceId, { role });
+    await enrollAgentIfNeeded(podUrl, cfg.apiKey, agentUserId, workspaceId, { role });
 
-    spinner.succeed(`Agent created: ${chalk.bold(agentName)}`);
+    spinner.succeed(
+      reused
+        ? `Agent reused: ${chalk.bold(agentName)}`
+        : `Agent created or reused: ${chalk.bold(agentName)}`
+    );
     log.blank();
     console.log(`  ${"ID".padEnd(12)}  ${chalk.dim(agentUserId)}`);
     console.log(`  ${"Name".padEnd(12)}  ${chalk.bold(agentName)}`);
@@ -466,9 +556,9 @@ export async function agentsCreate(opts: {
     console.log(chalk.yellow("  *** End of key — store it securely now ***"));
     log.blank();
 
-    // Store locally in agents config
+    // Store locally in agents config (cache — pod remains SSOT)
     const profile: AgentProfile = {
-      podName: activePod.name,
+      podName: activePod?.name ?? "default",
       apiKey: hubApiKey,
       workspaceId,
       label: agentName,
@@ -483,7 +573,7 @@ export async function agentsCreate(opts: {
 
     // Same CONTEXT.md routing file every other provisioned agent gets.
     try {
-      await configureAgentContext(activePod.config.podUrl, hubApiKey, agentType, agentUserId);
+      await configureAgentContext(podUrl, hubApiKey, agentType, agentUserId);
     } catch (err) {
       log.warn(`Agent context wizard failed: ${err instanceof Error ? err.message : String(err)}`);
     }
