@@ -138,6 +138,10 @@ program
   )
   .option("--pin-workspace <id>", "Pin the connection to one workspace (default: pod-wide lens)")
   .option("--pin-project <id>", "Pin the connection to one project (composable with --pin-workspace)")
+  .option(
+    "--with-mcp",
+    "Raycast only: also install the full MCP server via mcp-remote (names overlap @synap)"
+  )
   .action(async (opts) => {
     const { connect } = await import("./commands/connect.js");
     await connect(opts);
@@ -2458,8 +2462,10 @@ capConnections
 // ─── raycast ──────────────────────────────────────────────────────────────────
 
 const raycast = program
-  .command("raycast")
-  .description("Generate Raycast Script Commands from your enabled capabilities");
+  .command("raycast", { hidden: true })
+  .description(
+    "(hidden) Power-user escape: generate Raycast Script Commands per capability verb"
+  );
 
 raycast
   .command("generate")
