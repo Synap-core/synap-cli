@@ -54,6 +54,8 @@ export interface TargetConnectionConfig {
   projectId?: string;
   agentUserId?: string;
   skills?: string[]; // defaults to all three
+  /** Raycast only: also merge the full mcp-remote MCP server into mcp-config.json. */
+  withMcp?: boolean;
 }
 
 export interface TargetInfo {
@@ -156,7 +158,7 @@ export const TARGETS: Record<TargetName, TargetInfo> = {
   raycast: {
     name: "raycast",
     label: "Raycast",
-    description: "Native MCP server (via mcp-remote bridge) — all Synap tools in Raycast AI",
+    description: "Native Synap extension (@synap) catalog — full MCP opt-in via --with-mcp",
     supports: { skills: false, mcp: true },
   },
   openclaw: {
@@ -1096,9 +1098,9 @@ async function installCursor(
 // ─── Raycast ─────────────────────────────────────────────────────────────────
 
 async function installRaycast(cfg: TargetConnectionConfig): Promise<boolean> {
-  // Raycast reads credentials from ~/.synap/config.json (Tier 0) for its native
-  // extension commands, AND from mcp-config.json for the MCP server. Persist the
-  // workspace choice so both paths see the right scope.
+  // Default path: native Synap extension (@synap) is the catalog. Persist
+  // workspace + provision a dedicated raycast agent key for extension writes.
+  // Full MCP (mcp-remote → mcp-config.json) is opt-in via cfg.withMcp.
   const { setActiveWorkspaceId, clearActiveWorkspaceId } = await import("./pod.js");
   if (cfg.workspaceId) {
     setActiveWorkspaceId(cfg.workspaceId);
@@ -1106,14 +1108,29 @@ async function installRaycast(cfg: TargetConnectionConfig): Promise<boolean> {
     clearActiveWorkspaceId();
   }
 
-  // Provision a dedicated "raycast" agent identity + resolve the scoped MCP URL.
   const { effectiveApiKey, agentUserId, mcpUrl } = await prepareMcpSurface(cfg, "raycast");
   const { setSurfaceAgentKey } = await import("./pod.js");
   setSurfaceAgentKey("raycast", { hubApiKey: effectiveApiKey, agentUserId, podUrl: cfg.podUrl });
 
-  // ── Write the Raycast MCP server config (merge, never clobber) ─────────────
+  log.success("Raycast agent key stored for the Synap extension (@synap).");
+  log.dim("The native extension is your catalog — open Synap in Raycast (or run Connect there) if needed.");
+  log.blank();
+  log.dim(`   Pod: ${cfg.podUrl}`);
+  log.dim(`   Scope: ${cfg.workspaceId ? `workspace ${cfg.workspaceId}` : "all workspaces (pod-wide)"}`);
+
+  if (!cfg.withMcp) {
+    log.blank();
+    log.dim("Full MCP (mcp-remote) is opt-in: synap connect --target=raycast --with-mcp");
+    return true;
+  }
+
+  // ── Opt-in power door: write Raycast MCP server config (merge, never clobber) ─
   // Raycast's native MCP is stdio-only — bridge the HTTP /mcp endpoint with the
   // `mcp-remote` npm package (npx spawns it). Same bridge as Claude Desktop/Zed.
+  // Tool names will overlap the @synap extension catalog.
+  log.blank();
+  const raycastServerName = mcpServerNameFromPodUrl(cfg.podUrl);
+  log.info(`Installing full MCP power door via mcp-remote as '${raycastServerName}' — names overlap @synap.`);
   const synapServerEntry = {
     command: "npx",
     args: [
@@ -1139,14 +1156,12 @@ async function installRaycast(cfg: TargetConnectionConfig): Promise<boolean> {
         try { fs.copyFileSync(existingPath, `${existingPath}.bak`); } catch { /* best-effort */ }
       }
       mcpConfig.mcpServers = mcpConfig.mcpServers ?? {};
-      // Pod-derived name — a second pod must not overwrite the first.
-      const raycastServerName = mcpServerNameFromPodUrl(cfg.podUrl);
       mcpConfig.mcpServers[raycastServerName] = synapServerEntry;
       if (raycastServerName !== "synap") delete mcpConfig.mcpServers["synap"];
       fs.writeFileSync(existingPath, JSON.stringify(mcpConfig, null, 2) + "\n", { mode: 0o600 });
       wrote = true;
       log.success(`Synap MCP server added to Raycast: ${existingPath}`);
-      log.dim("Reopen Raycast → 'Manage MCP Servers' → 'synap' is connected with all tools.");
+      log.dim(`Reopen Raycast → 'Manage MCP Servers' → '${raycastServerName}' is connected with all tools.`);
       log.dim("First call spawns 'npx mcp-remote' (needs Node on PATH).");
     } catch (err) {
       log.warn(`Could not write Raycast MCP config: ${(err as Error).message}`);
@@ -1157,18 +1172,15 @@ async function installRaycast(cfg: TargetConnectionConfig): Promise<boolean> {
     log.info("To add Synap to Raycast as an MCP server:");
     log.dim("  1. Open Raycast → run 'Manage MCP Servers'");
     log.dim("  2. Action 'Show Config File in Finder' → open mcp-config.json");
-    log.dim("  3. Paste the 'synap' entry below into \"mcpServers\", then save:");
+    log.dim(`  3. Paste the '${raycastServerName}' entry below into "mcpServers", then save:`);
     log.blank();
     log.dim(
-      JSON.stringify({ mcpServers: { synap: synapServerEntry } }, null, 2)
+      JSON.stringify({ mcpServers: { [raycastServerName]: synapServerEntry } }, null, 2)
     );
     log.blank();
-    log.dim("  (Re-running `synap connect --target=raycast` after step 2 writes it for you.)");
+    log.dim("  (Re-running `synap connect --target=raycast --with-mcp` after step 2 writes it for you.)");
   }
 
-  log.blank();
-  log.dim(`   Pod: ${cfg.podUrl}`);
-  log.dim(`   Scope: ${cfg.workspaceId ? `workspace ${cfg.workspaceId}` : "all workspaces (pod-wide)"}`);
   return true;
 }
 

@@ -10,6 +10,7 @@
  *   synap connect --target=claude-desktop
  *   synap connect --target=cursor
  *   synap connect --target=raycast
+ *   synap connect --target=raycast --with-mcp   (opt-in full MCP via mcp-remote)
  *   synap connect --target=openclaw
  *   synap connect --target=claude-code --name=team   (use specific pod profile)
  *
@@ -41,6 +42,8 @@ interface ConnectOptions {
   // Pin lenses into the connection (default: pod-wide). Composable.
   pinWorkspace?: string;
   pinProject?: string;
+  /** Raycast only: also install the full mcp-remote MCP server. */
+  withMcp?: boolean;
 }
 
 export async function connect(opts: ConnectOptions): Promise<void> {
@@ -80,6 +83,10 @@ export async function connect(opts: ConnectOptions): Promise<void> {
   const target = await resolveTarget(opts.target);
   if (!target) return;
 
+  if (opts.withMcp && target !== "raycast") {
+    log.warn("--with-mcp is Raycast-only; ignored for this target.");
+  }
+
   // ── Step 4: Install ─────────────────────────────────────────────────────
   log.heading(`Connecting ${TARGETS[target].label} → ${podUrl}`);
 
@@ -94,6 +101,7 @@ export async function connect(opts: ConnectOptions): Promise<void> {
     workspaceId: opts.pinWorkspace,
     projectId: opts.pinProject,
     agentUserId,
+    withMcp: opts.withMcp,
   });
 
   log.blank();

@@ -14,7 +14,7 @@ import ora from "ora";
 import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { resolveHubConfig, hubGet } from "../lib/hub-client.js";
+import { resolveHubConfig, hubGet, renderHubError } from "../lib/hub-client.js";
 import { unwrapList } from "../lib/unwrapList.js";
 import { log } from "../utils/logger.js";
 
@@ -145,7 +145,7 @@ export async function raycastGenerate(opts: RaycastGenerateOpts): Promise<void> 
     spinner.stop();
   } catch (err) {
     spinner.fail(chalk.red("Failed to fetch capabilities"));
-    log.error((err as Error).message);
+    renderHubError(err);
     process.exit(1);
   }
   try {
