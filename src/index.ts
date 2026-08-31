@@ -88,6 +88,14 @@ program
   .option("--project-id <uuid>", "Scope the bridge to one project (default: prompt, pod-wide if declined)")
   .option("--proactive-channel <id>", "Discord channel id for the agent's proactive posts")
   .option("--enable-react", "Turn on ✅-react capture")
+  // Re-running bridge-setup on an already-provisioned pod now DETECTS what is
+  // configured and skips it (the bot token is already in the vault — re-asking
+  // for a secret the pod already holds was the sharpest instance). This flag
+  // restores the old behaviour for a genuine rotation or repoint.
+  .option(
+    "--reconfigure",
+    "Re-ask every question and re-provision from scratch (ignore what a previous run configured)"
+  )
   .option("--pod <name>", "Pod profile to connect the bridge to (default: prompt)")
   .option("--governance <mode>", "Agent governance preset: safe | normal | crazy (default: prompt)")
   .option("--pod-url <url>", "Synap pod URL (override)")
@@ -140,7 +148,7 @@ program
   .option("--pin-project <id>", "Pin the connection to one project (composable with --pin-workspace)")
   .option(
     "--with-mcp",
-    "Raycast only: also install the full MCP server via mcp-remote (names overlap @synap)"
+    "Raycast only: also install the full 56-tool MCP server via mcp-remote (names overlap @synap)"
   )
   .action(async (opts) => {
     const { connect } = await import("./commands/connect.js");
@@ -651,11 +659,12 @@ program
 
 program
   .command("ask <query>")
-  .description("Ask your pod anything — routes to the right knowledge substrate(s) and shows which answered")
+  .description("Ask your pod anything — returns a synthesized answer with its sources")
   .option("--workspace <id>", "Scope to a specific workspace (omit for pod-wide)")
   .option("--limit <n>", "Max results per substrate", "10")
   .option("--json", "Output as JSON")
   .option("--session", "Scope retrieval to the active session context")
+  .option("--raw", "Skip synthesis: show the raw per-substrate matches instead")
   .option("--compare", "A/B diagnostic: show baseline vs Horizon rankers side-by-side (read-only, does not change the answer)")
   .option("--pod-url <url>", "Pod URL override")
   .option("--api-key <key>", "API key override")
@@ -1083,6 +1092,7 @@ session
   .requiredOption("--goal <text>", "What this session is working toward")
   .option("--workspace <id>", "Workspace that owns the session")
   .option("--task-id <id>", "Link session to an existing task entity")
+  .option("--template <id>", "Start from a playbook (seeds currentStage from its stages)")
   .option("--json", "Output as JSON")
   .option("--pod-url <url>", "Pod URL override")
   .option("--api-key <key>", "API key override")
@@ -1123,6 +1133,7 @@ session
   .requiredOption("--workspace <id>", "Workspace that owns the session")
   .option("--progress <0-100>", "Progress percentage")
   .option("--status <status>", "New status: active | paused")
+  .option("--stage <key>", "Advance the session's current stage (playbook stage key)")
   .option("--goal <text>", "Revised goal")
   .option("--json", "Output as JSON")
   .option("--pod-url <url>", "Pod URL override")
@@ -1167,7 +1178,7 @@ session
 
 session
   .command("current")
-  .description("Show the active session for this terminal (from .synap-session or SYNAP_SESSION_ID)")
+  .description("Show the active session for this terminal (SYNAP_SESSION_ID, Claude-session lens, or .synap/lens.json)")
   .option("--json", "Output as JSON")
   .action(async (opts) => {
     const { sessionStatus } = await import("./commands/sessions.js");
@@ -1596,6 +1607,38 @@ program
   .action(async (instruction: string, opts: Record<string, unknown>) => {
     const { automate } = await import("./commands/automate.js");
     await automate(instruction, opts as Parameters<typeof automate>[1]);
+  });
+
+// ─── rule ────────────────────────────────────────────────────────────────────
+// The fourth door, beside `ask` (recall), `capture` (write) and `diagnose`
+// (inspect): a STANDING instruction. It classifies the sentence and shows the
+// reading before writing anything — and it records the rule only. Building the
+// behaviour half is still `synap automate`.
+
+const ruleCmd = program
+  .command("rule [text]")
+  .description("State a standing rule in plain language — classified, shown, then governed-created")
+  .option("--workspace <id>", "Workspace to scope the rule to (uses active workspace if omitted)")
+  .option("--pod-wide", "Scope the rule to the whole pod, ignoring the active workspace")
+  .option("--yes", "Skip the one-off confirmation (never skips a clarification)")
+  .option("--json", "Output raw JSON")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (text: string | undefined, opts) => {
+    const { rule } = await import("./commands/rule.js");
+    await rule(text ?? "", opts);
+  });
+
+ruleCmd
+  .command("list")
+  .description("List rules with their intent, scope, and whether a behaviour is attached")
+  .option("--workspace <id>", "Filter by workspace")
+  .option("--json", "Output raw JSON")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (opts) => {
+    const { ruleList } = await import("./commands/rule.js");
+    await ruleList(opts);
   });
 
 // ─── automation ──────────────────────────────────────────────────────────────
@@ -2102,6 +2145,7 @@ market
   .command("install <slug>")
   .description("Install a package by slug into a project — workspaces install now; other types route you to the right surface")
   .option("--project <id>", "Optionally tag the seeded entities to a project (installs are pod-wide by default)")
+  .option("--workspace <id>", "Acting workspace (UUID) a workflow/automation package is added to (required for that kind; defaults to your active lens). Ignored for pod-wide kinds")
   .option("--onto <workspaceId>", "Reconcile this template ONTO an existing workspace (additive) instead of creating a new one")
   .option("--dry-run", "Preview the create path write-free — report would-create / reuse / conflicts, install nothing")
   .option("--timeout <seconds>", "How long to wait for the apply to finish (default: 120)")
@@ -2459,7 +2503,9 @@ capConnections
     await capabilityConnectionsRemove(capability, connectionId, opts);
   });
 
-// ─── raycast ──────────────────────────────────────────────────────────────────
+// ─── raycast (hidden power-user escape) ───────────────────────────────────────
+// Prefer the native Synap Raycast extension (@synap). Capability verbs there go
+// through list-actions / run-action. Script Commands are a per-verb escape hatch.
 
 const raycast = program
   .command("raycast", { hidden: true })
@@ -2469,7 +2515,9 @@ const raycast = program
 
 raycast
   .command("generate")
-  .description("Emit a Raycast Script Command per enabled runnable verb")
+  .description(
+    "Power-user escape: emit a Script Command per enabled verb (extension uses list-actions/run-action)"
+  )
   .option("--out <dir>", "Output directory (default: ~/.synap/raycast-commands)")
   .option("--workspace <id>", "Workspace context")
   .action(async (opts) => {

@@ -5,18 +5,25 @@ import {
   hubGet,
   hubPatch,
   hubPost,
-  writeActiveSessionId,
-  clearActiveSessionId,
-  readActiveSessionId,
+  attachActiveSessionId,
+  detachActiveSessionId,
+  resolveActiveSessionId,
   renderHubError,
   HubError,
 } from "../lib/hub-client.js";
 import { type BaseOpts } from "./data.js";
 
+/** Human phrasing for where an attach landed — so scope is never a mystery. */
+function describeAttachTarget(target: "session-lens" | "directory-lens"): string {
+  return target === "session-lens"
+    ? "in this Claude Code session (~/.synap/lenses)"
+    : "in this working tree (.synap/lens.json)";
+}
+
 // ─── startSession ─────────────────────────────────────────────────────────────
 
 export async function startSession(
-  opts: BaseOpts & { goal: string; workspace?: string; taskId?: string }
+  opts: BaseOpts & { goal: string; workspace?: string; taskId?: string; template?: string }
 ): Promise<void> {
   try {
     const cfg = await resolveHubConfig(opts);
@@ -41,6 +48,7 @@ export async function startSession(
       goal: opts.goal,
     };
     if (opts.taskId) body.correlationId = `task:${opts.taskId}`;
+    if (opts.template) body.templateId = opts.template;
 
     const session = (await hubPost("/focus-sessions", body, cfg)) as Record<string, unknown>;
 
@@ -50,18 +58,15 @@ export async function startSession(
     }
 
     const id = String(session.id ?? "");
-    // Auto-attach: make this session active for the current terminal (per-CWD)
-    // AND for this Claude Code session's lens (per-session), so the statusline
-    // and every scoped call reflect it.
-    writeActiveSessionId(id);
-    const { getClaudeSessionId, writeLens } = await import("../lib/session-lens.js");
-    const cs = getClaudeSessionId();
-    if (cs) writeLens(cs, { focusSessionId: id });
+    // Auto-attach: make this session active so the statusline and every scoped
+    // call reflect it. Lands on the Claude-session lens inside Claude Code,
+    // otherwise on this working tree's directory lens.
+    const target = attachActiveSessionId(id);
     log.success(`Session started and attached`);
     console.log(`  ID:      ${chalk.bold(id)}`);
     console.log(`  Goal:    ${chalk.white(opts.goal)}`);
     if (opts.taskId) console.log(`  Task:    ${chalk.dim(opts.taskId)}`);
-    log.dim(`  Active in this terminal (.synap-session)`);
+    log.dim(`  Active ${describeAttachTarget(target)}`);
     console.log();
     // Print the ID alone on a final line so scripts can grab it easily
     console.log(id);
@@ -204,7 +209,7 @@ export async function getSession(
 
 export async function updateSession(
   id: string,
-  opts: BaseOpts & { workspace?: string; progress?: string; status?: string; goal?: string }
+  opts: BaseOpts & { workspace?: string; progress?: string; status?: string; stage?: string; goal?: string }
 ): Promise<void> {
   try {
     const cfg = await resolveHubConfig(opts);
@@ -218,6 +223,7 @@ export async function updateSession(
     const body: Record<string, string | number | undefined> = { workspaceId: wsId };
     if (opts.progress !== undefined) body.progress = parseInt(opts.progress, 10);
     if (opts.status) body.status = opts.status;
+    if (opts.stage) body.currentStage = opts.stage;
     if (opts.goal) body.goal = opts.goal;
 
     const res = await hubPatch(`/focus-sessions/${id}`, body, cfg);
@@ -230,6 +236,7 @@ export async function updateSession(
     log.success(`Session updated  ${chalk.dim(id.slice(0, 8))}`);
     if (opts.progress !== undefined) log.dim(`  progress → ${opts.progress}%`);
     if (opts.status) log.dim(`  status → ${opts.status}`);
+    if (opts.stage) log.dim(`  stage → ${opts.stage}`);
   } catch (e) {
     renderHubError(e);
     process.exit(1);
@@ -250,23 +257,20 @@ export async function attachSession(
     console.error(chalk.red("Error: session not found — " + (e as Error).message));
     process.exit(1);
   }
-  writeActiveSessionId(id);
-  const { getClaudeSessionId, writeLens } = await import("../lib/session-lens.js");
-  const cs = getClaudeSessionId();
-  if (cs) writeLens(cs, { focusSessionId: id });
+  const target = attachActiveSessionId(id);
   if (opts.json) {
-    console.log(JSON.stringify({ ok: true, sessionId: id }));
+    console.log(JSON.stringify({ ok: true, sessionId: id, scope: target }));
     return;
   }
   log.success(`Session attached  ${chalk.dim(id.slice(0, 8))}`);
+  log.dim(`  Active ${describeAttachTarget(target)}`);
   log.dim(`  All hub calls in this terminal will tag X-Session-Id: ${id.slice(0, 8)}…`);
 }
 
 // ─── detachSession ────────────────────────────────────────────────────────────
 
 export function detachSession(opts: { json?: boolean }): void {
-  const current = readActiveSessionId();
-  clearActiveSessionId();
+  const current = detachActiveSessionId();
   if (opts.json) {
     console.log(JSON.stringify({ ok: true }));
     return;
@@ -281,13 +285,13 @@ export function detachSession(opts: { json?: boolean }): void {
 // ─── sessionStatus ────────────────────────────────────────────────────────────
 
 export function sessionStatus(opts: { json?: boolean }): void {
-  const id = readActiveSessionId();
+  const id = resolveActiveSessionId();
   if (opts.json) {
     console.log(JSON.stringify({ sessionId: id ?? null }));
     return;
   }
   if (id) {
-    log.info(`Active session: ${chalk.bold(id.slice(0, 8))}…  ${chalk.dim("(from .synap-session or SYNAP_SESSION_ID)")}`);
+    log.info(`Active session: ${chalk.bold(id.slice(0, 8))}…  ${chalk.dim("(SYNAP_SESSION_ID, session lens, or .synap/lens.json)")}`);
   } else {
     log.dim("No active session — run `synap session start` or `synap session attach <id>`");
   }
@@ -353,7 +357,7 @@ export async function closeSession(
     }
 
     // Detach if this was the active terminal session
-    if (readActiveSessionId() === id) clearActiveSessionId();
+    if (resolveActiveSessionId(cfg.podUrl) === id) detachActiveSessionId(cfg.podUrl);
 
     if (opts.json) {
       if (usedPack && pack) {

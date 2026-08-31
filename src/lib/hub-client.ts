@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
+import { existsSync, readFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import {
   getActivePodConfig,
@@ -12,8 +12,17 @@ import {
   getSurfaceAgentKey,
 } from "./pod.js";
 import { resolveAgentOverride } from "./agents-config.js";
-import { resolveActiveLens, resolveActiveLensForPod } from "./session-lens.js";
-import { resolveDirectoryLensForPod } from "./directory-lens.js";
+import {
+  resolveActiveLensForPod,
+  getClaudeSessionId,
+  writeLens,
+  clearLensField,
+} from "./session-lens.js";
+import {
+  resolveDirectoryLensForPod,
+  writeDirectoryLens,
+  clearDirectoryLensField,
+} from "./directory-lens.js";
 import { preferClaudeCodeSurfaceKey } from "./key-source.js";
 import { samePodOrigin } from "./project-ref.js";
 import { HubRestClient } from "@synap/hub-rest-client";
@@ -306,6 +315,35 @@ function readErrorBody(
     return { detail: oneLine.length > 200 ? `${oneLine.slice(0, 200)}…` : oneLine };
   }
 
+  // tRPC batch errors are array-shaped: `[{ error: { message, code, data: { httpStatus, ... } } }]`
+  // (superjson may additionally nest the real payload one level deeper under
+  // `error.json`). Unwrap to the first entry's error object before falling
+  // through to the normal object-shaped handling below, so a tRPC failure
+  // surfaces its real `message` instead of the generic status phrase.
+  if (Array.isArray(parsed)) {
+    const first = parsed[0] as Record<string, unknown> | undefined;
+    const err = first?.error as Record<string, unknown> | undefined;
+    if (err && typeof err === "object") {
+      const json = err.json as Record<string, unknown> | undefined;
+      parsed = json ?? err;
+    }
+  } else if (
+    parsed &&
+    typeof parsed === "object" &&
+    "error" in (parsed as Record<string, unknown>)
+  ) {
+    // Single tRPC-shaped error body: `{ error: { message, ... } }` or
+    // `{ error: { json: { message, ... } } }`. Only unwrap when `error` is an
+    // OBJECT — a Hub-REST body's `error` is a plain string category
+    // (`{ error: "...", detail: "..." }`) and must fall through unchanged.
+    const errVal = (parsed as Record<string, unknown>).error;
+    if (errVal && typeof errVal === "object") {
+      const errObj = errVal as Record<string, unknown>;
+      const json = errObj.json as Record<string, unknown> | undefined;
+      parsed = json ?? errObj;
+    }
+  }
+
   if (parsed && typeof parsed === "object") {
     const o = parsed as Record<string, unknown>;
     const code = typeof o.code === "string" ? o.code : undefined;
@@ -469,9 +507,15 @@ function renderHubErrorBody(err: unknown): void {
     // active workspace left over from ANOTHER pod (a stale `synap use` after a
     // pod switch) being sent to a pod it doesn't belong to.
     if (err.workspaceId && err.podUrl) {
+      // State the FACT (what was sent where), then the two causes WITHOUT
+      // picking one — this code cannot tell them apart, and asserting the
+      // cross-pod story is wrong whenever the saved workspace simply no longer
+      // exists on its own pod (dogfood: `pods.team.workspaceId` pointed at a
+      // deleted workspace; the hint blamed a pod mix-up that had not happened).
+      // `synap doctor` is the only thing here that actually CHECKS, so it leads.
       log.hint(`Sent workspace ${err.workspaceId} to ${err.podUrl}.`);
-      log.hint("That workspace likely belongs to a different pod than the one you're calling.");
-      log.hint("Fix: pass --pod <name> to target the workspace's pod, or run `synap pods use <name>` to align your active pod + workspace. See valid workspaces with `synap orient`.");
+      log.hint("That workspace is not accessible on this pod — either it lives on a different pod, or it no longer exists here.");
+      log.hint("Run: synap doctor   (checks which of the two it is), then: synap orient   (see valid workspaces) and synap use <id>.");
     } else {
       log.hint("Workspace not found or not accessible on this pod — run: synap orient   (see valid workspaces), or: synap doctor");
     }
@@ -661,33 +705,112 @@ export async function resolveHubConfig(opts?: { podUrl?: string; apiKey?: string
   };
 }
 
-const SESSION_FILE = ".synap-session";
+// ─── Active focus session ─────────────────────────────────────────────────────
+//
+// ONE store, two rungs of the SAME lens mechanism:
+//
+//   env SYNAP_SESSION_ID  ›  session lens (per Claude tab)  ›  directory lens
+//
+// The retired legacy store was a per-CWD `.synap-session` file that the session
+// lens already silently shadowed — two concurrent "current session" stores for
+// one concept. It is now read exactly once, to migrate (below).
 
-/** Read the active session ID for this terminal from CWD or env var. */
-export function readActiveSessionId(): string | undefined {
+/** Legacy per-CWD session file — RETIRED as a store; read once to migrate. */
+const LEGACY_SESSION_FILE = ".synap-session";
+
+let legacySessionMigrationChecked = false;
+
+/**
+ * One-time migration of a pre-existing `.synap-session` into the DIRECTORY lens.
+ *
+ * COMPAT DECISION — read-and-migrate, not a permanent read-only fallback. A
+ * fallback would keep two stores alive indefinitely, which is exactly the
+ * divergence being removed. Migrating is faithful: `.synap-session` was
+ * per-working-tree and durable, and the directory lens has precisely that
+ * lifetime and scope — so an already-attached session survives the upgrade for
+ * every terminal in that tree. The file is deleted afterwards so it can never
+ * shadow (or be shadowed by) the lens again.
+ *
+ * No `podUrl` is stamped: the legacy file carried no pod, and stamping one here
+ * would falsely pod-qualify whatever workspace/project the lens already holds.
+ */
+function migrateLegacySessionFile(): void {
+  if (legacySessionMigrationChecked) return;
+  legacySessionMigrationChecked = true;
+  const filePath = join(process.cwd(), LEGACY_SESSION_FILE);
+  if (!existsSync(filePath)) return;
+  let id: string | undefined;
+  try {
+    id = readFileSync(filePath, "utf8").trim() || undefined;
+  } catch {
+    return;
+  }
+  try {
+    if (id) writeDirectoryLens({ focusSessionId: id });
+    unlinkSync(filePath);
+  } catch {
+    return; // best-effort — a read-only tree simply keeps the stale file
+  }
+  process.stderr.write(
+    `[synap] .synap-session is deprecated${id ? ` — session ${id.slice(0, 8)}… migrated into .synap/lens.json` : " — removed (empty)"}.\n`
+  );
+}
+
+/**
+ * The focus session every hub call should be tagged with.
+ *
+ * Both lens rungs are pod-qualified: a focus-session id is POD-LOCAL, so a lens
+ * stamped with another pod must not leak into `X-Session-Id`. (Lenses written
+ * before the stamp existed have no `podUrl` and match leniently — see
+ * `lensMatchesPod`.)
+ */
+export function resolveActiveSessionId(podUrl?: string): string | undefined {
   const fromEnv = process.env.SYNAP_SESSION_ID;
   if (fromEnv) return fromEnv;
-  const filePath = join(process.cwd(), SESSION_FILE);
-  if (existsSync(filePath)) {
-    return readFileSync(filePath, "utf8").trim() || undefined;
+  migrateLegacySessionFile();
+  return (
+    resolveActiveLensForPod(podUrl)?.focusSessionId ||
+    resolveDirectoryLensForPod(podUrl)?.lens.focusSessionId
+  );
+}
+
+/** Where an attach landed — reported so the user knows what owns their scope. */
+export type SessionAttachTarget = "session-lens" | "directory-lens";
+
+/**
+ * Attach a focus session to this terminal.
+ *
+ * Inside Claude Code the SESSION lens wins — per-tab isolation is the point
+ * (tab A on session X, tab B on session Y, same directory). Outside it there is
+ * no `CLAUDE_CODE_SESSION_ID` to key on, so the DIRECTORY lens is the
+ * legitimate fallback: the same per-working-tree scope the retired
+ * `.synap-session` had. `attach` therefore never silently no-ops.
+ */
+export function attachActiveSessionId(sessionId: string): SessionAttachTarget {
+  const claudeSession = getClaudeSessionId();
+  if (claudeSession) {
+    writeLens(claudeSession, { focusSessionId: sessionId });
+    return "session-lens";
   }
-  return undefined;
+  writeDirectoryLens({ focusSessionId: sessionId });
+  return "directory-lens";
 }
 
-/** Attach a session to this terminal — writes .synap-session in CWD. */
-export function writeActiveSessionId(sessionId: string): void {
-  writeFileSync(join(process.cwd(), SESSION_FILE), sessionId, "utf8");
+/**
+ * Detach — clear the focus session from BOTH lens rungs, and return whatever
+ * was active. Clearing only the top rung would "detach" into the lower one,
+ * which reads as the command failing.
+ */
+export function detachActiveSessionId(podUrl?: string): string | undefined {
+  const previous = resolveActiveSessionId(podUrl);
+  const claudeSession = getClaudeSessionId();
+  if (claudeSession) clearLensField(claudeSession, "focusSessionId");
+  clearDirectoryLensField("focusSessionId");
+  return previous;
 }
 
-/** Detach the active session from this terminal — removes .synap-session. */
-export function clearActiveSessionId(): void {
-  const filePath = join(process.cwd(), SESSION_FILE);
-  if (existsSync(filePath)) unlinkSync(filePath);
-}
-
-function sessionHeaders(): Record<string, string> {
-  // Per-Claude-session lens wins; fall back to the legacy per-CWD .synap-session.
-  const id = resolveActiveLens()?.focusSessionId || readActiveSessionId();
+function sessionHeaders(cfg?: HubConfig): Record<string, string> {
+  const id = resolveActiveSessionId(cfg?.podUrl);
   return id ? { "X-Session-Id": id } : {};
 }
 
@@ -824,7 +947,7 @@ export async function hubGet(
   const res = await hubFetchWithRetry(
     url.toString(),
     {
-      headers: { Authorization: `Bearer ${cfg.apiKey}`, ...sessionHeaders() },
+      headers: { Authorization: `Bearer ${cfg.apiKey}`, ...sessionHeaders(cfg) },
       signal: AbortSignal.timeout(15_000),
     },
     `GET ${path}`,
@@ -835,6 +958,19 @@ export async function hubGet(
     throw hubError("GET", path, res.status, body, undefined, cfg);
   }
   return res.json();
+}
+
+/**
+ * The workspace a failing request ACTUALLY carried. A caller may override the
+ * configured lens per-command (e.g. `--workspace <id>`), and naming the config's
+ * workspace in that error sends the reader chasing the wrong id.
+ */
+function errorWorkspace(body: unknown, cfg: HubConfig): string | undefined {
+  const sent =
+    body && typeof body === "object" && "workspaceId" in body
+      ? (body as { workspaceId?: unknown }).workspaceId
+      : undefined;
+  return typeof sent === "string" && sent.length > 0 ? sent : cfg.workspaceId;
 }
 
 export async function hubPost(
@@ -853,7 +989,7 @@ export async function hubPost(
       headers: {
         Authorization: `Bearer ${cfg.apiKey}`,
         "Content-Type": "application/json",
-        ...sessionHeaders(),
+        ...sessionHeaders(cfg),
       },
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(timeoutMs),
@@ -863,7 +999,10 @@ export async function hubPost(
   );
   if (!res.ok) {
     const bodyText = await res.text().catch(() => "");
-    throw hubError("POST", path, res.status, bodyText, undefined, cfg);
+    throw hubError("POST", path, res.status, bodyText, undefined, {
+      podUrl: cfg.podUrl,
+      workspaceId: errorWorkspace(body, cfg),
+    });
   }
   return res.json();
 }
@@ -885,7 +1024,7 @@ export async function hubPostMultipart(
     `${cfg.podUrl}/api/hub${path}`,
     {
       method: "POST",
-      headers: { Authorization: `Bearer ${cfg.apiKey}`, ...sessionHeaders() },
+      headers: { Authorization: `Bearer ${cfg.apiKey}`, ...sessionHeaders(cfg) },
       body: form,
       signal: AbortSignal.timeout(timeoutMs),
     },
@@ -918,7 +1057,7 @@ export async function hubPostMultipartRetryable(
     try {
       res = await fetch(url, {
         method: "POST",
-        headers: { Authorization: `Bearer ${cfg.apiKey}`, ...sessionHeaders() },
+        headers: { Authorization: `Bearer ${cfg.apiKey}`, ...sessionHeaders(cfg) },
         body: form,
         signal: AbortSignal.timeout(timeoutMs),
       });
@@ -958,7 +1097,7 @@ export async function hubPatch(path: string, body: unknown, cfg: HubConfig): Pro
   try {
     res = await fetch(url, {
       method: "PATCH",
-      headers: { Authorization: `Bearer ${cfg.apiKey}`, "Content-Type": "application/json", ...sessionHeaders() },
+      headers: { Authorization: `Bearer ${cfg.apiKey}`, "Content-Type": "application/json", ...sessionHeaders(cfg) },
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(15_000),
     });
@@ -967,7 +1106,10 @@ export async function hubPatch(path: string, body: unknown, cfg: HubConfig): Pro
   }
   if (!res.ok) {
     const bodyText = await res.text().catch(() => "");
-    throw hubError("PATCH", path, res.status, bodyText, undefined, cfg);
+    throw hubError("PATCH", path, res.status, bodyText, undefined, {
+      podUrl: cfg.podUrl,
+      workspaceId: errorWorkspace(body, cfg),
+    });
   }
   return res.json();
 }
@@ -978,7 +1120,7 @@ export async function hubDelete(path: string, cfg: HubConfig): Promise<unknown> 
   try {
     res = await fetch(url, {
       method: "DELETE",
-      headers: { Authorization: `Bearer ${cfg.apiKey}`, ...sessionHeaders() },
+      headers: { Authorization: `Bearer ${cfg.apiKey}`, ...sessionHeaders(cfg) },
       signal: AbortSignal.timeout(15_000),
     });
   } catch (err) {
