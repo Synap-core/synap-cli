@@ -23,7 +23,14 @@ function describeAttachTarget(target: "session-lens" | "directory-lens"): string
 // ─── startSession ─────────────────────────────────────────────────────────────
 
 export async function startSession(
-  opts: BaseOpts & { goal: string; workspace?: string; taskId?: string; template?: string }
+  opts: BaseOpts & {
+    goal: string;
+    workspace?: string;
+    taskId?: string;
+    template?: string;
+    parent?: string;
+    suspendedIntent?: string;
+  }
 ): Promise<void> {
   try {
     const cfg = await resolveHubConfig(opts);
@@ -49,6 +56,12 @@ export async function startSession(
     };
     if (opts.taskId) body.correlationId = `task:${opts.taskId}`;
     if (opts.template) body.templateId = opts.template;
+    // Detour push: the pod records `session --spawned_from--> session` and (with
+    // --suspended-intent) writes the "what were you about to do" line onto the
+    // PARENT. The parent is NOT closed or paused — popping back is just
+    // `synap session attach <parent>`.
+    if (opts.parent) body.parentSessionId = opts.parent;
+    if (opts.suspendedIntent) body.suspendedIntent = opts.suspendedIntent;
 
     const session = (await hubPost("/focus-sessions", body, cfg)) as Record<string, unknown>;
 
@@ -66,6 +79,7 @@ export async function startSession(
     console.log(`  ID:      ${chalk.bold(id)}`);
     console.log(`  Goal:    ${chalk.white(opts.goal)}`);
     if (opts.taskId) console.log(`  Task:    ${chalk.dim(opts.taskId)}`);
+    if (opts.parent) console.log(`  Forked from: ${chalk.dim(opts.parent)}`);
     log.dim(`  Active ${describeAttachTarget(target)}`);
     console.log();
     // Print the ID alone on a final line so scripts can grab it easily

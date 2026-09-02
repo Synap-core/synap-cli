@@ -1093,6 +1093,8 @@ session
   .option("--workspace <id>", "Workspace that owns the session")
   .option("--task-id <id>", "Link session to an existing task entity")
   .option("--template <id>", "Start from a playbook (seeds currentStage from its stages)")
+  .option("--parent <id>", "Push from another session — records session --spawned_from--> session (the parent stays open)")
+  .option("--suspended-intent <text>", "One line naming what the PARENT was about to do, recorded on the parent")
   .option("--json", "Output as JSON")
   .option("--pod-url <url>", "Pod URL override")
   .option("--api-key <key>", "API key override")
@@ -1251,6 +1253,19 @@ skillCmd
   .action(async (opts) => {
     const { listSkills } = await import("./commands/skill-manage.js");
     await listSkills(opts);
+  });
+
+skillCmd
+  .command("approve <slug-or-id>")
+  .description(
+    "Approve a skill so it loads (agent-authored skills are born unapproved)"
+  )
+  .option("--revoke", "Revoke approval instead of granting it")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (ref: string, opts) => {
+    const { approveSkill } = await import("./commands/skill-manage.js");
+    await approveSkill(ref, opts);
   });
 
 skillCmd
