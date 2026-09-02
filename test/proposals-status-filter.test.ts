@@ -69,10 +69,14 @@ describe("--status vocabulary", () => {
     // Mirrors PROPOSAL_STATUS_FILTERS in
     // synap-backend/packages/api/src/routers/hub-protocol/proposals.ts.
     // A client narrower than the door it calls is its own bug class.
-    for (const s of ["pending", "approved", "rejected", "auto_approved", "reverted", "approval_failed", "withdrawn", "all"]) {
+    // HAND-MAINTAINED MIRROR — nothing checks this list against the pod's
+    // SSOT, so it passed green while the pod already accepted `expired`.
+    // When the backend widens PROPOSAL_STATUS_FILTERS, this list and the
+    // length below must move with it.
+    for (const s of ["pending", "approved", "rejected", "auto_approved", "reverted", "approval_failed", "withdrawn", "expired", "all"]) {
       expect(parseProposalStatus(s)).toBe(s);
     }
-    expect([...PROPOSAL_STATUS_FILTERS]).toHaveLength(8);
+    expect([...PROPOSAL_STATUS_FILTERS]).toHaveLength(9);
   });
 
   it("returns null for an unknown value instead of forwarding garbage", async () => {

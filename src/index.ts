@@ -1034,7 +1034,7 @@ proposals
   .description("List governance proposals (default: the pending queue)")
   .option(
     "--status <status>",
-    "pending (default) | approved | auto_approved (what the agent already did) | rejected | all",
+    "pending (default) | approved | auto_approved (what the agent already did) | rejected | expired (never decided) | all",
     "pending"
   )
   .option("--workspace <id>", "Scope to a specific workspace")

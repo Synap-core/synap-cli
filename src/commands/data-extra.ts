@@ -117,6 +117,8 @@ export const PROPOSAL_STATUS_FILTERS = [
   "reverted",
   "approval_failed",
   "withdrawn",
+  // Never decided — its moment passed. Written by the pod's expiry sweep.
+  "expired",
   "all",
 ] as const;
 
