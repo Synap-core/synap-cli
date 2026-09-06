@@ -182,24 +182,136 @@ export async function fetchAvailableSlugs(
 }
 
 /**
- * GET /api/packages/:slug — the full row, INCLUDING `definition` (the install
- * payload). Authed when a token is given, which is REQUIRED for a private
- * template (the author-only visibility gate 404s otherwise). Returns `null` if
- * the package is absent / not visible.
+ * The single-package row `GET /api/packages/:slug` returns. The CP hands back
+ * the WHOLE `synap_packages` row (`getTableColumns`), so unlike the `/mine`
+ * list projection this one DOES carry `category` — which is why it is the door
+ * that can answer "what kind of package is this private thing I own?".
+ */
+export interface CpPackageRecord {
+  slug: string;
+  category?: string | null;
+  definition?: Record<string, unknown> | null;
+  isPublic?: boolean;
+  displayName?: string;
+}
+
+/**
+ * GET /api/packages/:slug — the full row (definition + `category` + visibility).
+ * Authed when a token is given, which is REQUIRED for a private package (the
+ * author-only visibility gate 404s otherwise). Returns `null` if the package is
+ * absent / not visible / unreachable.
+ *
+ * This is the ONE authed single-package read; `fetchPackageDefinition` and the
+ * category hydration below both go through it rather than re-rolling the fetch.
+ */
+export async function fetchPackageRecord(
+  slug: string,
+  token?: string,
+): Promise<CpPackageRecord | null> {
+  let res: Response;
+  try {
+    res = await fetch(`${packagesBase()}/${encodeURIComponent(slug)}`, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    });
+  } catch {
+    return null; // unreachable — "unknown", never a guessed answer
+  }
+  if (!res.ok) return null;
+  const data = (await res.json().catch(() => null)) as {
+    package?: CpPackageRecord;
+  } | null;
+  return data?.package ?? null;
+}
+
+/**
+ * GET /api/packages/:slug — just the `definition` (the install payload).
+ * Delegates to {@link fetchPackageRecord}; kept as its own name because most
+ * call sites want only the payload.
  */
 export async function fetchPackageDefinition(
   slug: string,
   token?: string,
 ): Promise<Record<string, unknown> | null> {
-  const res = await fetch(`${packagesBase()}/${encodeURIComponent(slug)}`, {
-    headers: token ? { Authorization: `Bearer ${token}` } : {},
-    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+  const rec = await fetchPackageRecord(slug, token);
+  return rec?.definition ?? null;
+}
+
+/**
+ * How many `/mine` rows will be hydrated over the network in one catalog build.
+ * Bounded so a prolific author's `synap market --list` can't fan out to 100
+ * detail requests. Beyond the cap the extra rows keep an ABSENT category —
+ * honest under-resolution, which the install refusal then catches.
+ */
+export const MINE_CATEGORY_HYDRATION_CAP = 25;
+
+/** Bounded-concurrency map — small, local, and only used by the hydration below. */
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const out = new Array<R>(items.length);
+  let next = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    for (;;) {
+      const i = next++;
+      if (i >= items.length) return;
+      out[i] = await fn(items[i]!);
+    }
   });
-  if (!res.ok) return null;
-  const data = (await res.json()) as {
-    package?: { definition?: Record<string, unknown>; category?: string };
-  };
-  return data.package?.definition ?? null;
+  await Promise.all(workers);
+  return out;
+}
+
+/**
+ * Fill in the `category` the `/mine` LIST PROJECTION does not select.
+ *
+ * `GET /api/packages/mine` projects ~15 columns and `category` is not one of
+ * them (`synap-control-plane-api/src/routes/packages.ts`), so every row the
+ * caller owns arrives type-less. Downstream that is not cosmetic: the CLI's
+ * display default turns an absent category into "workspace", which is exactly
+ * how a published CELL package was listed as a workspace, filtered out of
+ * `--type cell`, and installed as an empty "New Workspace".
+ *
+ * Resolution order per row, cheapest first:
+ *   1. the row already declares a category → untouched;
+ *   2. `fallbackBySlug` — a category already known from the PUBLIC browse rows
+ *      this catalog build fetched anyway (free, no extra request);
+ *   3. `GET /api/packages/:slug` with the caller's Bearer — the only door that
+ *      can see a PRIVATE row's category.
+ *
+ * A failure at step 3 leaves the category ABSENT. It never invents one: "I
+ * don't know" must stay distinguishable from "workspace".
+ */
+export async function hydrateMineCategories(
+  rows: CpMineRow[],
+  token: string,
+  fallbackBySlug?: Map<string, string | undefined>,
+  deps: { fetchRecord?: typeof fetchPackageRecord } = {},
+): Promise<CpMineRow[]> {
+  const fetchRecord = deps.fetchRecord ?? fetchPackageRecord;
+
+  const patched = rows.map((r) => {
+    if (r.category != null) return r;
+    const fromPublic = fallbackBySlug?.get(r.slug);
+    return fromPublic != null ? { ...r, category: fromPublic } : r;
+  });
+
+  const needing = patched.filter((r) => r.category == null).slice(0, MINE_CATEGORY_HYDRATION_CAP);
+  if (needing.length === 0) return patched;
+
+  const resolved = new Map<string, string>();
+  await mapWithConcurrency(needing, 5, async (r) => {
+    const rec = await fetchRecord(r.slug, token);
+    if (rec?.category != null) resolved.set(r.slug, rec.category);
+  });
+
+  return patched.map((r) =>
+    r.category == null && resolved.has(r.slug)
+      ? { ...r, category: resolved.get(r.slug)! }
+      : r,
+  );
 }
 
 /** The remote half of the catalog, plus the health `mergeCatalog` needs. */
@@ -343,6 +455,13 @@ export interface PublishResult {
   /** The `h-<hash>` version the CP derived from the definition. */
   version: string;
   isPublic: boolean;
+  /**
+   * Whether the package was attributed to a publisher profile. False means the
+   * author has no vendor yet, so this package will never appear on
+   * `GET /api/vendors/:slug` — the command says so and points at
+   * `synap vendor create`, because the CP never back-fills attribution later.
+   */
+  vendorAttached: boolean;
 }
 
 /**
@@ -400,6 +519,110 @@ function requireToken(deps: CpWriteDeps): string {
  * definition's top level because the CP reads those off `definition.icon`/… for
  * the list DTO (it strips the unknown `_meta` key).
  */
+/**
+ * The caller's vendor (publisher) profile, or null if they have never created one.
+ *
+ * `GET /api/vendors/mine` — an existing authed door; this adds no new endpoint.
+ *
+ * WHY publish needs it: the CP's publish handler is `if (body.vendorId) { … }`
+ * with NO else (`routes/packages.ts:1465`) — it never auto-creates and never
+ * infers one. The CLI has never sent the field, so every CLI-published package
+ * is permanently ORPHANED from its author's publisher profile and can never
+ * appear on `GET /api/vendors/:slug`. Vendor identity is already load-bearing
+ * elsewhere (reserved bedrock slugs gate on `isOfficialVendor`), so an orphaned
+ * package is not cosmetic.
+ *
+ * Failure is non-fatal by design: publishing must not break because a publisher
+ * profile does not exist yet. No vendor ⇒ publish exactly as before.
+ */
+export async function fetchMyVendorId(
+  base: string,
+  token: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<string | null> {
+  try {
+    const res = await fetchImpl(`${base}/api/vendors/mine`, {
+      headers: { Authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    });
+    if (!res.ok) return null;
+    const json = (await res.json()) as { vendor?: { id?: string } | null };
+    return json?.vendor?.id ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * A publisher (vendor) profile — the author identity a package is attributed to.
+ * Only the fields the CLI prints; the CP returns the whole row.
+ */
+export interface VendorProfile {
+  id: string;
+  slug: string;
+  displayName: string;
+}
+
+/**
+ * `POST /api/vendors` — create the caller's publisher profile.
+ *
+ * WHY the CLI needs its own verb: the endpoint is self-serve and the BROWSER
+ * already calls it inline (`PublishWizard.tsx`'s Publisher step, which blocks
+ * the wizard until a vendor exists). The CLI only ever READ one
+ * (`fetchMyVendorId`), so a CLI-only author had no way to make one and every
+ * package they published was attributed to nobody — no `/superpowers/by/<slug>`
+ * page, permanently, since the CP never auto-creates or back-fills a vendor.
+ *
+ * The contract mirrors the wizard's call exactly — same endpoint, same field
+ * names (`slug`, `displayName`, `description`, `website`) — with ONE deliberate
+ * difference: empty optionals are OMITTED rather than sent as `""`. The CP
+ * declares `website: z.string().url().optional()`, so an empty string is a 400;
+ * the wizard sends its blank fields unconditionally and hits that.
+ *
+ * Errors surface as `CpWriteError` carrying the server's own message: the CP
+ * returns 409 both for "you already have a vendor profile" and for a taken slug,
+ * and those are the two an author actually hits.
+ */
+export async function createVendor(
+  input: {
+    slug: string;
+    displayName: string;
+    description?: string;
+    website?: string;
+  },
+  deps: CpWriteDeps = {},
+): Promise<VendorProfile> {
+  const fetchImpl = deps.fetchImpl ?? fetch;
+  const token = requireToken(deps);
+  const base = deps.cpUrl ?? getCpUrl();
+
+  const res = await fetchImpl(`${base}/api/vendors`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      slug: input.slug,
+      displayName: input.displayName,
+      ...(input.description ? { description: input.description } : {}),
+      ...(input.website ? { website: input.website } : {}),
+    }),
+    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+  });
+
+  if (!res.ok) {
+    const raw = await res.text().catch(() => "");
+    throw new CpWriteError(res.status, extractServerMessage(raw, res.status));
+  }
+
+  const data = (await res.json()) as { vendor?: VendorProfile };
+  if (!data?.vendor?.id) {
+    throw new CpWriteError(0, "The control plane returned no vendor profile.");
+  }
+  return data.vendor;
+}
+
 export async function publishPackage(
   def: PackageDefinitionLike,
   opts: { isPublic: boolean; category?: string; slug?: string; displayName?: string },
@@ -444,6 +667,11 @@ export async function publishPackage(
     domain: def._meta?.domain ?? def.domain,
   };
 
+  // Best-effort: a package published without it is orphaned from its author's
+  // publisher profile forever (the CP has no auto-create and no back-fill).
+  // A failure here must never block a publish, so this resolves to null.
+  const vendorId = await fetchMyVendorId(base, token, fetchImpl);
+
   const res = await fetchImpl(`${base}/api/packages`, {
     method: "POST",
     headers: {
@@ -457,6 +685,9 @@ export async function publishPackage(
       isPublic: opts.isPublic,
       tags: def._meta?.tags,
       category: opts.category ?? "workspace",
+      // Attribute the package to the author's publisher profile when they have
+      // one. Omitted (not null) when they do not — the CP branches on presence.
+      ...(vendorId ? { vendorId } : {}),
       definition,
     }),
     signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
@@ -484,18 +715,25 @@ export async function publishPackage(
     displayName,
     version,
     isPublic: data.package?.isPublic ?? opts.isPublic,
+    vendorAttached: !!vendorId,
   };
 }
 
 /**
  * `PATCH /api/packages/:slug` — owner-gated flip of a package to private.
  *
- * ⚠️ TODO(cp): the CP PATCH handler's body validator is
- * `z.object({ podId: z.string().min(1).nullable() })` TODAY — it does NOT accept
- * `isPublic`, so this call currently fails (400) until the CP adds `isPublic` to
- * that PATCH allow-list. This is deliberately the INTENDED endpoint (not a
- * faked flip): it will start working the moment the CP door is widened. The
- * command surfaces the CP's message honestly meanwhile.
+ * ✅ RESOLVED 2026-09-05 — this block used to carry a TODO saying the CP's PATCH
+ * validator accepted only `podId` and that this call therefore 400'd. That is no
+ * longer true: the handler declares `isPublic: z.boolean().optional()`
+ * (`synap-control-plane-api/src/routes/packages.ts:1618`) and the flip works.
+ * Kept as a tombstone rather than deleted because the stale warning outlived its
+ * fix and would otherwise keep sending readers to "widen the CP door" work that
+ * is already done — the same way a stale comment sent an auditor down the wrong
+ * path on `kind-package.ts` a day earlier.
+ *
+ * Note the browser uses `DELETE /api/packages/:slug` for the same act; both
+ * doors now route through the CP's shared owned-package helpers and both are a
+ * SOFT delist (`is_public = false`), never a destroy.
  */
 export async function unpublishPackage(
   slug: string,

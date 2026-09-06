@@ -4,41 +4,318 @@
   "status": "active",
   "triggerConfig": {
     "eventPattern": "entity.create.completed",
-    "filters": { "profileSlug": "bookmark" }
+    "filters": {
+      "profileSlug": "bookmark"
+    }
   },
   "flowDefinition": {
     "nodes": [
       {
         "id": "trigger",
         "type": "trigger",
-        "position": { "x": 0, "y": 0 },
+        "position": {
+          "x": 0,
+          "y": 0
+        },
         "data": {
           "triggerType": "event",
           "label": "Bookmark created",
           "config": {
             "eventPattern": "entity.create.completed",
-            "filters": { "profileSlug": "bookmark" }
+            "filters": {
+              "profileSlug": "bookmark"
+            }
           }
         }
       },
       {
-        "id": "enrich",
-        "type": "skill",
-        "position": { "x": 0, "y": 120 },
+        "id": "read",
+        "type": "entity_read",
+        "position": {
+          "x": 0,
+          "y": 120
+        },
         "data": {
-          "label": "Bookmark Enrichment",
-          "skillName": "bookmark-enrichment",
-          "skillTitle": "Bookmark Enrichment",
+          "label": "Read the bookmark",
+          "entityId": "{{trigger.payload.subjectId}}"
+        }
+      },
+      {
+        "id": "graph-context",
+        "type": "related_entities",
+        "position": {
+          "x": 0,
+          "y": 240
+        },
+        "data": {
+          "label": "What the graph already connects (deterministic)",
+          "entityId": "{{trigger.payload.subjectId}}",
+          "direction": "both",
+          "limit": 10
+        }
+      },
+      {
+        "id": "channel-talk",
+        "type": "messages_query",
+        "position": {
+          "x": 0,
+          "y": 360
+        },
+        "data": {
+          "label": "What was being discussed (deterministic)",
+          "channelId": "{{steps.read.output.entity.properties.sourceChannelId}}",
+          "limit": 10,
+          "errorHandling": {
+            "continueOnError": true
+          }
+        }
+      },
+      {
+        "id": "sharer-lookup",
+        "type": "query",
+        "position": {
+          "x": 0,
+          "y": 480
+        },
+        "data": {
+          "label": "Resolve the sharer to a person entity (deterministic)",
+          "profileSlug": "person",
+          "filter": "{\"title\": \"{{steps.read.output.entity.properties.sharedBy}}\"}",
+          "limit": 5
+        }
+      },
+      {
+        "id": "has-sharer-name",
+        "type": "condition",
+        "position": {
+          "x": 0,
+          "y": 600
+        },
+        "data": {
+          "label": "Bookmark carries a sharer name?",
+          "expression": "steps.read.output.entity.properties.sharedBy !== ''"
+        }
+      },
+      {
+        "id": "sharer-matches",
+        "type": "condition",
+        "position": {
+          "x": 0,
+          "y": 720
+        },
+        "data": {
+          "label": "Matched person's title equals the sharer name exactly?",
+          "expression": "steps.sharer-lookup.output.entities.0.title === steps.read.output.entity.properties.sharedBy"
+        }
+      },
+      {
+        "id": "link-sharer",
+        "type": "output",
+        "position": {
+          "x": 0,
+          "y": 840
+        },
+        "data": {
+          "label": "Link bookmark → the person who shared it",
+          "outputType": "relation_create",
+          "config": {
+            "fromEntityId": "{{trigger.payload.subjectId}}",
+            "toEntityId": "{{steps.sharer-lookup.output.entities.0.id}}",
+            "relationType": "created_by"
+          }
+        }
+      },
+      {
+        "id": "classify",
+        "type": "capability",
+        "position": {
+          "x": 0,
+          "y": 1200
+        },
+        "data": {
+          "label": "Describe + classify (AI) — title only if the captured one is unusable",
+          "verbId": "ai.generate",
           "inputMapping": {
-            "entityId": "{{trigger.payload.subjectId}}"
+            "system": "You name saved links for a personal knowledge base. Answer with a JSON object and nothing else: {\"title\": string, \"description\": string, \"category\": string}. `title` is a short human-readable name for the link (max 70 chars, no URL, no quotes). `description` is one factual sentence (max 200 chars). `category` is ONE lowercase word from: article, video, tool, repo, docs, social, media, other. You CANNOT open the link. Use ONLY the URL, the already-resolved graph context and the surrounding conversation you are given. `description` and `category` are ALWAYS used. `title` is used ONLY when the link has no usable name yet — when 'Current name' below already reads like a real title, it is kept and yours is discarded, so never optimise for replacing it. If the material does not tell you what the page is, set `title` to the empty string rather than guessing.",
+            "prompt": "URL: {{steps.read.output.entity.properties.url}}\nCurrent name: {{steps.read.output.entity.title}}\nShared by: {{steps.read.output.entity.properties.sharedBy}}\n\nAlready connected in the graph:\n{{steps.graph-context.output.entities}}\n\nSurrounding conversation in the source channel:\n{{steps.channel-talk.output.messages}}\n\nThe message it arrived in:\n{{steps.read.output.entity.preview}}",
+            "json": "true",
+            "maxTokens": "2000"
+          }
+        }
+      },
+      {
+        "id": "apply-enrich",
+        "type": "output",
+        "position": {
+          "x": -400,
+          "y": 1500
+        },
+        "data": {
+          "label": "Write description + category back (always)",
+          "outputType": "entity_update",
+          "config": {
+            "entityId": "{{trigger.payload.subjectId}}",
+            "properties": {
+              "description": "{{steps.classify.output.description}}",
+              "category": "{{steps.classify.output.category}}"
+            }
+          }
+        }
+      },
+      {
+        "id": "title-present",
+        "type": "condition",
+        "position": {
+          "x": 400,
+          "y": 1350
+        },
+        "data": {
+          "label": "Did the link arrive with a name?",
+          "expression": "steps.read.output.entity.title !== ''"
+        }
+      },
+      {
+        "id": "title-not-url",
+        "type": "condition",
+        "position": {
+          "x": 400,
+          "y": 1470
+        },
+        "data": {
+          "label": "…and is that name more than the raw URL?",
+          "expression": "steps.read.output.entity.title !== steps.read.output.entity.properties.url"
+        }
+      },
+      {
+        "id": "usable-title",
+        "type": "guard",
+        "position": {
+          "x": 0,
+          "y": 1320
+        },
+        "data": {
+          "label": "Only rename when the model produced a real title",
+          "checks": [
+            {
+              "path": "steps.classify.output.title",
+              "minLength": 3,
+              "message": "ai.generate returned no usable title — leaving the bookmark's captured name untouched."
+            }
+          ]
+        }
+      },
+      {
+        "id": "apply-title",
+        "type": "output",
+        "position": {
+          "x": 0,
+          "y": 1440
+        },
+        "data": {
+          "label": "Write the AI title back (only when the captured one was unusable)",
+          "outputType": "entity_update",
+          "config": {
+            "entityId": "{{trigger.payload.subjectId}}",
+            "title": "{{steps.classify.output.title}}",
+            "properties": {
+              "title": "{{steps.classify.output.title}}"
+            }
           }
         }
       }
     ],
-    "edges": [{ "id": "e1", "source": "trigger", "target": "enrich" }]
+    "edges": [
+      {
+        "id": "trigger->read",
+        "source": "trigger",
+        "target": "read"
+      },
+      {
+        "id": "read->graph-context",
+        "source": "read",
+        "target": "graph-context"
+      },
+      {
+        "id": "graph-context->channel-talk",
+        "source": "graph-context",
+        "target": "channel-talk"
+      },
+      {
+        "id": "channel-talk->sharer-lookup",
+        "source": "channel-talk",
+        "target": "sharer-lookup"
+      },
+      {
+        "id": "sharer-lookup->has-sharer-name",
+        "source": "sharer-lookup",
+        "target": "has-sharer-name"
+      },
+      {
+        "id": "has-sharer-name->sharer-matches",
+        "source": "has-sharer-name",
+        "target": "sharer-matches",
+        "sourceHandle": "yes"
+      },
+      {
+        "id": "sharer-matches->link-sharer",
+        "source": "sharer-matches",
+        "target": "link-sharer",
+        "sourceHandle": "yes"
+      },
+      {
+        "id": "link-sharer->classify",
+        "source": "link-sharer",
+        "target": "classify"
+      },
+      {
+        "id": "has-sharer-name->classify",
+        "source": "has-sharer-name",
+        "target": "classify",
+        "sourceHandle": "no"
+      },
+      {
+        "id": "sharer-matches->classify",
+        "source": "sharer-matches",
+        "target": "classify",
+        "sourceHandle": "no"
+      },
+      {
+        "id": "classify->apply-enrich",
+        "source": "classify",
+        "target": "apply-enrich"
+      },
+      {
+        "id": "classify->title-present",
+        "source": "classify",
+        "target": "title-present"
+      },
+      {
+        "id": "title-present->title-not-url",
+        "source": "title-present",
+        "target": "title-not-url",
+        "sourceHandle": "yes"
+      },
+      {
+        "id": "title-present->usable-title",
+        "source": "title-present",
+        "target": "usable-title",
+        "sourceHandle": "no"
+      },
+      {
+        "id": "title-not-url->usable-title",
+        "source": "title-not-url",
+        "target": "usable-title",
+        "sourceHandle": "no"
+      },
+      {
+        "id": "usable-title->apply-title",
+        "source": "usable-title",
+        "target": "apply-title"
+      }
+    ]
   },
   "metadata": {
     "source": "bridge-template",
-    "note": "The skill node carries `skillName`; the CLI seed command resolves it to the live `skillId` at install time (GET /skills by name)."
+    "note": "DETERMINISTIC-FIRST. Everything reachable without a network call runs BEFORE the AI: `related_entities` (what the graph already connects to this bookmark — the capture flow's `references` edge to the channel's bound entity lands here), `messages_query` on the captured `sourceChannelId` (what was being discussed), and a `query` on `person` resolving the captured `sharedBy` display name to a real person entity, linked with the EXISTING `created_by` relation def (no new def, no new node type). ai.generate is now the LAST RESORT: it runs only when the captured name is empty OR is the raw URL — the branch `title-present`→`title-not-url` — so a human-written message preview is never overwritten by a guess, and when the AI does run it is handed the deterministic context instead of a bare URL. Two condition merges (`title-present`, `classify`) rely on markDescendantsSkipped's live-parent rule (graph-topology.ts) — a merge node survives as long as ONE incoming edge is unpruned. `sharer-lookup` uses the STRING filter form on purpose: `parseQueryFilterConditions` template-resolves a STRING filter but pushes an OBJECT filter's values RAW, so the object form would have compared the literal `{{...}}` text and silently matched nothing. The `sharer-matches` exact-equality condition is the containment for that string form: if a name with a quote breaks JSON.parse the filter is dropped and the query widens, and this check refuses to link a non-identical title. `messages_query` carries `continueOnError` because it THROWS when the channel is not visible in the automation's workspace. NOT expressible today: host→company/tool matching. `transform` has no host/hostname pipe and the query filter compiles only exact equality ($eq/$gt/$gte/$lt/$lte/$ne — no substring/LIKE), so a host could never be matched against a `website` property holding a full URL. A page `fetch` is deliberately still absent."
   }
 }

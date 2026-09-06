@@ -37,7 +37,7 @@ import { fileURLToPath } from "node:url";
 import chalk from "chalk";
 import ora from "ora";
 import prompts from "prompts";
-import { resolveHubConfig, hubGet, hubPost, hubPatch, resolveUserId, type HubConfig } from "../lib/hub-client.js";
+import { resolveHubConfig, hubGet, hubPost, hubPatch, resolveUserId, renderHubError, type HubConfig } from "../lib/hub-client.js";
 import { unwrapList } from "../lib/unwrapList.js";
 import { fetchProjects } from "../lib/project.js";
 import { discoverSkillDirs, parseSkillDir, importSkill } from "../lib/skill-import.js";
@@ -78,6 +78,12 @@ export interface BridgeSetupOpts {
   botToken?: string;
   /** Discord server (guild) id — written to the bridge .env. */
   guildId?: string;
+  /**
+   * Re-ask every question and re-provision from scratch, ignoring what a
+   * previous run already configured (pod choice, project pin, agent template,
+   * governance, the vaulted bot token). Without it a re-run REUSES all of that.
+   */
+  reconfigure?: boolean;
 }
 
 const DEFAULT_BRIDGE_DIR = path.join(
@@ -86,6 +92,151 @@ const DEFAULT_BRIDGE_DIR = path.join(
   "Code",
   "telegram-discord-bridge"
 );
+
+// ── Re-run detection ────────────────────────────────────────────────────────
+//
+// The Discord agent key already works this way: `provisionAgentKey({ idempotent:
+// true })` detects the stored key, reuses it, and SAYS SO ("reused (same key —
+// no rotation…)"). Everything below generalises that ONE idea to the rest of the
+// flow — detect, report, don't redo — so a second `synap bridge-setup` on an
+// already-connected pod stops re-asking for things it already holds (worst case:
+// re-prompting for a bot token that is sitting in the pod vault).
+
+/**
+ * Everything the command can know about a previous run BEFORE it asks anything.
+ * All of it is local (saved pod profile, stored agent key, the agent CONTEXT.md,
+ * the bridge .env), so it can be printed ahead of the first prompt.
+ */
+interface PriorSetupState {
+  /** Any evidence at all that bridge-setup already ran for this bridge. */
+  isReRun: boolean;
+  /**
+   * POSITIVE evidence that THIS command provisioned the bridge before — a
+   * stored discord agent key or a bridge .env it wrote. Stronger than
+   * `isReRun`, which a bare `synap pods use --surface discord` also satisfies.
+   * Anything that would otherwise skip a first-run question keys off this.
+   */
+  bridgeProvisioned: boolean;
+  envPath: string;
+  /** Pod profile already bound to the `discord` surface. */
+  podName: string | null;
+  /** A Discord agent key is already stored locally (reused, never rotated). */
+  hasAgentKey: boolean;
+  /** Path to the agent CONTEXT.md written by a previous run, if any. */
+  contextPath: string | null;
+  /** `vault://<secretId>` from a previous run — the bot token's home. */
+  vaultRef?: string;
+  /** The secret id inside `vaultRef` — lets us verify + re-grant with no token. */
+  secretId?: string;
+  workspaceId?: string;
+  projectId?: string;
+  guildId?: string;
+}
+
+/** Parse a dotenv file into KEY→value. Values are used, never printed. */
+function readEnvFile(filePath: string): Record<string, string> {
+  if (!fs.existsSync(filePath)) return {};
+  const out: Record<string, string> = {};
+  for (const line of fs.readFileSync(filePath, "utf-8").split("\n")) {
+    const m = line.match(/^([A-Z0-9_]+)=(.*)$/);
+    if (m) out[m[1]] = m[2].trim();
+  }
+  return out;
+}
+
+/** Local-only detection — no network, so it runs before the first prompt. */
+function detectPriorState(bridgeDir: string): PriorSetupState {
+  const envPath = path.join(bridgeDir, ".env");
+  const env = readEnvFile(envPath);
+  const podName = getSurfacePodName("discord");
+  const hasAgentKey = Boolean(getSurfaceAgentKey("discord")?.hubApiKey);
+  const ctx = path.join(os.homedir(), ".synap", "contexts", "discord.md");
+  const vaultRef = env.SYNAP_DISCORD_TOKEN_REF || undefined;
+  return {
+    isReRun: Boolean(podName || hasAgentKey || env.SYNAP_POD_URL || vaultRef),
+    bridgeProvisioned: Boolean(hasAgentKey || env.SYNAP_POD_URL || vaultRef),
+    envPath,
+    podName,
+    hasAgentKey,
+    contextPath: fs.existsSync(ctx) ? ctx : null,
+    vaultRef,
+    secretId: vaultRef?.startsWith("vault://")
+      ? vaultRef.slice("vault://".length)
+      : undefined,
+    workspaceId: env.SYNAP_WORKSPACE_ID || undefined,
+    projectId: env.SYNAP_PROJECT_ID || undefined,
+    guildId: env.DISCORD_GUILD_ID || undefined,
+  };
+}
+
+/**
+ * Report what is already configured BEFORE any prompt, so the operator can see
+ * this is a re-run rather than a first run — and can see exactly what will be
+ * reused vs. re-asked. Silent on a genuine first run (unchanged experience).
+ */
+function printPriorState(prior: PriorSetupState, reconfigure: boolean): void {
+  if (!prior.isReRun) return;
+  log.blank();
+  log.heading(
+    reconfigure
+      ? "Existing setup detected — --reconfigure: re-asking everything"
+      : "Existing setup detected — reusing what is already configured"
+  );
+  const found: string[] = [];
+  const ask: string[] = [];
+  const item = (label: string, detail: string | null, ifMissing: string): void => {
+    if (detail) found.push(`  ${chalk.green("✓")} ${label.padEnd(20)}${detail}`);
+    else ask.push(`${label.toLowerCase()} (${ifMissing})`);
+  };
+
+  item("Pod profile", prior.podName && `${prior.podName} ${chalk.dim("(discord surface)")}`, "will ask");
+  item("Discord agent key", prior.hasAgentKey ? "stored locally — reused, not rotated" : null, "will be minted");
+  item("Agent template", prior.contextPath, "will ask");
+  item("Bot token", prior.vaultRef ? `in the pod vault ${chalk.dim(prior.vaultRef)} — not re-asked` : null, "will ask");
+  item("Workspace pin", prior.workspaceId ?? null, "pod-wide");
+  item("Project pin", prior.projectId ?? null, "pod-wide");
+  item("Discord server id", prior.guildId ?? null, "pass --guild-id");
+
+  if (reconfigure) {
+    // Nothing below is reused — say so rather than listing it as "found".
+    log.dim("  Every question is asked again and every step re-provisioned.");
+  } else {
+    for (const line of found) console.log(line);
+    log.dim(
+      ask.length
+        ? `  Still to configure: ${ask.join(", ")}`
+        : "  Nothing left to ask — everything above is reused."
+    );
+  }
+  log.dim("  Capabilities, skills and automations re-apply idempotently — each reports its own line below.");
+  if (!reconfigure) {
+    log.dim(`  To re-ask everything instead: ${chalk.cyan("synap bridge-setup --reconfigure")}`);
+  }
+  log.blank();
+}
+
+/**
+ * Confirm the bot token a previous run vaulted is STILL in the vault, before
+ * deciding not to ask for it. Never returns or logs the secret itself.
+ *
+ *  - "present" → skip the prompt, reuse the ref
+ *  - "missing" → the .env ref is stale; ask for the token again (and say why)
+ *  - "unknown" → the read failed / the door isn't deployed; keep the ref
+ *                WITHOUT re-asking, and say it could not be verified
+ */
+async function checkVaultSecret(
+  cfg: HubConfig,
+  workspaceId: string | undefined,
+  secretId: string
+): Promise<"present" | "missing" | "unknown"> {
+  try {
+    const res = await hubGet("/vault/secrets", { workspaceId }, cfg);
+    const rows = unwrapList<{ id: string }>(res, ["secrets"]);
+    return rows.some((r) => r.id === secretId) ? "present" : "missing";
+  } catch {
+    return "unknown";
+  }
+}
 
 // Bot invite permissions — the full set the bridge's features actually use.
 // Bits per Discord's permission reference (https://discord.com/developers/docs/topics/permissions).
@@ -122,11 +273,14 @@ const BOT_PERMISSIONS = Object.values(BOT_PERMISSION_BITS)
  * Discord bridge points at a different (e.g. team / client) pod.
  *
  * Order: explicit --pod-url/--api-key escape hatch → --pod <name> →
- * single saved profile (auto) → interactive picker (default = the pod already
- * assigned to the discord surface, else the CLI-active one).
+ * single saved profile (auto) → the pod THIS BRIDGE is already connected to
+ * (re-run, no prompt) → interactive picker (default = the pod already assigned
+ * to the discord surface, else the CLI-active one).
  */
 async function resolveBridgePod(
   opts: BridgeSetupOpts,
+  prior: PriorSetupState,
+  reconfigure: boolean,
 ): Promise<{ cfg: HubConfig; podName: string | null }> {
   // 1. Raw URL+key escape hatch — bypasses profiles entirely.
   if (opts.podUrl && opts.apiKey) {
@@ -151,6 +305,15 @@ async function resolveBridgePod(
   } else if (profiles.length === 1) {
     chosen = profiles[0];
     log.dim(`Using your only saved pod profile: ${chosen.name}`);
+  } else if (
+    !reconfigure &&
+    prior.podName &&
+    profiles.some((p) => p.name === prior.podName)
+  ) {
+    // Re-run: the bridge is already bound to a pod (discord surface override).
+    // Re-asking would only invite a mis-click that repoints a live bridge.
+    chosen = profiles.find((p) => p.name === prior.podName)!;
+    log.dim(`  [skip] pod — already connected to "${chosen.name}" (--pod or --reconfigure to change)`);
   } else {
     const defaultName =
       getSurfacePodName("discord") ?? profiles.find((p) => p.active)?.name ?? profiles[0].name;
@@ -189,11 +352,19 @@ export async function bridgeSetup(opts: BridgeSetupOpts): Promise<void> {
   banner();
   log.heading("Discord bridge — one-shot setup");
 
+  // ── 0. Detect what a previous run already configured, and SAY SO before we
+  //      ask anything. Purely local — no network, no prompt. ────────────────
+  const bridgeDir = opts.bridgeDir ?? DEFAULT_BRIDGE_DIR;
+  const reconfigure =
+    Boolean(opts.reconfigure) || process.env.SYNAP_BRIDGE_SETUP_RECONFIGURE === "1";
+  const prior = detectPriorState(bridgeDir);
+  printPriorState(prior, reconfigure);
+
   // ── 1. Choose the pod the BRIDGE connects to (independent of the CLI pod) ──
   let cfg: HubConfig;
   let bridgePodName: string | null = null;
   try {
-    const resolved = await resolveBridgePod(opts);
+    const resolved = await resolveBridgePod(opts, prior, reconfigure);
     cfg = resolved.cfg;
     bridgePodName = resolved.podName;
   } catch (err) {
@@ -215,7 +386,7 @@ export async function bridgeSetup(opts: BridgeSetupOpts): Promise<void> {
   log.success(`Pod healthy: ${cfg.podUrl}${bridgePodName ? ` (profile: ${bridgePodName})` : ""}`);
 
   // ── 3. Resolve scope — pod-wide by default, workspace/project optional ───
-  const { workspaceId, projectId } = await resolveScope(opts, cfg);
+  const { workspaceId, projectId } = await resolveScope(opts, cfg, prior, reconfigure);
   log.dim(workspaceId ? `Workspace: ${workspaceId} (explicit pin)` : "Workspace: pod-wide (no pin)");
   if (projectId) log.dim(`Project: ${projectId}`);
 
@@ -226,7 +397,7 @@ export async function bridgeSetup(opts: BridgeSetupOpts): Promise<void> {
     probe.succeed("Key valid (hub-protocol scope OK)");
   } catch (err) {
     probe.fail("Key/scope check failed");
-    log.error((err as Error).message);
+    renderHubError(err);
     log.dim("The key may be expired or missing scope. Run `synap keys rotate` or `synap init`.");
     process.exit(1);
   }
@@ -237,22 +408,64 @@ export async function bridgeSetup(opts: BridgeSetupOpts): Promise<void> {
   // reads to the operator's data floor (hub-protocol-rest.ts auth middleware)
   // while attributing writes to the agent for governed proposals. All the
   // operator-key work below (capability apply, vault grant) keeps using `cfg`.
-  const agentKey = await provisionDiscordAgentKey(cfg.podUrl, cfg.apiKey, cfg.workspaceId);
+  const agentKey = await provisionDiscordAgentKey(
+    cfg.podUrl,
+    cfg.apiKey,
+    cfg.workspaceId,
+    !reconfigure ? prior.contextPath : null
+  );
 
   // ── 4. Provision the capability (vault credential + tool + skill) ─────────
-  const bridgeDir = opts.bridgeDir ?? DEFAULT_BRIDGE_DIR;
-  const botToken = await resolveBotToken(opts.botToken);
-  const { vaultRef, secretId } = await applyBridgeCapability(
+  // The bot token is the sharpest re-run case: it is ALREADY in the pod vault,
+  // so re-prompting for it asks the operator to paste a live secret the system
+  // holds. Verify the vaulted secret instead, and only ask when it is genuinely
+  // gone (or when --reconfigure / --bot-token says to rotate it).
+  let botToken: string | undefined;
+  let reuseVaultRef: string | undefined;
+  if (opts.botToken) {
+    botToken = opts.botToken;
+  } else if (!reconfigure && prior.secretId) {
+    const state = await checkVaultSecret(cfg, workspaceId, prior.secretId);
+    if (state === "present") {
+      reuseVaultRef = prior.vaultRef;
+      log.dim(`  [skip] bot token — already in the pod vault (${prior.vaultRef}); not re-asked`);
+    } else if (state === "unknown") {
+      reuseVaultRef = prior.vaultRef;
+      log.warn(
+        `  [warn] bot token — could not read the vault to confirm ${prior.vaultRef}; ` +
+        "keeping it rather than asking you to paste the token again (--reconfigure to re-enter)."
+      );
+    } else {
+      log.warn(
+        `  [warn] bot token — the vault no longer holds ${prior.vaultRef} (deleted or on another pod); asking again.`
+      );
+      botToken = await resolveBotToken(undefined);
+    }
+  } else {
+    botToken = await resolveBotToken(undefined);
+  }
+  const { vaultRef, secretId, error: capabilityError } = await applyBridgeCapability(
     bridgeDir,
     workspaceId,
     cfg,
-    botToken
+    botToken,
+    reuseVaultRef
   );
 
   // ── 4. Choose agent governance mode ──────────────────────────────────
   const discordAgentUserId = getSurfaceAgentKey("discord")?.agentUserId;
   if (discordAgentUserId) {
-    await ensureAgentGovernance(cfg, discordAgentUserId, opts.governance);
+    // A re-run leaves the agent's governance exactly as the operator set it.
+    // (The pod exposes no GET for it, so we say "unchanged" — never claim a
+    // specific mode we did not read.)
+    if (!opts.governance && !reconfigure && prior.bridgeProvisioned) {
+      log.dim(
+        "  [skip] governance — left unchanged from your previous run " +
+        "(--governance safe|normal|crazy, or --reconfigure, to change it)"
+      );
+    } else {
+      await ensureAgentGovernance(cfg, discordAgentUserId, opts.governance);
+    }
   }
 
   // ── 4b. Seed the bundled instruction skills FIRST, then the capabilities ────
@@ -286,8 +499,10 @@ export async function bridgeSetup(opts: BridgeSetupOpts): Promise<void> {
   }
 
   // ── 4d. Grant the bridge redeem access — token lives ONLY in the vault ─────
+  // Re-run path: `secretId` is recovered from the .env vault ref, so the grant
+  // is re-verified (it answers "(existing)") WITHOUT the token being re-entered.
   let granted = false;
-  if (secretId && botToken) {
+  if (secretId) {
     // Grant to the AGENT (the bridge's redeem identity), not the operator.
     const agentUserId = getSurfaceAgentKey("discord")?.agentUserId;
     granted = await grantRedeemAccess(secretId, cfg, agentUserId);
@@ -348,10 +563,12 @@ export async function bridgeSetup(opts: BridgeSetupOpts): Promise<void> {
     fs.existsSync(envPath) &&
     /^DISCORD_GUILD_ID=.+/m.test(fs.readFileSync(envPath, "utf-8"));
   printNextSteps(opts.clientId, bridgeDir, {
-    hasToken: Boolean(botToken),
+    hasToken: Boolean(botToken) || Boolean(reuseVaultRef),
     hasGuild: Boolean(opts.guildId) || envHasGuild,
     vaultRef,
     granted,
+    reusedToken: Boolean(reuseVaultRef),
+    capabilityError,
   });
 
   await printSynapNextSteps(cfg, workspaceId);
@@ -773,6 +990,36 @@ async function applyAutomationTemplates(
     return;
   }
 
+  // Fetch the capability catalog's verb ids once — needed for capability-node
+  // validation. This is a DIFFERENT namespace from `/skills`: a catalog verb's
+  // backing skill need not appear in the `/skills` list at all. Dogfood: the
+  // `ai.generate` verb on "Synap Core" is `enabled: true, runnable: true` and is
+  // what every AI automation node uses, yet its backing skill
+  // (e441519b-…) is absent from all 50 rows `/skills` returns. Validating verbs
+  // against skill NAMES therefore marked every AI automation as missing and
+  // silently skipped it.
+  let catalogVerbIds = new Set<string>();
+  try {
+    const res: unknown = await hubGet(
+      "/capabilities/catalog",
+      { userId, workspaceId },
+      cfg
+    );
+    for (const cap of unwrapList<{ verbs?: Array<{ verbId?: string }> }>(res, [
+      "capabilities",
+    ])) {
+      for (const v of cap.verbs ?? []) if (v.verbId) catalogVerbIds.add(v.verbId);
+    }
+  } catch (err) {
+    // NON-fatal, unlike the skills fetch: an empty verb set must not skip every
+    // AI automation. Fall back to accepting any verbId and let the runtime be the
+    // judge — a seeded automation that fails loudly beats one silently not seeded.
+    log.warn(
+      `Could not fetch the capability catalog — verb ids will not be pre-validated: ${(err as Error).message}`
+    );
+    catalogVerbIds = new Set<string>();
+  }
+
   // Fetch existing skills once — needed for skill-node injection.
   let existingSkills: Array<{ id: string; name: string }> = [];
   try {
@@ -824,14 +1071,21 @@ async function applyAutomationTemplates(
         }
       }
 
-      // `capability` node → validate verbId (a verb IS a seeded skill NAME) and
-      // fill an empty/placeholder connection id with the Google/Nango connection.
+      // `capability` node → validate verbId against the CAPABILITY CATALOG first
+      // (its real home), falling back to seeded skill names for verbs that are
+      // skill-backed by name. When the catalog could not be fetched the set is
+      // empty and we do not pre-validate at all — see the fetch above.
       if (node.type === "capability") {
         const data = node.data as {
           verbId?: string;
           connectionSelector?: { connectionId?: string };
         };
-        if (data.verbId && !existingSkills.some((s) => s.name === data.verbId)) {
+        if (
+          data.verbId &&
+          catalogVerbIds.size > 0 &&
+          !catalogVerbIds.has(data.verbId) &&
+          !existingSkills.some((s) => s.name === data.verbId)
+        ) {
           missing ??= `verb "${data.verbId}"`;
         }
         const sel = data.connectionSelector;
@@ -978,12 +1232,16 @@ async function applyAutomationTemplates(
  * @param podUrl      Pod base URL.
  * @param operatorKey The operator's raw hub key (authorizes the provisioning).
  * @param workspaceId Workspace to enroll the agent into (omit for all).
+ * @param existingContextPath Path to the CONTEXT.md a previous run already
+ *   wrote — when set, the agent-template wizard is SKIPPED (same reuse-and-say-so
+ *   contract as the agent key itself). Pass null to run it.
  * @returns the Discord agent key to write as SYNAP_HUB_API_KEY.
  */
 async function provisionDiscordAgentKey(
   podUrl: string,
   operatorKey: string,
-  workspaceId: string | undefined
+  workspaceId: string | undefined,
+  existingContextPath: string | null
 ): Promise<string> {
   const spinner = ora("Provisioning Discord agent key…").start();
 
@@ -1020,11 +1278,18 @@ async function provisionDiscordAgentKey(
   // key (before the bridge ever uses the agent key).
   await enrollAgentIfNeeded(podUrl, operatorKey, agentUserId, workspaceId);
 
-  // Same CONTEXT.md routing file every other provisioned agent gets.
-  try {
-    await configureAgentContext(podUrl, operatorKey, "discord", agentUserId);
-  } catch (err) {
-    log.warn(`Agent context wizard failed: ${err instanceof Error ? err.message : String(err)}`);
+  // Same CONTEXT.md routing file every other provisioned agent gets — written
+  // once. A re-run keeps the template the operator already picked.
+  if (existingContextPath) {
+    log.dim(
+      `  [skip] agent template — already configured (${existingContextPath}); --reconfigure to pick another`
+    );
+  } else {
+    try {
+      await configureAgentContext(podUrl, operatorKey, "discord", agentUserId);
+    } catch (err) {
+      log.warn(`Agent context wizard failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   return hubApiKey;
@@ -1039,15 +1304,36 @@ async function provisionDiscordAgentKey(
  * Project: a peer, independent lens. --project-id skips the prompt; otherwise
  * offer a picker with "Pod-wide (no project)" as the default alongside the
  * operator's existing projects. No projects on the pod → skip the prompt.
+ *
+ * Re-run: BOTH lenses are inherited from the bridge's own .env instead of being
+ * re-asked. That also fixes a real re-run defect — re-running without
+ * --workspace-id used to silently UNPIN a bridge that had been pinned (the .env
+ * key is purged), which in turn silently skipped every playbook-bundling
+ * capability. --reconfigure restores the ask-me-everything behaviour.
  */
 async function resolveScope(
   opts: { workspaceId?: string; projectId?: string },
-  cfg: Awaited<ReturnType<typeof resolveHubConfig>>
+  cfg: Awaited<ReturnType<typeof resolveHubConfig>>,
+  prior: PriorSetupState,
+  reconfigure: boolean
 ): Promise<{ workspaceId?: string; projectId?: string }> {
-  const workspaceId = opts.workspaceId;
+  let workspaceId = opts.workspaceId;
+  if (!workspaceId && !reconfigure && prior.workspaceId) {
+    workspaceId = prior.workspaceId;
+    log.dim(
+      `  [skip] workspace — keeping the pin from your previous run (${workspaceId}); --reconfigure to clear it`
+    );
+  }
 
   let projectId = opts.projectId;
-  if (!projectId) {
+  if (!projectId && !reconfigure && prior.bridgeProvisioned) {
+    projectId = prior.projectId;
+    log.dim(
+      prior.projectId
+        ? `  [skip] project — keeping ${prior.projectId} from your previous run (--project-id or --reconfigure to change)`
+        : "  [skip] project — you chose pod-wide previously; keeping it (--project-id or --reconfigure to change)"
+    );
+  } else if (!projectId) {
     const projects = await fetchProjects(cfg);
     if (projects.length > 0) {
       const { picked } = await prompts({
@@ -1077,13 +1363,33 @@ async function resolveBotToken(provided?: string): Promise<string | undefined> {
   return (token as string) || undefined;
 }
 
+/**
+ * @param existingVaultRef `vault://<id>` from a previous run. When there is no
+ *   NEW token but the credential is already vaulted, the definition is applied
+ *   with the vault entry dropped (we must never store a `{{botToken}}`
+ *   placeholder) while the tools' credentialRef is REPOINTED at the existing
+ *   secret — which is byte-identical to what a token-carrying apply produces,
+ *   since createVaultSecret reuses the same secret id. Without this the re-run
+ *   would strip the tool's credentialRef and break a working bridge.
+ */
 async function applyBridgeCapability(
   bridgeDir: string,
   workspaceId: string | undefined,
   cfg: Awaited<ReturnType<typeof resolveHubConfig>>,
-  botToken: string | undefined
-): Promise<{ vaultRef?: string; secretId?: string }> {
+  botToken: string | undefined,
+  existingVaultRef?: string
+): Promise<{ vaultRef?: string; secretId?: string; error?: string }> {
   const spinner = ora("Provisioning capability…").start();
+  // What we still know about the vaulted credential if the apply can't run —
+  // returning it keeps the .env + grant + summary truthful on a re-run.
+  const reuse: { vaultRef?: string; secretId?: string } = existingVaultRef
+    ? {
+        vaultRef: existingVaultRef,
+        secretId: existingVaultRef.startsWith("vault://")
+          ? existingVaultRef.slice("vault://".length)
+          : undefined,
+      }
+    : {};
   // Read the capability definition from the bridge repo — ONE source of truth.
   const capPath = path.join(bridgeDir, "src", "synapCapabilities.js");
   let rawDef: unknown;
@@ -1097,11 +1403,11 @@ async function applyBridgeCapability(
     spinner.fail("Capability definition not found");
     log.dim(`  Looked in: ${capPath}`);
     log.dim(`  ${(err as Error).message}`);
-    return {};
+    return { ...reuse, error: `capability definition not found at ${capPath}` };
   }
   if (!rawDef) {
     spinner.fail("No CAPABILITY_DEFINITION export in the bridge");
-    return {};
+    return { ...reuse, error: "no CAPABILITY_DEFINITION export in the bridge" };
   }
 
   // Deep-clone + inject the bot token into the vault credential. With no token,
@@ -1117,9 +1423,11 @@ async function applyBridgeCapability(
       }
     }
   } else {
-    // No token → drop the vault and any tool credentialRef that referenced it
-    // (a bare template-local ref or a vault:// string), so we never store a
-    // placeholder secret or leave a dangling reference.
+    // No NEW token → drop the vault entry, so we never store a placeholder
+    // secret. Two cases for the tools that referenced it:
+    //   · re-run (existingVaultRef) → REPOINT at the already-vaulted secret,
+    //     preserving the exact wiring a token-carrying apply would produce.
+    //   · first run with no token   → delete the ref (no dangling reference).
     const vaultRefs = new Set(
       (def.vault ?? []).map((v) => v.ref).filter((r): r is string => Boolean(r))
     );
@@ -1129,10 +1437,13 @@ async function applyBridgeCapability(
         t.credentialRef &&
         (vaultRefs.has(t.credentialRef) || t.credentialRef.startsWith("vault://"))
       ) {
-        delete t.credentialRef;
+        if (existingVaultRef) t.credentialRef = existingVaultRef;
+        else delete t.credentialRef;
       }
     }
-    spinner.text = "Provisioning capability (no token → structure only)…";
+    spinner.text = existingVaultRef
+      ? "Provisioning capability (token already vaulted → reusing the credential)…"
+      : "Provisioning capability (no token → structure only)…";
   }
 
   try {
@@ -1150,8 +1461,8 @@ async function applyBridgeCapability(
     };
     const tools = res.created?.tools?.length ?? 0;
     const skills = res.created?.skills?.length ?? 0;
-    const vaultRef = res.created?.vault?.[0]?.vaultRef;
-    const secretId = res.created?.vault?.[0]?.secretId;
+    const vaultRef = res.created?.vault?.[0]?.vaultRef ?? reuse.vaultRef;
+    const secretId = res.created?.vault?.[0]?.secretId ?? reuse.secretId;
     spinner.succeed(
       `Capability provisioned: ${res.capabilityKey ?? "?"} (${vaultRef ? "vault + " : ""}${tools} tool, ${skills} skill)`
     );
@@ -1160,6 +1471,14 @@ async function applyBridgeCapability(
     const msg = (err as Error).message;
     spinner.fail("Capability apply failed");
     log.error(`  ${msg}`);
+    if (existingVaultRef) {
+      // Re-run: the pod already holds a working credential + tool wiring, so a
+      // failed RE-apply is not fatal — but it is not a "skip" either. Say what
+      // failed, say what was left alone, and carry it into the final summary.
+      log.dim("  The capability was NOT re-applied — the pod's existing wiring is untouched.");
+      log.dim("  Setup continues; nothing below depends on this apply succeeding.");
+      return { ...reuse, error: msg };
+    }
     if (botToken) {
       // The bot token MUST be vaulted for the bridge to run — continuing to write
       // a .env and printing "Done" would leave a crash-looping bridge (redeem
@@ -1172,7 +1491,7 @@ async function applyBridgeCapability(
       }
       process.exit(1);
     }
-    return {};
+    return { ...reuse, error: msg };
   }
 }
 
@@ -1335,13 +1654,31 @@ async function printSynapNextSteps(
 function printNextSteps(
   clientId: string | undefined,
   bridgeDir: string,
-  state: { hasToken: boolean; hasGuild: boolean; vaultRef?: string; granted: boolean }
+  state: {
+    hasToken: boolean;
+    hasGuild: boolean;
+    vaultRef?: string;
+    granted: boolean;
+    /** The token came from the vault this run — it was never re-entered. */
+    reusedToken?: boolean;
+    /** Non-fatal capability-apply failure — reported, never swallowed. */
+    capabilityError?: string;
+  }
 ): void {
   log.blank();
   log.heading("Done");
   log.blank();
-  if (state.vaultRef && state.granted) {
-    console.log(`  ${chalk.green("✓")} Bot token in the pod vault, bridge granted redeem access — no env token  ${chalk.dim(state.vaultRef)}`);
+  if (state.capabilityError) {
+    console.log(
+      `  ${chalk.yellow("⚠")} Capability was not re-applied: ${state.capabilityError}`
+    );
+    console.log(
+      `     Everything else below still ran; the pod's existing capability wiring was left untouched.`
+    );
+  }
+  if (state.vaultRef && state.granted && state.reusedToken) {
+    console.log(`  ${chalk.green("✓")} Bot token reused from the pod vault (never re-entered), redeem access confirmed  ${chalk.dim(state.vaultRef)}`);
+  } else if (state.vaultRef && state.granted) {
   } else if (state.vaultRef && state.hasToken) {
     console.log(`  ${chalk.yellow("⚠")} Token stored in the vault (${chalk.dim(state.vaultRef)}) but the redeem GRANT did not land.`);
     console.log(`     Deploy the backend (grant door) and re-run — the bridge can't log in until the grant exists.`);

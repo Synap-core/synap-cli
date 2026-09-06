@@ -15,15 +15,52 @@ import {
 } from "../lib/review-credential.js";
 import { type BaseOpts } from "./data.js";
 
-/** The bits of a capability.run proposal's post-execution `data` this command reads. */
+/**
+ * The bits of a capability.run proposal's post-execution `data` this command reads.
+ *
+ * ⚠️ `success` is OPTIONAL AND OFTEN ABSENT. The executor materializes
+ * `data.runResult = runOutcome.result` verbatim (`executors/capability.ts`), so
+ * the shape is whatever the verb returned. `market.install` returns
+ * `{ status: "installed", result: { created: [...], failed: [] } }` — no
+ * `success` anywhere. Treating a missing `success` as failure is what made a
+ * SUCCESSFUL install ("Task Board", "Priority Matrix", "Task Calendar",
+ * "All Tasks" — all four created and verified on the pod) print
+ * `✗ Ran market.install — it failed: Unknown error`.
+ *
+ * Mirror image of the `status ?? "installed"` bug in `market.ts`: there a
+ * missing discriminator defaulted to SUCCESS, here it defaulted to FAILURE.
+ * Both are the same root — assuming a contract the producer never promised.
+ */
 interface CapabilityRunOutcome {
   verbId?: string;
   runResult?: {
+    /** Present on tool/provider runs. ABSENT on verb runs — never assume it. */
     success?: boolean;
     error?: string;
+    /** Verb-run discriminator, e.g. "installed". */
+    status?: string;
     executionTimeMs?: number;
     result?: Record<string, unknown>;
   };
+}
+
+/** Statuses a verb uses to say "this worked". */
+const SUCCESS_STATUSES = new Set(["installed", "updated", "unchanged", "ok", "success"]);
+
+/**
+ * Decide what actually happened, reading every honest marker and refusing to
+ * guess. Returns "unclear" rather than defaulting either way — an approval that
+ * reports neither outcome is a reporting bug worth seeing, not a silent verdict.
+ */
+export function classifyRun(
+  rr: NonNullable<CapabilityRunOutcome["runResult"]>
+): "ok" | "failed" | "unclear" {
+  if (rr.success === false) return "failed";
+  if (typeof rr.error === "string" && rr.error.length > 0) return "failed";
+  if (rr.success === true) return "ok";
+  if (rr.status && SUCCESS_STATUSES.has(String(rr.status).toLowerCase())) return "ok";
+  if (rr.result && typeof rr.result === "object") return "ok";
+  return "unclear";
 }
 
 /**
@@ -40,20 +77,40 @@ function printOutcome(proposal: Record<string, unknown> | null | undefined): voi
   const runResult = data.runResult;
 
   if (runResult) {
-    if (runResult.success) {
-      log.success(`Ran ${chalk.bold(data.verbId ?? "capability")} successfully` + (runResult.executionTimeMs ? chalk.dim(`  (${runResult.executionTimeMs}ms)`) : ""));
-      const result = runResult.result ?? {};
+    const verb = chalk.bold(data.verbId ?? "capability");
+    const took = runResult.executionTimeMs ? chalk.dim(`  (${runResult.executionTimeMs}ms)`) : "";
+    const verdict = classifyRun(runResult);
+
+    if (verdict === "ok") {
+      // Per-item isolation: a run can report `failed[]` while still succeeding
+      // overall. Say so rather than printing a clean tick over partial damage.
+      const result = (runResult.result ?? {}) as Record<string, unknown>;
+      const failedItems = Array.isArray(result.failed) ? result.failed : [];
+      if (failedItems.length > 0) {
+        log.warn(`Ran ${verb} — completed with ${failedItems.length} failure(s)${took}`);
+      } else {
+        log.success(`Ran ${verb} successfully${took}`);
+      }
       for (const [key, value] of Object.entries(result)) {
         if (value === undefined || value === null || value === "") continue;
+        if (Array.isArray(value) && value.length === 0) continue;
         log.dim(`  ${key}: ${typeof value === "string" ? value : JSON.stringify(value)}`);
       }
-    } else {
-      log.error(`Ran ${chalk.bold(data.verbId ?? "capability")} — it failed:`);
-      log.dim(`  ${runResult.error ?? "Unknown error"}`);
+      return;
+    }
+
+    if (verdict === "failed") {
+      log.error(`Ran ${verb} — it failed:`);
+      log.dim(`  ${runResult.error ?? "no reason was recorded"}`);
       if (runResult.error?.toLowerCase().includes("not approved")) {
         log.dim(`  → The underlying tool/skill needs approval. Run \`synap cap show <name>\` to see which, then re-run \`synap cap enable <name>\`.`);
       }
+      return;
     }
+
+    // Neither marker present. Do not invent a verdict in either direction.
+    log.warn(`Ran ${verb} — it returned no outcome marker, so this cannot say whether it worked.`);
+    log.dim(`  ${JSON.stringify(runResult).slice(0, 300)}`);
     return;
   }
 

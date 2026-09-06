@@ -1,6 +1,6 @@
 import chalk from "chalk";
 import { log } from "../utils/logger.js";
-import { resolveHubConfig, resolveUserId, hubGet, hubPost, hubPatch, readActiveSessionId, renderHubError } from "../lib/hub-client.js";
+import { resolveHubConfig, resolveUserId, hubGet, hubPost, hubPatch, resolveActiveSessionId, renderHubError } from "../lib/hub-client.js";
 import { unwrapList } from "../lib/unwrapList.js";
 import { reportWrite } from "../lib/capture-lane.js";
 import { renderNextSteps, FLOW } from "../lib/next-steps.js";
@@ -11,6 +11,8 @@ export interface BaseOpts {
   podUrl?: string;
   apiKey?: string;
   details?: boolean;
+  /** Workspace lens override (e.g. `--workspace <id>`); scopes reads/writes to that workspace. */
+  workspace?: string;
 }
 
 export const parseLimit = (s: string | undefined, def: number): number =>
@@ -488,6 +490,27 @@ interface RankComparison {
   horizon: RankedItem[];
   diff: { overlapAtN: number; moved: MovedItem[] };
 }
+/** `/knowledge/answer` — the synthesized door. Shape differs from retrieval. */
+interface AnswerSource {
+  substrate: string;
+  id: string;
+  title: string;
+}
+interface AnswerResponse {
+  answer: string | null;
+  sources?: AnswerSource[];
+  routedTo?: string[];
+  /** Stores that errored. An answer synthesized over a degraded corpus is
+   *  incomplete, and hiding that would make the synthesis look authoritative
+   *  when it isn't — the retrieval renderer already surfaces this; keep parity. */
+  degraded?: string[];
+  /** Why synthesis produced no answer. The backend classifies this precisely
+   *  (`retryable` distinguishes "out of credit" from "try again"); dropping it
+   *  turns every distinct cause into the same useless "unavailable". */
+  error?: string;
+  failure?: { code?: string; message?: string; retryable?: boolean };
+}
+
 interface AskResponse {
   query: string;
   routedTo: string[];
@@ -498,6 +521,65 @@ interface AskResponse {
   verdict?: string;
   /** Present only when `--compare` was requested. */
   comparison?: RankComparison;
+}
+
+/**
+ * Render the synthesized answer, then its sources.
+ *
+ * `answer` is nullable BY CONTRACT — synthesis can be unavailable (no IS, or the
+ * call failed) while retrieval still succeeded. In that case the sources are the
+ * honest fallback; never print an empty answer as if the pod knew nothing.
+ */
+function renderAnswer(query: string, res: AnswerResponse): void {
+  const routed = (res.routedTo ?? []).join(", ");
+  log.dim(`"${query}"${routed ? ` → ${routed}` : ""}`);
+  log.blank();
+
+  // Say this BEFORE the answer: a synthesis over a degraded corpus is incomplete,
+  // and the caller must know that while reading it, not after.
+  if (res.degraded && res.degraded.length > 0) {
+    log.info(
+      chalk.yellow(`⚠ Incomplete — store(s) unavailable: ${res.degraded.join(", ")}`)
+    );
+    log.blank();
+  }
+
+  if (res.answer && res.answer.trim().length > 0) {
+    log.info(res.answer.trim());
+    log.blank();
+  } else {
+    // Say WHY, using the backend's own classification. "retryable: false" is the
+    // difference between "run it again" and "stop, this will never work".
+    const why = res.failure?.message ?? res.error;
+    const retry =
+      res.failure?.retryable === false
+        ? " Retrying will not help."
+        : res.failure?.retryable === true
+          ? " Retrying may help."
+          : "";
+    log.dim(
+      why
+        ? `No synthesized answer — ${why}${retry} Showing sources only.`
+        : "No synthesized answer (synthesis unavailable) — showing sources only."
+    );
+    log.blank();
+  }
+
+  const sources = res.sources ?? [];
+  if (sources.length === 0) {
+    if (!res.answer) {
+      log.dim("No results. Try broader terms, or capture knowledge with: synap capture");
+    }
+    return;
+  }
+  log.info(chalk.bold("Sources") + chalk.dim(` (${sources.length})`));
+  for (const s of sources) {
+    log.info(
+      `  ${s.title || "(untitled)"} ${chalk.dim(`[${s.substrate}] ${s.id}`)}`
+    );
+  }
+  log.blank();
+  log.dim("Full substrate breakdown: synap ask --raw");
 }
 
 /** Render one item according to its substrate. */
@@ -594,16 +676,52 @@ function renderComparison(query: string, comparison?: RankComparison): void {
 
 export async function askKnowledge(
   query: string,
-  opts: BaseOpts & { workspace?: string; limit?: string; json?: boolean; session?: boolean; compare?: boolean }
+  opts: BaseOpts & {
+    workspace?: string;
+    limit?: string;
+    json?: boolean;
+    session?: boolean;
+    compare?: boolean;
+    raw?: boolean;
+  }
 ): Promise<void> {
   try {
     const cfg = await resolveHubConfig(opts);
     const limit = parseLimit(opts.limit, 10);
     const workspaceId = opts.workspace ?? cfg.workspaceId;
-    const sessionId = opts.session ? readActiveSessionId() : undefined;
+    const sessionId = opts.session ? resolveActiveSessionId(cfg.podUrl) : undefined;
+
+    // DEFAULT = the synthesized door. `ask` must ANSWER, not enumerate rows —
+    // `/knowledge/answer` runs the same retrieval as `/knowledge/search` and then
+    // synthesizes over the matched context. The raw substrate breakdown stays one
+    // flag away (`--raw`) for diagnosis, and `--compare` is a ranker diff that only
+    // the retrieval door produces. Historically this command pointed at
+    // `/knowledge/ask` — the DEPRECATED retrieval-only alias — which is why the
+    // agent-facing door returned 200 unranked rows while the browser got an answer.
+    if (!opts.raw && !opts.compare) {
+      const ans = (await hubPost(
+        "/knowledge/answer",
+        {
+          query,
+          ...(workspaceId ? { workspaceId } : {}),
+          ...(sessionId ? { sessionId } : {}),
+          limit,
+        },
+        cfg
+      )) as AnswerResponse;
+
+      if (opts.json) {
+        console.log(JSON.stringify(ans, null, 2));
+        return;
+      }
+      renderAnswer(query, ans);
+      return;
+    }
 
     const res = (await hubPost(
-      "/knowledge/ask",
+      // `/knowledge/search` is the canonical retrieval door; `/knowledge/ask` is a
+      // deprecated alias onto the same handler. Point at the canonical one.
+      "/knowledge/search",
       {
         query,
         ...(workspaceId ? { workspaceId } : {}),

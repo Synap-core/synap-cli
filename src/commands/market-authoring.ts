@@ -6,6 +6,7 @@
  * `market.ts`): the create→publish path an author walks.
  *
  *   synap market scaffold <slug>        — write a minimal valid <slug>.template.yaml
+ *   synap market scaffold <slug> --kind cell|view|workflow|capability — a standalone package file
  *   synap market validate  <file>       — run the ONE shared validator, fast feedback
  *   synap market publish   <file>       — validate, then upsert to the CP (private by default)
  *   synap market publish   --from-workspace <id>  — serialize a LIVE workspace, then publish
@@ -36,11 +37,14 @@ import {
   CpWriteError,
 } from "../lib/cp-packages.js";
 import { resolveHubConfig, hubPost, renderHubError } from "../lib/hub-client.js";
+import { exporterDropWarnings } from "../lib/exporter-coverage.js";
 import {
   isStandalonePackageFile,
   parseStandalonePackageFile,
   validateStandalonePackage,
   scaffoldStandalonePackageJson,
+  SCAFFOLDABLE_KINDS,
+  type ScaffoldableKind,
 } from "../lib/kind-package.js";
 
 /** Print a validator failure list human-readably: `rule` · `path` — `message`. */
@@ -58,6 +62,41 @@ export async function marketValidate(
   file: string,
   opts: { json?: boolean },
 ): Promise<void> {
+  // A standalone view/cell/skill/workflow file branches off IMMEDIATELY — the
+  // SAME discriminator `marketPublish` uses. Without this, `validate` ran the
+  // WORKSPACE validator over a standalone file and rejected it with three
+  // envelope errors (missing `meta`, `workspace`, `profiles`) — including files
+  // `market scaffold --kind cell` had JUST WRITTEN. Step 02 of the documented
+  // four-command loop rejected step 01's own output, for every non-workspace
+  // kind. Found by walking the loop on 2026-09-05.
+  let peeked: unknown;
+  try {
+    peeked = parseTemplateFile(file);
+  } catch {
+    peeked = undefined;
+  }
+  if (isStandalonePackageFile(peeked)) {
+    const parsed = parseStandalonePackageFile(file);
+    // `validateStandalonePackage` returns plain message strings, not the
+    // `ValidationError` records the workspace validator emits — so it prints
+    // directly rather than through `printValidationErrors`.
+    const errors = validateStandalonePackage(parsed);
+    if (opts.json) {
+      console.log(JSON.stringify({ ok: errors.length === 0, errors }, null, 2));
+      if (errors.length > 0) process.exit(1);
+      return;
+    }
+    if (errors.length === 0) {
+      log.success(`${file} is valid.`);
+      return;
+    }
+    log.error(
+      `${file} has ${errors.length} validation error${errors.length === 1 ? "" : "s"}:`,
+    );
+    for (const message of errors) log.hint(`✗ ${message}`);
+    process.exit(1);
+  }
+
   let tpl: WorkspaceYaml;
   try {
     tpl = parseTemplateFile(file);
@@ -92,10 +131,15 @@ export async function marketScaffold(
   slug: string,
   opts: { json?: boolean; kind?: string },
 ): Promise<void> {
-  // `--kind cell|view` scaffolds a STANDALONE package file instead of a
-  // workspace template — see `lib/kind-package.ts`. `skill` is refused: there
+  // `--kind cell|view|workflow` scaffolds a STANDALONE package file instead of
+  // a workspace template — see `lib/kind-package.ts`. `skill` is refused: there
   // is no known-good standalone shape yet (the CP schema has no slot for one),
   // so a scaffold would just produce a file that can't publish.
+  //
+  // The accepted list is `SCAFFOLDABLE_KINDS` — the same constant `src/index.ts`
+  // builds the `--kind` help string from, so the help can never again advertise
+  // a kind this branch refuses (it advertised `skill`) or hide one it accepts
+  // (it hid `workflow`, which `validateStandalonePackage` has always handled).
   if (opts.kind && opts.kind !== "workspace") {
     if (opts.kind === "skill") {
       if (opts.json) {
@@ -114,11 +158,14 @@ export async function marketScaffold(
       }
       process.exit(1);
     }
-    if (opts.kind !== "cell" && opts.kind !== "view") {
-      log.error(`Unknown --kind "${opts.kind}" — expected one of: cell, view, skill.`);
+    if (!(SCAFFOLDABLE_KINDS as readonly string[]).includes(opts.kind)) {
+      log.error(
+        `Unknown --kind "${opts.kind}" — expected one of: ${SCAFFOLDABLE_KINDS.join(", ")}.`,
+      );
       process.exit(1);
     }
-    const fileName = `${slug}.${opts.kind}.json`;
+    const kind = opts.kind as ScaffoldableKind;
+    const fileName = `${slug}.${kind}.json`;
     const target = resolvePath(process.cwd(), fileName);
     if (existsSync(target)) {
       if (opts.json) {
@@ -129,13 +176,14 @@ export async function marketScaffold(
       }
       process.exit(1);
     }
-    writeFileSync(target, scaffoldStandalonePackageJson(opts.kind, slug), "utf-8");
+    writeFileSync(target, scaffoldStandalonePackageJson(kind, slug), "utf-8");
     if (opts.json) {
-      console.log(JSON.stringify({ ok: true, path: target, slug, kind: opts.kind }, null, 2));
+      console.log(JSON.stringify({ ok: true, path: target, slug, kind }, null, 2));
       return;
     }
     log.success(`Wrote ${fileName}`);
     log.dim("Edit it in place, then:");
+    log.dim(`  synap market validate ${fileName}`);
     log.dim(`  synap market publish ${fileName}`);
     return;
   }
@@ -206,6 +254,14 @@ function reportPublish(
       log.info(`${chalk.bold(r.slug)} is already up to date at ${chalk.dim(r.version)} (${vis}) — nothing to publish.`);
       break;
   }
+  // Attribution is WRITE-TIME ONLY at the CP: `if (body.vendorId) {…}` with no
+  // else, and no back-fill. Silence here is how every CLI-published package
+  // ended up orphaned from its author — the publish looked like a full success
+  // because, apart from the author page, it was.
+  if (!r.vendorAttached) {
+    log.warn("Published without a publisher profile — attributed to nobody.");
+    log.hint(`Create one (synap vendor create <slug>), then publish again.`);
+  }
 }
 
 /** Turn a CP write failure into a clear, honest message — never swallow the server `detail`; special-case the reserved-slug 403. */
@@ -213,6 +269,18 @@ function reportCpWriteError(err: CpWriteError, slug: string | undefined): void {
   if (err.status === 403 && /reserved/i.test(err.serverMessage) && slug) {
     log.error(`"${slug}" is a reserved Synap bedrock template — publish under a different slug.`);
     log.hint("Reserved: foundation, crm, operations, content-os, enterprise-os, research-base.");
+    return;
+  }
+  // A 401 here is almost always "no CP session", not a broken package — publish
+  // authenticates as the HUMAN account (the pod agent key does not carry CP
+  // credentials, by design). Naming the door beats restating the wall: a bare
+  // "Unauthorized" sends the author back to re-check a file that was fine.
+  if (err.status === 401) {
+    log.error("Publish failed (HTTP 401): not signed in to the Synap account.");
+    log.hint("Run `synap login`, then publish again. Your package file is unchanged.");
+    log.hint(
+      "Publishing authenticates as YOU, not as the pod's agent key — that separation is deliberate: approval and publication stay human.",
+    );
     return;
   }
   log.error(`Publish failed${err.status ? ` (HTTP ${err.status})` : ""}: ${err.serverMessage}`);
@@ -327,6 +395,13 @@ export async function marketPublish(
   let yamlForValidate: WorkspaceYaml;
   let sourceLabel: string;
 
+  // Keys the pod's workspace serialiser has NO projection for. Unconditional
+  // for `--from-workspace` and EMPTY for a hand-written file, because the file
+  // path is not a projection — what the author wrote is what gets published.
+  // See `lib/exporter-coverage.ts` for why this warns about the door rather
+  // than counting a payload it cannot see.
+  let dropWarnings: string[] = [];
+
   if (opts.fromWorkspace) {
     try {
       def = await fetchWorkspaceAsTemplate(opts.fromWorkspace, opts);
@@ -334,6 +409,7 @@ export async function marketPublish(
       renderHubError(e);
       process.exit(1);
     }
+    dropWarnings = exporterDropWarnings();
     yamlForValidate = packageDefinitionToYaml(def);
     sourceLabel = `workspace ${opts.fromWorkspace}`;
   } else {
@@ -364,12 +440,25 @@ export async function marketPublish(
     process.exit(1);
   }
 
+  // 2b. Say what this door does NOT carry — BEFORE the publish, not after, so
+  // the author can still stop. Printed as a warning, never as an error: the
+  // export is not wrong, it is incomplete, and the package still installs.
+  if (dropWarnings.length > 0 && !opts.json) {
+    log.warn(
+      `Serialising a live workspace is a LOSSY projection — these are NOT in the package:`,
+    );
+    for (const w of dropWarnings) log.hint(`• ${w}`);
+    log.hint(
+      "See TEMPLATE-DEV-GUIDE.md — `template ≡ installed` holds publish→install, not workspace→publish.",
+    );
+  }
+
   // 3. Publish.
   const slug = def._meta?.slug;
   try {
     const r = await publishPackage(def, { isPublic });
     if (opts.json) {
-      console.log(JSON.stringify({ ok: true, ...r }, null, 2));
+      console.log(JSON.stringify({ ok: true, warnings: dropWarnings, ...r }, null, 2));
       return;
     }
     reportPublish(r);

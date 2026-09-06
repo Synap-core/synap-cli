@@ -83,9 +83,14 @@ export async function viewCreate(opts: ViewCreateOpts): Promise<void> {
       log.warn(`Queued for approval (proposal: ${String(res.proposalId ?? "")})`);
       if (res.reviewUrl) log.dim(`  Review: ${String(res.reviewUrl)}`);
     } else {
-      log.success(`View created: ${String(res.name ?? name)}`);
-      log.dim(`id: ${String(res.id ?? "")}`);
-      if (res.type) log.dim(`type: ${String(res.type)}`);
+      const created = res.view as Record<string, unknown> | undefined;
+      const id = created?.id ?? res.id;
+      log.success(`View created: ${String(res.name ?? created?.name ?? name)}`);
+      log.dim(`id: ${String(id ?? "")}`);
+      if (res.type ?? created?.type) {
+        log.dim(`type: ${String(res.type ?? created?.type)}`);
+      }
+      if (id) log.dim(`open: ${cfg.podUrl}/open/${id}`);
     }
   } catch (e) {
     log.error("Error: " + (e as Error).message);

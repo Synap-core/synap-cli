@@ -47,7 +47,7 @@ import {
   resolveUserId,
   hubGet,
   hubPost,
-  readActiveSessionId,
+  resolveActiveSessionId,
   type HubConfig,
   renderHubError,
 } from "../lib/hub-client.js";
@@ -84,6 +84,17 @@ export interface ImportOpts {
   /** Skip AI structure; store corpus units (Superwhisper). */
   storeFirst?: boolean;
   withAudio?: boolean;
+  /**
+   * Preserve the ORIGINAL file alongside the entities the AI derived from it.
+   *
+   * Default (absent) is extract-and-discard: the bytes are read for structuring
+   * and then dropped, so an imported PDF produced entities with no `documentId`
+   * and no source document — dogfooding an import of a real PDF found exactly
+   * that. `--with-audio` is NOT this: it is Superwhisper-adapter-specific and
+   * only rides the store-first path. This flag threads `keepRaw` + the bytes
+   * through the SAME `capture.execute` disposition the browser uses.
+   */
+  keepRaw?: boolean;
   limit?: number;
   concurrency?: number;
   resume?: boolean;
@@ -659,13 +670,22 @@ export interface ItemOutcome {
   projectId?: string | null;
   error?: string;
   /**
-   * Why the item degraded (`is_auth_error` | `is_invalid_response` |
-   * `is_empty_result`). The human path already prints this via
-   * `degradedMessage()`; carrying it here keeps `--json` from reporting a
-   * causeless "degraded" — a scripted import has no other way to see WHY it
-   * got zero entities.
+   * Why the item degraded. Either a pod plumbing reason (`is_auth_error` |
+   * `is_invalid_response` | `is_empty_result`) or an Intelligence Service
+   * extraction reason (`vision_provider_not_configured`,
+   * `pdf_scanned_needs_ocr`, `unsupported_type`, …) — the pod no longer
+   * relabels the latter as the former. The human path prints this through
+   * `degradedMessage()`; carrying the raw token here keeps `--json` machine
+   * readable while the human line stays token-free.
    */
   degradedReason?: string;
+  /**
+   * What happened to the ORIGINAL file under `--keep-raw`. Absent when nothing
+   * was kept. Never collapsed to a boolean: `denied` (policy said no) and
+   * `failed` (storage broke) are different problems, and `proposed` means the
+   * blob is still only a pending review.
+   */
+  sourceFile?: "stored" | "proposed" | "denied" | "failed";
   /** Present for the multi-file /import/* batch path. */
   batch?: {
     source: ImportSource;
@@ -737,6 +757,69 @@ export function degradedOutcome(
  */
 export function importExitCode(outcomes: Array<{ status: ItemOutcome["status"] }>): number {
   return outcomes.some((o) => o.status === "failed" || o.status === "degraded") ? 1 : 0;
+}
+
+/**
+ * The `keepRaw` half of a `/capture/execute` body — `{}` unless `--keep-raw`
+ * was passed for a FILE item.
+ *
+ * Three things it must get right, all of which the pod silently tolerates:
+ *  • `content` MUST be base64. `fileToItem` reads text-like files as utf8, and
+ *    the pod does `Buffer.from(content, "base64")` unconditionally — sending
+ *    utf8 there stores a mangled blob with no error.
+ *  • `extractedText` is echoed from the structure response so the stored
+ *    document lands with a real v1 body. Skipping it leaves
+ *    `document_versions.content` empty, which blinds the embedding worker, the
+ *    retrieval body join and Typesense enrichment.
+ *  • A URL item has no bytes to keep, so `keepRaw` is simply not sent — the pod
+ *    would accept `keepRaw: true` with no file and do nothing.
+ */
+export function buildKeepRawPayload(
+  opts: Pick<ImportOpts, "keepRaw">,
+  item: ImportItem,
+  structureRes: Pick<StructureResult, "extraction">
+): Record<string, unknown> {
+  if (!opts.keepRaw || item.kind !== "file") return {};
+  const content =
+    item.file.encoding === "base64"
+      ? item.file.content
+      : Buffer.from(item.file.content, "utf8").toString("base64");
+  const extractedText = structureRes.extraction?.text;
+  return {
+    keepRaw: true,
+    file: {
+      content,
+      mimeType: item.file.mimeType,
+      filename: item.file.filename,
+      ...(extractedText ? { extractedText } : {}),
+      ...(structureRes.extraction?.textTruncated
+        ? { extractedTextTruncated: true }
+        : {}),
+    },
+  };
+}
+
+/**
+ * One line describing what ACTUALLY happened to a kept original. The pod
+ * reports four dispositions and they are not interchangeable: a
+ * governance-parked attach is not a save, and a policy denial is not a storage
+ * failure. Returns null when nothing was kept (so nothing is claimed).
+ */
+export function keepRawLine(res: ExecuteResult): string | null {
+  const sf = res.sourceFile;
+  if (!sf) return null;
+  switch (sf.status) {
+    case "stored":
+      return "original kept and linked to the entity";
+    case "proposed":
+      return `original awaiting review${sf.reviewUrl ? ` — ${sf.reviewUrl}` : ""}`;
+    case "denied":
+      return `original NOT kept — policy declined it${sf.reason ? `: ${sf.reason}` : ""}`;
+    case "failed":
+      return "original NOT kept — the pod could not store it";
+    default:
+      return null;
+  }
 }
 
 async function processItem(
@@ -835,6 +918,10 @@ async function processItem(
     ...(sessionId ? { sessionId } : {}),
     entities: proposals,
     relations: structureRes.relations ?? [],
+    // --keep-raw: preserve the ORIGINAL artifact, not just what the AI read out
+    // of it. Without this the imported bytes are discarded, so the created
+    // entity has no `documentId` and no source document at all.
+    ...buildKeepRawPayload(opts, item, structureRes),
   };
   const executeRes = (await hubPost("/capture/execute", executeBody, cfg, 60_000)) as ExecuteResult;
 
@@ -874,7 +961,11 @@ async function processItem(
     if (outcome.movedToWorkspace) {
       log.dim(`  → filed into workspace ${outcome.movedToWorkspace}`);
     }
+    const kept = keepRawLine(executeRes);
+    if (kept) log.dim(`  ${kept}`);
   }
+
+  const keptStatus = executeRes.sourceFile?.status;
 
   return {
     label: item.label,
@@ -883,6 +974,9 @@ async function processItem(
     relations: relCount,
     workspaceId: finalWorkspaceId,
     projectId: projTarget,
+    // --json parity with the human line above: a scripted import must be able
+    // to tell a kept original from a denied or failed one.
+    ...(keptStatus ? { sourceFile: keptStatus } : {}),
   };
 }
 
@@ -1646,7 +1740,7 @@ export async function importData(inputs: string[], opts: ImportOpts): Promise<vo
     // Resolve routing overrides (id or name) up front so a bad value fails fast.
     const wsOverride = opts.workspace ? await resolveWorkspaceArg(opts.workspace, cfg) : undefined;
     const projOverride = opts.project ? await resolveProjectArg(opts.project, cfg) : undefined;
-    const sessionId = opts.session ? readActiveSessionId() : undefined;
+    const sessionId = opts.session ? resolveActiveSessionId(cfg.podUrl) : undefined;
 
     // Optional multi-home path map (no product defaults — user pairs only).
     let homeMap: ResolvedHomeMapEntry[] = [];
@@ -1678,12 +1772,22 @@ export async function importData(inputs: string[], opts: ImportOpts): Promise<vo
     // Single text file stays on capture structure/execute (same as a lone URL).
     const batchFileItems: Array<ImportItem & { kind: "file" }> = [];
     const captureItems: ImportItem[] = [];
+    // `--keep-raw` is a PER-FILE disposition and the batch door
+    // (/import/analyze → /import/apply) has no `keepRaw` half at all. Routing a
+    // kept-raw text file through it would accept the flag and silently discard
+    // every original — an inert flag rendered as a live one. Send those items
+    // down the per-item capture path instead, which is where `keepRaw` exists.
     for (const item of items) {
-      if (isBatchTextItem(item)) {
+      if (isBatchTextItem(item) && !opts.keepRaw) {
         batchFileItems.push(item);
       } else {
         captureItems.push(item);
       }
+    }
+    if (opts.keepRaw && !opts.json && captureItems.length > 1) {
+      log.dim(
+        `--keep-raw: importing ${captureItems.length} items one by one (the batch door cannot keep originals).`
+      );
     }
 
     // Global batch cap: multi-dir / multi-file inputs can exceed the sync max

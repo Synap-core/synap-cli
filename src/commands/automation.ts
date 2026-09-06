@@ -8,7 +8,7 @@ import chalk from "chalk";
 import ora from "ora";
 import prompts from "prompts";
 import { readFileSync, mkdirSync, writeFileSync, existsSync } from "fs";
-import { resolveHubConfig, resolveUserId, hubGet, hubPost } from "../lib/hub-client.js";
+import { resolveHubConfig, resolveUserId, hubGet, hubPost, renderHubError } from "../lib/hub-client.js";
 import { unwrapList } from "../lib/unwrapList.js";
 import { log } from "../utils/logger.js";
 
@@ -114,6 +114,38 @@ async function trpcMutation(
   if (input.userId === undefined) input.userId = await resolveUserId(cfg);
   const res = await hubPost(`/trpc/${procedure}`, { json: input }, cfg);
   return extractResult(res);
+}
+
+/**
+ * `automation list` / `automation create` go through the Hub-REST automations
+ * door (`/api/hub/automations`, `/api/hub/automations/create`) rather than the
+ * legacy `/trpc/automations.*` transport used by trpcQuery/trpcMutation above.
+ * The legacy tRPC procedures are `protectedProcedure` (session-cookie shaped)
+ * and trip an identity-remap bug for API-key-authenticated CLI/agent callers,
+ * producing a bare 403. The Hub-REST routes call the SAME underlying
+ * automations logic through `hubAutomationsRouter` (`scopedProcedure`,
+ * API-key-native, no remap) — this is the door `automation describe/enable/
+ * disable/delete` should also eventually use, but they are out of scope here
+ * (still on the legacy door, same latent 403).
+ */
+async function hubListAutomations(
+  input: { workspaceId?: string; status?: string },
+  cfg: HubCfg
+): Promise<unknown> {
+  const userId = await resolveUserId(cfg);
+  return hubGet(
+    "/automations",
+    { userId, workspaceId: input.workspaceId, status: input.status },
+    cfg
+  );
+}
+
+async function hubCreateAutomation(
+  payload: Record<string, unknown>,
+  cfg: HubCfg
+): Promise<unknown> {
+  const userId = await resolveUserId(cfg);
+  return hubPost("/automations/create", { ...payload, userId }, cfg);
 }
 
 function parseYamlOrJson(filePath: string): Record<string, unknown> {
@@ -266,17 +298,14 @@ export async function automationList(opts: ListOpts): Promise<void> {
   try {
     cfg = await resolveHubConfig();
   } catch (err) {
-    log.error((err as Error).message);
+    renderHubError(err);
     process.exit(1);
   }
 
   const workspaceId = opts.workspace ?? cfg.workspaceId;
 
   if (opts.json) {
-    const input: Record<string, unknown> = {};
-    if (workspaceId) input.workspaceId = workspaceId;
-    if (opts.status) input.status = opts.status;
-    const data = await trpcQuery("automations.listAutomations", input, cfg);
+    const data = await hubListAutomations({ workspaceId, status: opts.status }, cfg);
     console.log(JSON.stringify(data, null, 2));
     return;
   }
@@ -284,15 +313,12 @@ export async function automationList(opts: ListOpts): Promise<void> {
   const spinner = ora({ text: "Fetching automations…", color: "cyan" }).start();
   let automations: Automation[];
   try {
-    const input: Record<string, unknown> = {};
-    if (workspaceId) input.workspaceId = workspaceId;
-    if (opts.status) input.status = opts.status;
-    const data = await trpcQuery("automations.listAutomations", input, cfg);
+    const data = await hubListAutomations({ workspaceId, status: opts.status }, cfg);
     automations = unwrapList<Automation>(data, ["automations"]);
     spinner.stop();
   } catch (err) {
     spinner.fail(chalk.red("Failed to fetch automations"));
-    log.error((err as Error).message);
+    renderHubError(err);
     process.exit(1);
   }
 
@@ -326,11 +352,18 @@ export async function automationDescribe(id: string, opts: DescribeOpts): Promis
   try {
     cfg = await resolveHubConfig();
   } catch (err) {
-    log.error((err as Error).message);
+    renderHubError(err);
     process.exit(1);
   }
 
-  const workspaceId = opts.workspace ?? cfg.workspaceId;
+  // An id is already unambiguous — do NOT default to the ambient active-lens
+  // workspace (cfg.workspaceId) here. `automations.get` already treats a
+  // missing workspaceId as "search every workspace this caller can see" (it
+  // only NARROWS when one is given); defaulting to the lens would silently
+  // narrow away rows that live in a different workspace than whatever the
+  // user last `synap use`'d, producing a misleading 404 for a row they can
+  // actually read. Only narrow when the user explicitly asks with --workspace.
+  const workspaceId = opts.workspace;
 
   const input: Record<string, unknown> = { id };
   if (workspaceId) input.workspaceId = workspaceId;
@@ -349,7 +382,14 @@ export async function automationDescribe(id: string, opts: DescribeOpts): Promis
     spinner.stop();
   } catch (err) {
     spinner.fail(chalk.red("Failed to fetch automation"));
-    log.error((err as Error).message);
+    const msg = (err as Error).message;
+    if (/not found/i.test(msg) && workspaceId) {
+      log.error(`Automation not found in workspace ${workspaceId} — try \`synap automation describe ${id}\` without --workspace to search every workspace you can see.`);
+    } else if (/not found/i.test(msg)) {
+      log.error(`Automation not found in any workspace you can see. Double-check the id, or pass --workspace <id> if you know which workspace it lives in.`);
+    } else {
+      log.error(msg);
+    }
     process.exit(1);
   }
 
@@ -405,7 +445,7 @@ export async function automationCreate(opts: CreateOpts): Promise<void> {
   try {
     cfg = await resolveHubConfig();
   } catch (err) {
-    log.error((err as Error).message);
+    renderHubError(err);
     process.exit(1);
   }
 
@@ -421,7 +461,7 @@ export async function automationCreate(opts: CreateOpts): Promise<void> {
       fileData = parseYamlOrJson(opts.from);
     } catch (err) {
       spinner.fail(chalk.red("Failed to read file"));
-      log.error((err as Error).message);
+      renderHubError(err);
       process.exit(1);
     }
 
@@ -465,7 +505,7 @@ export async function automationCreate(opts: CreateOpts): Promise<void> {
       ({ triggerType, triggerConfig } = parseTriggerSpec(opts.trigger));
     } catch (err) {
       spinner.fail(chalk.red("Invalid --trigger spec"));
-      log.error((err as Error).message);
+      renderHubError(err);
       process.exit(1);
     }
 
@@ -479,7 +519,7 @@ export async function automationCreate(opts: CreateOpts): Promise<void> {
         triggerConfig.filters = parseFilters(opts.filter);
       } catch (err) {
         spinner.fail(chalk.red("Invalid --filter value"));
-        log.error((err as Error).message);
+        renderHubError(err);
         process.exit(1);
       }
     }
@@ -512,14 +552,14 @@ export async function automationCreate(opts: CreateOpts): Promise<void> {
 
   let result: Automation;
   try {
-    const data = await trpcMutation("automations.createAutomation", payload, cfg);
+    const data = await hubCreateAutomation(payload, cfg);
     // Response shape may be: { automation: {...} } | { id, name, ... } | raw Automation
     const raw = data as Record<string, unknown>;
     const inner = (raw.automation ?? raw) as Record<string, unknown>;
     result = inner as unknown as Automation;
   } catch (err) {
     spinner.fail(chalk.red("Failed to create automation"));
-    log.error((err as Error).message);
+    renderHubError(err);
     process.exit(1);
   }
 
@@ -543,7 +583,7 @@ export async function automationEnable(id: string, opts: EnableOpts): Promise<vo
   try {
     cfg = await resolveHubConfig();
   } catch (err) {
-    log.error((err as Error).message);
+    renderHubError(err);
     process.exit(1);
   }
 
@@ -559,7 +599,7 @@ export async function automationEnable(id: string, opts: EnableOpts): Promise<vo
     result = data as Automation;
   } catch (err) {
     spinner.fail(chalk.red("Failed to activate automation"));
-    log.error((err as Error).message);
+    renderHubError(err);
     process.exit(1);
   }
 
@@ -578,7 +618,7 @@ export async function automationDisable(id: string, opts: DisableOpts): Promise<
   try {
     cfg = await resolveHubConfig();
   } catch (err) {
-    log.error((err as Error).message);
+    renderHubError(err);
     process.exit(1);
   }
 
@@ -594,7 +634,7 @@ export async function automationDisable(id: string, opts: DisableOpts): Promise<
     result = data as Automation;
   } catch (err) {
     spinner.fail(chalk.red("Failed to pause automation"));
-    log.error((err as Error).message);
+    renderHubError(err);
     process.exit(1);
   }
 
@@ -614,11 +654,16 @@ export async function automationDelete(id: string, opts: DeleteOpts): Promise<vo
   try {
     cfg = await resolveHubConfig();
   } catch (err) {
-    log.error((err as Error).message);
+    renderHubError(err);
     process.exit(1);
   }
 
-  const workspaceId = opts.workspace ?? cfg.workspaceId;
+  // Same id-is-unambiguous rule as `describe`: don't default to the ambient
+  // lens workspace, it can silently narrow away a row that lives elsewhere.
+  // (activate/pause/delete themselves ignore workspaceId server-side — they
+  // load by id and gate on the row's OWN workspace — so this only affects
+  // the name lookup below.)
+  const workspaceId = opts.workspace;
 
   // Fetch name for confirmation prompt
   let automationName = id;
@@ -654,7 +699,7 @@ export async function automationDelete(id: string, opts: DeleteOpts): Promise<vo
     await trpcMutation("automations.deleteAutomation", input, cfg);
   } catch (err) {
     spinner.fail(chalk.red("Failed to delete automation"));
-    log.error((err as Error).message);
+    renderHubError(err);
     process.exit(1);
   }
 
@@ -673,7 +718,7 @@ export async function automationSchema(opts: SchemaOpts): Promise<void> {
   try {
     cfg = await resolveHubConfig();
   } catch (err) {
-    log.error((err as Error).message);
+    renderHubError(err);
     process.exit(1);
   }
 
@@ -686,7 +731,7 @@ export async function automationSchema(opts: SchemaOpts): Promise<void> {
     spinner?.stop();
   } catch (err) {
     spinner?.fail(chalk.red("Failed to fetch schema"));
-    log.error((err as Error).message);
+    renderHubError(err);
     process.exit(1);
   }
 

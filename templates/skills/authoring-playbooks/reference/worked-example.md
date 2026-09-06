@@ -27,6 +27,7 @@ This is a `playbooks[]` entry inside a `.capability.json` (NOT a standalone file
     {
       "key": "scope",
       "name": "Scope",
+      "category": "started",
       "description": "Understand the company and the problem worth solving.",
       "goal": "Produce a one-paragraph problem statement grounded in the company context.",
       "grants": [{ "kind": "skill", "id": "client-brief" }],
@@ -36,6 +37,7 @@ This is a `playbooks[]` entry inside a `.capability.json` (NOT a standalone file
     {
       "key": "abstract",
       "name": "Abstract",
+      "category": "started",
       "description": "Turn the problem into a buildable specification.",
       "goal": "Write a spec: scope, constraints, success criteria, and the smallest first deliverable.",
       "expectedOutputs": [{ "kind": "document", "label": "Buildable spec" }],
@@ -44,6 +46,7 @@ This is a `playbooks[]` entry inside a `.capability.json` (NOT a standalone file
     {
       "key": "build",
       "name": "Build",
+      "category": "started",
       "description": "Ship the first deliverable against the spec.",
       "goal": "Produce a working first build and link it to the company.",
       "grants": [{ "kind": "tool", "id": "gdrive" }],

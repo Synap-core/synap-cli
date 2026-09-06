@@ -1,0 +1,225 @@
+name: Publish CLI
+
+# `@synap-core/cli` is the ONE artifact an outsider installs, and until now it
+# was the only publishable package in the org with NO CI door — `synap-cli/`
+# had no `.github/` directory at all. Every sibling has one
+# (synap-backend `publish-types.yml`, synap-app `publish-packages.yml`,
+# `publish-official-templates.yml`), and each of those headers records the same
+# scar: hand-publishing from a laptop is the proven root cause of broken
+# artifacts. The CLI proved it too. Verified against the live registry on
+# 2026-09-05:
+#
+#   npm view @synap-core/cli@1.11.0 dependencies
+#     → '@synap-core/workspace-templates': 'workspace:*'
+#
+# An unbundled workspace-protocol range in a published tarball is
+# EUNSUPPORTEDPROTOCOL for every consumer. npm said 1.11.0 while the repo said
+# 1.12.0, and nothing had ever checked the artifact. `scripts/verify-artifact.mjs`
+# is that check; this workflow is the door that runs it.
+#
+# ── THE SIBLING CHECKOUT IS NOT A CONVENIENCE ────────────────────────────────
+# Publishing this package has ALWAYS required `../synap-backend`, for two
+# independent reasons:
+#   1. `prepack` vendors the unpublished `@synap/hub-rest-client` out of
+#      `../synap-backend/packages/hub-rest-client` into the tarball
+#      (`bundledDependencies`). That package is 404 on npm.
+#   2. `scripts/sync-skills.sh` copies `../synap-backend/skills` into the
+#      tarball, and hard-fails if the directory is absent.
+# So this workflow checks out BOTH repos side by side and runs from `cli/`,
+# reproducing the local dev topology those two scripts already assume. It does
+# not invent a new one.
+#
+# ⚠️ OPEN DECISION, deliberately NOT guessed here — see the report.
+# The clean end state is to PUBLISH `@synap/hub-rest-client` (it is
+# zero-dependency, non-private, already `publishConfig.access: public`, v1.0.9)
+# and depend on it by semver. That deletes `prepack`/`postpack`,
+# `bundledDependencies`, and half of this workflow. It is a live write to the
+# npm registry from a repo this change does not own, so it is surfaced rather
+# than performed. Everything below works TODAY without it.
+
+on:
+  # `workflow_dispatch` is the ONLY trigger — a CLI release is a decision, not a
+  # side effect of merging.
+  #
+  # This file previously carried that sentence directly above a
+  # `push: branches: [main], paths: [src/**, …]` trigger, i.e. the comment
+  # asserted the opposite of the config, and the config won: every merge that
+  # touched `src/` published a patch to npm. That is exactly the incident the
+  # sibling workflows' headers record — an accidental publish of an artifact
+  # nobody decided to release. The `push:` trigger is deleted rather than the
+  # sentence, because the sentence is the one that reflects how this package is
+  # actually released: it is versioned by this workflow (`npm version patch`),
+  # so an automatic trigger would also mean the version number is chosen by
+  # whoever merged, not by whoever released.
+  workflow_dispatch:
+
+# `contents: write` is REQUIRED, not decorative: the "Commit the version bump"
+# step pushes with GITHUB_TOKEN, and an org (or repo) whose default workflow
+# permission is read-only makes that push fail. Under the old ordering that
+# failure was silent-but-fatal — see the step's own comment.
+permissions:
+  contents: write
+
+# One publish at a time. Two concurrent runs would each `npm version patch`
+# from the same base, race on the push, and the loser would try to publish a
+# version the winner already put on the registry (EPUBLISHCONFLICT).
+# `cancel-in-progress: false` on purpose: a run that has already published must
+# be allowed to finish its post-publish verification.
+concurrency:
+  group: publish-cli
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout synap-cli
+        uses: actions/checkout@v4
+        with:
+          path: cli
+          # `actions/checkout` defaults to a DETACHED HEAD at the triggering
+          # SHA. Committing there works, but `git push` with no refspec fails
+          # ("HEAD does not match any"), which is one of the three ways the old
+          # publish-then-push ordering could leave npm ahead of the repo. Naming
+          # the branch puts us on it, so the final `git push` is an ordinary
+          # fast-forward — and a non-fast-forward (someone merged meanwhile)
+          # fails the run BEFORE anything is published.
+          ref: ${{ github.ref_name }}
+
+      # `actions/checkout` cannot write outside $GITHUB_WORKSPACE, so the
+      # sibling lands NEXT TO `cli/` rather than at a literal `../`. Running
+      # every step from `cli/` makes `../synap-backend` resolve exactly as it
+      # does on a developer's machine.
+      - name: Checkout synap-backend (sibling — hub-rest-client + skills)
+        uses: actions/checkout@v4
+        with:
+          repository: Synap-core/synap-backend
+          # A PAT with read access to the sibling repo. `GITHUB_TOKEN` is scoped
+          # to THIS repository only and cannot read another one, so a missing
+          # secret fails here with a clear checkout error rather than producing
+          # a tarball that is silently missing its bundled client and its
+          # skills.
+          token: ${{ secrets.CROSS_REPO_TOKEN }}
+          path: synap-backend
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: "https://registry.npmjs.org"
+
+      # pnpm is needed ONLY to build the sibling's hub-rest-client through the
+      # backend's own workspace door. The CLI itself is pure npm (its
+      # `prepublishOnly` used to shell out to `pnpm` for no reason; it now runs
+      # `npm run`, so no publish step depends on pnpm being present).
+      #
+      # An explicit `version:` is correct HERE and would be wrong in
+      # publish-types.yml: that repo pins `packageManager: pnpm@10.28.0` and
+      # action-setup refuses to be told twice ("Multiple versions of pnpm
+      # specified"), which silently broke that pipeline for two days. We are
+      # setting up pnpm for the CHECKED-OUT SIBLING, whose package.json is read
+      # from its own directory — so the pin is taken from there.
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: synap-backend/package.json
+
+      - name: Build @synap/hub-rest-client (unpublished — vendored by prepack)
+        working-directory: synap-backend
+        run: |
+          pnpm install --frozen-lockfile --filter @synap/hub-rest-client...
+          pnpm --filter @synap/hub-rest-client build
+
+      # `npm install`, not `npm ci`: the committed lockfile is older than the
+      # manifest (it still records the pre-fix `@synap-core/workspace-templates`
+      # range), and `npm ci` hard-fails on that mismatch. The lockfile it
+      # refreshes here is committed by the "Commit the version bump" step
+      # below, after which this could be tightened to `npm ci`.
+      - name: Install CLI dependencies
+        working-directory: cli
+        run: npm install --no-audit --no-fund
+
+      - name: Typecheck
+        working-directory: cli
+        run: npx tsc --noEmit
+
+      - name: Test
+        working-directory: cli
+        run: npx vitest run
+
+      - name: Build
+        working-directory: cli
+        run: npm run build
+
+      - name: Bump patch version
+        working-directory: cli
+        run: npm version patch --no-git-tag-version
+
+      # ── ORDERING IS THE WHOLE POINT ──────────────────────────────────────────
+      # The bump is committed and pushed BEFORE `npm publish`, never after.
+      #
+      # The other order wedges the pipeline permanently. `npm version patch`
+      # runs, `npm publish` puts 1.12.1 on the registry, and then the push
+      # fails — read-only GITHUB_TOKEN, a detached HEAD, or a merge that landed
+      # meanwhile. npm now says 1.12.1 and the repo still says 1.12.0, so the
+      # NEXT run bumps to 1.12.1 again and dies on EPUBLISHCONFLICT, and so
+      # does every run after it, until a human hand-edits the version. That is
+      # how this package sat at 1.11.0 while the repo claimed 1.12.0.
+      #
+      # Pushing first inverts the failure into the harmless direction: if the
+      # push fails, the job stops here and NOTHING was published. If the push
+      # succeeds and a later step fails, the repo is one patch ahead of the
+      # registry — the next release simply skips a version number, which costs
+      # nothing and wedges nothing.
+      - name: Commit the version bump (BEFORE publish — see above)
+        working-directory: cli
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add package.json package-lock.json
+          # No `|| true`: `npm version patch` always rewrites package.json, so
+          # an empty commit here means the bump did not happen and the run must
+          # not continue to publish.
+          git commit -m "chore: publish @synap-core/cli [skip ci]"
+          git push
+
+      # PRE-publish gate: pack this tree with `npm pack` (the same packer
+      # `npm publish` uses — `pnpm pack` would rewrite the very protocols we are
+      # hunting and report a clean bill of health for a broken artifact) and
+      # fail on any dependency range a consumer cannot resolve. This is the step
+      # that would have stopped 1.11.0.
+      - name: Verify the artifact BEFORE publishing
+        working-directory: cli
+        run: node scripts/verify-artifact.mjs --local
+
+      - name: Publish to npm
+        working-directory: cli
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      # POST-publish ground truth: re-download what the registry now actually
+      # serves. A local pack proves what your packer produced; only this proves
+      # what consumers get.
+      - name: Verify the PUBLISHED artifact
+        working-directory: cli
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          for i in 1 2 3 4 5; do
+            node scripts/verify-artifact.mjs --registry "@synap-core/cli@$VERSION" && exit 0
+            echo "registry not propagated yet (attempt $i) — retrying in 10s"
+            sleep 10
+          done
+          exit 1
+
+      # The end-to-end check neither pack-inspection can make: does
+      # `npm i -g @synap-core/cli` actually work, and does the installed binary
+      # run? Both published-artifact defects this pipeline exists for
+      # (an unresolvable range; a bundled dependency that was declared but not
+      # shipped) surface here as a failed install or a failed `--version`.
+      - name: Smoke-test a clean global install
+        run: |
+          VERSION=$(node -p "require('./cli/package.json').version")
+          mkdir -p "$RUNNER_TEMP/smoke" && cd "$RUNNER_TEMP/smoke"
+          npm install --no-audit --no-fund "@synap-core/cli@$VERSION"
+          ./node_modules/.bin/synap --version
+          ./node_modules/.bin/synap market scaffold smoke-probe --kind capability
+          ./node_modules/.bin/synap market validate smoke-probe.capability.json

@@ -22,18 +22,36 @@
         }
       },
       {
-        "id": "extract",
+        "id": "content",
         "type": "transform",
         "position": { "x": 0, "y": 120 },
         "data": {
-          "label": "Extract URLs",
-          "expression": "{{trigger.payload.data.content}} | url_extract"
+          "label": "Trim message text",
+          "expression": "{{trigger.payload.data.content}} | trim"
+        }
+      },
+      {
+        "id": "title-src",
+        "type": "transform",
+        "position": { "x": 0, "y": 240 },
+        "data": {
+          "label": "Human text (title source)",
+          "expression": "{{trigger.payload.data.messagePreview}} | trim"
+        }
+      },
+      {
+        "id": "extract",
+        "type": "transform",
+        "position": { "x": 0, "y": 360 },
+        "data": {
+          "label": "Extract URLs · drop bare-link noise",
+          "expression": "{{trigger.payload.data.content}} | url_extract | unique | filter:item !== steps.content.output.result | slice:5"
         }
       },
       {
         "id": "url-loop",
         "type": "loop",
-        "position": { "x": 0, "y": 240 },
+        "position": { "x": 0, "y": 480 },
         "data": {
           "label": "For each URL",
           "iteratorExpression": "steps.extract.output.result",
@@ -43,28 +61,72 @@
       {
         "id": "create-bookmark",
         "type": "output",
-        "position": { "x": 0, "y": 360 },
+        "position": { "x": 0, "y": 600 },
         "data": {
           "label": "Create bookmark",
           "outputType": "entity_create",
           "config": {
             "profileSlug": "bookmark",
-            "title": "{{loop.item}}",
+            "title": "{{steps.title-src.output.result}}",
             "dedupeBy": "url",
+            "body": "{{steps.content.output.result}}",
             "properties": {
               "url": "{{loop.item}}",
+              "sourceChannelId": "{{trigger.payload.data.channelId}}",
+              "sourceThreadId": "{{trigger.payload.data.threadId}}",
               "sourceMessageId": "{{trigger.payload.data.messageId}}",
-              "sourceChannelId": "{{trigger.payload.data.threadId}}"
+              "sourceProvider": "{{trigger.payload.data.provider}}",
+              "sharedBy": "{{trigger.payload.data.participantName}}"
             }
+          }
+        }
+      },
+      {
+        "id": "has-bookmark-id",
+        "type": "condition",
+        "position": { "x": 0, "y": 720 },
+        "data": {
+          "label": "Bookmark row exists?",
+          "expression": "steps.create-bookmark.output.entityId !== ''"
+        }
+      },
+      {
+        "id": "has-context-entity",
+        "type": "condition",
+        "position": { "x": 0, "y": 840 },
+        "data": {
+          "label": "Channel bound to an entity?",
+          "expression": "trigger.payload.data.entityId !== ''"
+        }
+      },
+      {
+        "id": "link-context",
+        "type": "output",
+        "position": { "x": 0, "y": 960 },
+        "data": {
+          "label": "Link bookmark → channel's entity",
+          "outputType": "relation_create",
+          "config": {
+            "fromEntityId": "{{steps.create-bookmark.output.entityId}}",
+            "toEntityId": "{{trigger.payload.data.entityId}}",
+            "relationType": "references"
           }
         }
       }
     ],
     "edges": [
-      { "id": "e1", "source": "trigger", "target": "extract" },
-      { "id": "e2", "source": "extract", "target": "url-loop" },
-      { "id": "e3", "source": "url-loop", "target": "create-bookmark" }
+      { "id": "e1", "source": "trigger", "target": "content" },
+      { "id": "e2", "source": "content", "target": "title-src" },
+      { "id": "e3", "source": "title-src", "target": "extract" },
+      { "id": "e4", "source": "extract", "target": "url-loop" },
+      { "id": "e5", "source": "url-loop", "target": "create-bookmark" },
+      { "id": "e6", "source": "create-bookmark", "target": "has-bookmark-id" },
+      { "id": "e7", "source": "has-bookmark-id", "target": "has-context-entity", "sourceHandle": "yes" },
+      { "id": "e8", "source": "has-context-entity", "target": "link-context", "sourceHandle": "yes" }
     ]
   },
-  "metadata": { "source": "bridge-template" }
+  "metadata": {
+    "source": "bridge-template",
+    "note": "Phase 1 is DETERMINISTIC — no AI. It keeps the context the trigger already hands it: data.channelId (the INTERNAL Synap channel UUID, not the Discord snowflake, which is kept separately as sourceThreadId), data.content (as the bookmark body) and data.entityId (the channel's bound entity, linked with a `references` relation). Title = the message's own 120-char preview; when the message is nothing but a link the item is dropped by the noise filter rather than named, so the title is never invented. Noise filter: `filter:item !== steps.content.output.result` keeps only links that arrived WITH human text — a Tenor/giphy GIF drop or a bare Google Photos paste is exactly a message whose whole trimmed text IS the URL. A host denylist is NOT expressible: the condition grammar (condition-eval.ts) has no substring/regex operator and `contains` is exact set intersection, so any 'tenor.com'-style match would silently never fire."
+  }
 }

@@ -1,15 +1,15 @@
 #!/usr/bin/env node
 /**
- * @synap/cli — Connect AI agents to your Synap data pod
+ * @synap-core/cli — Connect AI agents to your Synap data pod
  *
  * Usage:
- *   npx @synap/cli init              Full setup: detect, harden, connect, install
- *   npx @synap/cli connect           Connect an AI surface to a Synap pod
- *   npx @synap/cli status            Show pod health and API status
- *   npx @synap/cli update            Update skill + check for CLI updates
+ *   npx @synap-core/cli init              Full setup: detect, harden, connect, install
+ *   npx @synap-core/cli connect           Connect an AI surface to a Synap pod
+ *   npx @synap-core/cli status            Show pod health and API status
+ *   npx @synap-core/cli update            Update skill + check for CLI updates
  *
  * Or install globally:
- *   npm i -g @synap/cli
+ *   npm i -g @synap-core/cli
  *   synap init
  */
 
@@ -263,65 +263,9 @@ program
 program
   .command("update")
   .description("Update synap skill and check for CLI updates")
-  .option("--server", "Also trigger a Dokploy redeploy of the control-plane")
-  .option("--all", "Trigger a Dokploy redeploy of all registered services")
-  .action(async (opts: { server?: boolean; all?: boolean }) => {
+  .action(async () => {
     const { update } = await import("./commands/update.js");
-    await update(opts);
-  });
-
-// ─── infra ────────────────────────────────────────────────────────────────────
-
-const infra = program
-  .command("infra")
-  .description("Manage servers and deployments via Dokploy");
-
-infra
-  .command("status", { isDefault: true })
-  .description("Overview: all servers and services status")
-  .action(async () => {
-    const { infraStatus } = await import("./commands/infra.js");
-    await infraStatus();
-  });
-
-infra
-  .command("deploy <app>")
-  .description("Trigger a redeploy for a named service")
-  .action(async (app: string) => {
-    const { infraDeploy } = await import("./commands/infra.js");
-    await infraDeploy(app);
-  });
-
-infra
-  .command("logs <app>")
-  .description("Tail logs for a service")
-  .option("-n, --lines <n>", "Number of log lines", "100")
-  .option("-f, --follow", "Follow log output")
-  .action(async (app: string, opts: { lines?: string; follow?: boolean }) => {
-    const { infraLogs } = await import("./commands/infra.js");
-    await infraLogs(app, { lines: opts.lines ? parseInt(opts.lines, 10) : 100, follow: opts.follow });
-  });
-
-infra
-  .command("sync")
-  .description("Pull Dokploy state into Synap entities (server + deployment profiles)")
-  .option("--pod-url <url>", "Synap pod URL", process.env.SYNAP_POD_URL)
-  .option("--api-key <key>", "Hub Protocol API key", process.env.SYNAP_API_KEY)
-  .action(async (opts: { podUrl?: string; apiKey?: string }) => {
-    if (!opts.podUrl || !opts.apiKey) {
-      console.error("  --pod-url and --api-key are required (or set SYNAP_POD_URL / SYNAP_API_KEY)");
-      process.exit(1);
-    }
-    const { infraSync } = await import("./commands/infra.js");
-    await infraSync(opts.podUrl, opts.apiKey);
-  });
-
-infra
-  .command("open")
-  .description("Open the Dokploy dashboard in your browser")
-  .action(async () => {
-    const { infraOpen } = await import("./commands/infra.js");
-    infraOpen();
+    await update();
   });
 
 program
@@ -734,6 +678,10 @@ program
     "--store-first",
     "Skip AI structure; store units as pod-wide notes (+ optional audio)"
   )
+  .option(
+    "--keep-raw",
+    "Keep the original file and link it to the created entity (default: extract, then discard the bytes)"
+  )
   .option("--with-audio", "Upload WAV provenance (default on for --source superwhisper --store-first)")
   .option("--no-with-audio", "Transcript-only (no WAV upload)")
   .option("--limit <n>", "Max Superwhisper units to process", (v) => parseInt(v, 10))
@@ -1076,6 +1024,21 @@ proposals
     await rejectProposal(id, opts);
   });
 
+proposals
+  .command("await <id>")
+  .description(
+    "Block until a proposal is decided. Exit 0 approved · 1 rejected/expired/withdrawn · 2 timeout"
+  )
+  .option("--timeout <duration>", "Give up after this long (e.g. 30m, 2h)", "30m")
+  .option("--interval <duration>", "Delay between checks (e.g. 10s)", "10s")
+  .option("--json", "Output the final status as JSON")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (id: string, opts) => {
+    const { awaitProposalCommand } = await import("./commands/proposals-await.js");
+    await awaitProposalCommand(id, opts);
+  });
+
 // ─── session ──────────────────────────────────────────────────────────────────
 // Focus sessions — goal-bound work rooms tracked on the pod.
 // AI agents: use start_session to begin, update_session to report progress,
@@ -1091,6 +1054,7 @@ session
   .description("Start a new focus session and return its ID")
   .requiredOption("--goal <text>", "What this session is working toward")
   .option("--workspace <id>", "Workspace that owns the session")
+  .option("--project <id>", "Project that owns the session (defaults to the active project lens; the pod accepts a workspace OR a project)")
   .option("--task-id <id>", "Link session to an existing task entity")
   .option("--template <id>", "Start from a playbook (seeds currentStage from its stages)")
   .option("--parent <id>", "Push from another session — records session --spawned_from--> session (the parent stays open)")
@@ -1131,9 +1095,14 @@ session
 
 session
   .command("update <id>")
-  .description("Update progress or status of a focus session")
-  .requiredOption("--workspace <id>", "Workspace that owns the session")
-  .option("--progress <0-100>", "Progress percentage")
+  .description(
+    "Update a focus session's progress, status, stage or goal"
+  )
+  // NOT required: `workspaceId` is `.optional()` on the pod's UpdateBodySchema
+  // and the session is addressed by <id>. Demanding it made an already-attached
+  // or project-scoped session un-updatable without restating a known lens.
+  .option("--workspace <id>", "Workspace that owns the session (optional; inferred from the active lens)")
+  .option("--progress <0-100>", "Progress percentage — a whole number 0-100, not prose")
   .option("--status <status>", "New status: active | paused")
   .option("--stage <key>", "Advance the session's current stage (playbook stage key)")
   .option("--goal <text>", "Revised goal")
@@ -1147,9 +1116,18 @@ session
 
 session
   .command("close <id>")
-  .description("Complete a focus session (proposal pack) and optionally attach a recap")
+  .description("End a focus session (proposal pack) and optionally attach a recap")
   .option("--workspace <id>", "Workspace hint (optional; not required for complete)")
   .option("--recap <text>", "Short summary of what was accomplished (maps to summary)")
+  // Deliberately NOT validated here, unlike --progress. A bad --progress
+  // serialized to NaN and came back as an unreadable zod echo; a bad --as comes
+  // back naming the three legal values, because the pod's enum derives from
+  // TERMINAL_SESSION_STATUSES. Re-listing them here would be a second copy of
+  // an enum this CLI cannot import — the hand-mirrored-vocabulary defect.
+  .option(
+    "--as <status>",
+    "How it ended: closed (default, finished) | cancelled (abandoned) | failed (could not complete)"
+  )
   .option("--json", "Output full pack (or close result) as JSON")
   .option("--pod-url <url>", "Pod URL override")
   .option("--api-key <key>", "API key override")
@@ -1873,14 +1851,13 @@ program
   .description("Open in the Synap desktop app. Use: open <kind> <id> or open <id> (auto-resolves type)")
   .action(async (kindOrId: string, id?: string) => {
     if (id) {
-      // open entity|view|cell|document|proposal <id>
-      const validKinds = ["entity", "view", "cell", "document", "proposal"];
-      if (!validKinds.includes(kindOrId)) {
-        console.error(`Unknown kind: "${kindOrId}". Use: ${validKinds.join(" | ")}`);
-        process.exit(1);
-      }
+      // open <kind> <id> — the browser's object-nav.ts is the one route
+      // table for openable kinds (21 and growing); the CLI doesn't
+      // duplicate it here. An unroutable kind still opens the app and
+      // is reported via the printed deep link (objectNavTarget decides
+      // routability on the other side).
       const { openInBrowser } = await import("./commands/open.js");
-      await openInBrowser({ kind: kindOrId as "entity" | "view" | "cell" | "document" | "proposal", id });
+      await openInBrowser({ kind: kindOrId, id });
     } else {
       // open <id> — resolve type automatically
       const { resolveAndOpen } = await import("./commands/open.js");
@@ -1969,18 +1946,40 @@ cell
   .option("--type-key <key>", "Explicit typeKey (default: generated:<slug>)")
   .option(
     "--deps <json>",
-    'Dependency map JSON, e.g. \'{"recharts":"2.12.0"}\' (sent in payload; backend support pending)'
+    'Dependency map JSON, e.g. \'{"recharts":"2.12.0"}\''
   )
-  .option("--workspace <id>", "Workspace to scope the cell to (omit for pod-wide)")
+  .option(
+    "--view-types <list>",
+    'Comma-separated view types this cell can render as a VIEW RENDERER, e.g. "list,table,kanban". Omit to leave an existing affinity untouched; pass "" to clear it'
+  )
+  .option(
+    "--content-kind <kind>",
+    "What this cell renders — entity-detail | entity-card | entity-profile | collection | widget (default: widget, which is placeable but never offered as a profile renderer)"
+  )
+  // NOT "omit for pod-wide": `cell.ts` resolves `opts.workspace ?? cfg.workspaceId`,
+  // and `cfg.workspaceId` is the resolved lens (session › directory › env ›
+  // profile default). Omitting therefore scopes the cell to whatever workspace
+  // your lens currently points at — which is pod-wide ONLY when nothing resolves.
+  // Verified 2026-09-05: run from a directory with no `.synap/lens.json` and the
+  // cell silently lands in the pod profile's default workspace.
+  .option(
+    "--workspace <id>",
+    "Workspace to scope the cell to (default: your active workspace lens — run `synap lens` to see it)"
+  )
   .option("--description <text>", "Short description")
   .option("--open", "Open in the Synap desktop app after define")
   .option("--json", "JSON output")
   .option("--pod-url <url>", "Pod URL override")
   .option("--api-key <key>", "API key override")
   .addHelpText("after", `
+Without --view-types / --content-kind a cell installs cleanly but can never be
+PICKED as a view or profile renderer — it is only placeable on a bento.
+
 Examples:
   synap cell define --name "Revenue Chart" --file ./chart.js
   synap cell define --name "Revenue Chart" --file ./chart.js --deps '{"recharts":"2.12.0"}'
+  synap cell define --name "Deal Board" --file ./board.js --view-types kanban,table --content-kind collection
+  synap cell define --name "Contact Page" --file ./contact.js --content-kind entity-detail
   cat chart.js | synap cell define --name "Revenue Chart"
   `)
   .action(async (opts) => {
@@ -1999,6 +1998,8 @@ cell
     "--deps <json>",
     "Override dependency versions as JSON, e.g. '{\"react\":\"18.3.0\"}'"
   )
+  .option("--view-types <list>", 'Comma-separated view-renderer affinity (used with --define), e.g. "list,table"')
+  .option("--content-kind <kind>", "entity-detail | entity-card | entity-profile | collection | widget (used with --define)")
   .option("--workspace <id>", "Workspace (used with --define)")
   .option("--description <text>", "Description (used with --define)")
   .option("--open", "Open in browser after define (used with --define)")
@@ -2139,6 +2140,36 @@ podCmd
     const opts = cmd.optsWithGlobals();
     const { podAdopt } = await import("./commands/pod.js");
     await podAdopt(workspaceNameOrId, opts);
+  });
+
+// ─── vendor — the author's publisher profile ─────────────────────────────────
+// Attribution is write-time-only at the CP: a package published before a vendor
+// exists is orphaned from its author forever. See src/commands/vendor.ts.
+const vendor = program
+  .command("vendor")
+  .description("Your marketplace publisher profile (what packages are attributed to)");
+
+vendor
+  .command("create <slug>")
+  .description("Create your publisher profile — do this BEFORE your first publish")
+  .option("--name <name>", "Display name (defaults to a title-cased slug)")
+  .option("--description <text>", "Short description of you or your studio")
+  .option("--website <url>", "Website URL (must be a full URL)")
+  .option("--json", "Output as JSON")
+  .action(async (slug: string, _opts, cmd) => {
+    const opts = cmd.optsWithGlobals();
+    const { vendorCreate } = await import("./commands/vendor.js");
+    await vendorCreate(slug, opts);
+  });
+
+vendor
+  .command("show")
+  .description("Show whether you have a publisher profile")
+  .option("--json", "Output as JSON")
+  .action(async (_opts, cmd) => {
+    const opts = cmd.optsWithGlobals();
+    const { vendorShow } = await import("./commands/vendor.js");
+    await vendorShow(opts);
   });
 
 // ─── market — discover + install ANY package type ────────────────────────────
@@ -2301,7 +2332,20 @@ templates
 market
   .command("scaffold <slug>")
   .description("Write a minimal valid <slug>.template.yaml to edit in place (refuses to overwrite)")
-  .option("--kind <kind>", "Scaffold a standalone package instead of a workspace template: cell, view, or skill")
+  // This list MUST equal `SCAFFOLDABLE_KINDS` (src/lib/kind-package.ts). It is
+  // written out rather than imported because index.ts keeps its eager module
+  // graph to commander + one lib — importing kind-package.ts here would pull
+  // `yaml` into the startup path of every `synap` invocation. What keeps the two
+  // honest is `test/scaffold-kind-help-parity.test.ts`, which source-scans both.
+  //
+  // It advertised `skill` — which `marketScaffold` refuses, since the CP package
+  // schema has no standalone slot for one — and omitted `workflow`, which
+  // `market validate` has always accepted. A help string that offers a refused
+  // option and hides a working one is the documented-loop defect class.
+  .option(
+    "--kind <kind>",
+    "Scaffold a standalone package instead of a workspace template: cell, view, workflow, capability (skill is not scaffoldable — the CP package schema has no standalone slot for one)",
+  )
   .option("--json", "Output as JSON")
   .action(async (slug: string, _opts, cmd) => {
     // Same parent/child `--json` collision as `market install` — see its comment.
@@ -2544,7 +2588,7 @@ raycast
 
 const providers = program
   .command("providers")
-  .description("Discover AI providers from the pod and configure local tools");
+  .description("LLM providers on the pod (OpenAI/Anthropic/…) for local coding tools — not capability packs");
 
 providers
   .command("list", { isDefault: true })
@@ -2559,7 +2603,7 @@ providers
 
 providers
   .command("pull")
-  .description("Write pod provider config to a local AI tool (opencode, aider)")
+  .description("Write pod LLM credentials into opencode or aider, or print the OpenAI-compatible {pod}/v1 endpoint")
   .option("--target <name>", "Target tool: opencode | aider")
   .option("--pod-url <url>", "Pod URL override")
   .option("--api-key <key>", "API key override")

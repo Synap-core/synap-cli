@@ -75,7 +75,15 @@ export function writeLens(sessionId: string, patch: Partial<SessionLens>): Sessi
   return next;
 }
 
-/** Clear one field (or the whole lens) for a session. */
+/**
+ * Clear one field (or the whole lens) for a session.
+ *
+ * The remaining fields are written DIRECTLY, not through {@link writeLens}:
+ * writeLens merges over what is already on disk, so handing it the
+ * field-deleted object simply re-merged the field back in and the clear was a
+ * silent no-op. (`synap use --clear`, `synap project clear` and `synap session
+ * detach` all ran through here.)
+ */
 export function clearLensField(sessionId: string, field?: keyof SessionLens): void {
   const prev = readLens(sessionId);
   if (!prev) return;
@@ -83,8 +91,15 @@ export function clearLensField(sessionId: string, field?: keyof SessionLens): vo
     try { fs.unlinkSync(lensPath(sessionId)); } catch {}
     return;
   }
-  delete prev[field];
-  writeLens(sessionId, prev);
+  if (!(field in prev)) return;
+  const next: SessionLens = { ...prev, updatedAt: Date.now() };
+  delete next[field];
+  try {
+    fs.mkdirSync(LENS_DIR, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(lensPath(sessionId), JSON.stringify(next, null, 2), { mode: 0o600 });
+  } catch {
+    /* best-effort */
+  }
 }
 
 /** The active session's lens, or null if not in a Claude session / none set. */

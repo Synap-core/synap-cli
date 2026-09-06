@@ -40,6 +40,16 @@ export function renderNextSteps(steps: NextStep[]): void {
 }
 
 /**
+ * After structure exists (launch / a live market install): fill it via the
+ * onboard interview — not a second create. Same step on both edges so the hint
+ * cannot drift.
+ */
+const FILL_EMPTY_WORKSPACE: NextStep = {
+  command: 'synap ask "help me set up this workspace"',
+  why: "guided interview to fill the empty workspace — do not create another",
+};
+
+/**
  * The canonical flow graph. Each edge is a small function returning 1–3
  * `NextStep`s for "you just did X → here's the sensible next move(s)."
  */
@@ -114,6 +124,7 @@ export const FLOW = {
     return [
       { command: "synap orient", why: `see ${args.slug} in ${args.projectName ?? "your pod"}` },
       { command: "synap open", why: "open it in the browser" },
+      FILL_EMPTY_WORKSPACE,
     ];
   },
 
@@ -127,6 +138,7 @@ export const FLOW = {
           : "see the new workspaces",
       },
       { command: "synap market --list", why: "add more packages" },
+      FILL_EMPTY_WORKSPACE,
     ];
   },
 

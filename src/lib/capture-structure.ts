@@ -63,7 +63,22 @@ export interface StructureResult {
   targetProjectReason?: string | null;
   /** True when the IS structurer is down and the server returned a raw fallback. */
   degraded?: boolean;
-  degradedReason?: string;
+  degradedReason?: DegradedReason;
+  /**
+   * Summary of the extraction pass, present when a `file` input was normalized
+   * to text before structuring. `text` is what the pod needs echoed back on
+   * execute (as `file.extractedText`) so a kept original lands with a real
+   * document body instead of an empty one — the pod cannot re-derive it,
+   * because extraction runs in the Intelligence Service.
+   */
+  extraction?: {
+    kind: string;
+    extractor: string;
+    metadata?: Record<string, unknown>;
+    warnings?: string[];
+    text?: string;
+    textTruncated?: boolean;
+  };
 }
 
 /** One materialized entity row in a /capture/execute response. */
@@ -99,6 +114,20 @@ export interface ExecuteResult {
   reviewPath?: string;
   movedToWorkspace?: string | null;
   message?: string;
+  /**
+   * Disposition of the ORIGINAL file, present only when the caller sent
+   * `keepRaw: true` + `file`. Four honest outcomes — the blob can be stored,
+   * parked behind governance, denied by policy, or fail on storage — and a
+   * caller that prints "kept" for all four is back to false success.
+   */
+  sourceFile?: {
+    status: "stored" | "proposed" | "denied" | "failed";
+    entityId?: string;
+    documentId?: string;
+    proposalId?: string;
+    reviewUrl?: string;
+    reason?: string;
+  };
 }
 
 /** The honest outcome of a /capture/execute call, derived from the response. */
@@ -137,20 +166,157 @@ export function readCaptureExecute(res: ExecuteResult): CaptureExecuteOutcome {
   };
 }
 
-/** True when the structure step degraded (IS structurer unavailable). */
+/** True when the structure step degraded (nothing usable came back). */
 export function isDegraded(res: StructureResult): boolean {
   return res.degraded === true;
 }
 
 /**
- * The ONE degraded message. When the structurer is down the server returns a
- * generic `item` stand-in wrapping the raw text — but the CLI does NOT
- * materialize it (the browser does the same via `offlineFallback:false`). We
- * create nothing and tell the user, so a captured note is never silently
- * downgraded to an unstructured blob behind a "success" line. Retry when the
- * structurer is back.
+ * WHY a capture degraded. Two families, and the difference is the whole point:
+ *
+ *  • pod plumbing (`is_*`) — the structurer itself failed. Retrying is sensible.
+ *  • Intelligence Service extraction honesty (everything else) — the INPUT
+ *    could not be read. Several of these are PERMANENT CONFIGURATION states
+ *    (`vision_provider_not_configured`, `transcription_provider_not_configured`)
+ *    where "retry when it's back" is simply a lie: nothing is coming back.
+ *
+ * Open-ended (`string & {}`) because the IS owns this vocabulary and may add to
+ * it. An unknown value must humanize, never leak, never crash.
+ */
+export type DegradedReason =
+  | "is_auth_error"
+  | "is_invalid_response"
+  | "is_empty_result"
+  | "pdf_scanned_needs_ocr"
+  | "pdf_missing_binary"
+  | "vision_provider_not_configured"
+  | "image_missing_binary"
+  | "transcription_provider_not_configured"
+  | "audio_missing_binary"
+  | "docx_missing_binary"
+  | "docx_empty"
+  | "html_empty"
+  | "unsupported_type"
+  | (string & {});
+
+/**
+ * One line of honest copy for a degraded reason: WHAT happened, and WHAT TO DO.
+ *
+ * ── Why this is a second table, deliberately ────────────────────────────────
+ * `@synap-core/capture-pipeline`'s `describeDegradedReason` is the existing
+ * one-door for this copy, and it is the RIGHT door — but the CLI is a separate
+ * pnpm workspace whose only Synap runtime dependencies are
+ * `@synap/hub-rest-client` (a file: link into synap-backend) and
+ * `@synap-core/workspace-templates`. It cannot reach a `synap-app` package
+ * without a package.json/lockfile change. Same reason the `StructureResult`
+ * mirror above is local.
+ *
+ * So: the `title` half is COPIED VERBATIM from `describeDegradedReason` and
+ * pinned by a parity test (`test/degraded-message-honesty.test.ts`) that reads
+ * the sibling repo's source, so the two can never drift on WHAT happened.
+ * The `detail` half is deliberately DIFFERENT, because the app's
+ * details end in "saved as a note in the meantime" and the CLI creates nothing
+ * at all — repeating the app's sentence here would be a new lie in place of the
+ * old one.
+ */
+export function describeDegradedReason(reason: DegradedReason | undefined): {
+  title: string;
+  detail: string;
+} {
+  switch (reason) {
+    case "is_auth_error":
+      return {
+        title: "AI intelligence isn't connected",
+        detail:
+          "This pod's Intelligence Service rejected its credentials. Check them with `synap doctor`, then re-run this import.",
+      };
+    case "pdf_scanned_needs_ocr":
+      return {
+        title: "This PDF has no text layer",
+        detail:
+          "It's a scan, not typed text, so there is nothing to read yet. OCR it first, or keep the original with `synap import --keep-raw <file>`.",
+      };
+    case "pdf_missing_binary":
+      return {
+        title: "The PDF file wasn't available to read",
+        detail: "The bytes never reached the pod. Re-run the import for this file.",
+      };
+    case "vision_provider_not_configured":
+      return {
+        title: "Image reading isn't set up on this pod",
+        detail:
+          "No vision-capable model is configured, so images can't be described. Configure one in Settings → Intelligence; until then keep the original with `synap import --keep-raw <file>`.",
+      };
+    case "image_missing_binary":
+      return {
+        title: "The image file wasn't available to read",
+        detail: "The bytes never reached the pod. Re-run the import for this file.",
+      };
+    case "transcription_provider_not_configured":
+      return {
+        title: "Audio transcription isn't set up on this pod",
+        detail:
+          "No transcription model is configured, so speech can't be turned into text. Configure one in Settings → Intelligence; until then keep the original with `synap import --keep-raw <file>`.",
+      };
+    case "audio_missing_binary":
+      return {
+        title: "The audio file wasn't available to read",
+        detail: "The bytes never reached the pod. Re-run the import for this file.",
+      };
+    case "docx_missing_binary":
+      return {
+        title: "The document file wasn't available to read",
+        detail: "The bytes never reached the pod. Re-run the import for this file.",
+      };
+    case "docx_empty":
+      return {
+        title: "This document has no extractable text",
+        detail:
+          "It parsed cleanly but came back empty. Keep the original with `synap import --keep-raw <file>` if you still want it stored.",
+      };
+    case "html_empty":
+      return {
+        title: "This page has no extractable text",
+        detail:
+          "It parsed cleanly but came back empty — often a JavaScript-rendered page. Save the readable text yourself and pass it to `synap capture`.",
+      };
+    case "unsupported_type":
+      return {
+        title: "This file type isn't supported yet",
+        detail:
+          "Nothing can be extracted from it. Keep the bytes anyway with `synap import --keep-raw <file>`, or `synap upload <file>` to store it as a file entity.",
+      };
+    case "is_invalid_response":
+    case "is_empty_result":
+    case undefined:
+      return {
+        title: "AI structuring is unavailable right now",
+        detail: "Nothing was created. Re-run this import when the structurer is back.",
+      };
+    default:
+      // A reason this list hasn't been taught yet (the IS added one, and the
+      // wire type is an open string). Degrade gracefully — never print the raw
+      // token at a user, and never crash on it.
+      return {
+        title: "This input couldn't be read",
+        detail: "Nothing was created. Run `synap doctor` to check what this pod can extract.",
+      };
+  }
+}
+
+/**
+ * The ONE degraded message. The CLI does NOT materialize the server's generic
+ * `item` stand-in (the browser does the same via `offlineFallback:false`), so a
+ * captured note is never silently downgraded to an unstructured blob behind a
+ * "success" line.
+ *
+ * It used to print a single sentence for every cause — "AI structuring
+ * unavailable (is_empty_result) — nothing was created. Retry when it's back."
+ * — which leaked a raw machine token AND told users to retry states that never
+ * change (a pod with no vision provider is not going to come back). Now each
+ * reason says what actually happened and what to do about it.
  */
 export function degradedMessage(res: StructureResult): string {
-  const why = res.degradedReason ? ` (${res.degradedReason})` : "";
-  return `AI structuring unavailable${why} — nothing was created. Retry when it's back.`;
+  const { title, detail } = describeDegradedReason(res.degradedReason);
+  return `${title} — nothing was created. ${detail}`;
 }

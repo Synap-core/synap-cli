@@ -152,7 +152,7 @@ export async function toolsConnect(service: string | undefined, opts: ConnectOpt
     spinner.stop();
   } catch (err) {
     spinner.fail(chalk.red("Failed to resolve connection"));
-    log.error((err as Error).message);
+    renderHubError(err);
     process.exit(1);
   }
 
@@ -336,7 +336,7 @@ export async function toolsSchema(opts: SchemaOpts): Promise<void> {
     spinner?.stop();
   } catch (err) {
     spinner?.fail(chalk.red("Failed to fetch tool schema"));
-    log.error((err as Error).message);
+    renderHubError(err);
     process.exit(1);
   }
 

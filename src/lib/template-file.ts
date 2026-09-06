@@ -98,6 +98,8 @@ export interface PackageDefinitionLike {
   views?: unknown[];
   /** Cell definitions — only meaningful for a standalone `category: "cell"` package (see `lib/kind-package.ts`). */
   cells?: unknown[];
+  /** Automation definitions — only meaningful for a standalone `category: "workflow"` package (see `lib/kind-package.ts`). */
+  automations?: unknown[];
   entityLinks?: unknown[];
   onboarding?: unknown;
   dependencies?: unknown[];

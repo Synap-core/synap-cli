@@ -6,18 +6,31 @@
  *
  * Usage:
  *   synap cell define --name "My Chart" --file ./chart.js [--type-key my-chart] [--deps '{"recharts":"2.12.0"}'] [--workspace <id>] [--open]
+ *   synap cell define --name "Deal board" --file ./board.js --view-types kanban,table --content-kind collection
  *   cat chart.js | synap cell define --name "My Chart"
  *
  *   synap cell build ./src/chart.tsx --out ./dist/chart.js
  *   synap cell build ./src/chart.tsx --out ./dist/chart.js --define   # bundle then define
  *
  * API:
- *   POST /api/hub/cells/define — { name, rendererSource, workspaceId?, typeKey?, description?, defaultSize? }
+ *   POST /api/hub/cells/define — { name, rendererSource, workspaceId?, typeKey?,
+ *     description?, defaultSize?, deps?, viewTypes?, contentKind? }
  *
- * NOTE on deps: The /cells/define endpoint currently ignores the `deps` field in
- * the Zod schema (parsed but not persisted — the INSERT always uses `deps: {}`).
- * We send it anyway so the payload is ready when the backend adds support.
- * Track: cells.ts upsert sets `deps: {} as Record<string, string>` unconditionally.
+ * DEPS: persisted. (A prior note here claimed `/cells/define` parsed but dropped
+ * `deps` — that is STALE as of HEAD: the route forwards `deps` to `defineCell`,
+ * which writes `deps: input.deps ?? {}` on both the INSERT and the UPDATE branch,
+ * after `validateDeps` runs inside the door.)
+ *
+ * SELECTABILITY: a cell that declares neither `viewTypes` nor `contentKind`
+ * installs cleanly and is then UNPICKABLE — no error, no signal. `viewTypes`
+ * lands in `widget_definitions.view_renderer_view_types` (migration 0221) and is
+ * what the browser copies onto `viewRenderer.viewTypes`; without it the cell can
+ * never be chosen as a view renderer. `contentKind` decides which profile-renderer
+ * slot the cell can fill; omitted, the column defaults to `widget`, which is
+ * placeable but never offered as an entity-detail/card/profile/collection renderer.
+ * Both follow an omit-is-silence rule on an upsert of an EXISTING row: not passing
+ * the flag leaves the stored value untouched (so a source-only re-push can't erase
+ * a declared affinity). Pass `--view-types ""` to clear the affinity.
  *
  * cell build runtime contract:
  *   - esbuild bundles to a single ESM file (format: esm, bundle: true)
@@ -39,11 +52,63 @@ import { openInBrowser } from "./open.js";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
+/**
+ * The `contentKind` vocabulary — WHAT a cell renders, which decides the
+ * profile-renderer slots it can fill.
+ *
+ * SSOT: `ContentKind` in
+ * `synap-backend/packages/database/src/schema/widget-definitions.ts`
+ * (canonically mirrored from `@synap-core/capabilities`). This list is a
+ * hand-maintained copy because the CLI does not depend on either package; if
+ * the union there grows, `test/cell-define-content-kind.test.ts` is the only
+ * thing that will catch the drift — keep them together.
+ */
+export const CONTENT_KINDS = [
+  "entity-detail",
+  "entity-card",
+  "entity-profile",
+  "collection",
+  "widget",
+] as const;
+
+export type ContentKind = (typeof CONTENT_KINDS)[number];
+
+/** Narrow a raw `--content-kind` value against {@link CONTENT_KINDS}. */
+export function parseContentKind(raw: string): ContentKind | null {
+  const v = raw.trim();
+  return (CONTENT_KINDS as readonly string[]).includes(v)
+    ? (v as ContentKind)
+    : null;
+}
+
+/**
+ * Parse a `--view-types` list. Comma-separated, trimmed, deduped.
+ *
+ * `undefined` (flag absent) ⇒ omit the field entirely, so an upsert of an
+ * existing row leaves the stored affinity untouched. An EMPTY string ⇒ `[]`,
+ * the explicit "clear it" signal the define door documents.
+ */
+export function parseViewTypes(
+  raw: string | undefined
+): string[] | undefined {
+  if (raw === undefined) return undefined;
+  return [
+    ...new Set(
+      raw
+        .split(",")
+        .map((t) => t.trim())
+        .filter((t) => t !== "")
+    ),
+  ];
+}
+
 export interface CellDefineOpts {
   name: string;
   file?: string;
   typeKey?: string;
   deps?: string;
+  viewTypes?: string;
+  contentKind?: string;
   workspace?: string;
   description?: string;
   open?: boolean;
@@ -58,6 +123,8 @@ export interface CellBuildOpts {
   name?: string;
   typeKey?: string;
   deps?: string;
+  viewTypes?: string;
+  contentKind?: string;
   workspace?: string;
   description?: string;
   open?: boolean;
@@ -208,16 +275,35 @@ export async function cellDefine(opts: CellDefineOpts): Promise<void> {
       }
     }
 
+    // Validate --content-kind against the real union BEFORE the round trip: the
+    // define door's zod would otherwise strip an unknown value silently and the
+    // cell would install unpickable — the exact failure this flag exists to stop.
+    let contentKind: ContentKind | undefined;
+    if (opts.contentKind !== undefined) {
+      const parsed = parseContentKind(opts.contentKind);
+      if (!parsed) {
+        log.error(
+          `--content-kind must be one of: ${CONTENT_KINDS.join(", ")} (got "${opts.contentKind}")`
+        );
+        process.exit(1);
+      }
+      contentKind = parsed;
+    }
+    const viewTypes = parseViewTypes(opts.viewTypes);
+
     const body: Record<string, unknown> = {
       userId,
       name: opts.name,
       rendererSource,
-      // deps is sent even though the current backend ignores it (see file-level note).
       deps: parsedDeps,
     };
     if (workspaceId) body.workspaceId = workspaceId;
     if (opts.typeKey) body.typeKey = opts.typeKey;
     if (opts.description) body.description = opts.description;
+    // Omit-is-silence: only send these when the caller actually spoke about
+    // them, so a plain source re-push never erases a declared affinity/slot.
+    if (viewTypes !== undefined) body.viewTypes = viewTypes;
+    if (contentKind !== undefined) body.contentKind = contentKind;
 
     const res = (await hubPost("/cells/define", body, cfg)) as Record<
       string,
@@ -234,7 +320,19 @@ export async function cellDefine(opts: CellDefineOpts): Promise<void> {
     const typeKey = String(res.typeKey ?? "");
 
     if (opts.json) {
-      console.log(JSON.stringify({ typeKey, name: opts.name, deps: parsedDeps }, null, 2));
+      console.log(
+        JSON.stringify(
+          {
+            typeKey,
+            name: opts.name,
+            deps: parsedDeps,
+            ...(viewTypes !== undefined ? { viewTypes } : {}),
+            ...(contentKind !== undefined ? { contentKind } : {}),
+          },
+          null,
+          2
+        )
+      );
       return;
     }
 
@@ -247,6 +345,19 @@ export async function cellDefine(opts: CellDefineOpts): Promise<void> {
     log.dim(`  typeKey: ${typeKey}`);
     if (Object.keys(parsedDeps).length > 0)
       log.dim(`  deps: ${JSON.stringify(parsedDeps)}`);
+    if (viewTypes !== undefined)
+      log.dim(
+        `  view types: ${viewTypes.length > 0 ? viewTypes.join(", ") : "(cleared)"}`
+      );
+    if (contentKind !== undefined) log.dim(`  content kind: ${contentKind}`);
+    // Say it once, at define time, when the author can still act on it — a cell
+    // with neither is placeable on a bento but can never be PICKED as a view or
+    // profile renderer, and nothing downstream ever reports that.
+    if (viewTypes === undefined && contentKind === undefined) {
+      log.dim(
+        `  note: no --view-types / --content-kind — this cell is placeable but not selectable as a renderer`
+      );
+    }
     log.dim(`  bento block: { kind: "${typeKey}", config: {} }`);
     log.dim(`  open in browser: synap open cell ${typeKey}`);
 
@@ -329,6 +440,8 @@ export async function cellBuild(
         file: outPath,
         typeKey: opts.typeKey,
         deps: JSON.stringify(depsMap),
+        viewTypes: opts.viewTypes,
+        contentKind: opts.contentKind,
         workspace: opts.workspace,
         description: opts.description,
         open: opts.open,

@@ -1,27 +1,17 @@
 /**
- * `synap mcp` — the MCP front door.
+ * `synap mcp` — the MCP front door. Two lanes:
  *
- * The Synap pod exposes an MCP server at `${podUrl}/mcp` (Bearer-authed). This
- * command group is the turnkey funnel for pointing ANY MCP client at it:
+ *   1. Web AI (Cloud MCP / OAuth) — control plane `${cp}/mcp` (managed:
+ *      https://api.synap.live/mcp). claude.ai's connector UI is OAuth-only; use
+ *      `synap mcp connect-claude` to print the URL (no key mint, no file write).
+ *   2. IDE / file-configurable — pod `${podUrl}/mcp` (Bearer). Needs a pod +
+ *      key. `synap mcp connect <client>` writes client config; `synap mcp url`
+ *      prints URL + key for header-based UIs (ChatGPT, Raycast, …).
  *
- *   synap mcp url      — print a ready-to-paste connection (URL + key + snippets)
- *                        for UI-only clients that accept a custom header (e.g.
- *                        Raycast) and for clients that need the raw values to
- *                        wire up by hand. claude.ai's connector UI does NOT
- *                        currently accept a bearer token here — see the note
- *                        printed by this command.
- *   synap mcp verify   — health-check: is /mcp reachable and is the key valid?
- *   synap mcp connect  — alias of `synap connect` for file-configurable clients
- *                        (Claude Code, Cursor, Desktop, …) — writes the config.
- *   synap mcp connect-claude — print the claude.ai (web) OAuth connection
- *                        steps. claude.ai's connector UI is OAuth-only (no
- *                        header field), so this prints paste-ready values
- *                        instead of writing a file — claude.ai + the control
- *                        plane drive the actual OAuth handshake.
- *
- * For file-configurable clients, prefer `synap mcp connect <client>` (it mints a
- * dedicated agent key + writes the client's config). `synap mcp url` is the
- * escape hatch for clients you must configure by hand in a UI.
+ *   synap mcp url            — paste-ready pod MCP connection (URL + key)
+ *   synap mcp verify         — health-check pod /mcp + key
+ *   synap mcp connect        — write MCP config for IDE/desktop clients
+ *   synap mcp connect-claude — print Cloud MCP OAuth URL for claude.ai (web)
  */
 
 import chalk from "chalk";
@@ -179,7 +169,7 @@ export async function mcpUrl(
     );
     console.log(
       chalk.yellow(
-        "\nclaude.ai (web/desktop/mobile connectors) can't take a custom header yet — its connector UI has no field for one. OAuth support is planned; until then, use Claude Code, Cursor, or another file-configurable client above."
+        "\nclaude.ai (web) uses OAuth via Synap Cloud MCP — run `synap mcp connect-claude` to print https://api.synap.live/mcp (no header field in that UI)."
       )
     );
     console.log(
@@ -298,20 +288,45 @@ function deriveCpOrigin(podUrl: string): { cpOrigin: string; derived: boolean } 
  * claude.ai's "Add custom connector" UI is OAuth-only (Dynamic Client
  * Registration) — it has no field for a bearer header, so the file/header
  * based flows (`mcp connect`, `mcp url`) don't apply. The control plane's
- * `/mcp` endpoint now speaks OAuth, so connecting is: paste a URL, approve in
- * the browser. This command can't drive that click-through itself — claude.ai
- * and the control plane own the OAuth handshake — it only prints the exact
- * values so there's no guesswork.
+ * `/mcp` endpoint speaks OAuth: paste a URL, approve in the browser. This
+ * command does not mint keys or write client config — it only prints the URL.
+ *
+ * Stranger-safe: if no pod is configured, falls back to `--cp-url` or the
+ * managed control plane `https://api.synap.live`.
  */
 export async function mcpConnectClaudeWeb(
   opts: McpBaseOpts & { cpUrl?: string }
 ): Promise<void> {
   try {
-    const cfg = await resolveHubConfig(opts);
-    const { cpOrigin, derived } = deriveCpOrigin(cfg.podUrl);
-    const finalCpOrigin = (opts.cpUrl ?? cpOrigin).replace(/\/$/, "");
+    const MANAGED_CP = "https://api.synap.live";
+    /** How we chose the CP origin — for --json + user-facing notes. */
+    let source: "override" | "derived" | "managed-fallback" = "managed-fallback";
+    let cpOrigin = MANAGED_CP;
+
+    if (opts.cpUrl) {
+      cpOrigin = opts.cpUrl.replace(/\/$/, "");
+      source = "override";
+    } else {
+      try {
+        const cfg = await resolveHubConfig(opts);
+        const fromPod = deriveCpOrigin(cfg.podUrl);
+        if (fromPod.derived) {
+          cpOrigin = fromPod.cpOrigin;
+          source = "derived";
+        } else {
+          // Non-pod.* host — can't derive confidently; managed + tip to --cp-url.
+          cpOrigin = MANAGED_CP;
+          source = "managed-fallback";
+        }
+      } catch {
+        // No pod config — stranger path: print managed Cloud MCP (no key mint).
+        cpOrigin = MANAGED_CP;
+        source = "managed-fallback";
+      }
+    }
+
+    const finalCpOrigin = cpOrigin.replace(/\/$/, "");
     const url = `${finalCpOrigin}/mcp`;
-    const wasDerived = opts.cpUrl ? "override" : derived;
 
     const steps = [
       "Open claude.ai → Settings → Connectors → Add custom connector",
@@ -319,20 +334,26 @@ export async function mcpConnectClaudeWeb(
       `URL: ${url}`,
       "Leave Advanced settings (OAuth Client ID/Secret) blank",
       "Click Add → you'll be redirected to sign in to Synap Cloud and approve → done",
-      'Then ask Claude to "list my Synap pods" to confirm',
+      'Then ask Claude to "list my Synap pods" (list_pods) and connect one (connect_pod)',
     ];
 
     if (opts.json) {
       console.log(
-        JSON.stringify({ url, cpOrigin: finalCpOrigin, derived: wasDerived, steps }, null, 2)
+        JSON.stringify(
+          { url, cpOrigin: finalCpOrigin, derived: source, steps },
+          null,
+          2
+        )
       );
       return;
     }
 
     log.heading("\nConnect claude.ai (web) to Synap");
-    if (!derived && !opts.cpUrl) {
-      log.warn(
-        "Could not derive the control-plane URL from your pod host — pass --cp-url <url> (e.g. https://api.yourdomain.com)."
+    if (source === "managed-fallback" && !opts.cpUrl) {
+      console.log(
+        chalk.dim(
+          "  Using managed Cloud MCP (https://api.synap.live). Pass --cp-url for a self-hosted control plane. No key minted."
+        )
       );
     }
     console.log(`  ${chalk.dim("URL")}   ${url}`);
@@ -341,7 +362,7 @@ export async function mcpConnectClaudeWeb(
     console.log();
     console.log(
       chalk.dim(
-        "This connects via the Synap control plane. A direct pod connection (no control plane) is coming."
+        "Cloud MCP does not store your data. After OAuth, list_pods then connect_pod (you still need a pod for useful work)."
       )
     );
   } catch (e) {

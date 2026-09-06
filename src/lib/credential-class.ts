@@ -41,6 +41,7 @@
  */
 
 import chalk from "chalk";
+import { openAppUrl, openUrl } from "@synap/hub-rest-client";
 import { log } from "../utils/logger.js";
 import { hubGet, HubError, type HubConfig } from "./hub-client.js";
 
@@ -148,12 +149,12 @@ export function isAgentReviewRejection(err: unknown): boolean {
 
 /** The `synap://` deep link the desktop app registers — `synap open proposal <id>` sends exactly this (open.ts:36-38). */
 export function proposalDeepLink(id: string): string {
-  return `synap://open/proposal/${encodeURIComponent(id)}`;
+  return openAppUrl("proposal", id);
 }
 
 /** The pod's web review page for a bare id — the same route `bridge-setup.ts:894` and `statusline.ts:425` print. */
 export function proposalWebLink(podUrl: string, id: string): string {
-  return `${podUrl.replace(/\/+$/, "")}/open/${encodeURIComponent(id)}`;
+  return openUrl(podUrl, id);
 }
 
 /**

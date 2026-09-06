@@ -54,6 +54,8 @@ import {
   fetchMyRows,
   fetchAvailableSlugs,
   fetchPackageDefinition,
+  fetchPackageRecord,
+  hydrateMineCategories,
   type PackageFilters,
   type CpBrowseRow,
   type CpMineRow,
@@ -107,7 +109,7 @@ export async function buildMarketCatalog(filters?: PackageFilters): Promise<Mark
   const loggedIn = !!creds && !isTokenLocallyExpired(creds);
 
   let reachedCp = true;
-  const [publicRows, mineRows, availableSlugs, installed] = await Promise.all([
+  const [publicRows, rawMineRows, availableSlugs, installed] = await Promise.all([
     fetchPublicBrowseRows(filters).catch(() => {
       reachedCp = false;
       return [] as CpBrowseRow[];
@@ -121,13 +123,37 @@ export async function buildMarketCatalog(filters?: PackageFilters): Promise<Mark
     fetchInstalledSlugs(),
   ]);
 
+  // The `/mine` LIST PROJECTION omits `category` (CP `routes/packages.ts`), so
+  // the caller's own rows — the ONLY way a PRIVATE package can reach this
+  // catalog — arrive type-less. Untreated, `typeOf`'s display default calls
+  // every one of them a workspace: that is why a published cell package was
+  // invisible to `--list --type cell` and installed as an empty "New
+  // Workspace". Hydrate from the public rows we already have, else the authed
+  // single-package door. Best-effort: a row that can't be resolved keeps an
+  // ABSENT category (the install refusal is the floor under it).
+  const publicCategoryBySlug = new Map<string, string | undefined>();
+  for (const r of publicRows) publicCategoryBySlug.set(r.slug, r.category);
+  const mineRows =
+    loggedIn && creds && rawMineRows.length > 0
+      ? await hydrateMineCategories(rawMineRows, creds.token, publicCategoryBySlug).catch(
+          () => rawMineRows,
+        )
+      : rawMineRows;
+
   const merged = assembleCatalog({
     // Logged in → include PRIVATE bundled templates (e.g. the `the-arch` suite),
     // matching the "private templates unlocked" promise. Logged out → public
     // bundle only. (mergeCatalog derives `isPrivate` from each template's
     // `meta.isPublic === false`, so private bundled entries stay badged.)
     bundled: loggedIn ? listWorkspaceTemplates() : listPublicTemplates(),
-    remoteRows: [...publicRows, ...mineRows],
+    // `/mine` FIRST: `mergeCatalog` keeps the first remote row for a slug, so
+    // this makes the caller's OWN row win a collision with a stranger's public
+    // one. That matches the CP's own `GET /:slug` precedence (own row beats a
+    // public row) and `remoteVersionBySlug` below, and it is the only order
+    // under which the private flag and the hydrated category survive a slug a
+    // public package also claims. (The bundled-template squatting defense sits
+    // above both and is unaffected.)
+    remoteRows: [...mineRows, ...publicRows],
     bundleVersion: bundledTemplatesVersion(),
     remoteStatus: reachedCp ? "ok" : "unreachable",
   });
@@ -167,14 +193,89 @@ export async function buildMarketCatalog(filters?: PackageFilters): Promise<Mark
   };
 }
 
-/** The package type of an entry — bundled templates are always `workspace`. */
+/**
+ * The human plural for a package kind, in the CLI's own listing.
+ *
+ * This was `t.charAt(0).toUpperCase() + t.slice(1)`, which `.claude/rules/
+ * vocabulary.md` forbids by name — and it showed: the listing printed "Cell"
+ * (the registry says **Card**) and "Workflow" (the registry says Automation).
+ *
+ * The real SSOT is `@synap-core/types/vocabulary`, but this package cannot
+ * resolve it — the CLI links only `@synap-core/workspace-templates`, and adding
+ * a cross-repo dependency is an install-topology change, not a labelling fix.
+ * So the table is local AND pinned: `test/kind-heading-vocabulary-parity.test.ts`
+ * source-scans the registry and fails if these words drift from it. That is the
+ * same shape as `market-install-kind-parity.test.ts`, which keeps
+ * `marketInstallKind` honest against the pod's zod enum across repos.
+ */
+const KIND_HEADINGS: Record<string, string> = {
+  capability: "Capabilities",
+  skill: "Skills",
+  workflow: "Automations",
+  view: "Views",
+  cell: "Cards",
+  workspace: "Workspaces",
+};
+
+function kindHeading(kind: string): string {
+  return KIND_HEADINGS[kind] ?? humanizeKindToken(kind);
+}
+
+/** Last resort for a kind the CP added and this CLI has not learned yet. */
+function humanizeKindToken(kind: string): string {
+  const words = kind.replace(/[-_]+/g, " ").trim();
+  return words ? words[0].toUpperCase() + words.slice(1) : kind;
+}
+
+/**
+ * The package type of an entry — bundled templates are always `workspace`.
+ *
+ * ⚠️ The `?? "workspace"` default is safe for DISPLAY and FILTERING (a bundled
+ * template genuinely has no category). It is NOT safe for INSTALL: a package
+ * whose category is merely UNKNOWN would install as a workspace. That is not
+ * hypothetical — on 2026-09-05 `synap market install probe-card-pack`, a
+ * freshly published CELL package, created an empty "New Workspace" and reported
+ * "✓ Installed". Install paths must use {@link declaredCategoryOf} and refuse
+ * an unknown, never fall through to this default.
+ */
 function typeOf(entry: CatalogEntry): string {
   return entry.category ?? "workspace";
 }
 
-/** The `kind` values the pod's `market.install` verb provisions (see
- * cp-catalog-sync.ts `CatalogKind`). */
-export type MarketInstallKind = "capability" | "automation" | "template" | "cell";
+/**
+ * The category the catalog ACTUALLY declared, or null when it said nothing.
+ *
+ * The distinction `typeOf` erases: "this is a workspace" and "I don't know what
+ * this is" are different facts, and only one of them may be acted on. Third
+ * instance in one day of a defaulted discriminator turning "I don't know" into
+ * a confident claim (`status ?? "installed"`, an absent `runResult.success`
+ * read as failure, and this).
+ */
+function declaredCategoryOf(entry: CatalogEntry): string | null {
+  return entry.category ?? null;
+}
+
+/**
+ * The `kind` values the pod's `market.install` verb provisions.
+ *
+ * SSOT: the `kind` zod enum of `marketInstallParams` in
+ * `synap-backend/packages/api/src/services/capabilities/builtin-verbs.ts`
+ * (each arm implemented in `marketplace-install.ts`). This list is a
+ * hand-maintained copy — `test/market-install-kind.test.ts` pins it against a
+ * copy of that enum so a widening on the pod cannot silently leave the CLI
+ * refusing a kind the verb accepts (which is exactly how `view` and `skill`
+ * became uninstallable from the CLI).
+ */
+export const MARKET_INSTALL_KINDS = [
+  "capability",
+  "automation",
+  "template",
+  "cell",
+  "skill",
+  "view",
+] as const;
+
+export type MarketInstallKind = (typeof MARKET_INSTALL_KINDS)[number];
 
 /**
  * Map a CP package `category` (what {@link typeOf} returns) → the pod
@@ -197,9 +298,58 @@ export function marketInstallKind(type: string): MarketInstallKind | null {
       return "automation";
     case "template":
       return "template";
+    // The verb has always accepted these — the CLI returning null here is what
+    // made the published `view` packages uninstallable from the terminal.
+    case "skill":
+      return "skill";
+    case "view":
+      return "view";
     default:
       return null;
   }
+}
+
+/**
+ * Kinds whose `market.install` arm HARD-REQUIRES an acting workspace and 400s
+ * without one (`marketplace-install.ts`): an automation is added TO a workspace,
+ * and a view package needs a workspace to place its views in. Every other kind
+ * (capability / cell / skill) lands pod-wide — that branch is deliberate, so
+ * they must NOT be added here.
+ */
+export function marketInstallNeedsWorkspace(kind: MarketInstallKind): boolean {
+  return kind === "automation" || kind === "view";
+}
+
+/** One per-item result of a kind:automation market.install (marketplace-install.ts). */
+export type ItemInstallResult = { name?: string; status?: string; message?: string };
+
+/**
+ * Classify the PER-ITEM results of a kind:automation (workflow) install.
+ *
+ * The backend `market.install` automation case installs each automation under
+ * its own try/catch (per-item isolation), so the verb can report the overall
+ * install as `{status:"installed"}` while individual items are
+ * `{status:"error"}`. The CLI must inspect these before printing success — a
+ * bare "✓ Installed" is a lie when every item errored (the false-success bug).
+ *
+ * Returns null for any outcome that carries NO per-item array (cell, skill,
+ * workspace, …) so the caller falls through to the unchanged success line.
+ * Reads `automations[]` (the automation kind's field) or a generic `results[]`.
+ */
+export function summarizeItemInstall(
+  installed: Record<string, unknown>
+): { created: number; reused: number; errored: ItemInstallResult[]; okCount: number } | null {
+  const raw = Array.isArray(installed.automations)
+    ? installed.automations
+    : Array.isArray(installed.results)
+      ? installed.results
+      : undefined;
+  if (!raw) return null;
+  const items = raw as ItemInstallResult[];
+  const created = items.filter((i) => i.status === "created").length;
+  const reused = items.filter((i) => i.status === "reused").length;
+  const errored = items.filter((i) => i.status === "error");
+  return { created, reused, errored, okCount: created + reused };
 }
 
 /**
@@ -258,6 +408,41 @@ export interface WorkspaceApplyResult {
   workspaceId?: string;
   onto?: string;
   outcome?: "created" | "reconciled" | "unchanged";
+  /**
+   * Per-layer install outcomes, `status.conditions[]`-shaped, added pod-side on
+   * 2026-09-06 (`services/capabilities/install-layers.ts`).
+   *
+   * The pod already KNEW when a workspace landed but its capabilities,
+   * playbooks or automations did not — `applyPackagePostWorkspace` stamps the
+   * failure into `workspace.settings` — but `createFromDefinition` swallowed the
+   * rethrow and returned a clean report, so this CLI printed a bare
+   * "✓ Installed" for an install whose every capability had failed. Projecting
+   * the failure without reading it here would just move the lie one layer out.
+   *
+   * OPTIONAL because an older pod does not send it. Absent means "this pod
+   * cannot tell me", NOT "nothing failed" — so absence never downgrades the
+   * verdict, and the pre-existing `seedFailed` signal remains the fallback.
+   */
+  layers?: InstallLayerReport[];
+}
+
+/** One install layer's outcome, as the pod reports it. */
+export interface InstallLayerReport {
+  layer?: string;
+  status?: string;
+  detail?: string;
+}
+
+/**
+ * True when the pod reported a FAILED install layer.
+ *
+ * Reads `status` explicitly rather than inferring failure from the absence of a
+ * success marker: an unrecognised status is not a failure, and an absent
+ * `layers` array is not a success. Both are simply "not a reported failure",
+ * which is what the pre-existing `seedFailed` path already covers.
+ */
+export function hasLayerFailure(layers: InstallLayerReport[] | undefined): boolean {
+  return (layers ?? []).some((l) => l?.status === "failed");
 }
 
 /**
@@ -267,6 +452,25 @@ export interface WorkspaceApplyResult {
  * back to re-deriving from the per-dependency `dependencies[]` array on older
  * pod builds. No-op when there's nothing to report.
  */
+/**
+ * Name the install layers the pod reported as FAILED.
+ *
+ * The verdict line already says "completed with capability failures"; without
+ * this the user is told something failed and never which thing — the same
+ * complaint that made `install-layers.ts` fall back from `name` to `key`.
+ * Silent when the pod sent no layers (an older pod) or none failed.
+ */
+export function printLayerOutcomes(layers: InstallLayerReport[] | undefined): void {
+  const failed = (layers ?? []).filter((l) => l?.status === "failed");
+  if (failed.length === 0) return;
+  for (const l of failed) {
+    log.error(`${l.layer ?? "(unnamed layer)"} — ${l.detail ?? "no detail reported"}`);
+  }
+  log.hint(
+    "The workspace itself was created. Re-run the install to retry the failed layer(s); nothing above is retried automatically.",
+  );
+}
+
 function printSeedOutcomes(
   dependencies: ResolvedDependencyLike[] | undefined,
   seedSummary?: SeedSummary
@@ -374,7 +578,10 @@ export function classifyApplyResult(
   seedSummary: SeedSummary | undefined,
   ctx: { remoteVersionSent?: string; wasUnstamped: boolean; stampVerified?: boolean | null }
 ): ApplyVerdict {
-  const seedFailed = hasSeedFailure(dependencies, seedSummary);
+  // A post-workspace LAYER failure counts the same as a seed failure: the
+  // workspace exists, but part of what the package promised did not land.
+  const seedFailed =
+    hasSeedFailure(dependencies, seedSummary) || hasLayerFailure(ws?.layers);
 
   if (detectStampContradiction(ws, seedSummary, ctx.remoteVersionSent, ctx.wasUnstamped, ctx.stampVerified)) {
     return {
@@ -641,7 +848,7 @@ function renderCatalog(entries: CatalogEntry[], cat: MarketCatalog): void {
       (a, b) => (order.indexOf(a) + 1 || 99) - (order.indexOf(b) + 1 || 99)
     );
     for (const t of types) {
-      log.heading(`  ${t.charAt(0).toUpperCase() + t.slice(1)}`);
+      log.heading(`  ${kindHeading(t)}`);
       log.blank();
       for (const e of byType.get(t)!) row(e);
       log.blank();
@@ -786,6 +993,11 @@ export async function marketInstall(
     onto?: string;
     /** Preview the create path write-free (`/packages/preflight`) — reports would-create / reuse / conflicts and writes nothing. */
     dryRun?: boolean;
+    /** Acting workspace (UUID) an `automation`/`workflow` install is added TO — the
+     * backend `market.install` verb requires one for that kind (an automation
+     * lives in a workspace). Defaults to the active lens (`synap use` / env); a
+     * pod-wide kind (cell/capability) ignores it. */
+    workspace?: string;
   }
 ): Promise<void> {
   const applyTimeoutMs = parseApplyTimeoutMs(opts.timeout);
@@ -801,7 +1013,46 @@ export async function marketInstall(
     process.exit(1);
   }
 
-  const type = typeOf(entry);
+  // Install must know what it is installing. `typeOf`'s display default would
+  // silently provision a WORKSPACE for anything the catalog could not classify
+  // — which is exactly how a published cell package became "New Workspace".
+  // Last chance before refusing: the catalog's `/mine` rows carry no category,
+  // and hydration there is bounded/best-effort. For THIS one slug we can ask
+  // the authed single-package door directly — the only door that can see a
+  // private package the caller owns. Still no defaulting: an unresolved
+  // category falls through to the refusal below.
+  let declared = declaredCategoryOf(entry);
+  if (!declared) {
+    const token = getStoredToken()?.token;
+    if (token) {
+      const rec = await fetchPackageRecord(slug, token);
+      declared = rec?.category ?? null;
+    }
+  }
+  if (!declared) {
+    log.error(`Can't install "${slug}": the catalog didn't say what kind of package it is.`);
+    log.hint(
+      "This usually means the package is PRIVATE and the public catalog can't see it. Run `synap login`, then retry — nothing was installed.",
+    );
+    process.exit(1);
+  }
+  const type = declared;
+
+  // `--dry-run` promises "writes nothing". Only the WORKSPACE path below can
+  // keep that promise: it has a write-free preflight (`/packages/preflight`).
+  // The `market.install` verb has no `dryRun` parameter (see
+  // `marketInstallParams` in the pod's `builtin-verbs.ts`), and `cap add`
+  // installs immediately — so for every other kind this flag used to be
+  // silently ignored and the package was INSTALLED FOR REAL. A safety flag that
+  // performs the action it promises to skip is worse than no flag, so refuse
+  // and say why rather than quietly doing the write.
+  if (opts.dryRun && type !== "workspace") {
+    log.error(`--dry-run isn't available for ${type} packages.`);
+    log.hint(
+      `Only workspace packages have a write-free preflight. Nothing was installed. To install for real: synap market install ${slug}`,
+    );
+    process.exit(1);
+  }
 
   // A CAPABILITY installs through the SAME door as `cap add` — one code path, so
   // the two commands can never diverge. That door resolves the template by key
@@ -838,15 +1089,39 @@ export async function marketInstall(
       process.exit(1);
     }
 
+    // An `automation`/`workflow` install is added TO a workspace, and a `view`
+    // package needs a workspace to place its views in — the backend
+    // `market.install` verb hard-requires `workspaceId` for both
+    // (marketplace-install.ts) and 400s without it. Resolve it from the
+    // explicit `--workspace` flag, else the active lens (`synap use` / env),
+    // and fail with an actionable message rather than passing null downstream.
+    // Every OTHER kind (cell/capability/skill) lands pod-wide — leave
+    // workspaceId undefined so that deliberate pod-wide branch is preserved.
+    let workspaceId: string | undefined;
+    if (marketInstallNeedsWorkspace(kind)) {
+      workspaceId = opts.workspace ?? cfg.workspaceId;
+      if (!workspaceId) {
+        log.error(`Installing "${entry.name}" (a ${type}) needs an acting workspace to add it to.`);
+        log.hint("Pass one: synap market install " + slug + " --workspace <workspaceId>");
+        log.hint("Or set a default lens: synap use <workspace>   (see: synap orient)");
+        process.exit(1);
+      }
+    }
+
     const s = opts.json ? null : ora(`Installing ${entry.name}…`).start();
     let res: Record<string, unknown>;
     try {
-      // Pod-wide install: no workspaceId (a capability/cell/template lands on
-      // the pod). `market.install` is a WRITE builtin — an operator run
-      // owner-bypasses the gate and runs it in-process.
+      // Pod-wide install by default: no workspaceId (a capability/cell lands on
+      // the pod). An automation/workflow carries the resolved `workspaceId`
+      // (required — see above). `market.install` is a WRITE builtin — an
+      // operator run owner-bypasses the gate and runs it in-process.
       res = (await hubPost(
         "/capabilities/execute",
-        { verbId: "market.install", parameters: { slug, kind } },
+        {
+          verbId: "market.install",
+          parameters: { slug, kind },
+          ...(workspaceId ? { workspaceId } : {}),
+        },
         cfg,
         applyTimeoutMs
       )) as Record<string, unknown>;
@@ -872,9 +1147,34 @@ export async function marketInstall(
     s?.stop();
 
     // The execute door wraps the verb's return as { status:"run", result: <MarketInstallOutcome> }.
-    // The outcome is { status:"installed", result } (operator) or { status:"proposed", proposalId, reviewUrl }.
+    //
+    // ⚠️ DO NOT default this to "installed". A governed install comes back as a
+    // PROPOSAL, and the envelope's discriminator is `kind` — not `status`
+    // (`execute-capability.ts`: `{ kind:"proposed", proposalId, reviewUrl,
+    // ackState:"proposed" }`). Some hops flatten that to `{ proposed:true, … }`.
+    // Either way `outcome.status` is undefined, so `?? "installed"` printed a
+    // green "✓ Installed" for a write that had NOT happened — found by
+    // dogfooding `synap market install task-views-pack` on a live pod
+    // 2026-09-05, which returned `outcome:"installed"` alongside
+    // `proposed:true`. This is the same defaulted-discriminator class as the
+    // `changeType ?? "update"` bug that once titled every capability run
+    // "Update Capability".
+    //
+    // So: read every honest marker, and when none is present say so rather than
+    // assuming success.
     const outcome = (res.result ?? res) as Record<string, unknown>;
-    const status = String(outcome.status ?? "installed");
+    const isProposed =
+      outcome.kind === "proposed" ||
+      outcome.status === "proposed" ||
+      outcome.ackState === "proposed" ||
+      outcome.proposed === true;
+    const status = isProposed
+      ? "proposed"
+      : outcome.status
+        ? String(outcome.status)
+        : outcome.ackState === "applied" || outcome.result !== undefined
+          ? "installed"
+          : "unknown";
 
     if (opts.json) {
       console.log(JSON.stringify({ slug, kind, outcome: status, result: outcome }, null, 2));
@@ -883,10 +1183,56 @@ export async function marketInstall(
 
     if (status === "proposed") {
       const proposalId = outcome.proposalId ? String(outcome.proposalId) : undefined;
-      log.info(`${entry.name} — proposed (under review, not live yet).`);
+      const reviewUrl = outcome.reviewUrl ? String(outcome.reviewUrl) : undefined;
+      log.info(`${entry.name} — proposed (under review, NOT installed yet).`);
       if (proposalId) log.hint(`Approve: synap proposals approve ${proposalId}`);
+      if (reviewUrl) log.hint(`Review: ${reviewUrl}`);
       return;
     }
+
+    if (status === "unknown") {
+      // The pod answered with a shape carrying no honest marker at all. Saying
+      // "installed" here is exactly the lie this block exists to prevent.
+      log.warn(
+        `${entry.name} — the pod returned an unrecognised result; nothing is assumed installed. Check \`synap market installed\` before retrying.`
+      );
+      return;
+    }
+
+    // A kind:automation (workflow) install returns PER-ITEM results with
+    // per-item isolation — each automation can be {status:"error"} while the
+    // verb overall still reports {status:"installed"} (marketplace-install.ts
+    // automation case). A bare "✓ Installed" here would lie when every item
+    // errored (0 automations created). Inspect the per-item array and report
+    // the real outcome: N created · N reused · N error, surfacing each error's
+    // message, and exit non-zero if NOTHING was created. Other kinds carry no
+    // such array — `summarizeItemInstall` returns null and we fall through to
+    // the unchanged success line.
+    const installed = (outcome.result ?? outcome) as Record<string, unknown>;
+    const summary = summarizeItemInstall(installed);
+    if (summary) {
+      const { created, reused, errored, okCount } = summary;
+      const counts = `${created} created · ${reused} reused · ${errored.length} error`;
+
+      if (errored.length > 0) {
+        // Never print a bare success when any item failed.
+        if (okCount === 0) {
+          log.error(`${entry.name} — install failed (${counts}).`);
+        } else {
+          log.warn(`${entry.name} — installed partially (${counts}).`);
+        }
+        for (const e of errored) {
+          log.error(`${e.name ?? "(unnamed)"} — ${e.message ?? "unknown error"}`);
+        }
+        // Total failure (nothing created or reused) exits non-zero so scripts
+        // and users see the real outcome; a partial install stays exit 0.
+        if (okCount === 0) process.exit(1);
+        return;
+      }
+      log.success(`Installed ${entry.name} (${counts}).`);
+      return;
+    }
+
     log.success(`Installed ${entry.name}.`);
     return;
   }
@@ -1065,6 +1411,7 @@ export async function marketInstall(
       printApplyVerdict(entry, verdict);
     }
     printSeedOutcomes(dependencies, seedSummary);
+    printLayerOutcomes(ws?.layers);
     if (ws?.outcome || ws?.status === "composed" || ws?.status === "created") renderNextSteps(steps);
   } catch (e) {
     s?.stop();
@@ -1226,6 +1573,7 @@ async function applyOnePackage(
     if (!opts.json) {
       printApplyVerdict(entry, verdict);
       printSeedOutcomes(dependencies, seedSummary);
+      printLayerOutcomes(ws?.layers);
     }
     return {
       slug: entry.slug,

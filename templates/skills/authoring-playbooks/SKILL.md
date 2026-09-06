@@ -68,13 +68,16 @@ Stages are **ordered** and drive the session's progression. Read `reference/stag
 ```jsonc
 "stages": [
   {
-    "key": "scope",                       // stable id, referenced by currentStage
+    "key": "scope",                       // stable id, referenced by currentStage. Unique within the playbook.
     "name": "Scope",
+    "category": "started",                // REQUIRED. backlog | planned | started | paused | completed | canceled
     "description": "Understand the client and their problem.",
     "goal": "Produce a one-paragraph problem statement.",   // optional
     "grants": [{ "kind": "skill", "id": "client-brief" }],  // optional, advisory hint (not enforced)
     "expectedOutputs": [{ "kind": "note", "label": "Problem statement" }],
-    "suggestedTasks": ["Read the intake form", "List open questions"]
+    "suggestedTasks": ["Read the intake form", "List open questions"],
+    "position": 0,                                         // optional, orders WITHIN the category group
+    "indefinite": false                                    // optional, may a subject sit here forever?
   }
 ]
 ```

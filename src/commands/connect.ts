@@ -107,13 +107,6 @@ export async function connect(opts: ConnectOptions): Promise<void> {
   log.blank();
   if (ok) {
     log.success(`${TARGETS[target].label} connected to ${podUrl}`);
-    // For MCP targets, surface the provider pull option — lets users get real
-    // AI provider credentials from the pod vault into their local tool config.
-    if (TARGETS[target].supports.mcp) {
-      log.blank();
-      log.dim("To also configure an AI provider (opencode, aider, etc.) from the pod:");
-      log.dim("  synap providers pull");
-    }
     log.dim("Run 'synap connections' to see all surface connections.");
   } else {
     log.warn(`${TARGETS[target].label} install did not complete — see above.`);

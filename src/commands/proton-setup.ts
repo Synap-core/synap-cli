@@ -56,7 +56,7 @@ import { createRequire } from "node:module";
 import chalk from "chalk";
 import ora from "ora";
 import prompts from "prompts";
-import { resolveHubConfig, hubGet, hubPost, resolveUserId, type HubConfig } from "../lib/hub-client.js";
+import { resolveHubConfig, hubGet, hubPost, resolveUserId, renderHubError, type HubConfig } from "../lib/hub-client.js";
 import { fetchProjects } from "../lib/project.js";
 import {
   checkPodHealth,
@@ -218,7 +218,7 @@ export async function protonSetup(opts: ProtonSetupOpts): Promise<void> {
     probe.succeed("Key valid (hub-protocol scope OK)");
   } catch (err) {
     probe.fail("Key/scope check failed");
-    log.error((err as Error).message);
+    renderHubError(err);
     log.dim("The key may be expired or missing scope. Run `synap keys rotate` or `synap init`.");
     process.exit(1);
   }

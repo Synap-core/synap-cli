@@ -408,8 +408,9 @@ export async function installForTarget(
     case "generic":       result = await installGeneric(cfg); break;
   }
 
-  // Post-install: configure agent workspace context for all successful MCP installs.
-  if (result && info.supports.mcp && target !== "generic") {
+  // Post-install: agent context wizard for MCP targets. Skip Raycast — native
+  // and --with-mcp use the extension catalog / opt-in MCP; CONTEXT.md has no Raycast consumer.
+  if (result && info.supports.mcp && target !== "generic" && target !== "raycast") {
     const { getSurfaceAgentKey } = await import("./pod.js");
     const saved = getSurfaceAgentKey(target as import("./pod.js").SurfaceName);
     const agentUserId = saved?.agentUserId ?? "";

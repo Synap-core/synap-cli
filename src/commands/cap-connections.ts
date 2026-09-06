@@ -16,7 +16,7 @@
 import chalk from "chalk";
 import ora from "ora";
 import prompts from "prompts";
-import { resolveHubConfig, hubGet, hubPost, hubPatch, hubDelete } from "../lib/hub-client.js";
+import { resolveHubConfig, hubGet, hubPost, hubPatch, hubDelete, renderHubError } from "../lib/hub-client.js";
 import { unwrapList } from "../lib/unwrapList.js";
 import { log } from "../utils/logger.js";
 
@@ -118,7 +118,7 @@ export async function capabilityConnectionsList(
     spinner.stop();
   } catch (err) {
     spinner.fail(chalk.red("Failed to fetch connections"));
-    log.error((err as Error).message);
+    renderHubError(err);
     process.exit(1);
   }
 
@@ -193,7 +193,7 @@ export async function capabilityConnectionsAdd(
     spinner.stop();
   } catch (err) {
     spinner.fail(chalk.red("Failed to add connection"));
-    log.error((err as Error).message);
+    renderHubError(err);
     process.exit(1);
   }
 
@@ -247,7 +247,7 @@ export async function capabilityConnectionsUpdate(
     spinner.succeed(chalk.green(`Updated connection ${chalk.cyan(connectionId)}.`));
   } catch (err) {
     spinner.fail(chalk.red("Failed to update connection"));
-    log.error((err as Error).message);
+    renderHubError(err);
     process.exit(1);
   }
 }
@@ -279,7 +279,7 @@ export async function capabilityConnectionsRemove(
     spinner.succeed(chalk.green(`Removed connection ${chalk.cyan(connectionId)}.`));
   } catch (err) {
     spinner.fail(chalk.red("Failed to remove connection"));
-    log.error((err as Error).message);
+    renderHubError(err);
     process.exit(1);
   }
 }

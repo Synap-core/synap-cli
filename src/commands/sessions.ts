@@ -26,6 +26,7 @@ export async function startSession(
   opts: BaseOpts & {
     goal: string;
     workspace?: string;
+    project?: string;
     taskId?: string;
     template?: string;
     parent?: string;
@@ -35,9 +36,26 @@ export async function startSession(
   try {
     const cfg = await resolveHubConfig(opts);
 
+    // LENS PARITY. `resolveHubConfig` already resolves the active project
+    // ("write paths should consume resolveHubConfig().projectId" —
+    // lib/hub-client.ts), and `synap lens` / `synap capture` both honour it.
+    // This door read `cfg.workspaceId` and dropped `cfg.projectId` on the
+    // floor, so the same terminal answered differently depending on which
+    // command you used: capture filed into the project, `session start` wrote
+    // projectId: null. The value was one field away the whole time.
     const workspaceId = opts.workspace || cfg.workspaceId;
-    if (!workspaceId) {
-      console.error(chalk.red("Error: --workspace <id> is required (or set active workspace with 'synap use')"));
+    const projectId = opts.project || cfg.projectId;
+
+    // The POD accepts workspaceId OR projectId ("Provide a workspaceId or a
+    // projectId" — rest/focus-sessions.ts). Requiring a workspace here was a
+    // CLI-only rule, stricter than the contract, and it made a project-scoped
+    // session unreachable from the terminal.
+    if (!workspaceId && !projectId) {
+      console.error(
+        chalk.red(
+          "Error: no workspace or project in scope — pass --workspace <id> or --project <id>, or set one with 'synap use' / 'synap project use'"
+        )
+      );
       process.exit(1);
     }
 
@@ -49,11 +67,11 @@ export async function startSession(
       process.exit(1);
     }
 
-    const body: Record<string, unknown> = {
-      workspaceId,
-      userId,
-      goal: opts.goal,
-    };
+    const body: Record<string, unknown> = { userId, goal: opts.goal };
+    // Send only what is in scope: the pod's refine accepts either, and sending
+    // an undefined workspaceId would fail the "min(1)" on the wire.
+    if (workspaceId) body.workspaceId = workspaceId;
+    if (projectId) body.projectId = projectId;
     if (opts.taskId) body.correlationId = `task:${opts.taskId}`;
     if (opts.template) body.templateId = opts.template;
     // Detour push: the pod records `session --spawned_from--> session` and (with
@@ -228,14 +246,34 @@ export async function updateSession(
   try {
     const cfg = await resolveHubConfig(opts);
 
+    // The session is identified by `id` in the URL and `workspaceId` is
+    // `.optional()` on the pod's UpdateBodySchema — so demanding one here was a
+    // CLI-only rule that made an already-attached (or project-scoped) session
+    // un-updatable without re-stating a lens the terminal already holds.
     const wsId = opts.workspace || cfg.workspaceId;
-    if (!wsId) {
-      console.error(chalk.red("Error: no active workspace — pass --workspace <id> or set one with `synap use`"));
-      process.exit(1);
-    }
 
-    const body: Record<string, string | number | undefined> = { workspaceId: wsId };
-    if (opts.progress !== undefined) body.progress = parseInt(opts.progress, 10);
+    const body: Record<string, string | number | undefined> = {};
+    if (wsId) body.workspaceId = wsId;
+
+    // `progress` is `z.number().int().min(0).max(100)` on the pod. `parseInt`
+    // on prose yields NaN, which serialized to the wire and came back as a raw
+    // zod echo — an unreadable error for a mistake the CLI could name here.
+    // Validate at the edge and say what the flag actually takes.
+    if (opts.progress !== undefined) {
+      const pct = Number(opts.progress);
+      if (!Number.isInteger(pct) || pct < 0 || pct > 100) {
+        console.error(
+          chalk.red(
+            `Error: --progress takes a whole number 0-100 (got ${JSON.stringify(opts.progress)}).`
+          )
+        );
+        log.hint(
+          "For a free-text note, use --goal to restate the goal, or capture the note: synap capture --type lesson --claim \"...\""
+        );
+        process.exit(1);
+      }
+      body.progress = pct;
+    }
     if (opts.status) body.status = opts.status;
     if (opts.stage) body.currentStage = opts.stage;
     if (opts.goal) body.goal = opts.goal;
@@ -335,7 +373,7 @@ type CompletePackResult = {
  */
 export async function closeSession(
   id: string,
-  opts: BaseOpts & { workspace?: string; recap?: string }
+  opts: BaseOpts & { workspace?: string; recap?: string; as?: string }
 ): Promise<void> {
   try {
     const cfg = await resolveHubConfig(opts);
@@ -349,6 +387,10 @@ export async function closeSession(
       // Map CLI --recap → body.summary (server field; there is no `recap` key).
       const body: Record<string, unknown> = {};
       if (opts.recap) body.summary = opts.recap;
+      // How the session ended. Validated at the edge (see index.ts) so a typo
+      // fails here with the three legal values, rather than reaching the pod
+      // and being rejected by a zod enum the user cannot see.
+      if (opts.as) body.terminalStatus = opts.as;
       pack = (await hubPost(
         `/focus-sessions/${id}/complete`,
         body,
@@ -364,7 +406,9 @@ export async function closeSession(
       log.dim(
         "Pack unavailable on this pod (POST …/complete → 404); falling back to status close."
       );
-      const patchBody: Record<string, unknown> = { status: "closed" };
+      const patchBody: Record<string, unknown> = {
+        status: opts.as ?? "closed",
+      };
       if (wsId) patchBody.workspaceId = wsId;
       if (opts.recap) patchBody.verificationReport = { summary: opts.recap };
       await hubPatch(`/focus-sessions/${id}`, patchBody, cfg);

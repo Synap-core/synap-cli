@@ -57,7 +57,7 @@ vi.mock("../src/lib/hub-client.js", () => ({
     workspaceId: WS,
   })),
   resolveUserId: vi.fn(async () => "user-1"),
-  readActiveSessionId: vi.fn(() => undefined),
+  resolveActiveSessionId: vi.fn(() => undefined),
   renderHubError: vi.fn(),
   HubError: class HubError extends Error {},
 }));

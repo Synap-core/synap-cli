@@ -395,7 +395,7 @@ async function pathC(opts: InitOptions): Promise<void> {
           "\n  curl -fsSL https://raw.githubusercontent.com/Synap-core/backend/main/install.sh | bash\n"
         )
       );
-      log.info("Then on that server: npx @synap/cli init");
+      log.info("Then on that server: npx @synap-core/cli init");
     }
     return;
   }
@@ -1256,28 +1256,28 @@ async function hasAnyPodSignal(): Promise<boolean> {
 }
 
 function printNoPodInstructions(): void {
-  const line = "─".repeat(63);
+  const line = "─".repeat(64);
   console.log(`
 ┌${line}┐
-│ No Synap pod detected.                                        │
-│                                                               │
-│ You need a running pod before using @synap/cli init.          │
-│                                                               │
-│ Options:                                                      │
-│                                                               │
-│   1. Self-host on a server (free):                            │
-│      On your server, run:                                     │
-│        curl -fsSL https://synap.live/install.sh | bash        │
-│      Then come back and run:                                  │
-│        npx @synap-core/cli init --pod-url https://your-pod... │
-│                                                               │
-│   2. Use a hosted pod ($):                                    │
-│      Sign up at https://synap.live                            │
-│      Then run:                                                │
-│        npx @synap-core/cli init --pod-url <your-pod-url>      │
-│                                                               │
-│   3. Already running locally? Pass --pod-url:                 │
-│        npx @synap-core/cli init --pod-url http://localhost:4000 │
+│ No Synap pod detected.                                         │
+│                                                                │
+│ You need a running pod before using @synap-core/cli init.      │
+│                                                                │
+│ Options:                                                       │
+│                                                                │
+│   1. Self-host on a server (free):                             │
+│      On your server, run:                                      │
+│        curl -fsSL https://synap.live/install.sh | bash         │
+│      Then come back and run:                                   │
+│        npx @synap-core/cli init --pod-url https://your-pod...  │
+│                                                                │
+│   2. Use a hosted pod ($):                                     │
+│      Sign up at https://synap.live                             │
+│      Then run:                                                 │
+│        npx @synap-core/cli init --pod-url <your-pod-url>       │
+│                                                                │
+│   3. Already running locally? Pass --pod-url:                  │
+│        npx @synap-core/cli init --pod-url http://localhost:4000│
 └${line}┘
 `);
 }

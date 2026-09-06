@@ -461,7 +461,7 @@ export async function capabilityList(opts: CapListOpts): Promise<void> {
   try {
     cfg = await resolveHubConfig();
   } catch (err) {
-    log.error((err as Error).message);
+    renderHubError(err);
     process.exit(1);
   }
 
@@ -480,7 +480,7 @@ export async function capabilityList(opts: CapListOpts): Promise<void> {
       return;
     }
     spinner?.fail(chalk.red("Failed to fetch capabilities"));
-    log.error((err as Error).message);
+    renderHubError(err);
     process.exit(1);
   }
 
@@ -656,7 +656,7 @@ async function ensureConnection(
       return true;
     } catch (err) {
       spinner.fail(chalk.red("Failed to store credential"));
-      log.error((err as Error).message);
+      renderHubError(err);
       return false;
     }
   }
@@ -672,7 +672,7 @@ async function ensureConnection(
     spinner.stop();
   } catch (err) {
     spinner.fail(chalk.red("Failed to resolve connection"));
-    log.error((err as Error).message);
+    renderHubError(err);
     return false;
   }
 
@@ -802,7 +802,7 @@ async function applyTemplateWithParams(
     return true;
   } catch (err) {
     spinner.fail(chalk.red(`Failed to ${verb.toLowerCase()} ${card.name}`));
-    log.error((err as Error).message);
+    renderHubError(err);
     return false;
   }
 }
@@ -878,7 +878,7 @@ export async function capabilityAdd(
   try {
     cfg = await resolveHubConfig();
   } catch (err) {
-    log.error((err as Error).message);
+    renderHubError(err);
     process.exit(1);
   }
 
@@ -899,7 +899,7 @@ export async function capabilityAdd(
       return;
     }
     spinner.fail(chalk.red("Failed to fetch catalog"));
-    log.error((err as Error).message);
+    renderHubError(err);
     process.exit(1);
   }
 
@@ -1012,7 +1012,7 @@ export async function capabilityAdd(
       addSpinner.succeed(chalk.green(`Added ${chalk.bold(card.name)}.`));
     } catch (err) {
       addSpinner.fail(chalk.red(`Failed to add ${card.name}`));
-      log.error((err as Error).message);
+      renderHubError(err);
       process.exit(1);
     }
   }
@@ -1096,7 +1096,7 @@ export async function capabilityEnable(
   try {
     cfg = await resolveHubConfig();
   } catch (err) {
-    log.error((err as Error).message);
+    renderHubError(err);
     process.exit(1);
   }
 
@@ -1117,7 +1117,7 @@ export async function capabilityEnable(
         catalogNeedsDeploy();
         return;
       }
-      log.error((err as Error).message);
+      renderHubError(err);
       process.exit(1);
     }
     if (cards.length === 0) {
@@ -1179,7 +1179,7 @@ export async function capabilityEnable(
       return;
     }
     spinner.fail(chalk.red("Failed to fetch catalog"));
-    log.error((err as Error).message);
+    renderHubError(err);
     process.exit(1);
   }
 
@@ -1285,7 +1285,7 @@ export async function capabilityEnable(
     work.stop();
   } catch (err) {
     work.fail(chalk.red("Failed while applying your selection"));
-    log.error((err as Error).message);
+    renderHubError(err);
     process.exit(1);
   }
 
@@ -1318,7 +1318,7 @@ export async function capabilityConnect(
   try {
     cfg = await resolveHubConfig();
   } catch (err) {
-    log.error((err as Error).message);
+    renderHubError(err);
     process.exit(1);
   }
 
@@ -1344,7 +1344,7 @@ export async function capabilityConnect(
       spin.stop();
     } catch (err) {
       spin.stop();
-      log.error((err as Error).message);
+      renderHubError(err);
       log.dim("Couldn't reach the pod's connector service.");
       return;
     }
@@ -1420,7 +1420,7 @@ export async function capabilityConnect(
       return;
     }
     spinner.fail(chalk.red("Failed to fetch catalog"));
-    log.error((err as Error).message);
+    renderHubError(err);
     process.exit(1);
   }
 
@@ -1485,7 +1485,7 @@ export async function capabilityDisconnect(
   try {
     cfg = await resolveHubConfig();
   } catch (err) {
-    log.error((err as Error).message);
+    renderHubError(err);
     process.exit(1);
   }
 
@@ -1585,7 +1585,7 @@ export async function capabilityShow(name: string, opts: CapShowOpts): Promise<v
   try {
     cfg = await resolveHubConfig();
   } catch (err) {
-    log.error((err as Error).message);
+    renderHubError(err);
     process.exit(1);
   }
 
@@ -1603,7 +1603,7 @@ export async function capabilityShow(name: string, opts: CapShowOpts): Promise<v
       return;
     }
     spinner?.fail(chalk.red("Failed to fetch catalog"));
-    log.error((err as Error).message);
+    renderHubError(err);
     process.exit(1);
   }
 
@@ -1700,7 +1700,7 @@ export async function capabilityRun(
   try {
     cfg = await resolveHubConfig();
   } catch (err) {
-    log.error((err as Error).message);
+    renderHubError(err);
     process.exit(1);
   }
 
@@ -1793,7 +1793,7 @@ export async function capabilityTest(verb: string, opts: CapTestOpts): Promise<v
   try {
     cfg = await resolveHubConfig();
   } catch (err) {
-    log.error((err as Error).message);
+    renderHubError(err);
     process.exit(1);
   }
 
@@ -1806,7 +1806,7 @@ export async function capabilityTest(verb: string, opts: CapTestOpts): Promise<v
     skillId = await resolveSkillId(cfg, workspaceId, verb);
   } catch (err) {
     spinner.fail(chalk.red("Failed to resolve capability"));
-    log.error((err as Error).message);
+    renderHubError(err);
     process.exit(1);
   }
 
@@ -1823,7 +1823,7 @@ export async function capabilityTest(verb: string, opts: CapTestOpts): Promise<v
     spinner.stop();
   } catch (err) {
     spinner.fail(chalk.red(`Dry-run failed for ${verb}`));
-    log.error((err as Error).message);
+    renderHubError(err);
     process.exit(1);
   }
 
@@ -1868,7 +1868,7 @@ export async function capabilityCreate(
   try {
     cfg = await resolveHubConfig();
   } catch (err) {
-    log.error((err as Error).message);
+    renderHubError(err);
     process.exit(1);
   }
   const workspaceId = requireWorkspace(opts, cfg);
@@ -1922,7 +1922,7 @@ export async function capabilityCreate(
     spinner.stop();
   } catch (err) {
     spinner.fail(chalk.red("Failed to create capability"));
-    log.error((err as Error).message);
+    renderHubError(err);
     process.exit(1);
   }
 

@@ -10,15 +10,16 @@
     "build": "tsc",
     "dev": "tsx src/index.ts",
     "sync-skills": "bash scripts/sync-skills.sh",
-    "prepublishOnly": "pnpm sync-skills && pnpm build",
+    "prepublishOnly": "npm run sync-skills && npm run build",
     "prepack": "rm -rf node_modules/@synap/hub-rest-client && cp -r ../synap-backend/packages/hub-rest-client node_modules/@synap/",
     "postpack": "rm -rf node_modules/@synap/hub-rest-client && ln -s ../../../synap-backend/packages/hub-rest-client node_modules/@synap/hub-rest-client",
     "postbuild": "chmod +x dist/index.js",
-    "test": "vitest run"
+    "test": "vitest run",
+    "verify-artifact": "node scripts/verify-artifact.mjs"
   },
   "dependencies": {
     "@synap/hub-rest-client": "file:../synap-backend/packages/hub-rest-client",
-    "@synap-core/workspace-templates": "workspace:*",
+    "@synap-core/workspace-templates": "^0.11.0",
     "chalk": "^5.4.0",
     "commander": "^13.0.0",
     "ora": "^8.0.0",

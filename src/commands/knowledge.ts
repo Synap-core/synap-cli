@@ -27,7 +27,7 @@ import {
   resolveUserId,
   hubPost,
   hubGet,
-  readActiveSessionId,
+  resolveActiveSessionId,
   type HubConfig,
   renderHubError,
 } from "../lib/hub-client.js";
@@ -50,6 +50,7 @@ import {
   type ExecuteResult,
 } from "../lib/capture-structure.js";
 import { UUID_RE } from "../lib/id.js";
+import { knowledgeTitleFromClaim } from "../lib/knowledge-title.js";
 
 export type KnowledgeType = "gotcha" | "lesson" | "decision" | "reference";
 
@@ -424,7 +425,7 @@ async function runSmartCapture(rawText: string, opts: CaptureOpts): Promise<void
   }
 
   // 1. Structure
-  const smartSessionId = opts.session ? readActiveSessionId() : undefined;
+  const smartSessionId = opts.session ? resolveActiveSessionId(cfg.podUrl) : undefined;
   const structureBody: Record<string, unknown> = {
     userId,
     text,
@@ -678,7 +679,8 @@ export async function captureKnowledge(opts: CaptureOpts): Promise<void> {
       ? opts.tags.split(",").map((t) => t.trim()).filter(Boolean)
       : [];
 
-    const title = opts.claim.slice(0, 120);
+    // A title is a LABEL; the claim itself stays in `ek_claim` ("Summary").
+    const title = knowledgeTitleFromClaim(opts.claim);
 
     // Every --type entry is a typed `knowledge` entity; ek_type discriminates the
     // kind. This is "one store, type tags" (the research-canonical pattern) — NOT a
@@ -686,7 +688,7 @@ export async function captureKnowledge(opts: CaptureOpts): Promise<void> {
     // lens that supplies its domain (so no `engineering_knowledge`). A structured
     // decision RECORD (rationale/alternatives/status) is a different artifact, reached
     // via smart `capture "<text>"` or `create entity --profile=decision`.
-    const sessionId = opts.session ? readActiveSessionId() : undefined;
+    const sessionId = opts.session ? resolveActiveSessionId(cfg.podUrl) : undefined;
 
     const res = await hubPost("/entities", {
       userId,

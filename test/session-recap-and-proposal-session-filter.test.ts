@@ -50,8 +50,8 @@ vi.mock("../src/lib/hub-client.js", () => ({
   })),
   resolveUserId: vi.fn(async () => "user-1"),
   renderHubError: vi.fn(),
-  readActiveSessionId: vi.fn(() => undefined),
-  clearActiveSessionId: vi.fn(),
+  resolveActiveSessionId: vi.fn(() => undefined),
+  detachActiveSessionId: vi.fn(() => undefined),
   HubError: MockHubError,
 }));
 
