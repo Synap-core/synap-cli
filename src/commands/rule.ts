@@ -11,8 +11,15 @@
  * the reading (including the literal cues that fired, so an AI-authored routing
  * is inspectable rather than oracular), refuses to guess when the classifier
  * asks for clarification, creates the rule RECORD through the governed door,
- * and then says plainly that no behaviour is attached yet. `synap automate`
- * remains the door that builds behaviour.
+ * and then says plainly that no behaviour is attached yet.
+ *
+ * It does NOT point at `synap automate`: that door asks the agent for a
+ * standalone automation and never links it back to this rule (the only
+ * callers of `linkRuleHalves` are the rule create/update doors), so the hint
+ * sent users to make an orphan. The door that CAN attach behaviour to an
+ * existing rule is `skills.updateRule` with a sentence — reachable today from
+ * Relay's rule editor (Rules → the rule → Edit). The browser's rule modal is
+ * not that door: it writes a new automation, not an edit to this rule.
  *
  * The expensive failure this command exists to prevent is materialising a
  * ONE-OFF request ("we're working on Stellar Grants — research the process")
@@ -471,10 +478,6 @@ export async function rule(
       why: "review and approve the rule",
     });
   }
-  nextSteps.push({
-    command: `synap automate "${intent}"`,
-    why: "build the behaviour half — this door records the rule only",
-  });
   nextSteps.push({ command: "synap rule list", why: "see every rule and what is attached" });
 
   if (opts.json) {
@@ -513,9 +516,11 @@ export async function rule(
   } else {
     log.success(`Rule created${result.ruleId ? "  " + chalk.dim(result.ruleId) : ""}`);
   }
-  log.warn(
-    "No behaviour attached yet — this door records the rule, it does not build the automation."
+  log.warn("Intent recorded only — no behaviour is attached, so this rule will not run anything.");
+  log.hint(
+    `${result.status === "proposed" ? "Once approved, open it" : "To make it run, open it"} in Relay (Rules → this rule → Edit) and set its WHEN and THEN.`
   );
+  log.hint("`synap automate` would build a separate automation that is not linked to this rule.");
   renderNextSteps(nextSteps);
 }
 
@@ -627,6 +632,10 @@ export async function ruleList(
   );
   renderNextSteps([
     { command: "synap open proposal <id>", why: "approve a rule that is awaiting review" },
-    { command: 'synap automate "<rule>"', why: "build the behaviour half for a rule that has none" },
   ]);
+  if (rows.some((r) => behaviourCountOf(r) === 0)) {
+    log.hint(
+      "A rule with no behaviour runs nothing — set its WHEN and THEN in Relay (Rules → the rule → Edit)."
+    );
+  }
 }

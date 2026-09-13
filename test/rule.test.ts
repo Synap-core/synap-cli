@@ -272,7 +272,38 @@ describe("synap rule — a governed `proposed` result is queued, never failed", 
 
     await rule("always tag Acme invoices urgent", {}, deps);
 
-    expect(c.text()).toMatch(/No behaviour attached yet/);
+    expect(c.text()).toMatch(/Intent recorded only — no behaviour is attached/);
+    c.restore();
+  });
+
+  // `synap automate` builds an automation the rule never learns about — no
+  // path from it reaches `linkRuleHalves`. Offering it as "the behaviour half"
+  // sent users to make an orphan, so neither the human copy nor the agent's
+  // `nextSteps` may name it; both must name the door that edits THIS rule.
+  it("never sends the user to `synap automate`, and names the door that attaches behaviour", async () => {
+    const c = capture();
+    await rule("always tag Acme invoices urgent", {}, makeDeps());
+    expect(c.text()).not.toMatch(/synap automate "/);
+    expect(c.text()).toMatch(/Relay \(Rules → this rule → Edit\)/);
+    c.restore();
+
+    const j = capture();
+    await rule("always tag Acme invoices urgent", { json: true }, makeDeps());
+    const parsed = JSON.parse(j.stdout());
+    expect(parsed.nextSteps.length).toBeGreaterThan(0);
+    expect(
+      parsed.nextSteps.map((s: { command: string }) => s.command).join("\n")
+    ).not.toMatch(/synap automate/);
+    j.restore();
+  });
+
+  it("a proposed rule is told to wait for approval before behaviour can be attached", async () => {
+    const deps = makeDeps({
+      create: vi.fn().mockResolvedValue({ status: "proposed", proposalId: "prop-42" }),
+    });
+    const c = capture();
+    await rule("always tag Acme invoices urgent", {}, deps);
+    expect(c.text()).toMatch(/Once approved, open it in Relay/);
     c.restore();
   });
 
@@ -375,6 +406,17 @@ describe("synap rule list", () => {
     expect(text).toContain("1 automation");
     expect(text).toContain("no behaviour");
     expect(text).toContain("pod");
+    c.restore();
+  });
+
+  it("points a behaviour-less rule at Relay's editor, never at `synap automate`", async () => {
+    const deps = makeDeps({ list: vi.fn().mockResolvedValue(ROWS) });
+    const c = capture();
+
+    await ruleList({}, deps);
+
+    expect(c.text()).not.toMatch(/synap automate/);
+    expect(c.text()).toMatch(/Relay \(Rules → the rule → Edit\)/);
     c.restore();
   });
 
