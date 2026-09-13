@@ -973,7 +973,9 @@ export async function updateEntity(
     const workspaceId = opts.workspace ?? cfg.workspaceId;
     // parse props as unknown then cast — user-supplied JSON
     const metadata = JSON.parse(opts.props) as Record<string, unknown>;
-    const body: Record<string, unknown> = { userId: cfg.userId, metadata };
+    // No userId: the route defaults to the authenticated caller, and
+    // cfg.userId may be a CLI sentinel ("cli"/pod name) the pod refuses.
+    const body: Record<string, unknown> = { metadata };
     // backend reads body.workspaceId to scope automation matching — without it
     // the update lands pod-wide and workspace-gated automations never fire
     if (workspaceId) body.workspaceId = workspaceId;

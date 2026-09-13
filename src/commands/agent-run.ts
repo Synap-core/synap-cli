@@ -120,7 +120,8 @@ async function storeResearch(
   const res = await hubPost(
     "/entities",
     {
-      userId: cfg.userId,
+      // No userId: the route defaults to the authenticated caller, and
+      // cfg.userId may be a CLI sentinel ("cli"/pod name) the pod refuses.
       workspaceId: cfg.workspaceId,
       profileSlug: "research",
       name: title,
@@ -337,7 +338,7 @@ export async function agentSchedule(opts: ScheduleOpts): Promise<void> {
   await hubPost(
     "/entities",
     {
-      userId: cfg.userId,
+      // No userId — see storeResearch.
       workspaceId: cfg.workspaceId,
       profileSlug: "task",
       name: `[agent-sched] ${name}`,
