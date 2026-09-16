@@ -1102,7 +1102,15 @@ async function loginAndSelectPod(): Promise<{ url: string; podId: string } | nul
   // Check if already logged in
   const authStatus = await isLoggedIn();
 
-  if (!authStatus.valid) {
+  if (authStatus.valid) {
+    log.success(`Already logged in as ${authStatus.email}`);
+  } else {
+    log.info("You are not currently logged in to Synap.");
+  }
+
+  let storedToken = getStoredToken();
+  if (!storedToken || !authStatus.valid) {
+    // No token or not valid — need to login
     log.info("Opening browser to sign in and select your pod...");
     const spinner = ora("Waiting for browser authentication...").start();
 
@@ -1127,22 +1135,44 @@ async function loginAndSelectPod(): Promise<{ url: string; podId: string } | nul
       healthSpinner.warn(`Pod selected (${creds.podUrl}) but not yet reachable — may still be provisioning`);
       return { url: creds.podUrl, podId: creds.podId };
     }
-  } else {
-    log.success(`Already logged in as ${authStatus.email}`);
+
+    // After login, re-fetch stored token (login() writes credentials)
+    storedToken = getStoredToken();
   }
 
-  const token = getStoredToken();
-  if (!token) return null;
+  // We have a valid token
+  if (!storedToken) {
+    log.warn("No stored credentials found — please sign in.");
+    return null;
+  }
 
   // Short-circuit if credentials already carry a pod from a previous web-based selection.
-  if (token.podUrl && token.podId) {
-    return { url: token.podUrl, podId: token.podId };
+  if (storedToken.podUrl && storedToken.podId) {
+    log.info(`You have a previously selected pod: ${storedToken.podUrl}`);
+    const { useExisting } = await prompts({
+      type: "confirm",
+      name: "useExisting",
+      message: "Use this pod?",
+      initial: true,
+    });
+
+    if (useExisting) {
+      const healthSpinner = ora("Checking pod health...").start();
+      const status = await checkPodHealth(storedToken.podUrl);
+      if (status.healthy) {
+        healthSpinner.succeed(`Pod healthy at ${storedToken.podUrl}`);
+        return { url: storedToken.podUrl, podId: storedToken.podId };
+      }
+      healthSpinner.fail(`Pod not reachable at ${storedToken.podUrl}`);
+      log.blank();
+    }
+    // Fall through to pod selection if user doesn't want to use existing pod or pod is unreachable
   }
 
   // List pods
   const podsSpinner = ora("Fetching your pods...").start();
   try {
-    const pods = await listPods(token.token);
+    const pods = await listPods(storedToken.token);
 
     if (pods.length === 0) {
       podsSpinner.info("No pods found on your account");
@@ -1153,14 +1183,18 @@ async function loginAndSelectPod(): Promise<{ url: string; podId: string } | nul
     }
 
     podsSpinner.succeed(`Found ${pods.length} pod(s)`);
+    log.blank();
+    log.info("Your available pods:");
 
     if (pods.length === 1) {
       const pod = pods[0];
       const podUrl = pod.url || `https://${pod.subdomain}.synap.live`;
+      log.dim(`  • ${podUrl} (${pod.status})`);
+
       const { connect } = await prompts({
         type: "confirm",
         name: "connect",
-        message: `Connect to ${podUrl}?`,
+        message: `Connect to this pod?`,
         initial: true,
       });
 

@@ -166,7 +166,19 @@ function openBrowser(url: string): void {
         // Can't open browser — caller handles fallback
         throw new Error("Unsupported platform");
     }
-  } catch {
+  } catch (err) {
+    // On macOS, "open" can fail silently if no default browser is set or if the
+    // URL scheme isn't registered. Provide actionable feedback.
+    if (process.platform === "darwin") {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes("No application knows how to open") || msg.includes("LSOpenURLsWithRole")) {
+        throw new Error(
+          `Could not open browser: macOS has no default browser set.\n` +
+          `  Fix: Open System Settings → Desktop & Dock → Default web browser, or run:\n` +
+          `  open -a "Google Chrome" "${url}"`
+        );
+      }
+    }
     throw new Error("Could not open browser");
   }
 }
