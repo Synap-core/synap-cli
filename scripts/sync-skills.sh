@@ -18,7 +18,7 @@ SRC="${SYNAP_SKILLS_SOURCE:-../synap-backend/skills}"
 
 if [ ! -d "$SRC" ]; then
   echo "sync-skills: source not found at $SRC" >&2
-  echo "  Set SYNAP_SKILLS_SOURCE to the folder containing synap/, synap-schema/, synap-ui/" >&2
+  echo "  Set SYNAP_SKILLS_SOURCE to the folder containing synap/, synap-ui/" >&2
   exit 1
 fi
 
@@ -37,7 +37,7 @@ if [ -f "$SRC/manifest.json" ]; then
     console.log([...(m.baseline||[]), ...(m.workflow||[])].join(' '));
   ")
 else
-  SKILL_LIST="synap synap-schema synap-ui onboard agent-os"
+  SKILL_LIST="synap synap-ui"
   echo "sync-skills: manifest.json not found at $SRC/manifest.json, using fallback list" >&2
 fi
 
