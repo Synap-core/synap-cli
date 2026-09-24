@@ -293,7 +293,7 @@ const mcp = program
 
 mcp
   .command("url")
-  .description("Print a ready-to-paste MCP connection (URL + key + snippets) for UI clients like ChatGPT")
+  .description("Print a ready-to-paste MCP connection (URL + key + snippets) for header-based UI clients like Raycast")
   .option("--client <name>", "Name the dedicated agent key after the target client")
   .option("--workspace <id>", "Scope to a specific workspace (omit for pod-wide)")
   .option("--project <id>", "Focus the agent on a project (narrows every tool call; orthogonal to --workspace)")

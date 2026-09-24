@@ -6,7 +6,8 @@
  *      `synap mcp connect-claude` to print the URL (no key mint, no file write).
  *   2. IDE / file-configurable — pod `${podUrl}/mcp` (Bearer). Needs a pod +
  *      key. `synap mcp connect <client>` writes client config; `synap mcp url`
- *      prints URL + key for header-based UIs (ChatGPT, Raycast, …).
+ *      prints URL + key for header-based UIs (Raycast, …). ChatGPT's custom
+ *      connectors are OAuth-only, same lane as claude.ai (web) — see lane 1.
  *
  *   synap mcp url            — paste-ready pod MCP connection (URL + key)
  *   synap mcp verify         — health-check pod /mcp + key
@@ -154,7 +155,7 @@ export async function mcpUrl(
     console.log(chalk.dim(JSON.stringify(mcpRemote, null, 2)));
 
     console.log(
-      chalk.bold("\nUI clients that accept an API key / custom header (ChatGPT, Raycast, …)")
+      chalk.bold("\nUI clients that accept an API key / custom header (Raycast, …)")
     );
     console.log(`  Paste the URL above and add the Authorization header.`);
     console.log(
@@ -163,13 +164,8 @@ export async function mcpUrl(
       )
     );
     console.log(
-      chalk.dim(
-        "  ChatGPT: Settings → enable Developer mode → add a connector → paste the URL and choose API-key auth."
-      )
-    );
-    console.log(
       chalk.yellow(
-        "\nclaude.ai (web) uses OAuth via Synap Cloud MCP — run `synap mcp connect-claude` to print https://api.synap.live/mcp (no header field in that UI)."
+        "\nclaude.ai (web) and ChatGPT custom connectors are OAuth-only (no header field) — run `synap mcp connect-claude` to print the Synap Cloud MCP URL (https://api.synap.live/mcp) and add it as a custom connector in either app's settings."
       )
     );
     console.log(

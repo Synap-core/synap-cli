@@ -177,7 +177,7 @@ export const TARGETS: Record<TargetName, TargetInfo> = {
     label: "OpenAI Codex",
     description: "OpenAI Codex CLI — MCP server + instructions",
     supports: { skills: true, mcp: true },
-    mcpConfigPath: () => path.join(os.homedir(), ".codex", "config.yaml"),
+    mcpConfigPath: () => path.join(os.homedir(), ".codex", "config.toml"),
     skillsDir: () => path.join(os.homedir(), ".codex"),
   },
   opencode: {
@@ -1438,11 +1438,15 @@ function mcpServerNameFromPodUrl(podUrl: string, fallback = "synap"): string {
   return fallback;
 }
 
-/** Merge/replace [mcp_servers.<name>] in a Grok config.toml without a TOML dep. */
-function writeGrokTomlMcpServer(
+/**
+ * Merge/replace a `[mcp_servers.<name>]` TOML section in `configPath` without a
+ * TOML dep. Shared by any target whose config uses this table shape (Grok,
+ * Codex, ...) — each caller supplies its own body lines.
+ */
+function upsertTomlMcpServerSection(
   configPath: string,
   serverName: string,
-  opts: { url: string; bearer: string }
+  lines: string[]
 ): void {
   const dir = path.dirname(configPath);
   if (!fs.existsSync(dir)) {
@@ -1467,20 +1471,48 @@ function writeGrokTomlMcpServer(
   );
   let next = existing.replace(sectionRe, "").replace(/\n{3,}/g, "\n\n").trimEnd();
 
-  const block = [
-    "",
-    sectionHeader,
-    `url = "${opts.url}"`,
-    `headers = { Authorization = "Bearer ${opts.bearer}" }`,
-    `enabled = true`,
-    `startup_timeout_sec = 30`,
-    "",
-  ].join("\n");
+  const block = ["", sectionHeader, ...lines, ""].join("\n");
 
   next = (next ? next + "\n" : "") + block;
   fs.writeFileSync(configPath, next.endsWith("\n") ? next : next + "\n", {
     mode: 0o600,
   });
+}
+
+/** Merge/replace [mcp_servers.<name>] in a Grok config.toml without a TOML dep. */
+function writeGrokTomlMcpServer(
+  configPath: string,
+  serverName: string,
+  opts: { url: string; bearer: string }
+): void {
+  upsertTomlMcpServerSection(configPath, serverName, [
+    `url = "${opts.url}"`,
+    `headers = { Authorization = "Bearer ${opts.bearer}" }`,
+    `enabled = true`,
+    `startup_timeout_sec = 30`,
+  ]);
+}
+
+/**
+ * Merge/replace [mcp_servers.<name>] in Codex CLI's config.toml.
+ *
+ * Codex reads `~/.codex/config.toml` (TOML), not config.yaml. Codex does have
+ * an experimental streamable-HTTP transport for MCP servers, but this repo
+ * couldn't confirm the exact header/bearer-env-var keys it expects, so — per
+ * the same guidance used for the Claude Desktop and Zed targets — we point it
+ * at the `mcp-remote` stdio bridge instead: a documented, stable command/args
+ * entry with identical auth semantics (Bearer token in the Authorization
+ * header) and no dependency on Codex's HTTP-transport config shape.
+ */
+export function writeCodexTomlMcpServer(
+  configPath: string,
+  serverName: string,
+  opts: { mcpUrl: string; bearer: string }
+): void {
+  upsertTomlMcpServerSection(configPath, serverName, [
+    `command = "npx"`,
+    `args = ["-y", "mcp-remote", "${opts.mcpUrl}", "--header", "Authorization: Bearer ${opts.bearer}"]`,
+  ]);
 }
 
 // ─── Grok (Grok Build TUI) ───────────────────────────────────────────────────
@@ -1600,43 +1632,27 @@ async function installCodex(
   info: TargetInfo,
   cfg: TargetConnectionConfig
 ): Promise<boolean> {
-  const configPath = info.mcpConfigPath?.() ?? path.join(os.homedir(), ".codex", "config.yaml");
+  const configPath =
+    info.mcpConfigPath?.() ?? path.join(os.homedir(), ".codex", "config.toml");
   const configDir = path.dirname(configPath);
+  const serverName = mcpServerNameFromPodUrl(cfg.podUrl);
 
-  if (!fs.existsSync(configDir)) {
-    fs.mkdirSync(configDir, { recursive: true, mode: 0o700 });
-  }
+  const { effectiveApiKey, agentUserId, mcpUrl } = await prepareMcpSurface(
+    cfg,
+    "codex"
+  );
 
-  // Read existing config or start fresh
-  let existing = "";
-  if (fs.existsSync(configPath)) {
-    try { existing = fs.readFileSync(configPath, "utf-8"); } catch { /* ignore */ }
-  }
+  writeCodexTomlMcpServer(configPath, serverName, {
+    mcpUrl,
+    bearer: effectiveApiKey,
+  });
 
-  // Build MCP server entry
-  const { hubApiKey: effectiveApiKey, agentUserId } = await provisionAgentKey(cfg.podUrl, cfg.apiKey, "codex");
-  await enrollAgentIfNeeded(cfg.podUrl, cfg.apiKey, agentUserId, cfg.workspaceId);
-  const mcpUrl = buildMcpUrl(cfg.podUrl, cfg.workspaceId, cfg.projectId);
-
-  // Inject/replace the synap mcpServers block using simple string manipulation
-  // (avoid requiring a YAML parser dependency)
-  const mcpBlock = [
-    "mcpServers:",
-    `  - name: synap`,
-    `    url: "${mcpUrl}"`,
-    `    headers:`,
-    `      Authorization: "Bearer ${effectiveApiKey}"`,
-  ].join("\n");
-
-  let updated: string;
-  if (/^mcpServers:/m.test(existing)) {
-    // Replace existing mcpServers block (everything from mcpServers: to the next top-level key or EOF)
-    updated = existing.replace(/^mcpServers:[\s\S]*?(?=\n[a-zA-Z]|\s*$)/m, mcpBlock);
-  } else {
-    updated = existing ? `${existing.trimEnd()}\n\n${mcpBlock}\n` : `${mcpBlock}\n`;
-  }
-
-  fs.writeFileSync(configPath, updated, { mode: 0o600 });
+  const { setSurfaceAgentKey: save } = await import("./pod.js");
+  save("codex", {
+    hubApiKey: effectiveApiKey,
+    agentUserId,
+    podUrl: cfg.podUrl,
+  });
 
   // Skills → append synap context to ~/.codex/instructions.md
   const instructionsPath = path.join(configDir, "instructions.md");
@@ -1651,7 +1667,7 @@ async function installCodex(
       "",
       marker,
       "## Synap pod access",
-      `You have access to a Synap data pod via MCP tools (server: synap).`,
+      `You have access to a Synap data pod via MCP tools (server: ${serverName}).`,
       `Pod: ${cfg.podUrl}`,
       cfg.workspaceId ? `Default workspace: ${cfg.workspaceId}` : "Access: pod-wide",
       "Use the synap MCP tools to search, read, and write entities, memory, and documents.",
@@ -1666,6 +1682,9 @@ async function installCodex(
   }
 
   log.success(`Codex config updated: ${configPath}`);
+  log.info(`  Server table: [mcp_servers.${serverName}]`);
+  log.dim("  Agent key provisioned (not the human profile key).");
+  log.dim("  stdio bridge: npx mcp-remote (Codex spawns it on startup).");
   if (cfg.workspaceId) {
     log.dim(`Scoped to workspace: ${cfg.workspaceId}`);
   } else {

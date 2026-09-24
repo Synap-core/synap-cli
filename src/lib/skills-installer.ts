@@ -20,8 +20,11 @@ import { log } from "../utils/logger.js";
 import { resolveHubConfig } from "./hub-client.js";
 
 /** Last-resort constant — only used when no manifest.json can be found on
- *  disk (dev or bundled) AND the pod is unreachable/unconfigured. */
-export const SKILL_NAMES = ["synap", "synap-schema", "synap-ui"] as const;
+ *  disk (dev or bundled) AND the pod is unreachable/unconfigured. Must match
+ *  the packages actually shipped in the bundled skills/ tree (see
+ *  scripts/sync-skills.sh); a name with no corresponding package here is
+ *  skipped with a warning rather than installed. */
+export const SKILL_NAMES = ["synap", "synap-ui"] as const;
 export type SkillName = (typeof SKILL_NAMES)[number];
 
 const __filename = fileURLToPath(import.meta.url);
@@ -89,7 +92,7 @@ export async function installSkills(opts: InstallOpts): Promise<boolean> {
   }
 
   log.warn("Could not locate skills source.");
-  log.dim("Set SYNAP_SKILLS_DIR to the folder containing synap/, synap-schema/, synap-ui/");
+  log.dim("Set SYNAP_SKILLS_DIR to the folder containing synap/, synap-ui/");
   log.dim("Or connect a pod: synap pods add");
   log.dim("Or clone: git clone https://github.com/Synap-core/synap.git");
   log.dim(`Then copy synap/synap-backend/skills/* → ${opts.destDir}/`);
