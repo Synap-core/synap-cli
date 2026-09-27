@@ -56,6 +56,12 @@ export interface TargetConnectionConfig {
   skills?: string[]; // defaults to all three
   /** Raycast only: also merge the full mcp-remote MCP server into mcp-config.json. */
   withMcp?: boolean;
+  /**
+   * Take the recommended answer instead of prompting (install mode, behaviour
+   * template, governance "normal"). Set by `synap init`, which connects several
+   * agents in one run and must not ask the same three questions per agent.
+   */
+  unattended?: boolean;
 }
 
 export interface TargetInfo {
@@ -283,7 +289,8 @@ export async function configureAgentContext(
   apiKey: string,
   agentType: string,
   agentUserId: string,
-  info?: TargetInfo
+  info?: TargetInfo,
+  opts?: { prompt?: boolean }
 ): Promise<void> {
   const { AGENT_TEMPLATES, getTemplate } = await import("./agent-templates.js");
 
@@ -310,7 +317,7 @@ export async function configureAgentContext(
   // create`) still get a routing file — just with the MINIMAL default template,
   // since there's no TTY to prompt on.
   let templateId: string | undefined;
-  if (process.stdin.isTTY) {
+  if (process.stdin.isTTY && opts?.prompt !== false) {
     ({ templateId } = await prompts({
       type: "select",
       name: "templateId",
@@ -415,7 +422,9 @@ export async function installForTarget(
     const saved = getSurfaceAgentKey(target as import("./pod.js").SurfaceName);
     const agentUserId = saved?.agentUserId ?? "";
     try {
-      await configureAgentContext(cfg.podUrl, cfg.apiKey, target, agentUserId, info);
+      await configureAgentContext(cfg.podUrl, cfg.apiKey, target, agentUserId, info, {
+        prompt: !cfg.unattended,
+      });
     } catch (err) {
       log.warn(`Agent context wizard failed: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -435,7 +444,7 @@ async function installClaudeCode(
   // commands (capture, recall, search, create, etc.) — not via MCP tool calls.
   // Skills give it Synap knowledge; the agent key lets it call the CLI directly.
   // MCP is available as an opt-in for users who prefer the tool-call interface.
-  const { mode } = await prompts({
+  const { mode } = cfg.unattended ? { mode: "both" } : await prompts({
     type: "select",
     name: "mode",
     message: "What do you want to install?",
@@ -556,7 +565,7 @@ export async function resolveWorkspaceId(cfg: TargetConnectionConfig): Promise<s
  * @param writeMcp — set false to skip the mcpServers entry (skills-only installs)
  */
 export async function writeClaudeCodeEnv(
-  cfg: Pick<TargetConnectionConfig, "podUrl" | "apiKey" | "workspaceId" | "projectId" | "agentUserId">,
+  cfg: Pick<TargetConnectionConfig, "podUrl" | "apiKey" | "workspaceId" | "projectId" | "agentUserId" | "unattended">,
   { writeMcp = true }: { writeMcp?: boolean } = {}
 ): Promise<void> {
   const settingsPath = path.join(os.homedir(), ".claude", "settings.json");
@@ -667,7 +676,7 @@ export async function writeClaudeCodeEnv(
 
   // Set per-agent governance — prompt once per agent, idempotent.
   if (agentSetup.agentUserId) {
-    await ensureAgentGovernance(cfg, agentSetup.agentUserId);
+    await ensureAgentGovernance(cfg, agentSetup.agentUserId, cfg.unattended ? "normal" : undefined);
   }
 
   const env = (settings.env ?? {}) as Record<string, string>;

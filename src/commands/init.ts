@@ -1,10 +1,13 @@
 /**
  * synap init
  *
- * Three paths based on environment detection:
- *   A: OpenClaw found → connect mode (primary funnel, 250K users)
- *   B: Server, no OpenClaw → bundle mode (fresh setup)
- *   C: Laptop/desktop → need hosting
+ * Laptop/desktop (the default): find or create a pod → connect the agents on
+ * this machine (Claude Code, Codex, Cursor, OpenClaw — one row each) → pair
+ * the phone → hand the person one real task to give their agent.
+ *
+ * Server (linux + docker) keeps its own paths:
+ *   A: OpenClaw found → connect pod, then wire OpenClaw
+ *   B: no OpenClaw → bundle mode (fresh setup)
  */
 
 import prompts from "prompts";
@@ -25,17 +28,27 @@ import {
   setupAgentViaPod,
   provisionUserOnPod,
   installSynapSkill,
-  enableOpenClawAddonManaged,
   saveLocalPodConfig,
   checkServerResources,
   startOpenClawOnServer,
   findSynapDeployDir,
   getLocalPodConfig,
   getActiveProjectId,
+  listPodProfiles,
+  addPodProfile,
+  setActivePod,
+  type LocalPodConfig,
 } from "../lib/pod.js";
-import { provisionAgentKey, configureAgentContext } from "../lib/targets.js";
+import { provisionAgentKey, configureAgentContext, installForTarget } from "../lib/targets.js";
 import { seedAgentEntities } from "../lib/seed.js";
 import { login, isLoggedIn, listPods, getStoredToken, waitForPodCallback } from "../lib/auth.js";
+import { detectAgents, type DetectableAgent } from "../lib/agent-detect.js";
+import { createPodInBrowser } from "../lib/init-pod.js";
+import { buildPairLink, renderTerminalQr } from "../lib/pair-link.js";
+import { buildHandoff } from "../lib/init-handoff.js";
+
+/** Where a phone without Relay gets it (synap-landing/app/download/relay). */
+const RELAY_DOWNLOAD_URL = "https://synap.live/download/relay";
 
 interface InitOptions {
   podUrl?: string;
@@ -46,25 +59,9 @@ interface InitOptions {
 export async function init(opts: InitOptions): Promise<void> {
   banner();
 
-  // ── Pre-flight: "no pod anywhere" gate ──────────────────────────────────
-  // Keep this CLI laptop/agent-focused. If the user ran `synap init` without
-  // any signal of an existing pod, point them at the two supported ways to
-  // get one (self-host via ./synap install on a server, or a managed pod on
-  // synap.live) and exit. This replaces silent failure / interactive
-  // provisioning when there's nothing to connect to.
-  //
-  // A --pod-url flag that's explicitly unreachable is a separate diagnostic
-  // (handled below once checkPodHealth has confirmed).
-  if (!opts.podUrl) {
-    if (await hasAnyPodSignal()) {
-      // fall through into the normal flow
-    } else {
-      printNoPodInstructions();
-      process.exit(2);
-    }
-  } else {
-    // Explicit URL was passed — probe it before letting downstream assume
-    // reachability. Fail loud with a helpful hint instead of silent 500s.
+  // An explicit --pod-url is probed before anything assumes reachability: a
+  // typo'd URL fails loud with a checklist instead of silent 500s later.
+  if (opts.podUrl) {
     const probe = await checkPodHealth(opts.podUrl);
     if (!probe.healthy) {
       printUnreachablePodInstructions(opts.podUrl);
@@ -72,49 +69,304 @@ export async function init(opts: InitOptions): Promise<void> {
     }
   }
 
-  // ── Auto-detect environment ─────────────────────────────────────────────
-  // Pod URL is always the primary decision axis. OpenClaw, if present, is an
-  // optional enhancement that gets wired after the pod connection is set up —
-  // it is no longer the gating condition for which path runs.
-  const oc = detectOpenClaw();
-  const isServer = detectServer();
+  if (!detectServer()) {
+    await desktopFlow(opts);
+    return;
+  }
 
+  // ── Server (linux + docker) ─────────────────────────────────────────────
+  // With no pod signal at all, a server gets the self-host instructions.
+  if (!opts.podUrl && !(await hasAnyPodSignal())) {
+    printNoPodInstructions();
+    process.exit(2);
+  }
+
+  const oc = detectOpenClaw();
   if (oc.found) {
     log.info(
       `OpenClaw detected${oc.version ? ` v${oc.version}` : ""} — will wire it after pod setup`
     );
   }
 
-  if (isServer) {
-    // Before assuming fresh install, check if a pod is already running
-    const spinner = ora("Scanning for existing Synap pod...").start();
-    const existingPodUrl = opts.podUrl ?? (await detectLocalPod());
-    spinner.stop();
+  // Before assuming fresh install, check if a pod is already running
+  const spinner = ora("Scanning for existing Synap pod...").start();
+  const existingPodUrl = opts.podUrl ?? (await detectLocalPod());
+  spinner.stop();
 
-    if (existingPodUrl) {
-      log.success(`Found existing pod at ${existingPodUrl}`);
-      if (oc.found) {
-        log.info("Server + OpenClaw — connecting pod then wiring OpenClaw");
-        await pathA(opts, oc);
-      } else {
-        log.info("Server detected — connecting to existing pod");
-        await pathBExisting(opts, existingPodUrl);
-      }
+  if (existingPodUrl) {
+    log.success(`Found existing pod at ${existingPodUrl}`);
+    if (oc.found) {
+      log.info("Server + OpenClaw — connecting pod then wiring OpenClaw");
+      await pathA(opts, oc);
     } else {
-      log.info("Server detected — fresh setup mode");
-      await pathB(opts);
+      log.info("Server detected — connecting to existing pod");
+      await pathBExisting(opts, existingPodUrl);
     }
-    return;
+  } else {
+    log.info("Server detected — fresh setup mode");
+    await pathB(opts);
+  }
+}
+
+// =============================================================================
+// DESKTOP: pod → agents → phone → first task
+// =============================================================================
+
+async function desktopFlow(opts: InitOptions): Promise<void> {
+  const pod = await resolveDesktopPod(opts);
+  if (!pod) return;
+
+  const humanKey = await ensurePodKey(pod.podUrl, opts, pod.podId);
+  if (!humanKey) return;
+
+  const connected = await connectAgentsStep(pod.podUrl, humanKey, opts);
+  await pairPhoneStep(pod.podUrl);
+  printHandoff(connected);
+}
+
+/**
+ * The pod this machine talks to. In order: --pod-url, a saved profile that
+ * answers, a pod running on this machine — and when there is none, create one
+ * instead of exiting.
+ */
+async function resolveDesktopPod(
+  opts: InitOptions
+): Promise<{ podUrl: string; podId?: string } | null> {
+  if (opts.podUrl) return { podUrl: opts.podUrl };
+
+  const saved = getLocalPodConfig();
+  if (saved?.podUrl) {
+    const spinner = ora(`Checking ${saved.podUrl}…`).start();
+    if ((await checkPodHealth(saved.podUrl)).healthy) {
+      spinner.succeed(`Pod: ${saved.podUrl}`);
+      return { podUrl: saved.podUrl, podId: saved.podId };
+    }
+    spinner.warn(`Your saved pod at ${saved.podUrl} is not answering.`);
   }
 
-  if (oc.found) {
-    // Desktop with OpenClaw — use pathA (OpenClaw connect mode)
-    await pathA(opts, oc);
-    return;
+  const local = await detectLocalPod();
+  if (local) {
+    log.success(`Pod running on this machine: ${local}`);
+    return { podUrl: local };
   }
 
-  log.info("Running on desktop — hosting mode");
-  await pathC(opts);
+  return noPodStep();
+}
+
+async function noPodStep(): Promise<{ podUrl: string; podId?: string } | null> {
+  log.blank();
+  const { choice } = await prompts({
+    type: "select",
+    name: "choice",
+    message: "No Synap pod yet. Create one (managed, €15/mo) or point me at yours?",
+    choices: [
+      { title: "Create in browser", value: "create" },
+      { title: "I have one on synap.live (sign in)", value: "login" },
+      { title: "I have a URL", value: "url" },
+      { title: "Self-host", value: "self-host" },
+    ],
+  });
+
+  if (choice === "create") return createPodStep();
+
+  if (choice === "login") {
+    const picked = await loginAndSelectPod();
+    return picked ? { podUrl: picked.url, podId: picked.podId || undefined } : null;
+  }
+
+  if (choice === "url") {
+    const { url } = await prompts({ type: "text", name: "url", message: "Pod URL:" });
+    if (!url) return null;
+    const spinner = ora("Checking pod health...").start();
+    if ((await checkPodHealth(url)).healthy) {
+      spinner.succeed(`Pod: ${url}`);
+      return { podUrl: url };
+    }
+    spinner.fail(`Pod not reachable at ${url}`);
+    return null;
+  }
+
+  if (choice === "self-host") {
+    log.blank();
+    log.info("On your server, run:");
+    console.log(chalk.cyan("\n  curl -fsSL https://synap.live/install.sh | bash\n"));
+    log.info("Then here: " + chalk.cyan("npx @synap-core/cli init --pod-url <your-pod-url>"));
+  }
+  return null;
+}
+
+/** Open synap.live to create a pod, then continue here once it answers. */
+async function createPodStep(): Promise<{ podUrl: string } | null> {
+  log.info("Opening synap.live to create your pod…");
+  const spinner = ora("Waiting for you in the browser…").start();
+  const result = await createPodInBrowser({
+    waitForPodCallback: async () => {
+      const created = await waitForPodCallback();
+      if (created) spinner.text = "Your pod is starting (usually ~2 min). I'll continue here.";
+      return created;
+    },
+    checkPodHealth,
+  });
+
+  if (result.ok) {
+    spinner.succeed(`Pod ready: ${result.podUrl}`);
+    return { podUrl: result.podUrl };
+  }
+  if (result.reason === "not-reachable") {
+    spinner.warn(`Your pod at ${result.podUrl} is still starting.`);
+    log.info("Pick up where you left off: " + chalk.cyan(`synap init --pod-url ${result.podUrl}`));
+    return null;
+  }
+  spinner.fail("No pod was created (the browser window timed out or was closed).");
+  log.info("Try again any time: " + chalk.cyan("synap init"));
+  return null;
+}
+
+/**
+ * The person's own key for this pod — the one `/setup/agent` accepts to mint
+ * each agent's key. Reuses a saved profile for this pod; otherwise mints one
+ * (CP login when available, else paste / PROVISIONING_TOKEN).
+ */
+async function ensurePodKey(
+  podUrl: string,
+  opts: InitOptions,
+  podId?: string
+): Promise<string | null> {
+  if (opts.apiKey) return opts.apiKey;
+
+  const norm = (u: string) => u.replace(/\/+$/, "");
+  const saved = listPodProfiles().find((p) => norm(p.config.podUrl) === norm(podUrl));
+  if (saved?.config.hubApiKey) {
+    const res = await fetch(`${norm(podUrl)}/api/hub/auth/status`, {
+      headers: { Authorization: `Bearer ${saved.config.hubApiKey}` },
+      signal: AbortSignal.timeout(15_000),
+    }).catch(() => null);
+    if (res?.ok) {
+      if (!saved.active) setActivePod(saved.name);
+      return saved.config.hubApiKey;
+    }
+    if (res && (res.status === 401 || res.status === 403)) {
+      log.warn("Your saved key for this pod no longer works — issuing a new one.");
+    } else {
+      log.warn(`Could not check your saved key for this pod (${res ? `HTTP ${res.status}` : "unreachable"}).`);
+      return null;
+    }
+  }
+
+  // A synap.live pod needs a CP login to mint the key; sign in now rather than
+  // falling through to the self-host PROVISIONING_TOKEN prompt.
+  const creds = getStoredToken();
+  const loggedIn = creds && new Date(creds.expiresAt) > new Date();
+  if (!loggedIn && podUrl.includes("synap.live")) {
+    const spinner = ora("Sign in to Synap in your browser…").start();
+    const fresh = await login();
+    if (fresh) spinner.succeed(`Signed in as ${fresh.email}`);
+    else spinner.fail("Sign-in timed out.");
+  }
+
+  return connectStep(podUrl, opts, false, podId, "cli");
+}
+
+/** Save the pod as a named profile (host name) and make it active — never overwrite another pod's profile. */
+function rememberPod(config: LocalPodConfig): void {
+  let name: string;
+  try {
+    name = new URL(config.podUrl).hostname;
+  } catch {
+    name = "default";
+  }
+  addPodProfile(name, config);
+  setActivePod(name);
+}
+
+async function connectAgentsStep(
+  podUrl: string,
+  humanKey: string,
+  opts: InitOptions
+): Promise<string[]> {
+  log.heading("Your agents");
+  const rows = detectAgents();
+  const found = rows.filter((r) => r.found);
+  log.info(
+    found.length > 0
+      ? `Found: ${found.map((r) => r.label).join(", ")}.`
+      : "No agent found on this machine. Pick one to set up anyway, or skip."
+  );
+
+  const { targets } = await prompts({
+    type: "multiselect",
+    name: "targets",
+    message: found.length > 1 ? `Connect ${found.length === 2 ? "both" : "them"}?` : "Connect:",
+    choices: rows.map((r) => ({
+      title: r.label,
+      description: r.found ? r.evidence : "not found on this machine",
+      value: r.target,
+      selected: r.found,
+    })),
+    hint: "space to toggle, enter to confirm",
+    instructions: false,
+  });
+
+  const picked = (targets ?? []) as DetectableAgent[];
+  if (picked.length === 0) {
+    log.dim("No agent connected. Later: synap connect --target=claude-code");
+    return [];
+  }
+
+  // TODO(W1b — one-click approval, D5): each Codex / Cursor key is minted with
+  // requireApproval and opens its own review page. When the backend's batch
+  // approval door lands, mint all keys first and approve them in ONE click.
+  const connected: string[] = [];
+  for (const target of picked) {
+    const label = rows.find((r) => r.target === target)?.label ?? target;
+    try {
+      const ok = await installForTarget(target, { podUrl, apiKey: humanKey, unattended: true });
+      if (!ok) {
+        log.warn(`${label} was not connected — see above. Retry: synap connect --target=${target}`);
+        continue;
+      }
+      if (target === "openclaw") {
+        const oc = detectOpenClaw();
+        await skillStep(true, oc);
+        await seedStep(podUrl, humanKey, oc);
+        if (!opts.skipIs) await isStep(podUrl, humanKey, true);
+      }
+      connected.push(label);
+    } catch (err) {
+      log.warn(`${label} was not connected: ${err instanceof Error ? err.message : String(err)}`);
+      log.dim(`Retry: synap connect --target=${target}`);
+    }
+  }
+  return connected;
+}
+
+async function pairPhoneStep(podUrl: string): Promise<void> {
+  log.heading("Your phone");
+  const pair = buildPairLink({ podUrl });
+  if (!pair.ok) {
+    log.dim(
+      pair.reason === "loopback"
+        ? "This pod only runs on this computer, so a phone can't reach it yet."
+        : `Can't make a pairing link for ${podUrl}.`
+    );
+    return;
+  }
+  log.info("Scan with Relay so your agents can reach you. That's where their questions arrive.");
+  log.dim(`No Relay yet? ${RELAY_DOWNLOAD_URL}`);
+  console.log("\n" + (await renderTerminalQr(pair.link)));
+  log.dim(pair.link);
+}
+
+function printHandoff(connected: string[]): void {
+  const h = buildHandoff(connected);
+  log.blank();
+  console.log(chalk.green.bold("Done. Try it now.") + ` In ${h.agentLabel}, say:`);
+  log.blank();
+  console.log(chalk.cyan(`  "${h.prompt}"`));
+  log.blank();
+  log.dim("More:");
+  for (const m of h.more) log.dim(`  "${m}"`);
+  log.blank();
 }
 
 // =============================================================================
@@ -315,215 +567,6 @@ async function pathB(opts: InitOptions): Promise<void> {
   printSummary(podUrl, false);
 }
 
-// =============================================================================
-// PATH C: Laptop/desktop user
-// =============================================================================
-
-async function pathC(opts: InitOptions): Promise<void> {
-  log.heading("Step 1: Connect to Your Pod");
-
-  const { hostChoice } = await prompts({
-    type: "select",
-    name: "hostChoice",
-    message: "How do you want to connect?",
-    choices: [
-      {
-        title: "Login to Synap (managed pods)",
-        description: "Sign in via browser — auto-detect your pods",
-        value: "login",
-      },
-      {
-        title: "Connect to an existing pod (enter URL)",
-        description: "Self-hosted or managed — enter the URL directly",
-        value: "existing",
-      },
-      {
-        title: "I don't have a pod yet",
-        value: "none",
-      },
-    ],
-  });
-
-  if (hostChoice === "login") {
-    const podResult = await loginAndSelectPod();
-    if (!podResult) return;
-    await connectExistingPod(podResult.url, opts, "managed", podResult.podId);
-    return;
-  }
-
-  if (hostChoice === "none") {
-    const { createChoice } = await prompts({
-      type: "select",
-      name: "createChoice",
-      message: "Create a pod:",
-      choices: [
-        {
-          title: "Managed by Synap — €15/mo",
-          description: "We host it, zero ops",
-          value: "managed",
-        },
-        {
-          title: "Self-hosted on my VPS — FREE",
-          value: "vps",
-        },
-      ],
-    });
-
-    if (createChoice === "managed") {
-      log.blank();
-      log.info("Opening synap.live to provision your pod...");
-      log.info(chalk.dim("(Waiting up to 5 minutes for provisioning to complete)"));
-      log.blank();
-
-      const spinner = ora("Waiting for pod provisioning...").start();
-      const result = await waitForPodCallback();
-
-      if (result) {
-        spinner.succeed(`Pod provisioned at ${chalk.cyan(result.podUrl)}`);
-        await connectExistingPod(result.podUrl, opts, "managed");
-      } else {
-        spinner.fail("Pod provisioning timed out or was cancelled.");
-        log.blank();
-        log.info("You can resume at any time by running: " + chalk.cyan("synap init"));
-        log.info("Or connect manually: " + chalk.cyan(`synap connect --pod-url <your-pod-url>`));
-      }
-    } else if (createChoice === "vps") {
-      log.blank();
-      log.info("SSH into your server and run:");
-      console.log(
-        chalk.cyan(
-          "\n  curl -fsSL https://raw.githubusercontent.com/Synap-core/backend/main/install.sh | bash\n"
-        )
-      );
-      log.info("Then on that server: npx @synap-core/cli init");
-    }
-    return;
-  }
-
-  if (hostChoice === "existing") {
-    const { url } = await prompts({
-      type: "text",
-      name: "url",
-      message: "Pod URL:",
-      initial: "https://pod.synap.live",
-    });
-    if (!url) return;
-
-    const spinner = ora("Checking pod health...").start();
-    const status = await checkPodHealth(url);
-    if (!status.healthy) {
-      spinner.fail(`Pod not reachable at ${url}`);
-      return;
-    }
-    spinner.succeed(`Pod healthy at ${url}`);
-
-    // Detect if self-hosted or managed by checking URL
-    const isSynapLive = url.includes("synap.live");
-    await connectExistingPod(url, opts, isSynapLive ? "managed" : "self-hosted");
-  }
-}
-
-/**
- * Connect to an existing pod — handles both self-hosted and managed.
- */
-async function connectExistingPod(
-  podUrl: string,
-  opts: InitOptions,
-  podType: "self-hosted" | "managed",
-  podId?: string
-): Promise<void> {
-  // Check for local OpenClaw
-  const oc = detectOpenClaw();
-  if (oc.found) {
-    log.success(`OpenClaw detected${oc.version ? ` v${oc.version}` : ""}`);
-    // Security audit removed — no longer OpenClaw-specific
-  }
-
-  // Get API key
-  const apiKey = await connectStep(podUrl, opts, oc.found, podId);
-  if (!apiKey) return;
-
-  // OpenClaw handling
-  if (!oc.found) {
-    log.heading("OpenClaw");
-    const { ocChoice } = await prompts({
-      type: "select",
-      name: "ocChoice",
-      message: "OpenClaw not detected locally. What would you like to do?",
-      choices: [
-        {
-          title: "Enable OpenClaw on my pod server (free addon)",
-          description: "Runs alongside your pod via Docker — zero extra cost",
-          value: "addon",
-        },
-        {
-          title: "Install OpenClaw on this computer",
-          description: "npm i -g openclaw",
-          value: "local",
-        },
-        { title: "Skip OpenClaw for now", value: "skip" },
-      ],
-    });
-
-    if (ocChoice === "addon") {
-      if (podType === "self-hosted") {
-        log.blank();
-        log.info("SSH into your pod server and run:");
-        log.blank();
-        console.log(chalk.cyan("  cd /srv/synap && ./deploy/setup-openclaw.sh"));
-        log.blank();
-        log.info("This will start OpenClaw as a Docker addon on your pod.");
-        log.info("Then re-run: synap init --pod-url " + podUrl);
-      } else {
-        // Managed pod — activate via CP (requires user session, not PROVISIONING_TOKEN)
-        log.info("Activating OpenClaw addon on your managed pod...");
-        const creds = getStoredToken();
-        try {
-          if (!creds) throw new Error("Not logged in to CP");
-          await enableOpenClawAddonManaged(creds.token, podUrl);
-          log.success("OpenClaw addon provisioning started — may take a minute");
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          if (msg.includes("422") || msg.includes("provisioned pod server")) {
-            // Pod doesn't have a managed server — OpenClaw can't run server-side
-            log.blank();
-            log.info("Your pod doesn't have a managed server for addons.");
-            log.info("Install OpenClaw locally instead:");
-            log.dim("  npm i -g openclaw && openclaw onboard");
-            log.info("Then re-run: " + chalk.cyan(`synap init --pod-url ${podUrl}`));
-          } else {
-            log.warn("Could not activate OpenClaw automatically.");
-            log.dim(msg);
-            log.info("Enable it from: https://synap.live/account/pods");
-          }
-        }
-      }
-    } else if (ocChoice === "local") {
-      log.blank();
-      log.info("Install OpenClaw:");
-      log.dim("  npm i -g openclaw && openclaw onboard");
-      log.info("Then re-run: synap init --pod-url " + podUrl);
-      return;
-    }
-  }
-
-  // Install skill + seed (if OpenClaw available)
-  const ocAfter = detectOpenClaw();
-  if (ocAfter.found) {
-    await skillStep(true, ocAfter);
-    await seedStep(podUrl, apiKey, ocAfter);
-    if (!opts.skipIs) await isStep(podUrl, apiKey, true);
-  } else {
-    log.blank();
-    log.info("Pod connected. Once OpenClaw is running:");
-    log.dim("  Local:  openclaw skills install synap");
-    log.dim("  Docker: docker exec openclaw openclaw skills install synap");
-    log.dim("  Or run: synap update");
-  }
-
-  printSummary(podUrl, ocAfter.found);
-}
-
 async function podChoiceStep(opts: InitOptions): Promise<string | null> {
   log.heading("Synap Pod");
 
@@ -678,7 +721,10 @@ async function connectStep(
   podUrl: string,
   opts: InitOptions,
   openclawFound: boolean,
-  podId?: string
+  podId?: string,
+  // "cli" = the person's own key for this pod (desktop init: it mints each
+  // agent's key and is saved as a named profile). "openclaw" = the server paths.
+  integration: "cli" | "openclaw" = "openclaw"
 ): Promise<string | null> {
   log.heading("Connect to Pod");
 
@@ -692,7 +738,9 @@ async function connectStep(
     if (isAuthenticated) {
       // User is logged in — generate API key automatically via CP session
       // The pod trusts the user's session to create agent credentials
-      const spinner = ora("Generating API key for OpenClaw agent...").start();
+      const spinner = ora(
+        integration === "cli" ? "Issuing your key for this pod..." : "Generating API key for OpenClaw agent..."
+      ).start();
       try {
         // Provision the user on the pod (creates Kratos identity + pod user
         // account) AND capture the Kratos session the handshake mints. This is
@@ -714,27 +762,32 @@ async function connectStep(
         // Canonical key issuance: mint a scoped Hub Protocol key via the pod's
         // apiKeys.connectIntegration tRPC procedure — the same path the pod-admin
         // /connect page and the browser use (replaces the removed CP relay).
-        const result = await setupAgentViaPod(podUrl, sessionToken, "openclaw");
+        const result = await setupAgentViaPod(podUrl, sessionToken, integration);
         apiKey = result.hubApiKey;
         opts.apiKey = apiKey;
         spinner.succeed("API key generated");
-        if (result.agentUserId) {
-          log.dim(`Agent user: ${result.agentUserId}`);
-        }
-        log.dim(`Workspace: ${result.workspaceId}`);
-        log.blank();
-        log.info("This key lets OpenClaw read/write your knowledge graph.");
-        log.info("It's scoped to Hub Protocol operations only.");
-
-        // Always save to ~/.synap/pod-config.json (works even without OpenClaw)
-        saveLocalPodConfig({
+        const podConfig: LocalPodConfig = {
           podUrl,
           podId: podId ?? undefined,
           workspaceId: result.workspaceId,
           agentUserId: result.agentUserId,
           hubApiKey: result.hubApiKey,
           savedAt: new Date().toISOString(),
-        });
+        };
+        if (integration === "cli") {
+          rememberPod(podConfig);
+        } else {
+          if (result.agentUserId) {
+            log.dim(`Agent user: ${result.agentUserId}`);
+          }
+          log.dim(`Workspace: ${result.workspaceId}`);
+          log.blank();
+          log.info("This key lets OpenClaw read/write your knowledge graph.");
+          log.info("It's scoped to Hub Protocol operations only.");
+
+          // Always save to ~/.synap/pod-config.json (works even without OpenClaw)
+          saveLocalPodConfig(podConfig);
+        }
 
         if (openclawFound) {
           const config = readOpenClawConfig() ?? {};
@@ -777,6 +830,16 @@ async function connectStep(
           message: "Hub Protocol API key:",
         });
         apiKey = key;
+        if (key && integration === "cli") {
+          rememberPod({
+            podUrl,
+            podId: podId ?? undefined,
+            workspaceId: "",
+            agentUserId: "",
+            hubApiKey: key,
+            savedAt: new Date().toISOString(),
+          });
+        }
       } else {
         const { token } = await prompts({
           type: "password",
@@ -792,20 +855,22 @@ async function connectStep(
             // was already always null/"" in practice. Provision via the shared
             // wrapper (no enrollAgentIfNeeded: a PROVISIONING_TOKEN can't
             // authorize /workspaces/enroll-agent, same as before).
-            const result = await provisionAgentKey(podUrl, token, "openclaw");
+            const result = await provisionAgentKey(podUrl, token, integration);
             apiKey = result.hubApiKey;
             opts.apiKey = apiKey;
             spinner.succeed("Credentials created");
             log.dim(`Agent: ${result.agentUserId}`);
 
-            saveLocalPodConfig({
+            const podConfig: LocalPodConfig = {
               podUrl,
               podId: podId ?? undefined,
               workspaceId: "",
               agentUserId: result.agentUserId,
               hubApiKey: result.hubApiKey,
               savedAt: new Date().toISOString(),
-            });
+            };
+            if (integration === "cli") rememberPod(podConfig);
+            else saveLocalPodConfig(podConfig);
 
             if (openclawFound) {
               const config = readOpenClawConfig() ?? {};
@@ -816,7 +881,7 @@ async function connectStep(
 
             if (result.agentUserId) {
               try {
-                await configureAgentContext(podUrl, apiKey, "openclaw", result.agentUserId);
+                await configureAgentContext(podUrl, apiKey, integration, result.agentUserId);
               } catch (err) {
                 log.warn(`Agent context wizard failed: ${err instanceof Error ? err.message : String(err)}`);
               }
@@ -830,7 +895,7 @@ async function connectStep(
     }
   }
 
-  if (apiKey) {
+  if (apiKey && integration === "openclaw") {
     log.success(`API Key: ${apiKey}`);
     log.warn("Save this key — it will not be shown again.");
   }
@@ -1175,11 +1240,9 @@ async function loginAndSelectPod(): Promise<{ url: string; podId: string } | nul
     const pods = await listPods(storedToken.token);
 
     if (pods.length === 0) {
-      podsSpinner.info("No pods found on your account");
-      log.blank();
-      log.info("Create a pod at: " + chalk.cyan("https://synap.live"));
-      log.info("Then re-run: " + chalk.dim("synap init"));
-      return null;
+      podsSpinner.info("No pods on your account yet");
+      const created = await createPodStep();
+      return created ? { url: created.podUrl, podId: "" } : null;
     }
 
     podsSpinner.succeed(`Found ${pods.length} pod(s)`);
