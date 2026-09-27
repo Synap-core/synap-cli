@@ -3,12 +3,14 @@
  *
  * Contract (Relay is the receiver; it owns the screen that consumes it):
  *
- *   synap://pair?v=1&pod=<url-encoded pod origin>[&token=<opaque, single-use>]
+ *   synap://pair?v=1&pod=<url-encoded pod origin>[&email=<CP account>][&token=<opaque, single-use>]
  *
  *   - `v`     grammar version. A receiver that sees an unknown `v` must refuse
  *             and say "update Relay", never guess.
  *   - `pod`   the pod's public origin (https, or http for a LAN host). Relay
  *             pre-fills its sign-in with this pod; it never trusts it for auth.
+ *   - `email` OPTIONAL: the Synap account the CLI is signed in to. Relay
+ *             pre-fills the sign-in email with it. Not a credential.
  *   - `token` OPTIONAL and absent today: no pod or CP door mints a short-lived,
  *             single-use pairing token yet. When one exists, the CLI passes it
  *             here and Relay redeems it instead of asking for a password. Until
@@ -33,7 +35,7 @@ function isLoopbackHost(hostname: string): boolean {
   return h === "localhost" || h.endsWith(".localhost") || h === "::1" || h === "0.0.0.0" || /^127\./.test(h);
 }
 
-export function buildPairLink(opts: { podUrl: string; token?: string }): PairLinkResult {
+export function buildPairLink(opts: { podUrl: string; email?: string; token?: string }): PairLinkResult {
   let url: URL;
   try {
     url = new URL(opts.podUrl);
@@ -45,6 +47,7 @@ export function buildPairLink(opts: { podUrl: string; token?: string }): PairLin
 
   const pod = `${url.origin}${url.pathname.replace(/\/+$/, "")}`;
   const params = new URLSearchParams({ v: PAIR_LINK_VERSION, pod });
+  if (opts.email) params.set("email", opts.email);
   if (opts.token) params.set("token", opts.token);
   return { ok: true, link: `synap://pair?${params.toString()}` };
 }

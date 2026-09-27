@@ -342,7 +342,7 @@ async function connectAgentsStep(
 
 async function pairPhoneStep(podUrl: string): Promise<void> {
   log.heading("Your phone");
-  const pair = buildPairLink({ podUrl });
+  const pair = buildPairLink({ podUrl, email: getStoredToken()?.email });
   if (!pair.ok) {
     log.dim(
       pair.reason === "loopback"

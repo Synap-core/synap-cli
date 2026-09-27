@@ -73,18 +73,23 @@ describe("buildPairLink", () => {
   });
 
   it("parses back to host 'pair' with pod + v (the shape relay's deep-link handler reads)", () => {
-    const r = buildPairLink({ podUrl: "https://pod.example.com", token: "t-123" });
+    const r = buildPairLink({ podUrl: "https://pod.example.com", email: "a+b@x.io", token: "t-123" });
     if (!r.ok) throw new Error("expected ok");
     const u = new URL(r.link);
     expect(u.protocol).toBe("synap:");
     expect(`${u.host}${u.pathname}`.replace(/^\/+|\/+$/g, "")).toBe("pair");
-    expect(Object.fromEntries(u.searchParams)).toEqual({ v: "1", pod: "https://pod.example.com", token: "t-123" });
+    expect(Object.fromEntries(u.searchParams)).toEqual({
+      v: "1",
+      pod: "https://pod.example.com",
+      email: "a+b@x.io",
+      token: "t-123",
+    });
   });
 
-  it("omits token when none is given (no pairing-token door exists yet)", () => {
+  it("omits email and token when none is given (no pairing-token door exists yet)", () => {
     const r = buildPairLink({ podUrl: "https://pod.example.com" });
     if (!r.ok) throw new Error("expected ok");
-    expect(new URL(r.link).searchParams.has("token")).toBe(false);
+    expect([...new URL(r.link).searchParams.keys()]).toEqual(["v", "pod"]);
   });
 
   it("refuses a pod a phone cannot reach", () => {
