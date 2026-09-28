@@ -45,6 +45,24 @@ interface OrientWorkspace {
   description?: string | null;
   profiles?: Array<{ slug: string; name: string }>;
 }
+/**
+ * The pinned space's brief as `GET /orient` serves it (backend
+ * `services/discover/space-brief.ts`; canonical type `@synap-core/types/space-brief`).
+ * Structural and all-optional on purpose: the CLI is npm-published and must
+ * render whatever an older or newer pod sends without breaking.
+ */
+interface OrientSpaceBrief {
+  status?: "unavailable";
+  name?: string;
+  purpose?: string;
+  persona?: string;
+  collect?: Array<{ kind: string; what?: string; cardinality?: string }>;
+  keyKinds?: Array<{ slug: string; entityCount?: number }> | { status: "unavailable" };
+  keyKindsTotal?: number;
+  playbooks?: { items: Array<{ id: string; name: string }>; total: number } | { status: "unavailable" };
+  trimmed?: string[];
+  more?: string;
+}
 interface OrientProject {
   id: string;
   name: string;
@@ -58,6 +76,50 @@ interface OrientResult {
   workspaces: OrientWorkspace[];
   profiles: Array<{ slug: string; name: string }>;
   note: string;
+  /** Present when orient was pinned to a space. */
+  brief?: OrientSpaceBrief;
+}
+
+/**
+ * A space's purpose as the POD resolved it: `description` is the server's
+ * purpose line (authored description, else onboarding goal, never a
+ * `Domain: x` placeholder). An older pod that sent only `onboarding.goal`
+ * still gets a line. The rule itself lives server-side — never re-derived here.
+ */
+export function spacePurposeOf(ws: Pick<OrientWorkspace, "description" | "onboarding">): string | undefined {
+  const d = typeof ws.description === "string" ? ws.description.trim() : "";
+  if (d) return d;
+  const g = typeof ws.onboarding?.goal === "string" ? ws.onboarding.goal.trim() : "";
+  return g || undefined;
+}
+
+/** The pinned space's brief as dim lines (no heading). `[]` when absent. */
+export function renderSpaceBriefLines(brief: OrientSpaceBrief | undefined): string[] {
+  if (!brief) return [];
+  if (brief.status === "unavailable") {
+    return ["Space brief: unavailable (the pod could not read it) — rerun orient."];
+  }
+  const out: string[] = [];
+  if (brief.purpose) out.push(`purpose: ${brief.purpose}`);
+  if (brief.persona) out.push(`persona: ${brief.persona}`);
+  const k = brief.keyKinds;
+  if (k && !Array.isArray(k)) out.push("kinds: unavailable (read failed)");
+  else if (k && k.length) {
+    const more = brief.keyKindsTotal && brief.keyKindsTotal > k.length ? ` …+${brief.keyKindsTotal - k.length}` : "";
+    out.push(`kinds: ${k.map((x) => `${x.slug} (${x.entityCount ?? 0})`).join(", ")}${more}`);
+  }
+  if (brief.collect?.length) {
+    out.push(`collect: ${brief.collect.map((c) => (c.cardinality ? `${c.kind} (${c.cardinality})` : c.kind)).join(", ")}`);
+  }
+  const pb = brief.playbooks;
+  if (pb && "status" in pb) out.push("playbooks: unavailable (read failed)");
+  else if (pb && pb.items.length) {
+    const more = pb.total > pb.items.length ? ` …+${pb.total - pb.items.length}` : "";
+    out.push(`playbooks: ${pb.items.map((p) => p.name).join(", ")}${more}`);
+  }
+  if (brief.trimmed?.length) out.push(`(shortened to fit: ${brief.trimmed.join(", ")})`);
+  if (brief.more) out.push(brief.more);
+  return out;
 }
 
 export async function orient(opts: BaseOpts): Promise<void> {
@@ -143,9 +205,11 @@ export async function orient(opts: BaseOpts): Promise<void> {
           ? chalk.dim(`${ws.entityCount} entities`)
           : chalk.dim("empty");
         console.log(`  ${marker}${name}  ${id}  ${count}`);
-        if (ws.description) log.dim(`     ${String(ws.description)}`);
-        if (ws.onboarding?.goal && ws.entityCount === 0) {
-          log.dim(`     ${chalk.cyan("→ onboard:")} ${String(ws.onboarding.goal)}`);
+        const purpose = spacePurposeOf(ws);
+        if (purpose) log.dim(`     ${purpose}`);
+        const goal = ws.onboarding?.goal?.trim();
+        if (goal && ws.entityCount === 0 && goal !== purpose) {
+          log.dim(`     ${chalk.cyan("→ onboard:")} ${goal}`);
         }
         const profiles = ws.profiles ?? [];
         if (profiles.length > 0) {
@@ -167,9 +231,18 @@ export async function orient(opts: BaseOpts): Promise<void> {
         const id = chalk.dim(String(ws.id ?? ""));
         const domain = ws.domain ? chalk.dim(String(ws.domain)) : "";
         console.log(`  ${marker}${name}  ${id}  ${domain}`);
+        const purpose = spacePurposeOf(ws);
+        if (purpose) log.dim(`     ${purpose}`);
       }
       log.blank();
       log.dim("Workspaces are operational domains; run 'synap orient --details' for profiles + entity counts.");
+    }
+
+    const briefLines = renderSpaceBriefLines(res.brief);
+    if (briefLines.length) {
+      log.blank();
+      log.heading(`Space brief${res.brief?.name ? ` — ${res.brief.name}` : ""}`);
+      for (const l of briefLines) log.dim(l);
     }
 
     log.blank();
