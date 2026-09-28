@@ -46,6 +46,7 @@ import { detectAgents, type DetectableAgent } from "../lib/agent-detect.js";
 import { createPodInBrowser } from "../lib/init-pod.js";
 import { buildPairLink, renderTerminalQr } from "../lib/pair-link.js";
 import { buildHandoff } from "../lib/init-handoff.js";
+import { approveAgentKeysAtOnce } from "../lib/batch-approval.js";
 
 /** Where a phone without Relay gets it (synap-landing/app/download/relay). */
 const RELAY_DOWNLOAD_URL = "https://synap.live/download/relay";
@@ -313,12 +314,16 @@ async function connectAgentsStep(
     return [];
   }
 
-  // TODO(W1b — one-click approval, D5): each Codex / Cursor key is minted with
-  // requireApproval and opens its own review page. When the backend's batch
-  // approval door lands, mint all keys first and approve them in ONE click.
+  // One click for every key that needs approval (V1 D5): mint them all first,
+  // open ONE review page, then install with the approved keys.
+  const { notApproved } = await approveAgentKeysAtOnce(podUrl, humanKey, picked);
   const connected: string[] = [];
   for (const target of picked) {
     const label = rows.find((r) => r.target === target)?.label ?? target;
+    if (notApproved.includes(target)) {
+      log.warn(`${label} was not connected — its key was not approved. Retry: synap connect --target=${target}`);
+      continue;
+    }
     try {
       const ok = await installForTarget(target, { podUrl, apiKey: humanKey, unattended: true });
       if (!ok) {

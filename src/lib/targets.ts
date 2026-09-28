@@ -18,6 +18,7 @@ import ora from "ora";
 import prompts from "prompts";
 import { log } from "../utils/logger.js";
 import { installSkills, getDeliverableSkills } from "./skills-installer.js";
+import { TARGET_KEY_MINT, takePreApprovedKey } from "./batch-approval.js";
 import {
   resolveHubConfig,
   resolveUserId,
@@ -785,7 +786,7 @@ function credentialError(agentType: string, status: number, body: string): strin
   );
 }
 
-function openBrowserUrl(url: string): void {
+export function openBrowserUrl(url: string): void {
   const safe = url.replace(/"/g, "%22");
   const cmd =
     process.platform === "darwin" ? `open "${safe}"` :
@@ -828,8 +829,29 @@ export async function provisionAgentKey(
   {
     requireApproval = true,
     idempotent = false,
-  }: { requireApproval?: boolean; idempotent?: boolean } = {}
-): Promise<{ hubApiKey: string; agentUserId: string; reused: boolean }> {
+    deferApproval = false,
+  }: {
+    requireApproval?: boolean;
+    idempotent?: boolean;
+    /**
+     * Return a pending key WITHOUT opening its review page or waiting — the
+     * caller approves several at once (`batch-approval.ts`, V1 D5).
+     */
+    deferApproval?: boolean;
+  } = {}
+): Promise<{
+  hubApiKey: string;
+  agentUserId: string;
+  reused: boolean;
+  /** Set only with `deferApproval`: the key is minted but not yet approved. */
+  pending?: { pendingToken: string; reviewUrl: string };
+}> {
+  // `synap init` already minted — and the person approved — this key in one
+  // step with the others (`approveAgentKeysAtOnce`): hand it over, mint nothing.
+  if (!deferApproval) {
+    const pre = takePreApprovedKey(agentType);
+    if (pre) return { ...pre, reused: false };
+  }
   // `idempotent: true` reuses the pod's existing valid key for this agentType
   // instead of minting a fresh one + revoking the old — required by callers whose
   // running process holds a long-lived key (e.g. `bridge-setup`), so re-running
@@ -916,6 +938,7 @@ export async function provisionAgentKey(
     return provisionAgentKey(podUrl, humanApiKey, agentType, {
       requireApproval,
       idempotent: false,
+      deferApproval,
     });
   }
   if (!body.hubApiKey) {
@@ -923,6 +946,14 @@ export async function provisionAgentKey(
       `setup/agent succeeded but returned no hubApiKey for ${agentType}. ` +
       `This is a server-side bug — check the pod logs.`
     );
+  }
+  if (body.requiresApproval && body.pendingToken && body.reviewUrl && deferApproval) {
+    return {
+      hubApiKey: body.hubApiKey,
+      agentUserId: body.agentUserId ?? "",
+      reused: false,
+      pending: { pendingToken: body.pendingToken, reviewUrl: body.reviewUrl },
+    };
   }
   if (body.requiresApproval && body.pendingToken && body.reviewUrl) {
     log.info(`\n  Opening your pod to review this agent key request…`);
@@ -1071,7 +1102,13 @@ async function installCursor(
   const mcpPath = info.mcpConfigPath?.();
   if (!mcpPath) return false;
 
-  const { hubApiKey: effectiveApiKey, agentUserId } = await provisionAgentKey(cfg.podUrl, cfg.apiKey, "cursor");
+  const mint = TARGET_KEY_MINT.cursor!;
+  const { hubApiKey: effectiveApiKey, agentUserId } = await provisionAgentKey(
+    cfg.podUrl,
+    cfg.apiKey,
+    mint.agentType,
+    { idempotent: mint.idempotent }
+  );
   const { setSurfaceAgentKey: saveCursorKey } = await import("./pod.js");
   saveCursorKey("cursor", { hubApiKey: effectiveApiKey, agentUserId, podUrl: cfg.podUrl });
   await enrollAgentIfNeeded(cfg.podUrl, cfg.apiKey, agentUserId, cfg.workspaceId);
@@ -1623,7 +1660,13 @@ async function installCodex(
   }
 
   // Build MCP server entry
-  const { hubApiKey: effectiveApiKey, agentUserId } = await provisionAgentKey(cfg.podUrl, cfg.apiKey, "codex");
+  const mint = TARGET_KEY_MINT.codex!;
+  const { hubApiKey: effectiveApiKey, agentUserId } = await provisionAgentKey(
+    cfg.podUrl,
+    cfg.apiKey,
+    mint.agentType,
+    { idempotent: mint.idempotent }
+  );
   await enrollAgentIfNeeded(cfg.podUrl, cfg.apiKey, agentUserId, cfg.workspaceId);
   const mcpUrl = buildMcpUrl(cfg.podUrl, cfg.workspaceId, cfg.projectId);
 
