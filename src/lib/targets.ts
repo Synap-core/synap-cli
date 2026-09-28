@@ -24,6 +24,7 @@ import {
   resolveUserId,
   hubGet,
   hubPatch,
+  HubError,
   type HubConfig,
 } from "./hub-client.js";
 
@@ -59,7 +60,7 @@ export interface TargetConnectionConfig {
   withMcp?: boolean;
   /**
    * Take the recommended answer instead of prompting (install mode, behaviour
-   * template, governance "normal"). Set by `synap init`, which connects several
+   * template, governance "creates"). Set by `synap init`, which connects several
    * agents in one run and must not ask the same three questions per agent.
    */
   unattended?: boolean;
@@ -675,16 +676,17 @@ export async function writeClaudeCodeEnv(
   // (before switching to the agent key). Scoped to one workspace when chosen.
   await enrollAgentIfNeeded(cfg.podUrl, cfg.apiKey, agentSetup.agentUserId ?? "", cfg.workspaceId);
 
-  // Set per-agent governance — prompt once per agent, idempotent.
-  // Unattended (`synap init`): a NEW agent gets "normal"; an agent the pod
-  // already knew keeps whatever the person set. The pod has no read door for
-  // an agent's posture, so "already knew" is `alreadyValid` from setup/agent.
+  // Set per-agent governance — read before write, so it never overwrites a
+  // choice. A NEW agent is already on "creates" (the pod seeds it at
+  // creation, D2); an agent whose approval anyone ever set keeps it. Only an
+  // agent nobody configured is set — to "creates" unattended, else prompted.
   if (agentSetup.agentUserId) {
-    if (cfg.unattended && agentSetup.alreadyValid) {
-      log.dim("Kept this agent's approval settings.");
-    } else {
-      await ensureAgentGovernance(cfg, agentSetup.agentUserId, cfg.unattended ? "normal" : undefined);
-    }
+    await ensureAgentGovernance(
+      cfg,
+      agentSetup.agentUserId,
+      cfg.unattended ? "creates" : undefined,
+      { onlyIfUnset: true, knownAgent: !!agentSetup.alreadyValid }
+    );
   }
 
   const env = (settings.env ?? {}) as Record<string, string>;
@@ -1985,18 +1987,52 @@ function removeMcpServerEntry(configPath: string, serverName: string): void {
 }
 
 /**
- * Idempotent workspace governance prompt. Checks if the workspace already has
- * aiGovernance configured — skips if set. Otherwise prompts for safe/normal/crazy
- * and applies via PATCH /workspaces/:id/governance.
+ * Per-agent governance presets. `creates` is a NAMED pod posture
+ * (`create-with-undo`, resolved by the pod — the CLI never re-states its
+ * action list): creates happen at once with Undo, everything else waits for
+ * you. It is the default for a new agent (D2). `safe` / `normal` / `crazy` are
+ * the legacy action lists below.
  */
-export type GovernancePreset = "safe" | "normal" | "crazy";
+export type GovernancePreset = "safe" | "creates" | "normal" | "crazy";
+
+/** The pod posture name each named preset maps to. */
+const PRESET_POSTURE: Partial<Record<GovernancePreset, string>> = {
+  creates: "create-with-undo",
+};
+
+/** `GET /agent-users/:id/governance` — the fields the CLI reads. */
+interface AgentGovernanceRead {
+  posture: string | null;
+  configured: boolean;
+}
+
+/**
+ * Read an agent's governance, or `null` when the pod has no such read door
+ * (a pod older than it: 404/405) — "unknown", never "unset".
+ */
+async function readAgentGovernance(
+  agentUserId: string,
+  hubCfg: HubConfig
+): Promise<AgentGovernanceRead | null> {
+  try {
+    return (await hubGet(
+      `/agent-users/${agentUserId}/governance`,
+      {},
+      hubCfg
+    )) as AgentGovernanceRead;
+  } catch (err) {
+    if (err instanceof HubError && (err.status === 404 || err.status === 405))
+      return null;
+    throw err;
+  }
+}
 
 // Governance presets — MUST stay in sync with GOVERNANCE_MODES in the backend
 // `@synap/governance-policy`. (Single-source TODO: have the backend resolve a
 // mode NAME so the CLI never re-states the autoApproveFor list — until then,
 // this is the one place to mirror when the backend presets change.)
 const GOVERNANCE_PRESETS: Record<
-  GovernancePreset,
+  Exclude<GovernancePreset, "creates">,
   { autoApproveFor: string[]; writesRequireProposal: boolean }
 > = {
   safe: {
@@ -2038,13 +2074,47 @@ const GOVERNANCE_PRESETS: Record<
 export async function ensureAgentGovernance(
   cfg: { podUrl: string; apiKey: string },
   agentUserId: string,
-  presetMode?: GovernancePreset
+  presetMode?: GovernancePreset,
+  opts: {
+    /**
+     * Read before write and leave an agent whose approval anyone ever set
+     * alone (`synap init`). Explicit commands (`--governance` on a bridge
+     * setup) omit it and apply what they were told.
+     */
+    onlyIfUnset?: boolean;
+    /**
+     * The pod already knew this agent (setup/agent `alreadyValid`). Only
+     * consulted on a pod too old to answer the read: there, a known agent
+     * keeps its settings, as before the read door existed.
+     */
+    knownAgent?: boolean;
+  } = {}
 ): Promise<void> {
   const userId = await resolveUserId(cfg as HubConfig);
   const hubCfg: HubConfig = { ...cfg, userId };
 
-  // Non-interactive when a preset is passed (e.g. `--governance normal`);
-  // otherwise prompt (Normal pre-selected, Enter = <1s).
+  let current: AgentGovernanceRead | null = null;
+  try {
+    current = await readAgentGovernance(agentUserId, hubCfg);
+  } catch (err) {
+    log.warn(`Could not read agent approval: ${(err as Error).message}`);
+    if (opts.onlyIfUnset) return; // unknown ⇒ never overwrite
+  }
+  if (opts.onlyIfUnset && current === null && opts.knownAgent) {
+    log.dim("Kept this agent's approval settings.");
+    return;
+  }
+  if (opts.onlyIfUnset && current?.configured) {
+    log.dim(
+      current.posture === "create-with-undo"
+        ? 'Agent approval: "creates" — creating happens at once with Undo; changes and deletes wait for you.'
+        : "Kept this agent's approval settings."
+    );
+    return;
+  }
+
+  // Non-interactive when a preset is passed (e.g. `--governance creates`);
+  // otherwise prompt (Creates pre-selected, Enter = <1s).
   let mode = presetMode;
   if (!mode) {
     const res = await prompts({
@@ -2059,7 +2129,13 @@ export async function ensureAgentGovernance(
           value: "safe",
         },
         {
-          title: "Normal — creating & editing are instant, deletes need approval (recommended)",
+          title: "Creates — creating is instant with Undo; changes and deletes need approval (recommended)",
+          description:
+            "Agents add new things at once and you can undo each one; edits, new fields, automations and deletes go through proposals.",
+          value: "creates",
+        },
+        {
+          title: "Normal — creating & editing are instant, deletes need approval",
           description:
             "Agents create and edit data immediately (edits merge, never wipe fields); deletes and full-content rewrites go through proposals.",
           value: "normal",
@@ -2077,20 +2153,33 @@ export async function ensureAgentGovernance(
     mode = res.mode as GovernancePreset;
   }
 
-  const profile = GOVERNANCE_PRESETS[mode] ?? GOVERNANCE_PRESETS.normal;
+  const posture = PRESET_POSTURE[mode];
+  // A pod without the read door (`current === null` after a clean read) also
+  // predates named postures: it would ignore `posture` and loosen the agent.
+  // Fall back to the strictest legacy list rather than guess.
+  const podKnowsPostures = current !== null;
+  const legacyMode: Exclude<GovernancePreset, "creates"> =
+    mode === "creates" ? "safe" : mode;
+  const profile = GOVERNANCE_PRESETS[legacyMode] ?? GOVERNANCE_PRESETS.safe;
   try {
     await hubPatch(
       `/agent-users/${agentUserId}/governance`,
-      {
-        autoApproveFor: profile.autoApproveFor,
-        writesRequireProposal: profile.writesRequireProposal,
-      },
+      posture && podKnowsPostures
+        ? { posture }
+        : {
+            autoApproveFor: profile.autoApproveFor,
+            writesRequireProposal: profile.writesRequireProposal,
+          },
       hubCfg
     );
     log.success(
-      mode === "normal"
-        ? 'Agent approval: "normal". Creating and editing (including profile and property changes and new automations) happen at once; deletes wait for you.'
-        : `Agent approval: "${mode}".`
+      posture && podKnowsPostures
+        ? 'Agent approval: "creates". Creating happens at once with Undo; changes, new fields, automations and deletes wait for you.'
+        : mode === "creates"
+          ? 'Agent approval: "safe" — this pod predates "creates", so every change waits for you.'
+          : legacyMode === "normal"
+            ? 'Agent approval: "normal". Creating and editing (including profile and property changes and new automations) happen at once; deletes wait for you.'
+            : `Agent approval: "${legacyMode}".`
     );
   } catch (err) {
     log.warn(`Could not apply agent governance: ${(err as Error).message}`);

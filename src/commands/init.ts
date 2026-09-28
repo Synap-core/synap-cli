@@ -58,7 +58,7 @@ interface InitOptions {
   podUrl?: string;
   apiKey?: string;
   skipIs?: boolean;
-  /** Accept the defaults: no prompt (the agents found here, "normal" approval). */
+  /** Accept the defaults: no prompt (the agents found here, "creates" approval). */
   yes?: boolean;
   /** Comma-separated agents to connect, e.g. "claude-code,codex". */
   agents?: string;
