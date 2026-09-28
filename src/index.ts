@@ -18,6 +18,7 @@ import { readFileSync } from "fs";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
 import { bootstrapPodOverride } from "./lib/pod.js";
+import { INIT_EXIT_HELP } from "./lib/init-exit.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -54,6 +55,10 @@ program
   .option("--pod-url <url>", "Synap pod URL (skip pod choice prompt)")
   .option("--api-key <key>", "Hub Protocol API key (skip key generation)")
   .option("--skip-is", "Skip Intelligence Service provider setup")
+  .option("-y, --yes", "Accept the defaults, no prompts (connects the agents found on this machine)")
+  .option("--agents <list>", "Agents to connect, comma-separated: claude-code,codex,cursor,openclaw")
+  .option("--json", "Print a JSON summary on stdout: {podUrl, connected, notApproved, failed, pairLink, exitCode}")
+  .addHelpText("after", INIT_EXIT_HELP)
   .action(async (opts) => {
     const { init } = await import("./commands/init.js");
     await init(opts);

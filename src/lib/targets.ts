@@ -676,8 +676,15 @@ export async function writeClaudeCodeEnv(
   await enrollAgentIfNeeded(cfg.podUrl, cfg.apiKey, agentSetup.agentUserId ?? "", cfg.workspaceId);
 
   // Set per-agent governance — prompt once per agent, idempotent.
+  // Unattended (`synap init`): a NEW agent gets "normal"; an agent the pod
+  // already knew keeps whatever the person set. The pod has no read door for
+  // an agent's posture, so "already knew" is `alreadyValid` from setup/agent.
   if (agentSetup.agentUserId) {
-    await ensureAgentGovernance(cfg, agentSetup.agentUserId, cfg.unattended ? "normal" : undefined);
+    if (cfg.unattended && agentSetup.alreadyValid) {
+      log.dim("Kept this agent's approval settings.");
+    } else {
+      await ensureAgentGovernance(cfg, agentSetup.agentUserId, cfg.unattended ? "normal" : undefined);
+    }
   }
 
   const env = (settings.env ?? {}) as Record<string, string>;
@@ -816,6 +823,17 @@ async function waitForKeyApproval(
   });
 }
 
+/** The pod answered a key mint with something unusable (e.g. no agent id). */
+export class AgentKeyMintError extends Error {
+  constructor(
+    readonly agentType: string,
+    message: string
+  ) {
+    super(message);
+    this.name = "AgentKeyMintError";
+  }
+}
+
 /**
  * Provision an agent-owned API key for the given surface via POST /api/hub/setup/agent.
  * When requireApproval is true the key is created inactive; the user must approve in the
@@ -948,9 +966,14 @@ export async function provisionAgentKey(
     );
   }
   if (body.requiresApproval && body.pendingToken && body.reviewUrl && deferApproval) {
+    // The pre-approved key is handed to an installer that enrolls and scopes
+    // by this id: an empty one would connect an agent the pod cannot name.
+    if (!body.agentUserId) {
+      throw new AgentKeyMintError(agentType, `The pod minted a ${agentType} key but named no agent for it.`);
+    }
     return {
       hubApiKey: body.hubApiKey,
-      agentUserId: body.agentUserId ?? "",
+      agentUserId: body.agentUserId,
       reused: false,
       pending: { pendingToken: body.pendingToken, reviewUrl: body.reviewUrl },
     };
@@ -2064,7 +2087,11 @@ export async function ensureAgentGovernance(
       },
       hubCfg
     );
-    log.success(`Agent governance set to "${mode}"`);
+    log.success(
+      mode === "normal"
+        ? 'Agent approval: "normal". Creating and editing (including profile and property changes and new automations) happen at once; deletes wait for you.'
+        : `Agent approval: "${mode}".`
+    );
   } catch (err) {
     log.warn(`Could not apply agent governance: ${(err as Error).message}`);
   }

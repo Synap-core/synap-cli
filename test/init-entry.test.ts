@@ -73,7 +73,7 @@ describe("buildPairLink", () => {
   });
 
   it("parses back to host 'pair' with pod + v (the shape relay's deep-link handler reads)", () => {
-    const r = buildPairLink({ podUrl: "https://pod.example.com", email: "a+b@x.io", token: "t-123" });
+    const r = buildPairLink({ podUrl: "https://pod.example.com", email: "a+b@x.io" });
     if (!r.ok) throw new Error("expected ok");
     const u = new URL(r.link);
     expect(u.protocol).toBe("synap:");
@@ -82,11 +82,16 @@ describe("buildPairLink", () => {
       v: "1",
       pod: "https://pod.example.com",
       email: "a+b@x.io",
-      token: "t-123",
     });
   });
 
-  it("omits email and token when none is given (no pairing-token door exists yet)", () => {
+  it("carries the pod's ORIGIN only: a path, query or fragment never reaches the phone", () => {
+    const r = buildPairLink({ podUrl: "https://pod.example.com:8443/api/hub/?x=1#frag" });
+    if (!r.ok) throw new Error("expected ok");
+    expect(new URL(r.link).searchParams.get("pod")).toBe("https://pod.example.com:8443");
+  });
+
+  it("omits email when none is given, and never carries a token (no pairing-token door exists yet)", () => {
     const r = buildPairLink({ podUrl: "https://pod.example.com" });
     if (!r.ok) throw new Error("expected ok");
     expect([...new URL(r.link).searchParams.keys()]).toEqual(["v", "pod"]);
@@ -95,6 +100,15 @@ describe("buildPairLink", () => {
   it("refuses a pod a phone cannot reach", () => {
     for (const podUrl of ["http://localhost:4000", "http://127.0.0.1", "http://[::1]:4000", "http://app.localhost"]) {
       expect(buildPairLink({ podUrl })).toEqual({ ok: false, reason: "loopback" });
+    }
+  });
+
+  it("refuses plain http on a public host, allows it on the LAN", () => {
+    for (const podUrl of ["http://pod.example.com", "http://8.8.8.8:4000", "http://172.32.0.1"]) {
+      expect(buildPairLink({ podUrl })).toEqual({ ok: false, reason: "insecure" });
+    }
+    for (const podUrl of ["http://192.168.1.20:4000", "http://10.0.0.5", "http://172.16.3.4", "http://synap.local"]) {
+      expect(buildPairLink({ podUrl }).ok).toBe(true);
     }
   });
 

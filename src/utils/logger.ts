@@ -6,8 +6,11 @@ import chalk from "chalk";
 // are trying to parse. Callers that print a failure and its next-action hint
 // use error/warn/dim — dim stays on stdout because it is also used for ordinary
 // output detail; hint lines that accompany an error are emitted via `hint`.
+//
+// Colour carries meaning only: green ✓ done, yellow ⚠ warning, red ✗ error,
+// cyan for a command to type. Ordinary lines stay uncoloured.
 export const log = {
-  info: (msg: string) => console.log(chalk.blue("  " + msg)),
+  info: (msg: string) => console.log("  " + msg),
   success: (msg: string) => console.log(chalk.green("  ✓ " + msg)),
   warn: (msg: string) => console.error(chalk.yellow("  ⚠ " + msg)),
   error: (msg: string) => console.error(chalk.red("  ✗ " + msg)),
