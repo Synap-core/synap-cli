@@ -1,11 +1,8 @@
 /**
- * Re-running `synap init` must not reset an agent's approval settings. The
- * unattended connect READS the agent's governance first
- * (`GET /agent-users/:id/governance`) and writes only when nobody ever set it
- * — then the named posture "creates" (`create-with-undo`, D2), resolved by the
- * pod. A pod too old to answer the read falls back to setup/agent's
- * `alreadyValid`, and never sends a posture it would ignore. Driven through
- * the real `writeClaudeCodeEnv` against a stubbed pod, with a throwaway HOME.
+ * `synap init` must never write an agent's approval settings: a new agent
+ * follows the pod default ("reversible writes act", founder 2026-09-28) and a
+ * configured one keeps its choice on re-run. Driven through the real
+ * `writeClaudeCodeEnv` against a stubbed pod, with a throwaway HOME.
  */
 
 import { describe, it, expect, vi, beforeAll, afterAll, beforeEach } from "vitest";
@@ -66,50 +63,21 @@ const governanceCalls = () => calls.filter((c) => c.url.includes("/governance"))
 const governanceWrites = () => governanceCalls().filter((c) => c.method === "PATCH");
 
 describe("unattended connect and the agent's approval settings", () => {
-  it("an agent nobody configured gets the named posture 'creates' — the pod resolves it, the CLI sends no list", async () => {
-    vi.stubGlobal("fetch", pod({ hubApiKey: "agent-key-new", agentUserId: "agent-1" }));
-    await writeClaudeCodeEnv({ podUrl: POD, apiKey: "human-key", unattended: true }, { writeMcp: false });
-    const gov = governanceCalls();
-    // Read BEFORE write.
-    expect(gov.map((c) => c.method)).toEqual(["GET", "PATCH"]);
-    expect(gov[1]!.url).toBe(`${POD}/api/hub/agent-users/agent-1/governance`);
-    expect(gov[1]!.body).toEqual({ posture: "create-with-undo" });
-  });
-
-  it("a NEW agent the pod already seeded (D2) is left alone: read, no write", async () => {
-    vi.stubGlobal(
-      "fetch",
-      pod(
-        { hubApiKey: "agent-key-new", agentUserId: "agent-1" },
-        { posture: "create-with-undo", configured: true }
-      )
-    );
-    await writeClaudeCodeEnv({ podUrl: POD, apiKey: "human-key", unattended: true }, { writeMcp: false });
-    expect(governanceCalls().map((c) => c.method)).toEqual(["GET"]);
-  });
-
-  it("an agent someone configured keeps its settings on re-run, even a custom one", async () => {
-    vi.stubGlobal(
-      "fetch",
-      pod({ alreadyValid: true, agentUserId: "agent-1" }, { posture: null, configured: true })
-    );
-    await writeClaudeCodeEnv({ podUrl: POD, apiKey: "human-key", unattended: true }, { writeMcp: false });
-    expect(calls.some((c) => c.url.endsWith("/api/hub/setup/agent"))).toBe(true);
-    expect(governanceWrites()).toEqual([]);
-  });
-
-  it("a pod without the read door: a known agent keeps its settings (as before)", async () => {
-    vi.stubGlobal("fetch", pod({ alreadyValid: true, agentUserId: "agent-1" }, "missing"));
-    await writeClaudeCodeEnv({ podUrl: POD, apiKey: "human-key", unattended: true }, { writeMcp: false });
-    expect(governanceWrites()).toEqual([]);
-  });
-
-  it("a pod without the read door never gets a posture it would ignore — a new agent falls back to 'safe'", async () => {
-    vi.stubGlobal("fetch", pod({ hubApiKey: "agent-key-new", agentUserId: "agent-1" }, "missing"));
-    await writeClaudeCodeEnv({ podUrl: POD, apiKey: "human-key", unattended: true }, { writeMcp: false });
-    const [write] = governanceWrites();
-    expect(write!.body).not.toHaveProperty("posture");
-    expect((write!.body as { writesRequireProposal: boolean }).writesRequireProposal).toBe(true);
-    expect((write!.body as { autoApproveFor: string[] }).autoApproveFor).not.toContain("entity.update");
-  });
+  // `synap init` never writes an agent's governance: a new agent follows the
+  // POD default ("reversible writes act", founder 2026-09-28) and a configured
+  // one keeps whatever someone chose. One case per shape the pod can answer.
+  for (const [name, setup, governance] of [
+    ["an agent nobody configured", { hubApiKey: "agent-key-new", agentUserId: "agent-1" }, { posture: null, configured: false }],
+    ["a configured agent on re-run", { alreadyValid: true, agentUserId: "agent-1" }, { posture: null, configured: true }],
+    ["a new agent on a pod without the read door", { hubApiKey: "agent-key-new", agentUserId: "agent-1" }, "missing"],
+    ["a known agent on a pod without the read door", { alreadyValid: true, agentUserId: "agent-1" }, "missing"],
+  ] as const) {
+    it(`${name}: no governance write, the pod default applies`, async () => {
+      vi.stubGlobal("fetch", pod(setup as Record<string, unknown>, governance as Record<string, unknown> | "missing"));
+      await writeClaudeCodeEnv({ podUrl: POD, apiKey: "human-key", unattended: true }, { writeMcp: false });
+      // Non-vacuity: the connect really ran against the stubbed pod.
+      expect(calls.some((c) => c.url.endsWith("/api/hub/setup/agent"))).toBe(true);
+      expect(governanceWrites()).toEqual([]);
+    });
+  }
 });

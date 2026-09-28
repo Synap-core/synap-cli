@@ -60,7 +60,7 @@ export interface TargetConnectionConfig {
   withMcp?: boolean;
   /**
    * Take the recommended answer instead of prompting (install mode, behaviour
-   * template, governance "creates"). Set by `synap init`, which connects several
+   * template; governance is left to the pod default). Set by `synap init`, which connects several
    * agents in one run and must not ask the same three questions per agent.
    */
   unattended?: boolean;
@@ -677,16 +677,15 @@ export async function writeClaudeCodeEnv(
   await enrollAgentIfNeeded(cfg.podUrl, cfg.apiKey, agentSetup.agentUserId ?? "", cfg.workspaceId);
 
   // Set per-agent governance — read before write, so it never overwrites a
-  // choice. A NEW agent is already on "creates" (the pod seeds it at
-  // creation, D2); an agent whose approval anyone ever set keeps it. Only an
-  // agent nobody configured is set — to "creates" unattended, else prompted.
-  if (agentSetup.agentUserId) {
-    await ensureAgentGovernance(
-      cfg,
-      agentSetup.agentUserId,
-      cfg.unattended ? "creates" : undefined,
-      { onlyIfUnset: true, knownAgent: !!agentSetup.alreadyValid }
-    );
+  // choice. Unattended (`synap init`) writes NOTHING: a new agent follows the
+  // POD default ("reversible writes act", founder 2026-09-28). Interactive
+  // `synap connect` still offers the presets, and only for an agent nobody
+  // configured.
+  if (agentSetup.agentUserId && !cfg.unattended) {
+    await ensureAgentGovernance(cfg, agentSetup.agentUserId, undefined, {
+      onlyIfUnset: true,
+      knownAgent: !!agentSetup.alreadyValid,
+    });
   }
 
   const env = (settings.env ?? {}) as Record<string, string>;
@@ -1990,7 +1989,8 @@ function removeMcpServerEntry(configPath: string, serverName: string): void {
  * Per-agent governance presets. `creates` is a NAMED pod posture
  * (`create-with-undo`, resolved by the pod — the CLI never re-states its
  * action list): creates happen at once with Undo, everything else waits for
- * you. It is the default for a new agent (D2). `safe` / `normal` / `crazy` are
+ * you. An optional stricter choice — a new agent follows the pod default
+ * ("reversible writes act"). `safe` / `normal` / `crazy` are
  * the legacy action lists below.
  */
 export type GovernancePreset = "safe" | "creates" | "normal" | "crazy";
