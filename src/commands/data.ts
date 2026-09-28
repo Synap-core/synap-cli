@@ -46,20 +46,27 @@ interface OrientWorkspace {
   profiles?: Array<{ slug: string; name: string }>;
 }
 /**
- * The pinned space's brief as `GET /orient` serves it (backend
- * `services/discover/space-brief.ts`; canonical type `@synap-core/types/space-brief`).
- * Structural and all-optional on purpose: the CLI is npm-published and must
- * render whatever an older or newer pod sends without breaking.
+ * The pinned space's BUILT brief as `GET /orient` serves it (backend
+ * `services/discover/space-brief.ts` `BuiltSpaceBrief`; client mirror
+ * `HubBuiltSpaceBrief` in @synap-core/hub-rest-client >= the release after
+ * 1.4.0 — switch to it once this CLI installs that version). Structural and
+ * all-optional on purpose: the CLI is npm-published and must render whatever
+ * an older or newer pod sends without breaking.
  */
-interface OrientSpaceBrief {
+export interface OrientSpaceBrief {
   status?: "unavailable";
   name?: string;
   purpose?: string;
   persona?: string;
+  /** Read first: THE entity this space is about, then context kinds. */
+  anchors?: { root?: { kind: string; entityId?: string }; context?: string[] };
+  /** Keys of the rules this space's template installed. */
+  rules?: string[];
   collect?: Array<{ kind: string; what?: string; cardinality?: string }>;
   keyKinds?: Array<{ slug: string; entityCount?: number }> | { status: "unavailable" };
   keyKindsTotal?: number;
-  playbooks?: { items: Array<{ id: string; name: string }>; total: number } | { status: "unavailable" };
+  /** `items` is `[]` when the pod shed the list to fit; `total` stays true. */
+  playbooks?: { items?: Array<{ id: string; name: string }>; total: number } | { status: "unavailable" };
   trimmed?: string[];
   more?: string;
 }
@@ -102,6 +109,10 @@ export function renderSpaceBriefLines(brief: OrientSpaceBrief | undefined): stri
   const out: string[] = [];
   if (brief.purpose) out.push(`purpose: ${brief.purpose}`);
   if (brief.persona) out.push(`persona: ${brief.persona}`);
+  const root = brief.anchors?.root;
+  if (root) out.push(`read first: ${root.kind}${root.entityId ? ` ${root.entityId}` : ""}`);
+  if (brief.anchors?.context?.length) out.push(`context: ${brief.anchors.context.join(", ")}`);
+  if (brief.rules?.length) out.push(`rules: ${brief.rules.join(", ")}`);
   const k = brief.keyKinds;
   if (k && !Array.isArray(k)) out.push("kinds: unavailable (read failed)");
   else if (k && k.length) {
@@ -113,9 +124,12 @@ export function renderSpaceBriefLines(brief: OrientSpaceBrief | undefined): stri
   }
   const pb = brief.playbooks;
   if (pb && "status" in pb) out.push("playbooks: unavailable (read failed)");
-  else if (pb && pb.items.length) {
+  else if (pb && pb.items?.length) {
     const more = pb.total > pb.items.length ? ` …+${pb.total - pb.items.length}` : "";
     out.push(`playbooks: ${pb.items.map((p) => p.name).join(", ")}${more}`);
+  } else if (pb && pb.total > 0) {
+    // The pod shed the list to fit its byte cap; the count is still true.
+    out.push(`playbooks: ${pb.total}`);
   }
   if (brief.trimmed?.length) out.push(`(shortened to fit: ${brief.trimmed.join(", ")})`);
   if (brief.more) out.push(brief.more);
