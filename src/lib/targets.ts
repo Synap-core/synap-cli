@@ -1995,6 +1995,9 @@ function removeMcpServerEntry(configPath: string, serverName: string): void {
  */
 export type GovernancePreset = "safe" | "creates" | "normal" | "crazy";
 
+/** The prompt's first choice: write nothing, follow the pod default. */
+const POD_DEFAULT_CHOICE = "pod-default";
+
 /** The pod posture name each named preset maps to. */
 const PRESET_POSTURE: Partial<Record<GovernancePreset, string>> = {
   creates: "create-with-undo",
@@ -2114,7 +2117,9 @@ export async function ensureAgentGovernance(
   }
 
   // Non-interactive when a preset is passed (e.g. `--governance creates`);
-  // otherwise prompt (Creates pre-selected, Enter = <1s).
+  // otherwise prompt. "Follow the pod default" is pre-selected and writes
+  // nothing: a new agent's trust is the pod's rule, a preset is only ever a
+  // stricter (or looser) explicit choice.
   let mode = presetMode;
   if (!mode) {
     const res = await prompts({
@@ -2123,13 +2128,19 @@ export async function ensureAgentGovernance(
       message: "Governance — how should this agent's actions be gated?",
       choices: [
         {
+          title: "Follow the pod default (recommended)",
+          description:
+            "Changes you can undo happen at once and show in Activity; deletes, sends and admin changes wait for you.",
+          value: POD_DEFAULT_CHOICE,
+        },
+        {
           title: "Safe — every change requires your approval in Synap Studio",
           description:
             "Creates, updates, and deletes all go through proposals. Maximum control.",
           value: "safe",
         },
         {
-          title: "Creates — creating is instant with Undo; changes and deletes need approval (recommended)",
+          title: "Creates — creating is instant with Undo; changes and deletes need approval",
           description:
             "Agents add new things at once and you can undo each one; edits, new fields, automations and deletes go through proposals.",
           value: "creates",
@@ -2147,9 +2158,13 @@ export async function ensureAgentGovernance(
           value: "crazy",
         },
       ],
-      initial: 1,
+      initial: 0,
     });
     if (!res.mode) return;
+    if (res.mode === POD_DEFAULT_CHOICE) {
+      log.dim("Agent approval: follows the pod default.");
+      return;
+    }
     mode = res.mode as GovernancePreset;
   }
 
