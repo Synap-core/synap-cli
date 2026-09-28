@@ -102,7 +102,7 @@ program
     "Re-ask every question and re-provision from scratch (ignore what a previous run configured)"
   )
   .option("--pod <name>", "Pod profile to connect the bridge to (default: prompt)")
-  .option("--governance <mode>", "Agent governance preset: safe | normal | crazy (default: prompt)")
+  .option("--governance <mode>", "Agent approval preset: safe | creates | normal | crazy (default: prompt; \"follow the pod default\" writes nothing)")
   .option("--pod-url <url>", "Synap pod URL (override)")
   .option("--api-key <key>", "Hub Protocol API key (override)")
   .action(async (opts) => {
@@ -124,7 +124,7 @@ program
   .option("--workspace-id <uuid>", "Advanced/legacy: pin the bridge to one workspace (default: pod-wide, never prompted)")
   .option("--project-id <uuid>", "Scope the bridge to one project (default: prompt, pod-wide if declined)")
   .option("--pod <name>", "Pod profile to connect the bridge to (default: prompt)")
-  .option("--governance <mode>", "Agent governance preset: safe | normal | crazy (default: prompt)")
+  .option("--governance <mode>", "Agent approval preset: safe | creates | normal | crazy (default: prompt; \"follow the pod default\" writes nothing)")
   .option("--pod-url <url>", "Synap pod URL (override)")
   .option("--api-key <key>", "Hub Protocol API key (override)")
   .action(async (opts) => {

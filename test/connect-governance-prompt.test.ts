@@ -67,6 +67,31 @@ describe("connect approval prompt", () => {
     expect(governanceWrites()).toEqual([]);
   });
 
+  it("a failed read falls back strict and says so — never 'predates'", async () => {
+    const { ensureAgentGovernance } = await import("../src/lib/targets.js");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        const method = init?.method ?? "GET";
+        calls.push({ method, url });
+        if (url.endsWith("/api/hub/users/me"))
+          return new Response(JSON.stringify({ id: "human-1" }), { status: 200 });
+        if (url.includes("/governance") && method === "GET")
+          return new Response("boom", { status: 500 });
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      })
+    );
+    const logged: string[] = [];
+    vi.spyOn(console, "log").mockImplementation((...a: unknown[]) => {
+      logged.push(a.map(String).join(" "));
+    });
+    await ensureAgentGovernance({ podUrl: POD, apiKey: "k" }, "agent-1", "creates");
+    expect(governanceWrites()).toHaveLength(1);
+    const text = logged.join("\n");
+    expect(text).toMatch(/could not read/);
+    expect(text).not.toMatch(/predates/);
+  });
+
   it("an explicit preset still writes", async () => {
     const { ensureAgentGovernance } = await import("../src/lib/targets.js");
     answer = "safe";

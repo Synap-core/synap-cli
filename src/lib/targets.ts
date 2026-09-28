@@ -2097,9 +2097,14 @@ export async function ensureAgentGovernance(
   const hubCfg: HubConfig = { ...cfg, userId };
 
   let current: AgentGovernanceRead | null = null;
+  // A failed read (vs a pod that has no read door) is its own fact: the
+  // strict fallback below is the same, but the message must not claim the
+  // pod is old.
+  let readFailed = false;
   try {
     current = await readAgentGovernance(agentUserId, hubCfg);
   } catch (err) {
+    readFailed = true;
     log.warn(`Could not read agent approval: ${(err as Error).message}`);
     if (opts.onlyIfUnset) return; // unknown ⇒ never overwrite
   }
@@ -2130,7 +2135,7 @@ export async function ensureAgentGovernance(
         {
           title: "Follow the pod default (recommended)",
           description:
-            "Changes you can undo happen at once and show in Activity; deletes, sends and admin changes wait for you.",
+            "Uses your pod's trust setting (Settings › Trust rules); change it there anytime.",
           value: POD_DEFAULT_CHOICE,
         },
         {
@@ -2191,7 +2196,9 @@ export async function ensureAgentGovernance(
       posture && podKnowsPostures
         ? 'Agent approval: "creates". Creating happens at once with Undo; changes, new fields, automations and deletes wait for you.'
         : mode === "creates"
-          ? 'Agent approval: "safe" — this pod predates "creates", so every change waits for you.'
+          ? readFailed
+            ? 'Agent approval: "safe" — could not read this pod\'s approval settings, so every change waits for you.'
+            : 'Agent approval: "safe" — this pod predates "creates", so every change waits for you.'
           : legacyMode === "normal"
             ? 'Agent approval: "normal". Creating and editing (including profile and property changes and new automations) happen at once; deletes wait for you.'
             : `Agent approval: "${legacyMode}".`
