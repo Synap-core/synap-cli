@@ -1033,6 +1033,21 @@ export async function capabilityAdd(
     // best-effort — the add already succeeded
   }
 
+  // CONNECT-first: a provider capability that isn't connected yet runs the OAuth
+  // flow now, so `cap add` is the ONE happy-path door (apply → connect → enable
+  // reads). `ensureConnection` is the shared provider+OAuth path; a failed or
+  // timed-out OAuth returns false and leaves the card un-connected — recover
+  // with `synap cap connect "<name>"`. No-connection / already-connected cards
+  // skip this.
+  if (after?.connection?.required && after.connection.state !== "connected") {
+    await ensureConnection(cfg, workspaceId, after);
+    try {
+      after = findCard(await fetchCatalog(cfg, workspaceId), card.name) ?? after;
+    } catch {
+      // keep the pre-connect card
+    }
+  }
+
   // AUTO-ENABLE the read verbs, so install is ONE step, not two. Reads are the
   // `auto`-governance, no-side-effect verbs — safe to turn on without asking.
   // Write/action verbs stay OFF (they ask approval per run); enable them later
