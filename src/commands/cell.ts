@@ -11,6 +11,7 @@
  *
  *   synap cell build ./src/chart.tsx --out ./dist/chart.js
  *   synap cell build ./src/chart.tsx --out ./dist/chart.js --define   # bundle then define
+ *   synap cell build ./src/chart.tsx --out ./dist/chart.js --bundle-deps   # no esm.sh at runtime
  *
  * API:
  *   POST /api/hub/cells/define — { name, rendererSource, workspaceId?, typeKey?,
@@ -34,10 +35,18 @@
  *
  * cell build runtime contract:
  *   - esbuild bundles to a single ESM file (format: esm, bundle: true)
- *   - bare imports (react, react-dom, any non-relative) are externalized
- *   - externalized modules become the deps map (version from package.json if present, else "latest")
+ *   - default mode: every bare import (react, react-dom, any non-relative) is
+ *     externalized; externalized modules become the deps map (version from
+ *     package.json if present, else "latest"); at runtime Synap resolves
+ *     them via esm.sh importmap
+ *   - `--bundle-deps` mode: only react/react-dom are externalized (they are
+ *     host-inlined at runtime, never via esm.sh — see
+ *     `synap-app/packages/core/cell-runtime/src/frame-react-modules.ts`);
+ *     every other bare import is bundled into the output, so the deps map is
+ *     `{}` and the frame's runtime CSP drops esm.sh entirely (see
+ *     `ViewFrame.buildFrameCsp`'s `fullyBundled` branch) — this mode is
+ *     opt-in; the default build is byte-identical to before this flag existed
  *   - the output module default-exports a React component (or plain module)
- *   - at runtime Synap resolves bare imports via esm.sh importmap
  */
 
 import { readFileSync, writeFileSync, existsSync } from "fs";
@@ -120,6 +129,7 @@ export interface CellDefineOpts {
 export interface CellBuildOpts {
   out?: string;
   define?: boolean;
+  bundleDeps?: boolean;
   name?: string;
   typeKey?: string;
   deps?: string;
@@ -200,19 +210,58 @@ function lookupVersion(
   return raw.replace(/^[^0-9]*/, "") || "latest";
 }
 
-/** Call esbuild programmatically. Returns { code, externals }. */
-async function bundleWithEsbuild(
-  entry: string
+/**
+ * Thrown by `bundleWithEsbuild`/`buildCellFromSource` instead of exiting the
+ * process, so a caller that is NOT the direct `cell build` CLI entry point
+ * (namely `resolveCellCodeFiles` on the `market publish` path) can turn a
+ * bundle failure into its own structured `{ ok: false, ... }` envelope rather
+ * than have the process die out from under it before that envelope is ever
+ * built. `cellBuild` (the direct entry point) catches this like any other
+ * error and still exits 1 — interactive behaviour is unchanged.
+ */
+export class CellBundleError extends Error {}
+
+/**
+ * Package names that stay external even under `--bundle-deps` — the modules
+ * the FRAME HOST provides at runtime, which must never be pulled from
+ * node_modules: react/react-dom are host-inlined (`synap-app/packages/core/
+ * cell-runtime/src/frame-react-modules.ts`), and `@synap/view-sdk` is
+ * host-supplied via the iframe import map (`.../frame-import-map.ts`,
+ * `imports['@synap/view-sdk'] = blobs.viewSdk`). Externalizing all three
+ * costs nothing and keeps the bundle small; failing to list one here means
+ * `--bundle-deps` (now the DEFAULT for `market publish` cells) can never
+ * build a cell that imports it — esbuild tries to resolve it from
+ * node_modules and fails, dead on arrival.
+ *
+ * This set is a hand-maintained mirror of `frame-import-map.ts` — exactly the
+ * drift class this repo keeps losing to — so `frame-import-map-parity.test.ts`
+ * reads that file's own source across the repo boundary and fails the moment
+ * the host starts supplying a module this set doesn't know about.
+ */
+export const BUNDLE_DEPS_KEEP_EXTERNAL = new Set([
+  "react",
+  "react-dom",
+  "@synap/view-sdk",
+]);
+
+/** Call esbuild programmatically. Returns { code, externals }. Exported for tests. */
+export async function bundleWithEsbuild(
+  entry: string,
+  opts: { bundleDeps?: boolean } = {}
 ): Promise<{ code: string; externals: string[] }> {
   // Dynamic import so the CLI only requires esbuild when `cell build` is used.
+  // esbuild is a real `dependency` of this package (not a devDependency) —
+  // Node resolves it from the CLI's OWN install location, not the caller's
+  // project, so it is present under `npx @synap-core/cli` too. This catch is
+  // therefore a last-resort guard against a corrupted install, not the
+  // expected path; the fix is reinstalling the CLI, not the user's project.
   let esbuild: typeof import("esbuild");
   try {
     esbuild = await import("esbuild");
   } catch {
-    log.error(
-      "esbuild is not installed. Run: npm install -D esbuild  (or pnpm add -D esbuild)"
+    throw new CellBundleError(
+      "esbuild failed to load from the CLI's own install. Reinstall the CLI (npm install -g @synap-core/cli) or re-run via npx."
     );
-    process.exit(1);
   }
 
   // First pass: bundle without any externals to discover all bare imports.
@@ -230,7 +279,14 @@ async function bundleWithEsbuild(
           args.path.startsWith("@") && parts.length >= 2
             ? `${parts[0]}/${parts[1]}`
             : parts[0];
-        externalSet.add(pkgName ?? args.path);
+        const name = pkgName ?? args.path;
+        // --bundle-deps: only react/react-dom stay external — every other
+        // bare import is left unhandled so esbuild resolves + bundles it
+        // from node_modules, producing an empty deps map.
+        if (opts.bundleDeps && !BUNDLE_DEPS_KEEP_EXTERNAL.has(name)) {
+          return undefined;
+        }
+        externalSet.add(name);
         return { path: args.path, external: true };
       });
     },
@@ -247,12 +303,70 @@ async function bundleWithEsbuild(
 
   if (result.errors.length > 0) {
     const msgs = result.errors.map((e) => e.text).join("\n");
-    log.error(`esbuild failed:\n${msgs}`);
-    process.exit(1);
+    throw new CellBundleError(`esbuild failed:\n${msgs}`);
   }
 
   const code = result.outputFiles[0]?.text ?? "";
   return { code, externals: Array.from(externalSet).sort() };
+}
+
+export interface BuiltCell {
+  code: string;
+  /** Externals → version, ready for the `deps` field the runtime resolves via esm.sh. */
+  deps: Record<string, string>;
+  externals: string[];
+}
+
+/**
+ * Bundle `entry` and derive its `deps` map — the shared guts behind `cell
+ * build` (which additionally writes the result to disk) and `market
+ * publish`'s `codeFile` resolution (`lib/kind-package.ts`, which inlines the
+ * result straight into a package's `code` field instead). Kept in ONE place
+ * because the bundle-deps/react-exclusion derivation below is exactly the
+ * seam `cell-build-bundle-deps.test.ts` exists to protect (see its top-of-file
+ * comment) — a second copy of this logic is how that bug would come back.
+ */
+export async function buildCellFromSource(
+  entry: string,
+  opts: { bundleDeps?: boolean; deps?: string } = {}
+): Promise<BuiltCell> {
+  const { code, externals } = await bundleWithEsbuild(entry, {
+    bundleDeps: opts.bundleDeps,
+  });
+
+  // Build deps map: externals → version from nearest package.json.
+  //
+  // Under `--bundle-deps` the react/react-dom externals are DELIBERATELY
+  // omitted from this map. They stay external to esbuild (the host supplies
+  // them), but the `deps` map means one thing only: "modules the runtime must
+  // resolve via the esm.sh import map". React is never one of those — the
+  // host inlines it (`frame-react-modules.ts`), and `ViewFrame` will not even
+  // build a react-language srcdoc until `reactSources` has loaded.
+  //
+  // This is the seam that makes the flag WORK: `buildFrameCsp`'s
+  // `fullyBundled` branch keys off `Object.keys(deps).length === 0`, so
+  // leaving react in the map here would leave `deps = { react: "19" }` and
+  // esm.sh would stay in the CSP for every React cell — i.e. the whole
+  // feature would be inert on its main use case.
+  const pkgJson = findPackageJson(dirname(entry));
+  const depsMap: Record<string, string> = {};
+  for (const ext of externals) {
+    if (opts.bundleDeps && BUNDLE_DEPS_KEEP_EXTERNAL.has(ext)) continue;
+    depsMap[ext] = pkgJson ? lookupVersion(pkgJson, ext) : "latest";
+  }
+
+  // Honour explicit --deps overrides
+  if (opts.deps) {
+    let override: Record<string, string>;
+    try {
+      override = JSON.parse(opts.deps) as Record<string, string>;
+    } catch {
+      throw new Error(`--deps must be valid JSON, e.g. '{"recharts":"2.12.0"}'`);
+    }
+    Object.assign(depsMap, override);
+  }
+
+  return { code, deps: depsMap, externals };
 }
 
 // ─── cell define ──────────────────────────────────────────────────────────────
@@ -384,26 +498,10 @@ export async function cellBuild(
     }
 
     log.dim(`Bundling ${entry}…`);
-    const { code, externals } = await bundleWithEsbuild(absEntry);
-
-    // Build deps map: externals → version from nearest package.json
-    const pkgJson = findPackageJson(dirname(absEntry));
-    const depsMap: Record<string, string> = {};
-    for (const ext of externals) {
-      depsMap[ext] = pkgJson ? lookupVersion(pkgJson, ext) : "latest";
-    }
-
-    // Honour explicit --deps overrides
-    if (opts.deps) {
-      let override: Record<string, string>;
-      try {
-        override = JSON.parse(opts.deps) as Record<string, string>;
-      } catch {
-        log.error(`--deps must be valid JSON, e.g. '{"recharts":"2.12.0"}'`);
-        process.exit(1);
-      }
-      Object.assign(depsMap, override);
-    }
+    const { code, deps: depsMap, externals } = await buildCellFromSource(absEntry, {
+      bundleDeps: opts.bundleDeps,
+      deps: opts.deps,
+    });
 
     // Write output file
     const outPath = opts.out

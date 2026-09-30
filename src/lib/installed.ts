@@ -13,11 +13,18 @@
  * discovery command — you can always browse the catalog offline.
  */
 
-import { resolveHubConfig, hubGet, type HubConfig } from "./hub-client.js";
+import { resolveHubConfig, hubGet, HubError, type HubConfig } from "./hub-client.js";
 
 /** An installed workspace's package identity — slug plus (when the pod stamped one) its content version. */
 export interface InstalledTemplateInfo {
   slug: string;
+  /**
+   * Which install ledger this row came from — `"workspace"` for the historical
+   * shape, and one of the other five kinds once the pod serves
+   * `GET /api/hub/installed`. Optional so every existing constructor (and every
+   * test that builds one by hand) stays valid; absent reads as `"workspace"`.
+   */
+  kind?: InstalledKind;
   /**
    * `settings.packageVersion`, when the pod stamped one — `GET /api/hub/workspaces`
    * (`hub-protocol/rest/workspaces.ts`) projects it off `workspace.settings`.
@@ -28,7 +35,13 @@ export interface InstalledTemplateInfo {
    * "can't check" rather than "outdated" — see `market.ts`'s `computeUpdates`.
    */
   version?: string;
-  workspaceId: string;
+  /**
+   * The workspace this row lives in — `null` for a POD-GLOBAL install (a
+   * capability, cell or skill installed with `workspace_id IS NULL`). Widened
+   * from `string` when `GET /installed` brought the other five kinds in: a
+   * pod-wide row has no workspace, and inventing one would be a fabrication.
+   */
+  workspaceId: string | null;
   workspaceName: string;
   /**
    * Server-computed latest catalog version for this slug (Hub `/workspaces`
@@ -46,11 +59,9 @@ export interface InstalledTemplateInfo {
 }
 
 /**
- * Every installed workspace's `{slug, version, workspaceId, workspaceName}` —
- * the raw material for "what's installed" (`fetchInstalledSlugs`) and "what's
- * out of date" (`market update`'s `computeUpdates`). One Hub call, derived
- * views. Unions TWO install shapes, mirroring the browser's
- * `useInstalledPackageSlugs` (see that hook's doc for the full rationale):
+ * The Hub `GET /workspaces` row shape. It carries TWO install shapes, mirroring
+ * the browser's `useInstalledPackageSlugs` (see that hook's doc for the full
+ * rationale):
  *
  *  1. `workspace.packageSlug` — a workspace-creating install (template).
  *  2. `workspace.settings.installedPacks[]` — additive packs (profile/view/
@@ -70,30 +81,204 @@ type HubWorkspaceRow = {
   installedPacks?: Array<{ slug?: string; version?: string }> | null;
 };
 
-/** Pure projection of the Hub `/workspaces` payload → installed-template rows. */
-function mapInstalledTemplates(rows: HubWorkspaceRow[]): InstalledTemplateInfo[] {
-  const out: InstalledTemplateInfo[] = [];
-  for (const ws of rows) {
-    if (ws.packageSlug) {
-      out.push({
-        slug: ws.packageSlug,
-        version: ws.packageVersion ?? undefined,
+// ── THE ONE READ DOOR — `GET /api/hub/installed` ────────────────────────────
+//
+// The pod projects all FOUR install ledgers it already maintains (workspaces,
+// capability containers, marketSource-linked view/skill/automation rows, and
+// package cells) through one kind-agnostic route. Before it existed this file
+// asked `GET /workspaces` and nothing else, so `market installed` /
+// `market update` / every drift marker structurally reported ONE of six kinds
+// while their names claimed all of them.
+//
+// Two calls, deliberately, both cheap and local to the pod:
+//   • `/installed` — the six kinds. Absent on an older pod (404).
+//   • `/workspaces` — for TWO things `/installed` does not carry:
+//       1. the workspace id→name join (`/installed` reports each ROW's own
+//          name — a view's title, not its workspace's), and
+//       2. `settings.installedPacks[]`, an additive-pack ledger `/installed`
+//          reads only to decide whether a workspace counts as installed, and
+//          never emits rows for. Dropping it would un-list (and make
+//          un-updatable) every additive pack — a coverage regression in the
+//          exact command this consolidation exists to widen.
+
+/** Every kind the door can report. Mirrors the pod's `INSTALLED_KINDS`. */
+export const INSTALLED_KINDS = [
+  "workspace",
+  "capability",
+  "view",
+  "skill",
+  "automation",
+  "cell",
+] as const;
+export type InstalledKind = (typeof INSTALLED_KINDS)[number];
+
+/**
+ * One row of `GET /api/hub/installed`, plus the locally-joined `workspaceName`.
+ *
+ * Read the pod's `hub-protocol/rest/installed.ts` docblock for the field
+ * contract. The three that bite:
+ *
+ *  - `drift: null` means **NOT COMPUTED**, never "no drift". Capabilities and
+ *    cells have no local comparator, so `null` is the honest answer for them.
+ *  - `packageSlug: null` means **not source-linked to a package** — every
+ *    capability row (its link is a `templateKey`, not a catalog slug) and any
+ *    cell minted with the `"unknown"` sentinel. Never print it as a name.
+ *  - `installedVersion` is a semver for workspace/view/skill/automation and a
+ *    CONTENT HASH for capability/cell. Never diff the two shapes.
+ */
+export interface InstalledRow {
+  kind: InstalledKind;
+  id: string;
+  name: string;
+  packageSlug: string | null;
+  templateKey: string | null;
+  installedVersion: string | null;
+  latestVersion: string | null;
+  drift: boolean | null;
+  installedAt: string | null;
+  workspaceId: string | null;
+  /** Joined LOCALLY from `GET /workspaces`; the door itself carries only the id. */
+  workspaceName: string | null;
+  provisioningStatus: string | null;
+  failedStep: string | null;
+  note?: string;
+}
+
+export interface InstalledInventory {
+  rows: InstalledRow[];
+  /** Echoes whether the pod ran its expensive drift pass. The CLI never asks for it. */
+  driftComputed: boolean;
+  /**
+   * TRUE when the pod does not serve `GET /installed` (404) and this inventory
+   * was rebuilt from `GET /workspaces` alone — i.e. workspace packages only.
+   * Callers must SAY so; an older pod is not an empty pod.
+   */
+  degraded: boolean;
+}
+
+type HubInstalledResponse = {
+  installed?: Array<Omit<InstalledRow, "workspaceName">>;
+  driftComputed?: boolean;
+};
+
+/** `GET /installed`, or `null` when this pod is too old to serve it. Any other failure throws. */
+async function getInstalledOrNull(cfg: HubConfig): Promise<HubInstalledResponse | null> {
+  try {
+    return (await hubGet("/installed", {}, cfg)) as HubInstalledResponse;
+  } catch (e) {
+    if (e instanceof HubError && e.status === 404) return null;
+    throw e;
+  }
+}
+
+/**
+ * STRICT inventory — THROWS on any pod failure except the older-pod 404, which
+ * degrades to the historical `/workspaces` behaviour with `degraded: true`.
+ * Absence of the route is not absence of installs.
+ */
+export async function fetchInstalledInventoryStrict(cfg?: HubConfig): Promise<InstalledInventory> {
+  const resolved = cfg ?? (await resolveHubConfig());
+  const [wsRes, installedRes] = await Promise.all([
+    hubGet("/workspaces", {}, resolved) as Promise<{ workspaces?: HubWorkspaceRow[] }>,
+    getInstalledOrNull(resolved),
+  ]);
+  const wsRows = wsRes.workspaces ?? [];
+  const nameById = new Map(wsRows.map((w) => [w.id, w.name]));
+
+  // Additive packs — the ledger `/installed` never emits rows for (see above).
+  const packRows: InstalledRow[] = [];
+  for (const ws of wsRows) {
+    for (const pack of ws.installedPacks ?? []) {
+      if (!pack?.slug) continue;
+      packRows.push({
+        kind: "workspace",
+        id: `${ws.id}:${pack.slug}`,
+        name: pack.slug,
+        packageSlug: pack.slug,
+        templateKey: null,
+        installedVersion: pack.version ?? null,
+        latestVersion: null,
+        // The pod never version-stamped or health-checked an additive pack, so
+        // it cannot be computed here either. `null`, not a defaulted `false`.
+        drift: null,
+        installedAt: null,
         workspaceId: ws.id,
         workspaceName: ws.name,
-        latestVersion: ws.latestVersion ?? undefined,
-        drifted: ws.drifted,
+        provisioningStatus: null,
+        failedStep: null,
       });
     }
-    for (const pack of ws.installedPacks ?? []) {
-      if (pack?.slug) {
-        out.push({
-          slug: pack.slug,
-          version: pack.version,
-          workspaceId: ws.id,
-          workspaceName: ws.name,
-        });
-      }
-    }
+  }
+
+  if (!installedRes) {
+    // Older pod: rebuild the workspace rows exactly as this file always did.
+    const wsOnly: InstalledRow[] = wsRows
+      .filter((ws) => !!ws.packageSlug)
+      .map((ws) => ({
+        kind: "workspace" as const,
+        id: ws.id,
+        name: ws.name,
+        packageSlug: ws.packageSlug!,
+        templateKey: null,
+        installedVersion: ws.packageVersion ?? null,
+        latestVersion: ws.latestVersion ?? null,
+        drift: ws.drifted ?? null,
+        installedAt: null,
+        workspaceId: ws.id,
+        workspaceName: ws.name,
+        provisioningStatus: null,
+        failedStep: null,
+      }));
+    return { rows: [...wsOnly, ...packRows], driftComputed: false, degraded: true };
+  }
+
+  const rows: InstalledRow[] = (installedRes.installed ?? []).map((r) => ({
+    ...r,
+    workspaceName: r.workspaceId ? (nameById.get(r.workspaceId) ?? null) : null,
+  }));
+  return {
+    rows: [...rows, ...packRows],
+    driftComputed: installedRes.driftComputed === true,
+    degraded: false,
+  };
+}
+
+/** Non-fatal inventory — empty (and NOT degraded) on any failure, for markers that must never block discovery. */
+export async function fetchInstalledInventory(cfg?: HubConfig): Promise<InstalledInventory> {
+  try {
+    return await fetchInstalledInventoryStrict(cfg);
+  } catch {
+    return { rows: [], driftComputed: false, degraded: false };
+  }
+}
+
+/**
+ * The UPDATABLE subset of an inventory, in the shape `computeUpdates` /
+ * `market update` / the composition renderers already speak.
+ *
+ * Rows with `packageSlug: null` are dropped ON PURPOSE — they are inventory,
+ * not update targets: `market update` takes a catalog SLUG, and a capability's
+ * `templateKey` is not one. Feeding them through would hand the user a slug
+ * that misses the catalog. `market installed` renders them separately.
+ *
+ * `drift: null` maps to `drifted: undefined`, which is `computeUpdates`'
+ * long-standing "the server didn't answer — derive it client-side, and report
+ * an unstampable install as noVersionInfo rather than outdated" path. It is
+ * NEVER mapped to `drifted: false`.
+ */
+export function installedRowsToTemplates(rows: InstalledRow[]): InstalledTemplateInfo[] {
+  const out: InstalledTemplateInfo[] = [];
+  for (const r of rows) {
+    if (!r.packageSlug) continue;
+    out.push({
+      kind: r.kind,
+      slug: r.packageSlug,
+      version: r.installedVersion ?? undefined,
+      workspaceId: r.workspaceId,
+      workspaceName: r.workspaceName ?? (r.workspaceId ? r.workspaceId : "pod-wide"),
+      latestVersion: r.latestVersion ?? undefined,
+      drifted: r.drift ?? undefined,
+    });
   }
   return out;
 }
@@ -104,11 +289,15 @@ function mapInstalledTemplates(rows: HubWorkspaceRow[]): InstalledTemplateInfo[]
  * nothing installed": `market update` otherwise reports a transient Hub error
  * as "No installed packages found," which reads as data loss and is why the
  * command felt random (empty on one call, full on the next).
+ *
+ * Sources from `fetchInstalledInventoryStrict` — so every consumer of this
+ * function (`market update`, `launch --list`, the picker, `fetchInstalledSlugs`)
+ * now sees ALL SIX kinds on a current pod, and exactly the old workspace-only
+ * set on an older one.
  */
 export async function fetchInstalledTemplatesStrict(): Promise<InstalledTemplateInfo[]> {
-  const cfg = await resolveHubConfig();
-  const res = (await hubGet("/workspaces", {}, cfg)) as { workspaces?: HubWorkspaceRow[] };
-  return mapInstalledTemplates(res.workspaces ?? []);
+  const inv = await fetchInstalledInventoryStrict();
+  return installedRowsToTemplates(inv.rows);
 }
 
 export async function fetchInstalledTemplates(): Promise<InstalledTemplateInfo[]> {

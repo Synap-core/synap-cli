@@ -11,7 +11,10 @@
  *   (d) the Intelligence Service is reachable — the dependency that capture,
  *       import and all AI structuring run through. Without it doctor once
  *       printed "All checks passed" while every import was 502-ing.
- *   (e) prints the active lens (pod, workspace, project) so the user sees
+ *   (e) the connection broker answers — and when it does not, WHY: broker
+ *       kind, relay credential presence + expiry, control-plane issuer trust
+ *       and the owner's identity link, with the one fix for that reason.
+ *   (f) prints the active lens (pod, workspace, project) so the user sees
  *       exactly where they're pointed.
  *
  * Degrades gracefully on older pods (missing /orient, no dependency probe) — a
@@ -351,6 +354,23 @@ export async function doctor(opts: DoctorOpts = {}): Promise<void> {
     checks.push(intelligenceCheck(await probeIntelligence(cfgResolved)));
   }
 
+  // ── (e) The connection broker, and why it fails when it does ─────────────
+  if (!keyValid || !cfgResolved) {
+    checks.push({
+      name: BROKER_CHECK_NAME,
+      ok: false,
+      unknown: true,
+      detail: "could not determine — the key did not authenticate",
+      fix: "Fix the API key check above first.",
+    });
+  } else {
+    const [providers, diagnostics] = await Promise.all([
+      probeBrokerProviders(cfgResolved),
+      probeBrokerDiagnostics(cfgResolved),
+    ]);
+    checks.push(brokerCheck(providers, diagnostics));
+  }
+
   await finish(checks, opts, {
     // Prefer the pod resolveHubConfig actually hit — health-check URL can lag
     // the active profile when the shell is env-pinned to another pod.
@@ -391,6 +411,187 @@ async function probeIntelligence(cfg: HubConfig): Promise<IsHealthVerdict> {
     return {
       state: "unknown",
       detail: `the dependency probe did not answer (${err instanceof Error ? err.message : String(err)})`,
+    };
+  }
+}
+
+const BROKER_CHECK_NAME = "Connection broker";
+
+/**
+ * What `GET /api/hub/connectors/providers` says about the broker.
+ * `not-configured` is the route's own 503 ("Nango not configured"); every other
+ * failure to read is `unknown`, never a pass.
+ */
+export type BrokerProvidersRead =
+  | { state: "ok" }
+  | { state: "not-configured" }
+  | { state: "error"; reason: string; message?: string }
+  | { state: "unknown"; detail: string };
+
+/**
+ * `GET /api/hub/connectors/broker-diagnostics` (synap-backend
+ * `connectors/broker-trust-diagnostics.ts`). Non-secret by contract.
+ */
+export interface BrokerTrustReport {
+  cpIssuer: { present: boolean; status: string | null; hasSourceConfigWrite: boolean };
+  ownerIdentityLink: { present: boolean };
+  /** `resolvable` is absent on a pod that predates it. */
+  relayCredential: { present: boolean; resolvable?: boolean; validUntil: string | null };
+  broker: { kind: string; reason: string | null };
+}
+
+export type BrokerDiagnosticsRead =
+  | { state: "read"; report: BrokerTrustReport }
+  | { state: "unknown"; detail: string };
+
+export function readProvidersEnvelope(payload: unknown): BrokerProvidersRead {
+  if (!payload || typeof payload !== "object") {
+    return { state: "unknown", detail: "the providers door returned no payload" };
+  }
+  const p = payload as { nangoStatus?: unknown; nangoError?: { reason?: unknown; message?: unknown } };
+  if (p.nangoStatus === "ok") return { state: "ok" };
+  if (p.nangoStatus === "error") {
+    return {
+      state: "error",
+      reason: typeof p.nangoError?.reason === "string" ? p.nangoError.reason : "unknown",
+      message: typeof p.nangoError?.message === "string" ? p.nangoError.message : undefined,
+    };
+  }
+  return { state: "unknown", detail: "the providers door carried no readable nangoStatus" };
+}
+
+export function readBrokerDiagnostics(payload: unknown): BrokerDiagnosticsRead {
+  const r = payload as Partial<BrokerTrustReport> | null;
+  const readable =
+    !!r &&
+    typeof r.cpIssuer?.present === "boolean" &&
+    typeof r.cpIssuer?.hasSourceConfigWrite === "boolean" &&
+    typeof r.ownerIdentityLink?.present === "boolean" &&
+    typeof r.relayCredential?.present === "boolean" &&
+    typeof r.broker?.kind === "string";
+  if (!readable) {
+    return { state: "unknown", detail: "the broker diagnostics payload was not readable" };
+  }
+  return { state: "read", report: r as BrokerTrustReport };
+}
+
+/** The one fix for a broker fault, sharpened by the trust diagnostics when readable. */
+export function brokerFixHint(reason: string, diagnostics: BrokerDiagnosticsRead, message?: string): string {
+  if (reason === "broker-credential-missing") {
+    if (diagnostics.state !== "read") {
+      return "The pod holds no usable relay key from its control plane. Its trust state is unreadable here (needs a pod owner/admin key on a pod serving /connectors/broker-diagnostics) — check the control plane log for the relay-key delivery refusal, then rotate the pod's relay key from the control plane.";
+    }
+    return credentialMissingHint(diagnostics.report);
+  }
+  switch (reason) {
+    case "unauthenticated":
+      return "The broker rejected this pod's credential. Rotate the pod's relay key from the control plane (or, for a self-brokered pod, re-save its Nango key).";
+    case "unreachable":
+      return "The broker did not answer. Check that the control plane / Nango host is up and reachable from the pod.";
+    case "vault-unreadable":
+      return "The pod could not decrypt its broker credential. Check VAULT_SERVER_KEY on the pod.";
+    case "vault-unresolved":
+      return "The pod holds a relay key from its control plane but cannot read it from its vault. Rotate the pod's relay key from the control plane — it re-delivers a readable key.";
+    case "db-unavailable":
+      return "The pod could not read its database. Check the pod's health and logs.";
+    default:
+      return message ?? `The broker reported ${reason}.`;
+  }
+}
+
+function credentialMissingHint(r: BrokerTrustReport): string {
+  if (!r.cpIssuer.present) {
+    return "The pod has no control plane issuer, so it cannot accept a relay key. Check CONTROL_PLANE_URL on the pod and restart it, then rotate the relay key from the control plane.";
+  }
+  if (r.cpIssuer.status !== "approved" || !r.cpIssuer.hasSourceConfigWrite) {
+    return "Approve the Synap Control Plane issuer with 'Configure data sources' (source-config:write) in pod-admin → Trust & Keys → Trusted issuers, then rotate the relay key from the control plane.";
+  }
+  if (!r.ownerIdentityLink.present) {
+    return "The pod owner's control plane identity is not linked on this pod, so relay-key delivery is refused. Link it (sign in to this pod through the control plane), then rotate the relay key from the control plane.";
+  }
+  return "Trust is in place but no valid relay key has been delivered. Rotate the pod's relay key from the control plane.";
+}
+
+/** Human summary of the trust facts; "unknown" for any part that could not be read. */
+function describeBrokerTrust(diagnostics: BrokerDiagnosticsRead): string {
+  if (diagnostics.state !== "read") {
+    return `broker kind unknown; credential unknown; issuer unknown; owner link unknown (${diagnostics.detail})`;
+  }
+  const r = diagnostics.report;
+  const credential = !r.relayCredential.present
+    ? "credential missing"
+    : r.relayCredential.resolvable === false
+      ? "credential present but unreadable"
+      : `credential present, valid until ${r.relayCredential.validUntil ?? "unknown"}`;
+  if (r.broker.kind !== "control-plane") {
+    return `broker ${r.broker.kind}`;
+  }
+  const issuer = !r.cpIssuer.present
+    ? "CP issuer missing"
+    : r.cpIssuer.status === "approved" && r.cpIssuer.hasSourceConfigWrite
+      ? "CP issuer ok"
+      : `CP issuer ${r.cpIssuer.status ?? "unknown"}${r.cpIssuer.hasSourceConfigWrite ? "" : " without source-config:write"}`;
+  const link = r.ownerIdentityLink.present ? "owner link ok" : "owner link missing";
+  return `broker ${r.broker.kind}; ${credential}; ${issuer}; ${link}`;
+}
+
+export function brokerCheck(providers: BrokerProvidersRead, diagnostics: BrokerDiagnosticsRead): CheckResult {
+  const trust = describeBrokerTrust(diagnostics);
+  if (providers.state === "unknown") {
+    return {
+      name: BROKER_CHECK_NAME,
+      ok: false,
+      unknown: true,
+      detail: `could not determine — ${providers.detail}; ${trust}`,
+      fix: "This pod build may predate GET /api/hub/connectors/providers, or the key lacks hub-protocol.read.",
+    };
+  }
+  if (providers.state === "not-configured") {
+    return {
+      name: BROKER_CHECK_NAME,
+      ok: true,
+      detail: "no connection broker is configured on this pod — connectors are unavailable",
+    };
+  }
+  if (providers.state === "ok") {
+    return { name: BROKER_CHECK_NAME, ok: true, detail: `broker answered; ${trust}` };
+  }
+  return {
+    name: BROKER_CHECK_NAME,
+    ok: false,
+    detail: `${providers.reason}; ${trust}`,
+    fix: brokerFixHint(providers.reason, diagnostics, providers.message),
+  };
+}
+
+async function probeBrokerProviders(cfg: HubConfig): Promise<BrokerProvidersRead> {
+  try {
+    return readProvidersEnvelope(await hubGet("/connectors/providers", {}, cfg));
+  } catch (err) {
+    const body = err instanceof HubError ? (err.body as { error?: unknown } | undefined) : undefined;
+    if (err instanceof HubError && err.status === 503 && body?.error === "Nango not configured") {
+      return { state: "not-configured" };
+    }
+    return {
+      state: "unknown",
+      detail: `the providers door did not answer (${err instanceof Error ? err.message : String(err)})`,
+    };
+  }
+}
+
+async function probeBrokerDiagnostics(cfg: HubConfig): Promise<BrokerDiagnosticsRead> {
+  try {
+    return readBrokerDiagnostics(await hubGet("/connectors/broker-diagnostics", {}, cfg));
+  } catch (err) {
+    if (err instanceof HubError && err.status === 404) {
+      return { state: "unknown", detail: "this pod does not expose broker diagnostics (older build)" };
+    }
+    if (err instanceof HubError && err.status === 403) {
+      return { state: "unknown", detail: "broker diagnostics need a pod owner/admin key" };
+    }
+    return {
+      state: "unknown",
+      detail: `broker diagnostics did not answer (${err instanceof Error ? err.message : String(err)})`,
     };
   }
 }

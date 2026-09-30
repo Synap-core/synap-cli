@@ -558,7 +558,7 @@ export async function projectList(opts: BaseOpts): Promise<void> {
 
   log.heading("Projects");
   if (projects.length === 0) {
-    log.dim("No projects yet — a project is a company/initiative that ties workspaces together.");
+    log.dim("No projects yet — a project is a commitment (what you drive, with whom); it spans workspaces and ends when the commitment ends.");
     log.dim("Create one: synap project new <name>");
     return;
   }

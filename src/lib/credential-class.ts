@@ -41,7 +41,7 @@
  */
 
 import chalk from "chalk";
-import { openAppUrl, openUrl } from "@synap/hub-rest-client";
+import { openAppUrl, openUrl } from "@synap-core/hub-rest-client";
 import { log } from "../utils/logger.js";
 import { hubGet, HubError, type HubConfig } from "./hub-client.js";
 

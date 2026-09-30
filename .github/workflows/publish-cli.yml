@@ -20,7 +20,7 @@ name: Publish CLI
 # ── THE SIBLING CHECKOUT IS NOT A CONVENIENCE ────────────────────────────────
 # Publishing this package has ALWAYS required `../synap-backend`, for two
 # independent reasons:
-#   1. `prepack` vendors the unpublished `@synap/hub-rest-client` out of
+#   1. `prepack` vendors the unpublished `@synap-core/hub-rest-client` out of
 #      `../synap-backend/packages/hub-rest-client` into the tarball
 #      (`bundledDependencies`). That package is 404 on npm.
 #   2. `scripts/sync-skills.sh` copies `../synap-backend/skills` into the
@@ -30,7 +30,7 @@ name: Publish CLI
 # not invent a new one.
 #
 # ⚠️ OPEN DECISION, deliberately NOT guessed here — see the report.
-# The clean end state is to PUBLISH `@synap/hub-rest-client` (it is
+# The clean end state is to PUBLISH `@synap-core/hub-rest-client` (it is
 # zero-dependency, non-private, already `publishConfig.access: public`, v1.0.9)
 # and depend on it by semver. That deletes `prepack`/`postpack`,
 # `bundledDependencies`, and half of this workflow. It is a live write to the
@@ -122,11 +122,11 @@ jobs:
         with:
           package_json_file: synap-backend/package.json
 
-      - name: Build @synap/hub-rest-client (unpublished — vendored by prepack)
+      - name: Build @synap-core/hub-rest-client (unpublished — vendored by prepack)
         working-directory: synap-backend
         run: |
-          pnpm install --frozen-lockfile --filter @synap/hub-rest-client...
-          pnpm --filter @synap/hub-rest-client build
+          pnpm install --frozen-lockfile --filter @synap-core/hub-rest-client...
+          pnpm --filter @synap-core/hub-rest-client build
 
       # `npm install`, not `npm ci`: the committed lockfile is older than the
       # manifest (it still records the pre-fix `@synap-core/workspace-templates`

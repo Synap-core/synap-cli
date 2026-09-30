@@ -92,6 +92,13 @@ interface CardConnection {
    */
   state: "connected" | "missing" | "expired" | "unavailable";
   account?: string;
+  /**
+   * Set alongside `state: "missing"` when the pod could not actually verify
+   * that — a broker/list fault, not a checked absence. Render as "couldn't
+   * check", never as a plain "missing" (that reads as "you never connected
+   * this", which may be false).
+   */
+  unverified?: { reason: string; message: string };
 }
 
 /** A template's INSTALL parameter — supplied to `apply` (e.g. a vault key). */
@@ -596,6 +603,116 @@ async function pollUntilConnected(
 }
 
 /**
+ * The ONE "connect a provider" path: resolve `/connectors/connect`, open the
+ * browser on the returned `redirectUrl`, and poll (self-completing door) until
+ * the provider flips to `connected`. Shared by the capability-card flow
+ * (`ensureConnection`) and the raw-provider discovery picker
+ * (`capabilityConnect` with no name), so both reach the identical endpoint,
+ * status handling, browser-open and poll semantics.
+ *
+ * `cardName` is the discriminator: when present the caller is connecting on
+ * behalf of a capability card, which enables the card-aware `provider_required`
+ * / `provider_unavailable` branches and the named re-run + timeout hints. The
+ * raw-picker path already holds an explicit provider id, so those branches do
+ * not apply to it — it goes straight from `connected` to the `redirectUrl`
+ * check, exactly as before.
+ *
+ * `displayName` is the local fallback name: the provider's list label for the
+ * raw picker, the provider id for the card flow (a card has no separate label).
+ */
+async function connectProviderOAuth(
+  cfg: HubCfg,
+  provider: string,
+  workspaceId: string | undefined,
+  ctx: {
+    /** Local fallback name for headings/success when the server sends none. */
+    displayName: string;
+    /** Capability name — its presence selects the card-aware branches + hints. */
+    cardName?: string;
+    /** Force a fresh OAuth even if a connection record exists. */
+    forceReauth?: boolean;
+  }
+): Promise<boolean> {
+  const isCard = ctx.cardName !== undefined;
+  // Card flow prefers the server's displayName (falling back to the provider
+  // id); the raw picker uses its own list label verbatim.
+  const name = (r: Record<string, unknown>): string =>
+    isCard ? String(r.displayName ?? ctx.displayName) : ctx.displayName;
+
+  const spinner = ora({
+    text: isCard ? `Resolving ${chalk.bold(provider)} connection…` : `Connecting ${chalk.bold(ctx.displayName)}…`,
+    color: "cyan",
+  }).start();
+  let res: Record<string, unknown>;
+  try {
+    const body: Record<string, unknown> = { provider };
+    if (workspaceId) body.workspaceId = workspaceId;
+    if (ctx.forceReauth) body.forceReauth = true;
+    res = (await hubPost("/connectors/connect", body, cfg)) as Record<string, unknown>;
+    spinner.stop();
+  } catch (err) {
+    if (isCard) spinner.fail(chalk.red("Failed to resolve connection"));
+    else spinner.stop();
+    renderHubError(err);
+    return false;
+  }
+
+  const status = String(res.status);
+  if (status === "connected") {
+    // Both flows prefer the server's displayName here (falling back locally).
+    log.success(`${res.displayName ?? ctx.displayName} is already connected.`);
+    return true;
+  }
+  if (isCard && status === "provider_required") {
+    log.warn(`Couldn't resolve a single provider for ${ctx.cardName}.`);
+    log.dim(`Connect it directly:  synap cap connect "${ctx.cardName}"`);
+    return false;
+  }
+  if (isCard && status === "provider_unavailable") {
+    // The pod can't offer this provider (not declared / unreachable / malformed).
+    // The server message already names the real cause + remedy — print it as-is.
+    // No browser, and no "re-run connect": re-running cannot fix a server-side gap.
+    log.warn(`${ctx.cardName} is unavailable on this pod.`);
+    if (res.message) log.dim(String(res.message));
+    return false;
+  }
+
+  // setup_required (or any status this CLI doesn't know) → only ever open a
+  // browser when the server actually handed us a URL. An older/newer pod that
+  // returns a status we don't handle must NOT send the user to "undefined".
+  const redirectUrl =
+    typeof res.redirectUrl === "string" && res.redirectUrl.length > 0 ? res.redirectUrl : null;
+  if (!redirectUrl) {
+    log.warn(`Couldn't start a connection for ${name(res)}.`);
+    if (res.message) log.dim(String(res.message));
+    else if (isCard)
+      log.dim(`The pod returned status "${status}" with no connect URL. Check the pod's connector configuration.`);
+    return false;
+  }
+  log.heading(`Connect ${name(res)}`);
+  console.log();
+  console.log(`  Opening OAuth flow in your browser…`);
+  console.log(`  ${chalk.dim("If it didn't open, paste this URL:")}`);
+  console.log(`  ${chalk.underline(chalk.cyan(redirectUrl))}`);
+  console.log();
+  openBrowser(redirectUrl);
+
+  const waitSpinner = ora({ text: "Waiting for you to finish in the browser…", color: "cyan" }).start();
+  const connected = await pollUntilConnected(cfg, provider, workspaceId);
+  if (connected) {
+    waitSpinner.succeed(chalk.green(`Connected ${chalk.bold(name(connected))}!`));
+    return true;
+  }
+  waitSpinner.stop();
+  log.dim(
+    isCard
+      ? `Didn't detect a connection yet — finish the browser flow, then re-run \`synap cap enable "${ctx.cardName}"\`.`
+      : `Didn't detect a connection yet — finish the browser flow, then re-run.`
+  );
+  return false;
+}
+
+/**
  * Ensure a capability's required connection is satisfied. Provider (nango://) →
  * OAuth open + poll. Vault (vault://) → prompt for the key, POST /vault/secrets.
  * Returns true when the connection is (now) satisfied, false otherwise.
@@ -663,65 +780,13 @@ async function ensureConnection(
 
   // ── Provider OAuth (nango://) — open + poll ───────────────────────────────
   const provider = conn.provider ?? card.key;
-  const spinner = ora({ text: `Resolving ${chalk.bold(provider)} connection…`, color: "cyan" }).start();
-  let res: Record<string, unknown>;
-  try {
-    const connectBody: Record<string, unknown> = { provider, workspaceId };
-    if (forceReconnect) connectBody.forceReauth = true;
-    res = (await hubPost("/connectors/connect", connectBody, cfg)) as Record<string, unknown>;
-    spinner.stop();
-  } catch (err) {
-    spinner.fail(chalk.red("Failed to resolve connection"));
-    renderHubError(err);
-    return false;
-  }
-
-  const status = String(res.status);
-  if (status === "connected") {
-    log.success(`${res.displayName ?? provider} is already connected.`);
-    return true;
-  }
-  if (status === "provider_required") {
-    log.warn(`Couldn't resolve a single provider for ${card.name}.`);
-    log.dim(`Connect it directly:  synap cap connect "${card.name}"`);
-    return false;
-  }
-  if (status === "provider_unavailable") {
-    // The pod can't offer this provider (not declared / unreachable / malformed).
-    // The server message already names the real cause + remedy — print it as-is.
-    // No browser, and no "re-run connect": re-running cannot fix a server-side gap.
-    log.warn(`${card.name} is unavailable on this pod.`);
-    if (res.message) log.dim(String(res.message));
-    return false;
-  }
-
-  // setup_required (or any status this CLI doesn't know) → only ever open a
-  // browser when the server actually handed us a URL. An older/newer pod that
-  // returns a status we don't handle must NOT send the user to "undefined".
-  const redirectUrl = typeof res.redirectUrl === "string" && res.redirectUrl.length > 0 ? res.redirectUrl : null;
-  if (!redirectUrl) {
-    log.warn(`Couldn't start a connection for ${res.displayName ?? provider}.`);
-    if (res.message) log.dim(String(res.message));
-    else log.dim(`The pod returned status "${status}" with no connect URL. Check the pod's connector configuration.`);
-    return false;
-  }
-  log.heading(`Connect ${res.displayName ?? provider}`);
-  console.log();
-  console.log(`  Opening OAuth flow in your browser…`);
-  console.log(`  ${chalk.dim("If it didn't open, paste this URL:")}`);
-  console.log(`  ${chalk.underline(chalk.cyan(redirectUrl))}`);
-  console.log();
-  openBrowser(redirectUrl);
-
-  const waitSpinner = ora({ text: "Waiting for you to finish in the browser…", color: "cyan" }).start();
-  const connected = await pollUntilConnected(cfg, provider, workspaceId);
-  if (connected) {
-    waitSpinner.succeed(chalk.green(`Connected ${chalk.bold(String(connected.displayName ?? provider))}!`));
-    return true;
-  }
-  waitSpinner.stop();
-  log.dim(`Didn't detect a connection yet — finish the browser flow, then re-run \`synap cap enable "${card.name}"\`.`);
-  return false;
+  return connectProviderOAuth(cfg, provider, workspaceId, {
+    // A card has no separate display name — the provider id is the fallback the
+    // server's displayName (when sent) takes precedence over.
+    displayName: provider,
+    cardName: card.name,
+    forceReauth: forceReconnect,
+  });
 }
 
 /**
@@ -805,63 +870,6 @@ async function applyTemplateWithParams(
     renderHubError(err);
     return false;
   }
-}
-
-/**
- * Connect a RAW provider chosen from the discovery picker (not tied to a
- * capability card): start OAuth via `/connectors/connect`, open the browser, and
- * poll until it flips to connected. Same door + poll the card flow uses.
- */
-async function connectProviderFlow(
-  cfg: HubCfg,
-  provider: string,
-  displayName: string,
-  workspaceId: string | undefined,
-  forceReauth = false
-): Promise<boolean> {
-  const spinner = ora({ text: `Connecting ${chalk.bold(displayName)}…`, color: "cyan" }).start();
-  let res: Record<string, unknown>;
-  try {
-    const body: Record<string, unknown> = { provider };
-    if (workspaceId) body.workspaceId = workspaceId;
-    if (forceReauth) body.forceReauth = true;
-    res = (await hubPost("/connectors/connect", body, cfg)) as Record<string, unknown>;
-    spinner.stop();
-  } catch (err) {
-    spinner.stop();
-    renderHubError(err);
-    return false;
-  }
-
-  if (String(res.status) === "connected") {
-    log.success(`${res.displayName ?? displayName} is already connected.`);
-    return true;
-  }
-  const redirectUrl =
-    typeof res.redirectUrl === "string" && res.redirectUrl.length > 0 ? res.redirectUrl : null;
-  if (!redirectUrl) {
-    log.warn(`Couldn't start a connection for ${displayName}.`);
-    // Covers provider_unavailable too — the server message names the real cause.
-    if (res.message) log.dim(String(res.message));
-    return false;
-  }
-  log.heading(`Connect ${displayName}`);
-  console.log();
-  console.log(`  Opening OAuth flow in your browser…`);
-  console.log(`  ${chalk.dim("If it didn't open, paste this URL:")}`);
-  console.log(`  ${chalk.underline(chalk.cyan(redirectUrl))}`);
-  console.log();
-  openBrowser(redirectUrl);
-
-  const waitSpinner = ora({ text: "Waiting for you to finish in the browser…", color: "cyan" }).start();
-  const connected = await pollUntilConnected(cfg, provider, workspaceId);
-  if (connected) {
-    waitSpinner.succeed(chalk.green(`Connected ${chalk.bold(displayName)}!`));
-    return true;
-  }
-  waitSpinner.stop();
-  log.dim(`Didn't detect a connection yet — finish the browser flow, then re-run.`);
-  return false;
 }
 
 // ── Public: capabilityAdd ────────────────────────────────────────────────────
@@ -1396,13 +1404,10 @@ export async function capabilityConnect(
       return;
     }
     const chosen = providers.find((p) => p.id === answer.id)!;
-    const ok = await connectProviderFlow(
-      cfg,
-      chosen.id,
-      chosen.displayName ?? chosen.provider,
-      workspaceId,
-      opts.reconnect ?? false
-    );
+    const ok = await connectProviderOAuth(cfg, chosen.id, workspaceId, {
+      displayName: chosen.displayName ?? chosen.provider,
+      forceReauth: opts.reconnect ?? false,
+    });
     // A connect that did not connect must not report success to a caller/script.
     if (!ok) process.exit(1);
     return;
@@ -1627,19 +1632,24 @@ export async function capabilityShow(name: string, opts: CapShowOpts): Promise<v
     const c = card.connection;
     // `unavailable` is dim, not red: it isn't the user's fault and isn't fixable
     // by connecting — red reads as "you have a missing credential to go fix".
-    const stateColor =
-      c.state === "connected"
+    // Unverified: the pod could not actually check (a broker/list fault), not a
+    // checked absence. Render distinctly from a plain "missing" — that would
+    // falsely claim "you never connected this".
+    const stateColor = c.unverified
+      ? chalk.yellow
+      : c.state === "connected"
         ? chalk.green
         : c.state === "expired"
           ? chalk.yellow
           : c.state === "unavailable"
             ? chalk.dim
             : chalk.red;
+    const stateLabel = c.unverified ? "couldn't check" : c.state;
     const parts = [
       c.kind ?? "connection",
       c.provider ? chalk.dim(`(${c.provider})`) : "",
       c.account ? chalk.dim(c.account) : "",
-      stateColor(c.state),
+      stateColor(stateLabel),
     ].filter(Boolean);
     console.log(`  ${chalk.bold("Connection")}  ${parts.join(" ")}`);
     // Expired = previously connected, token now dead. Surface the exact command to
@@ -1647,6 +1657,10 @@ export async function capabilityShow(name: string, opts: CapShowOpts): Promise<v
     if (c.state === "expired") {
       console.log(
         `      ${chalk.yellow("→")} its access expired — reconnect:  synap cap connect "${card.name}" --reconnect`
+      );
+    } else if (c.unverified) {
+      console.log(
+        `      ${chalk.yellow("→")} ${c.unverified.message || c.unverified.reason} — retry:  synap cap show "${card.name}"`
       );
     }
   } else {

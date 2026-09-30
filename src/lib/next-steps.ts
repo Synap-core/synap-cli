@@ -104,7 +104,7 @@ export const FLOW = {
   afterProjectList(): NextStep[] {
     return [
       { command: "synap project use <id>", why: "focus a project (cross-cutting lens)" },
-      { command: "synap project new <name>", why: "create a new company / initiative" },
+      { command: "synap project new <name>", why: "create a project — a commitment you are driving, with whom" },
     ];
   },
 

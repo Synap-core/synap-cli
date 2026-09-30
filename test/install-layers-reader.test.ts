@@ -27,7 +27,7 @@ describe("classifyApplyResult reads layers[]", () => {
       outcome: "created",
       layers: [
         { layer: "profiles", status: "applied" },
-        { layer: "capabilities", status: "failed", detail: "seed timeout" },
+        { layer: "capabilities", status: "failed", message: "seed timeout" },
       ],
     };
     expect(classifyApplyResult(entry, ws, undefined, undefined, ctx).status).toBe(

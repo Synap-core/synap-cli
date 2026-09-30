@@ -34,7 +34,11 @@ interface Capability {
   kind: string;
   id: string;
   name: string;
-  governance?: "auto" | "propose";
+  /** Run posture for an agent (auto runs now / propose files a review). */
+  governance?: "auto" | "propose" | "none";
+  /** The approval gate. Absent on pods before 2026-09-14, which served
+   *  approval under `governance` instead. */
+  enabled?: boolean;
   approved?: boolean;
   inputSchema?: Record<string, unknown>;
   verbs?: CapVerb[];
@@ -57,6 +61,9 @@ interface RunnableVerb {
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 function isEnabled(cap: Capability): boolean {
+  // `governance` is the run posture now; it only meant approval on older pods,
+  // which never send `enabled`.
+  if (typeof cap.enabled === "boolean") return cap.enabled;
   return cap.approved === true || cap.governance === "auto";
 }
 

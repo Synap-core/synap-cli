@@ -16,7 +16,7 @@ import { execFileSync, execSync } from "child_process";
 import { existsSync } from "fs";
 import { homedir } from "os";
 import { join } from "path";
-import { openAppUrl } from "@synap/hub-rest-client";
+import { openAppUrl } from "@synap-core/hub-rest-client";
 import { resolveHubConfig } from "../lib/hub-client.js";
 import { log } from "../utils/logger.js";
 

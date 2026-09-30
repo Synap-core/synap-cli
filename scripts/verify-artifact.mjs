@@ -17,7 +17,7 @@
  *     npm view @synap-core/cli@1.11.0 dependencies
  *     → '@synap-core/workspace-templates': 'workspace:*'
  *
- * and `npm pack @synap-core/cli@1.11.0` shows only `@synap/hub-rest-client`
+ * and `npm pack @synap-core/cli@1.11.0` shows only `@synap-core/hub-rest-client`
  * inside `package/node_modules/` — so the workspace-protocol range is a LIVE,
  * unbundled dependency of the one artifact outsiders are told to install. The
  * CLI has had no CI publish door at all (`synap-cli/` had no `.github/`), and
@@ -42,7 +42,7 @@
  * ── WHY BUNDLED DEPS ARE EXEMPT ──────────────────────────────────────────────
  * `bundledDependencies` ship INSIDE the tarball, under
  * `package/node_modules/<name>`. npm extracts them instead of resolving their
- * range, which is the whole reason `@synap/hub-rest-client` — a package that
+ * range, which is the whole reason `@synap-core/hub-rest-client` — a package that
  * does not exist on npm at all (404, verified) — can be a `file:` dependency
  * of a published CLI. So this script exempts a forbidden range ONLY when the
  * name is BOTH declared in `bundledDependencies` AND physically present in the

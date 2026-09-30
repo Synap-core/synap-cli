@@ -26,6 +26,7 @@ const IS_REASONS = [
   "pdf_scanned_needs_ocr",
   "pdf_missing_binary",
   "vision_provider_not_configured",
+  "vision_provider_failed",
   "image_missing_binary",
   "transcription_provider_not_configured",
   "audio_missing_binary",
@@ -35,7 +36,13 @@ const IS_REASONS = [
   "unsupported_type",
 ] as const;
 
-const POD_REASONS = ["is_auth_error", "is_invalid_response", "is_empty_result"] as const;
+const POD_REASONS = [
+  "is_auth_error",
+  "is_invalid_response",
+  "is_empty_result",
+  // IS spend guard (routes/structure.ts) — a named, recoverable refusal.
+  "llm_budget_exceeded",
+] as const;
 
 const ALL_REASONS = [...IS_REASONS, ...POD_REASONS];
 

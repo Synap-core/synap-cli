@@ -10,16 +10,17 @@
  *   synap market validate  <file>       — run the ONE shared validator, fast feedback
  *   synap market publish   <file>       — validate, then upsert to the CP (private by default)
  *   synap market publish   --from-workspace <id>  — serialize a LIVE workspace, then publish
+ *   synap market publish   --from-project <id>    — serialize a LIVE project's used workspaces into a suite, then publish
  *   synap market unpublish <slug>       — flip a published package back to private
  *
  * REUSE: validation is the shared `validateTemplate` (via `lib/template-file`);
  * CP transport is `lib/cp-packages` (`publishPackage`/`unpublishPackage`); the
- * pod `to-template` serializer is reached through the standard hub client. No
- * fetch is hand-rolled here.
+ * pod `to-template` / `to-suite-template` serializers are reached through the
+ * standard hub client. No fetch is hand-rolled here.
  */
 
 import { existsSync, writeFileSync } from "node:fs";
-import { resolve as resolvePath } from "node:path";
+import { dirname, resolve as resolvePath } from "node:path";
 import chalk from "chalk";
 import type { ValidationError, WorkspaceYaml } from "@synap-core/workspace-templates";
 import { log } from "../utils/logger.js";
@@ -43,6 +44,7 @@ import {
   parseStandalonePackageFile,
   validateStandalonePackage,
   scaffoldStandalonePackageJson,
+  resolveCellCodeFiles,
   SCAFFOLDABLE_KINDS,
   type ScaffoldableKind,
 } from "../lib/kind-package.js";
@@ -79,8 +81,12 @@ export async function marketValidate(
     const parsed = parseStandalonePackageFile(file);
     // `validateStandalonePackage` returns plain message strings, not the
     // `ValidationError` records the workspace validator emits — so it prints
-    // directly rather than through `printValidationErrors`.
-    const errors = validateStandalonePackage(parsed);
+    // directly rather than through `printValidationErrors`. `baseDir` lets it
+    // check a cell's `codeFile` actually exists — the same resolution root
+    // `resolveCellCodeFiles` uses at publish time.
+    const errors = validateStandalonePackage(parsed, {
+      baseDir: dirname(resolvePath(process.cwd(), file)),
+    });
     if (opts.json) {
       console.log(JSON.stringify({ ok: errors.length === 0, errors }, null, 2));
       if (errors.length > 0) process.exit(1);
@@ -183,6 +189,11 @@ export async function marketScaffold(
     }
     log.success(`Wrote ${fileName}`);
     log.dim("Edit it in place, then:");
+    if (kind === "cell") {
+      log.dim(
+        `  tip: replace "code" with "codeFile": "./path/to/your-entry.tsx" to publish from a real source file — \`market publish\` bundles it (esbuild) and inlines the result, no hand-pasted bundle needed.`,
+      );
+    }
     log.dim(`  synap market validate ${fileName}`);
     log.dim(`  synap market publish ${fileName}`);
     return;
@@ -236,6 +247,59 @@ export async function fetchWorkspaceAsTemplate(
     throw new Error(`Workspace ${workspaceId} produced no template definition.`);
   }
   return res.definition;
+}
+
+/**
+ * POST `/api/hub/projects/:id/to-suite-template` — walk a project's uses→workspace
+ * edges: full constituent workspace packages + thin suite (`suite` tag, `require`
+ * deps, harvested playbooks). The one door for `--from-project`.
+ */
+export async function fetchProjectAsSuiteTemplate(
+  projectId: string,
+  opts: { podUrl?: string; apiKey?: string },
+): Promise<{
+  definition: PackageDefinitionLike;
+  constituents: PackageDefinitionLike[];
+  requiredSlugs: string[];
+}> {
+  const cfg = await resolveHubConfig(opts);
+  const res = (await hubPost(
+    `/projects/${encodeURIComponent(projectId)}/to-suite-template`,
+    {},
+    cfg,
+    120_000,
+  )) as {
+    definition?: PackageDefinitionLike;
+    constituents?: PackageDefinitionLike[];
+    requiredSlugs?: string[];
+  };
+  if (!res?.definition) {
+    throw new Error(`Project ${projectId} produced no suite definition.`);
+  }
+  return {
+    definition: res.definition,
+    constituents: Array.isArray(res.constituents) ? res.constituents : [],
+    requiredSlugs: Array.isArray(res.requiredSlugs) ? res.requiredSlugs : [],
+  };
+}
+
+/**
+ * Parse `--price <usd>` into CP columns. Dollars → cents. Settlement/Stripe is
+ * NOT this wave — we only stamp `pricingModel: one_time` + `priceUsd`.
+ */
+export function parsePriceUsdFlag(raw: string): {
+  pricingModel: "one_time";
+  priceUsd: number;
+} {
+  const dollars = Number(raw);
+  if (!Number.isFinite(dollars) || dollars <= 0) {
+    throw new Error(`--price must be a positive dollar amount (got "${raw}")`);
+  }
+  const cents = Math.round(dollars * 100);
+  if (cents <= 0) {
+    throw new Error(`--price must be at least $0.01 (got "${raw}")`);
+  }
+  return { pricingModel: "one_time", priceUsd: cents };
 }
 
 /** Surface a publish outcome (created/updated/no-op) uniformly. */
@@ -296,7 +360,7 @@ function reportCpWriteError(err: CpWriteError, slug: string | undefined): void {
  */
 async function marketPublishStandalone(
   file: string,
-  opts: { public?: boolean; json?: boolean },
+  opts: { public?: boolean; json?: boolean; bundleDeps?: boolean },
 ): Promise<void> {
   const isPublic = opts.public === true;
 
@@ -308,7 +372,9 @@ async function marketPublishStandalone(
     process.exit(1);
   }
 
-  const structuralErrors = validateStandalonePackage(pkg);
+  const baseDir = dirname(resolvePath(process.cwd(), file));
+
+  const structuralErrors = validateStandalonePackage(pkg, { baseDir });
   if (structuralErrors.length) {
     if (opts.json) {
       console.log(
@@ -321,9 +387,38 @@ async function marketPublishStandalone(
     process.exit(1);
   }
 
+  // Inline any `codeFile` cell entries into `code` — the field the CP schema
+  // actually validates; `codeFile` never reaches the wire (see
+  // `lib/kind-package.ts`). Bundling defaults to `--bundle-deps` HERE, on the
+  // publish path only: a published cell is exactly the case Chrome MV3's
+  // "reviewers must be able to see the code that runs" rationale targets —
+  // our `deps` map otherwise resolves through esm.sh at runtime, so the
+  // published artifact is not what actually executes. `synap cell build`
+  // invoked directly keeps its own default (external deps via esm.sh)
+  // unchanged; `--no-bundle-deps` opts a publish back out of this default.
+  let definition = pkg.definition;
+  if (pkg.category === "cell") {
+    const { definition: resolvedDefinition, errors: codeFileErrors } =
+      await resolveCellCodeFiles(pkg, baseDir, {
+        bundleDeps: opts.bundleDeps !== false,
+      });
+    if (codeFileErrors.length) {
+      if (opts.json) {
+        console.log(
+          JSON.stringify({ ok: false, stage: "build", errors: codeFileErrors }, null, 2),
+        );
+      } else {
+        log.error(`${file} failed to build — not published:`);
+        for (const e of codeFileErrors) log.hint(e);
+      }
+      process.exit(1);
+    }
+    definition = resolvedDefinition;
+  }
+
   try {
     const r = await publishPackage(
-      { ...pkg.definition, description: pkg.description },
+      { ...definition, description: pkg.description },
       {
         isPublic,
         category: pkg.category,
@@ -362,18 +457,21 @@ export async function marketPublish(
     public?: boolean;
     private?: boolean;
     fromWorkspace?: string;
+    fromProject?: string;
+    price?: string;
     json?: boolean;
     podUrl?: string;
     apiKey?: string;
+    bundleDeps?: boolean;
   },
 ): Promise<void> {
   // A standalone view/cell/skill file branches off IMMEDIATELY — it has no
   // `meta`/`workspace` envelope, so the WorkspaceYaml parser below would
-  // reject it. `--from-workspace` never produces this shape, so only the
-  // `file` path is checked. `isStandalonePackageFile` peeks the SAME parse
-  // `parseStandalonePackageFile` will redo — cheap, and keeps the discriminator
-  // logic in ONE place (`kind-package.ts`).
-  if (file && !opts.fromWorkspace) {
+  // reject it. `--from-workspace` / `--from-project` never produce this shape,
+  // so only the `file` path is checked. `isStandalonePackageFile` peeks the
+  // SAME parse `parseStandalonePackageFile` will redo — cheap, and keeps the
+  // discriminator logic in ONE place (`kind-package.ts`).
+  if (file && !opts.fromWorkspace && !opts.fromProject) {
     let peeked: unknown;
     try {
       peeked = parseTemplateFile(file);
@@ -386,9 +484,26 @@ export async function marketPublish(
     }
   }
 
+  if (opts.fromWorkspace && opts.fromProject) {
+    log.error("Pass only one of --from-workspace or --from-project.");
+    process.exit(1);
+  }
+
   // Default PRIVATE; `--public` flips it. `--private` is accepted as the explicit
   // default so a script can state intent.
   const isPublic = opts.public === true;
+
+  let pricing:
+    | { pricingModel: "one_time"; priceUsd: number }
+    | undefined;
+  if (opts.price !== undefined) {
+    try {
+      pricing = parsePriceUsdFlag(opts.price);
+    } catch (e) {
+      log.error((e as Error).message);
+      process.exit(1);
+    }
+  }
 
   // 1. Obtain the definition + a WorkspaceYaml view to validate.
   let def: PackageDefinitionLike;
@@ -396,11 +511,11 @@ export async function marketPublish(
   let sourceLabel: string;
 
   // Keys the pod's workspace serialiser has NO projection for. Unconditional
-  // for `--from-workspace` and EMPTY for a hand-written file, because the file
-  // path is not a projection — what the author wrote is what gets published.
-  // See `lib/exporter-coverage.ts` for why this warns about the door rather
-  // than counting a payload it cannot see.
+  // for `--from-workspace` / `--from-project` (both walk that door) and EMPTY
+  // for a hand-written file, because the file path is not a projection — what
+  // the author wrote is what gets published. See `lib/exporter-coverage.ts`.
   let dropWarnings: string[] = [];
+  let lossyLabel = "workspace";
 
   if (opts.fromWorkspace) {
     try {
@@ -412,9 +527,60 @@ export async function marketPublish(
     dropWarnings = exporterDropWarnings();
     yamlForValidate = packageDefinitionToYaml(def);
     sourceLabel = `workspace ${opts.fromWorkspace}`;
+  } else if (opts.fromProject) {
+    let suiteConstituents: PackageDefinitionLike[] = [];
+    try {
+      const suite = await fetchProjectAsSuiteTemplate(opts.fromProject, opts);
+      def = suite.definition;
+      suiteConstituents = suite.constituents;
+    } catch (e) {
+      renderHubError(e);
+      process.exit(1);
+    }
+    dropWarnings = exporterDropWarnings();
+    lossyLabel = "project suite";
+    yamlForValidate = packageDefinitionToYaml(def);
+    sourceLabel = `project ${opts.fromProject}`;
+
+    // Publish FULL constituent workspace packages FIRST so suite `require`
+    // deps resolve on install (otherwise hollow required-absent).
+    if (suiteConstituents.length > 0 && !opts.json) {
+      log.info(
+        `Publishing ${suiteConstituents.length} constituent workspace package(s) before the suite…`,
+      );
+    }
+    for (const constituent of suiteConstituents) {
+      const cSlug = constituent._meta?.slug;
+      if (!cSlug) {
+        log.warn("Skipping constituent without _meta.slug");
+        continue;
+      }
+      const cYaml = packageDefinitionToYaml(constituent);
+      const cVal = validateTemplateYaml(cYaml);
+      if (!cVal.ok) {
+        log.error(`Constituent ${cSlug} failed validation — not published:`);
+        printValidationErrors(cVal.errors);
+        process.exit(1);
+      }
+      try {
+        const r = await publishPackage(constituent, {
+          isPublic,
+          ...(pricing ?? {}),
+        });
+        if (!opts.json) reportPublish(r);
+      } catch (e) {
+        if (e instanceof CpWriteError) {
+          reportCpWriteError(e, cSlug);
+          process.exit(1);
+        }
+        throw e;
+      }
+    }
   } else {
     if (!file) {
-      log.error("Provide a template file, or --from-workspace <id>.");
+      log.error(
+        "Provide a template file, --from-workspace <id>, or --from-project <id>.",
+      );
       process.exit(1);
     }
     try {
@@ -445,20 +611,51 @@ export async function marketPublish(
   // export is not wrong, it is incomplete, and the package still installs.
   if (dropWarnings.length > 0 && !opts.json) {
     log.warn(
-      `Serialising a live workspace is a LOSSY projection — these are NOT in the package:`,
+      `Serialising a live ${lossyLabel} is a LOSSY projection — these are NOT in the package:`,
     );
     for (const w of dropWarnings) log.hint(`• ${w}`);
     log.hint(
       "See TEMPLATE-DEV-GUIDE.md — `template ≡ installed` holds publish→install, not workspace→publish.",
+    );
+    if (opts.fromProject) {
+      log.hint(
+        "Constituent workspace packages were published first (when present); the suite only requires them by slug.",
+      );
+    }
+  }
+
+  if (pricing && !opts.json) {
+    log.info(
+      `Pricing stamped: one_time @ $${(pricing.priceUsd / 100).toFixed(2)} (settlement/Stripe is not this wave).`,
     );
   }
 
   // 3. Publish.
   const slug = def._meta?.slug;
   try {
-    const r = await publishPackage(def, { isPublic });
+    const r = await publishPackage(def, {
+      isPublic,
+      ...(pricing ?? {}),
+    });
     if (opts.json) {
-      console.log(JSON.stringify({ ok: true, warnings: dropWarnings, ...r }, null, 2));
+      console.log(
+        JSON.stringify(
+          {
+            ok: true,
+            warnings: dropWarnings,
+            ...(pricing
+              ? {
+                  pricingModel: pricing.pricingModel,
+                  priceUsd: pricing.priceUsd,
+                  settlement: "not-this-wave",
+                }
+              : {}),
+            ...r,
+          },
+          null,
+          2,
+        ),
+      );
       return;
     }
     reportPublish(r);

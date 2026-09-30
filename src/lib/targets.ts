@@ -36,6 +36,8 @@ export type TargetName =
   | "openclaw"
   | "openwebui"
   | "codex"
+  | "chatgpt"
+  | "chatgpt-oauth"
   | "opencode"
   | "aider"
   | "windsurf"
@@ -44,6 +46,143 @@ export type TargetName =
   | "vscode"
   | "grok"
   | "generic";
+
+/**
+ * Result of verifying a written MCP config against the pod.
+ *
+ * `ok` means the client's key authenticates to `/mcp` AND the pod advertises
+ * Synap tools. A bad key returns a clean JSON-RPC error (`-32600 Invalid or
+ * expired API key`), never an HTTP 200 with zero tools — so both are
+ * distinguishable here, which is the whole point.
+ */
+export interface McpVerifyResult {
+  ok: boolean;
+  toolCount?: number;
+  error?: string;
+}
+
+/**
+ * Verify that a pod's `/mcp` endpoint actually serves Synap tools for THIS key.
+ *
+ * Two JSON-RPC calls: `initialize` (confirms the endpoint is a Synap MCP server,
+ * not a proxy default page — it checks `serverInfo.name === "synap-mcp-server"`)
+ * and `tools/list` (confirms the key authenticates and sees tools).
+ *
+ * This is the post-install gate `synap connect` runs after writing a client
+ * config. Without it, a wrong key, a workspace the agent isn't enrolled in, or
+ * a pod that is up but not serving MCP all surface three steps later when the
+ * user reports "it says it works but it doesn't" — which is exactly the failure
+ * that motivated this. `synap mcp verify` is the manual version of the same
+ * check.
+ */
+export async function verifyMcpConnection(
+  podUrl: string,
+  apiKey: string,
+  opts?: { timeoutMs?: number; expectToolCount?: number }
+): Promise<McpVerifyResult> {
+  const podBase = podUrl.replace(/\/$/, "");
+  const url = `${podBase}/mcp`;
+  const timeout = opts?.timeoutMs ?? 20_000;
+  const headers = {
+    "Content-Type": "application/json",
+    Accept: "application/json, text/event-stream",
+    Authorization: `Bearer ${apiKey}`,
+  };
+
+  // 1. initialize — is this a Synap MCP server?
+  let initRes: Response;
+  try {
+    initRes = await fetch(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: "2024-11-05",
+          capabilities: {},
+          clientInfo: { name: "synap-cli", version: "1.0.0" },
+        },
+      }),
+      signal: AbortSignal.timeout(timeout),
+    });
+  } catch (err) {
+    return { ok: false, error: `Could not reach pod /mcp: ${(err as Error).message}` };
+  }
+
+  if (!initRes.ok) {
+    return { ok: false, error: `Pod /mcp returned HTTP ${initRes.status}` };
+  }
+
+  let initBody: { result?: { serverInfo?: { name?: string } }; error?: { message?: string } };
+  try {
+    initBody = (await initRes.json()) as typeof initBody;
+  } catch {
+    return { ok: false, error: "Pod /mcp returned a non-JSON body — is this a Synap pod?" };
+  }
+
+  if (initBody.error) {
+    return { ok: false, error: `MCP initialize rejected: ${initBody.error.message ?? "unknown error"}` };
+  }
+  const serverName = initBody.result?.serverInfo?.name;
+  if (serverName !== "synap-mcp-server") {
+    return {
+      ok: false,
+      error: `Pod /mcp is not a Synap MCP server (serverInfo.name = ${JSON.stringify(
+        serverName
+      )}) — the URL may point at a proxy or a non-Synap service.`,
+    };
+  }
+
+  // 2. tools/list — does this key authenticate and see tools?
+  let listRes: Response;
+  try {
+    listRes = await fetch(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }),
+      signal: AbortSignal.timeout(timeout),
+    });
+  } catch (err) {
+    return { ok: false, error: `Could not reach pod /mcp for tools/list: ${(err as Error).message}` };
+  }
+
+  if (!listRes.ok) {
+    return { ok: false, error: `Pod /mcp tools/list returned HTTP ${listRes.status}` };
+  }
+
+  let listBody: { result?: { tools?: unknown[] }; error?: { message?: string } };
+  try {
+    listBody = (await listRes.json()) as typeof listBody;
+  } catch {
+    return { ok: false, error: "Pod /mcp tools/list returned a non-JSON body." };
+  }
+
+  if (listBody.error) {
+    return { ok: false, error: `MCP tools/list rejected: ${listBody.error.message ?? "unknown error"}` };
+  }
+
+  const tools = Array.isArray(listBody.result?.tools) ? listBody.result.tools : [];
+  const toolCount = tools.length;
+  if (toolCount === 0) {
+    return {
+      ok: false,
+      error:
+        `Pod /mcp authenticated this key but exposed ZERO tools — the key may be scoped ` +
+        `to a workspace the agent isn't enrolled in, or the pod is misconfigured.`,
+    };
+  }
+
+  if (opts?.expectToolCount && toolCount < opts.expectToolCount) {
+    return {
+      ok: false,
+      error: `Pod /mcp exposed only ${toolCount} tool(s), expected at least ${opts.expectToolCount}. The connection is degraded — re-run 'synap connect'.`,
+    };
+  }
+
+  return { ok: true, toolCount };
+}
 
 export interface TargetConnectionConfig {
   podUrl: string;
@@ -185,8 +324,22 @@ export const TARGETS: Record<TargetName, TargetInfo> = {
     label: "OpenAI Codex",
     description: "OpenAI Codex CLI — MCP server + instructions",
     supports: { skills: true, mcp: true },
-    mcpConfigPath: () => path.join(os.homedir(), ".codex", "config.yaml"),
+    mcpConfigPath: () => path.join(os.homedir(), ".codex", "config.toml"),
     skillsDir: () => path.join(os.homedir(), ".codex"),
+  },
+  chatgpt: {
+    name: "chatgpt",
+    label: "ChatGPT (API key)",
+    description:
+      "ChatGPT connector (web) — API-key auth to your pod's /mcp (provisions under generic surface)",
+    supports: { skills: false, mcp: true },
+  },
+  "chatgpt-oauth": {
+    name: "chatgpt-oauth",
+    label: "ChatGPT (OAuth, via Control Plane)",
+    description:
+      "ChatGPT connector via Synap Control Plane OAuth — multi-pod, no key to paste",
+    supports: { skills: false, mcp: true },
   },
   opencode: {
     name: "opencode",
@@ -277,9 +430,21 @@ export function buildMcpUrl(
  */
 async function prepareMcpSurface(
   cfg: TargetConnectionConfig,
-  agentType: string
+  agentType: string,
+  opts?: { idempotent?: boolean }
 ): Promise<{ effectiveApiKey: string; agentUserId: string; mcpUrl: string }> {
-  const { hubApiKey: effectiveApiKey, agentUserId } = await provisionAgentKey(cfg.podUrl, cfg.apiKey, agentType);
+  // Idempotent by default: `synap connect` is re-runnable. Without it, every
+  // connect mints a NEW inactive key + a fresh approval request on the pod,
+  // even for a surface that is already connected — which is why the pod admin
+  // site keeps showing "validate this proposal" on every reconnect. The pod
+  // returns `alreadyValid` for an existing key; we recover the plaintext from
+  // local storage and reuse it, rotating only on positive invalidation.
+  const { hubApiKey: effectiveApiKey, agentUserId } = await provisionAgentKey(
+    cfg.podUrl,
+    cfg.apiKey,
+    agentType,
+    { idempotent: opts?.idempotent ?? true }
+  );
   await enrollAgentIfNeeded(cfg.podUrl, cfg.apiKey, agentUserId, cfg.workspaceId);
   return { effectiveApiKey, agentUserId, mcpUrl: buildMcpUrl(cfg.podUrl, cfg.workspaceId, cfg.projectId) };
 }
@@ -388,7 +553,8 @@ export function listTargets(): void {
  */
 export async function installForTarget(
   target: TargetName,
-  cfg: TargetConnectionConfig
+  cfg: TargetConnectionConfig,
+  opts?: { verify?: boolean }
 ): Promise<boolean> {
   const info = TARGETS[target];
   if (!info) {
@@ -407,6 +573,8 @@ export async function installForTarget(
     case "openclaw":      result = await installOpenclaw(cfg); break;
     case "openwebui":     result = await installOpenWebUI(cfg); break;
     case "codex":         result = await installCodex(info, cfg); break;
+    case "chatgpt":       result = await installChatGpt(cfg); break;
+    case "chatgpt-oauth": result = await installChatGptOAuth(cfg); break;
     case "opencode":      result = await installOpencode(cfg); break;
     case "aider":         result = await installAider(cfg); break;
     case "windsurf":      result = await installWindsurf(info, cfg); break;
@@ -429,6 +597,39 @@ export async function installForTarget(
       });
     } catch (err) {
       log.warn(`Agent context wizard failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  // ── Post-install verify (the missing gate) ────────────────────────────────
+  // The config is written and the agent key is stored — but until this point
+  // nothing has checked that the client will actually load Synap tools. A key
+  // scoped to a workspace the agent isn't enrolled in, a pod that is up but not
+  // serving MCP, or a config the client ignores all surface three steps later
+  // when the user reports "it says it works but it doesn't". Verify against the
+  // pod's /mcp with the AGENT key (the one the client will use), not the human
+  // profile key — those are different identities and only one is in the config.
+  if (result && info.supports.mcp && opts?.verify !== false) {
+    const { getSurfaceAgentKey } = await import("./pod.js");
+    const saved = getSurfaceAgentKey(target as import("./pod.js").SurfaceName, cfg.podUrl);
+    const verifyKey = saved?.hubApiKey ?? cfg.apiKey;
+    const verifySpinner = ora(`Verifying ${info.label} can reach Synap…`).start();
+    try {
+      const v = await verifyMcpConnection(cfg.podUrl, verifyKey, { timeoutMs: 20_000 });
+      if (v.ok) {
+        verifySpinner.succeed(
+          `${info.label} verified — ${v.toolCount} Synap tool(s) reachable at ${cfg.podUrl}/mcp`
+        );
+      } else {
+        verifySpinner.warn(`${info.label} install completed but verification FAILED.`);
+        log.warn(`  ${v.error}`);
+        log.dim(
+          `  The client config was written, but the agent key couldn't reach Synap. ` +
+          `Re-run 'synap connect --target=${target}' after fixing it.`
+        );
+      }
+    } catch (err) {
+      verifySpinner.warn(`${info.label} verification errored.`);
+      log.warn(`  ${(err as Error).message}`);
     }
   }
 
@@ -840,6 +1041,12 @@ export class AgentKeyMintError extends Error {
  * When requireApproval is true the key is created inactive; the user must approve in the
  * browser before this function returns.
  * Throws on failure — callers must not silently fall back to a human key.
+ *
+ * @param surfaceName  The CLI surface name (e.g. "chatgpt", "codex") — used for
+ *                     idempotent key lookup in local storage. If omitted, `agentType`
+ *                     is used. This handles the case where the pod's agentType
+ *                     differs from the CLI surface (e.g. ChatGPT provisions under
+ *                     "generic" but the CLI surface is "chatgpt").
  */
 export async function provisionAgentKey(
   podUrl: string,
@@ -848,10 +1055,12 @@ export async function provisionAgentKey(
   {
     requireApproval = true,
     idempotent = false,
+    surfaceName,
     deferApproval = false,
   }: {
     requireApproval?: boolean;
     idempotent?: boolean;
+    surfaceName?: string;
     /**
      * Return a pending key WITHOUT opening its review page or waiting — the
      * caller approves several at once (`batch-approval.ts`, V1 D5).
@@ -919,7 +1128,11 @@ export async function provisionAgentKey(
   // (e.g. a brand-new machine). This generalizes the claude-code self-heal.
   if (!body.hubApiKey && body.alreadyValid && idempotent) {
     const { getSurfaceAgentKey } = await import("./pod.js");
-    const stored = getSurfaceAgentKey(agentType as import("./pod.js").SurfaceName);
+    // Use surfaceName for local storage lookup if provided; otherwise agentType.
+    // This handles cases where pod agentType ≠ CLI surface (e.g. ChatGPT uses
+    // "generic" but CLI surface is "chatgpt").
+    const lookupType = surfaceName ?? agentType;
+    const stored = getSurfaceAgentKey(lookupType as import("./pod.js").SurfaceName);
     const candidate = stored?.hubApiKey;
     const expectedAgentUserId = body.agentUserId ?? stored?.agentUserId;
     if (candidate && expectedAgentUserId) {
@@ -1061,7 +1274,12 @@ async function installClaudeDesktop(
   // stdio MCP messages into HTTPS calls against the pod's /mcp endpoint.
   //
   // Reference: https://www.npmjs.com/package/mcp-remote
-  const { hubApiKey: effectiveApiKey, agentUserId } = await provisionAgentKey(cfg.podUrl, cfg.apiKey, "claude-desktop");
+  const { hubApiKey: effectiveApiKey, agentUserId } = await provisionAgentKey(
+    cfg.podUrl,
+    cfg.apiKey,
+    "claude-desktop",
+    { idempotent: true }
+  );
   const { setSurfaceAgentKey: saveDesktopKey } = await import("./pod.js");
   saveDesktopKey("claude-desktop", { hubApiKey: effectiveApiKey, agentUserId, podUrl: cfg.podUrl });
   await enrollAgentIfNeeded(cfg.podUrl, cfg.apiKey, agentUserId, cfg.workspaceId);
@@ -1322,6 +1540,145 @@ async function installOpenWebUI(cfg: TargetConnectionConfig): Promise<boolean> {
   fs.writeFileSync(refFile, JSON.stringify(refData, null, 2) + "\n", { mode: 0o600 });
 
   log.success(`Connection details saved to ~/.synap/openwebui-mcp.json`);
+  return true;
+}
+
+// ─── ChatGPT (web) ───────────────────────────────────────────────────────────
+
+/**
+ * ChatGPT connects to Synap in TWO ways. This target wires the API-key path
+ * (the one the CLI can automate) and documents the OAuth path.
+ *
+ * API key: ChatGPT's "Add custom connector" accepts a URL + an
+ * `Authorization: Bearer <key>` header. That is the pod's standard MCP form,
+ * so the connection is the same one every other target uses — just pointed at
+ * the pod directly.
+ *
+ * OAuth: ChatGPT also supports OAuth (no header field). The pod's /mcp is
+ * Bearer-only, so OAuth for a SINGLE pod isn't available — it lives on the
+ * Control Plane (`https://api.synap.live/mcp`), which is an OAuth MCP server
+ * exposing `list_pods` / `connect_pod` / 14 proxied `pod__*` tools. That path
+ * is multi-pod and managed; `synap mcp connect-claude` prints it for
+ * claude.ai, and the same URL works for ChatGPT's OAuth connector.
+ *
+ * Agent type: the pod only mints keys for known surface agent types
+ * (`SURFACE_AGENT_TYPE_REQUIRED`), so a ChatGpt agent provisions under
+ * "generic" — a dedicated identity, never the human profile key.
+ */
+async function installChatGpt(cfg: TargetConnectionConfig): Promise<boolean> {
+  // ChatGPT provisions under agentType "generic" (not a known surface type),
+  // so we store under surface name "chatgpt" for the user-facing CLI.
+  // The pod's SURFACE_AGENT_TYPE_REQUIRED guard allows "generic" but not "chatgpt".
+  // For idempotent reuse: pass surfaceName="chatgpt" so the local lookup finds
+  // the stored key, while the pod call uses agentType="generic".
+  const { hubApiKey: effectiveApiKey, agentUserId } = await provisionAgentKey(
+    cfg.podUrl,
+    cfg.apiKey,
+    "generic",
+    { idempotent: true, surfaceName: "chatgpt" }
+  );
+  const { setSurfaceAgentKey } = await import("./pod.js");
+  setSurfaceAgentKey("chatgpt", { hubApiKey: effectiveApiKey, agentUserId, podUrl: cfg.podUrl });
+  await enrollAgentIfNeeded(cfg.podUrl, cfg.apiKey, agentUserId, cfg.workspaceId);
+  const mcpUrl = buildMcpUrl(cfg.podUrl, cfg.workspaceId, cfg.projectId);
+
+  const synapDir = path.join(os.homedir(), ".synap");
+  if (!fs.existsSync(synapDir)) fs.mkdirSync(synapDir, { recursive: true });
+
+  const refFile = path.join(synapDir, "chatgpt-mcp.json");
+  const refData = {
+    mcpToolServer: {
+      url: mcpUrl,
+      headers: { Authorization: `Bearer ${effectiveApiKey}` },
+    },
+    oauthAlternative: {
+      url: "https://api.synap.live/mcp",
+      note:
+        "ChatGPT OAuth connector (no header field). Multi-pod: list_pods, " +
+        "connect_pod, then proxied pod__* tools. Same URL as claude.ai.",
+    },
+  };
+  fs.writeFileSync(refFile, JSON.stringify(refData, null, 2) + "\n", { mode: 0o600 });
+
+  log.heading("Connecting ChatGPT → " + cfg.podUrl);
+  log.blank();
+  log.info("Path 1 — API key (this CLI can wire it):");
+  log.blank();
+  log.info("  ChatGPT → Settings → Connectors → Add custom connector");
+  log.info(`  Name:     Synap`);
+  log.info(`  URL:      ${mcpUrl}`);
+  log.info(`  Auth:     API key`);
+  log.info(`  API key:  ${effectiveApiKey}`);
+  log.blank();
+  log.dim(
+    "  ChatGPT shows the key field inline — paste it there. If your build only " +
+    "shows URL + a header, set Authorization: Bearer <key>."
+  );
+  log.blank();
+  log.info("Path 2 — OAuth (multi-pod, no key to paste):");
+  log.blank();
+  log.info("  ChatGPT → Settings → Connectors → Add custom connector");
+  log.info("  URL:     https://api.synap.live/mcp");
+  log.info("  Auth:    OAuth (leave API key blank)");
+  log.blank();
+  log.dim(
+    "  After OAuth, ask ChatGPT to 'list my Synap pods' (list_pods) and connect " +
+    "one (connect_pod). Same flow as claude.ai — see `synap mcp connect-claude`."
+  );
+  log.blank();
+  log.success(`Connection details saved to ~/.synap/chatgpt-mcp.json`);
+  log.dim("ChatGPT caches connectors per workspace — remove and re-add if you switch pods.");
+  return true;
+}
+
+// ─── ChatGPT (web) — OAuth via Control Plane ──────────────────────────────────
+
+/**
+ * ChatGPT OAuth via the Control Plane — same URL as claude.ai.
+ *
+ * The CP's `/mcp` endpoint is OAuth-only (ES256 access tokens, RFC 9728
+ * `WWW-Authenticate` discovery). This path is MULTI-POD: after OAuth, the
+ * user sees `list_pods` → `connect_pod` to pick a pod, then gets 14 proxied
+ * `pod__*` tools. No API key is pasted; the CP stores an encrypted grant.
+ *
+ * Use this when:
+ *   - You have multiple pods and want to switch between them in ChatGPT
+ *   - You prefer OAuth over API-key auth
+ *   - You want the managed CP proxy (revoke in one place, no pod restarts)
+ */
+async function installChatGptOAuth(cfg: TargetConnectionConfig): Promise<boolean> {
+  // Use the CP origin from the pod (or managed fallback)
+  const { deriveCpOrigin } = await import("../commands/mcp.js");
+  const { cpOrigin } = deriveCpOrigin(cfg.podUrl);
+  const url = `${cpOrigin.replace(/\/$/, "")}/mcp`;
+
+  log.heading("Connecting ChatGPT (OAuth) via Control Plane");
+  log.blank();
+  log.info("This uses the SAME OAuth URL as claude.ai — the CP is the single broker.");
+  log.blank();
+  log.info("ChatGPT → Settings → Connectors → Add custom connector");
+  log.info(`  Name:  Synap (Control Plane)`);
+  log.info(`  URL:   ${url}`);
+  log.info(`  Auth:  OAuth (leave API key blank)`);
+  log.blank();
+  log.info("After connecting, ask ChatGPT to:");
+  log.info("  1. 'list my Synap pods' (list_pods)");
+  log.info("  2. 'connect pod <your-pod>' (connect_pod)");
+  log.blank();
+  log.dim("The CP stores an encrypted grant. Revoke in pod-admin → My Connections.");
+  log.blank();
+  log.dim("See `synap mcp connect-claude` for the identical claude.ai flow.");
+
+  // Save a reference file for the user
+  const synapDir = path.join(os.homedir(), ".synap");
+  if (!fs.existsSync(synapDir)) fs.mkdirSync(synapDir, { recursive: true });
+  const refFile = path.join(synapDir, "chatgpt-oauth.json");
+  const refData = {
+    oauthUrl: url,
+    note: "ChatGPT OAuth connector via Synap Control Plane. Multi-pod: list_pods, connect_pod, then proxied pod__* tools.",
+  };
+  fs.writeFileSync(refFile, JSON.stringify(refData, null, 2) + "\n", { mode: 0o600 });
+  log.success(`Connection details saved to ~/.synap/chatgpt-oauth.json`);
   return true;
 }
 
@@ -1670,7 +2027,9 @@ async function installCodex(
   info: TargetInfo,
   cfg: TargetConnectionConfig
 ): Promise<boolean> {
-  const configPath = info.mcpConfigPath?.() ?? path.join(os.homedir(), ".codex", "config.yaml");
+  // Codex reads MCP servers from ~/.codex/config.toml (not config.yaml).
+  // HTTP MCP format: [mcp_servers.synap] with url, headers, type="http"
+  const configPath = info.mcpConfigPath?.() ?? path.join(os.homedir(), ".codex", "config.toml");
   const configDir = path.dirname(configPath);
 
   if (!fs.existsSync(configDir)) {
@@ -1691,26 +2050,36 @@ async function installCodex(
     mint.agentType,
     { idempotent: mint.idempotent }
   );
+  const { setSurfaceAgentKey } = await import("./pod.js");
+  setSurfaceAgentKey("codex", { hubApiKey: effectiveApiKey, agentUserId, podUrl: cfg.podUrl });
   await enrollAgentIfNeeded(cfg.podUrl, cfg.apiKey, agentUserId, cfg.workspaceId);
   const mcpUrl = buildMcpUrl(cfg.podUrl, cfg.workspaceId, cfg.projectId);
 
-  // Inject/replace the synap mcpServers block using simple string manipulation
-  // (avoid requiring a YAML parser dependency)
+  // Build TOML block for HTTP MCP server
   const mcpBlock = [
-    "mcpServers:",
-    `  - name: synap`,
-    `    url: "${mcpUrl}"`,
-    `    headers:`,
-    `      Authorization: "Bearer ${effectiveApiKey}"`,
+    "",
+    "[mcp_servers.synap]",
+    `url = "${mcpUrl}"`,
+    `http_headers = { Authorization = "Bearer ${effectiveApiKey}" }`,
+    `startup_timeout_sec = 30`,
+    `enabled = true`,
+    "",
   ].join("\n");
 
+  // Replace existing synap entry or append
   let updated: string;
-  if (/^mcpServers:/m.test(existing)) {
-    // Replace existing mcpServers block (everything from mcpServers: to the next top-level key or EOF)
-    updated = existing.replace(/^mcpServers:[\s\S]*?(?=\n[a-zA-Z]|\s*$)/m, mcpBlock);
+  const sectionHeader = "[mcp_servers.synap]";
+  const sectionRe = new RegExp(
+    `\\n?\\[mcp_servers\\.synap\\][\\s\\S]*?(?=\\n\\[|$)`,
+    "g"
+  );
+  if (existing.includes(sectionHeader)) {
+    updated = existing.replace(sectionRe, "").replace(/\n{3,}/g, "\n\n").trimEnd();
+    updated = (updated ? updated + "\n" : "") + mcpBlock;
   } else {
-    updated = existing ? `${existing.trimEnd()}\n\n${mcpBlock}\n` : `${mcpBlock}\n`;
+    updated = existing ? `${existing.trimEnd()}\n${mcpBlock}\n` : mcpBlock;
   }
+  if (!updated.endsWith("\n")) updated += "\n";
 
   fs.writeFileSync(configPath, updated, { mode: 0o600 });
 
@@ -1866,7 +2235,12 @@ export async function installOpencode(cfg: ProviderInstallConfig & { workspaceId
   };
 
   // Provision an agent key so the MCP server runs under its own identity
-  const { hubApiKey: agentKey, agentUserId } = await provisionAgentKey(cfg.podUrl, cfg.apiKey, "opencode");
+  const { hubApiKey: agentKey, agentUserId } = await provisionAgentKey(
+    cfg.podUrl,
+    cfg.apiKey,
+    "opencode",
+    { idempotent: true }
+  );
   await enrollAgentIfNeeded(cfg.podUrl, cfg.apiKey, agentUserId, cfg.workspaceId);
   const podBase = cfg.podUrl.replace(/\/$/, "");
   const mcpUrl = buildMcpUrl(cfg.podUrl, cfg.workspaceId, cfg.projectId);

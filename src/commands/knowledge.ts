@@ -46,6 +46,11 @@ import {
   isDegraded,
   degradedMessage,
   readCaptureExecute,
+  formatWorkspaceRouting,
+  formatPendingWorkspaceSwitch,
+  headlessPlacementFields,
+  projectRoutingHints,
+  workspaceRoutingHints,
   type StructureResult,
   type ExecuteResult,
 } from "../lib/capture-structure.js";
@@ -355,12 +360,10 @@ function renderStructureResult(result: StructureResult): void {
 
   if (result.targetWorkspaceId || result.targetProjectId) {
     log.blank();
-    if (result.targetWorkspaceId) {
-      const conf =
-        typeof result.targetWorkspaceConfidence === "number"
-          ? ` (${Math.round(result.targetWorkspaceConfidence * 100)}%)`
-          : "";
-      log.dim(`  → workspace: ${result.targetWorkspaceId}${conf}`);
+    const workspaceLine = formatWorkspaceRouting(result);
+    if (workspaceLine) {
+      // The pod's NAME for its pick, with its confidence once.
+      log.dim(`  → workspace: ${workspaceLine}`);
       if (result.targetWorkspaceReason) {
         log.dim(`      ${result.targetWorkspaceReason.slice(0, 90)}`);
       }
@@ -434,8 +437,8 @@ async function runSmartCapture(rawText: string, opts: CaptureOpts): Promise<void
   };
   const structureRes = await hubPost("/capture/structure", structureBody, cfg) as StructureResult;
 
-  // Degraded: the IS structurer is down. The server returns a raw `item`
-  // stand-in, but we create nothing (browser does the same via
+  // Degraded: the IS structurer is down. The server returns a raw fallback-kind
+  // stand-in (`note`; `degraded: true` on the wire), but we create nothing (browser does the same via
   // offlineFallback:false) — tell the user, don't silently downgrade the
   // capture into an unstructured blob behind a success line.
   if (isDegraded(structureRes)) {
@@ -457,13 +460,19 @@ async function runSmartCapture(rawText: string, opts: CaptureOpts): Promise<void
   // (auto = AI target wins over ambient when confidence is high enough AND the
   // user is a member).
   const isExplicitOverride = Boolean(opts.workspace);
+  // The AI's advice goes through the ONE structure → execute mapper
+  // (`captureExecuteRoutingHints`, mirrored in capture-structure.ts).
+  // Headless door: the structure step's PLACEMENT decides what is pinned
+  // (`headlessPlacementFields` — the ONE derivation, shared with the pod's own
+  // headless doors). A deterministic placement rides as an explicit
+  // `targetWorkspaceId`; an AI suggestion stays a proposal and is recorded as
+  // `workspaceChoice: "ignored"` — the CLI never shows it before saving.
   const routingFields: Record<string, unknown> = isExplicitOverride
     ? {}
     : {
         workspaceRouting: "auto",
-        aiWorkspaceId: structureRes.targetWorkspaceId,
-        aiWorkspaceConfidence: structureRes.targetWorkspaceConfidence,
-        aiWorkspaceReason: structureRes.targetWorkspaceReason,
+        ...headlessPlacementFields(structureRes),
+        ...workspaceRoutingHints(structureRes),
       };
   // Project: the explicit pin (--project / ambient lens) is the ONE
   // deterministic field and always wins when present. The AI's own guess is
@@ -475,9 +484,7 @@ async function runSmartCapture(rawText: string, opts: CaptureOpts): Promise<void
   if (projectId) {
     routingFields.projectId = projectId;
   } else if (structureRes.targetProjectId) {
-    routingFields.aiProjectId = structureRes.targetProjectId;
-    routingFields.aiProjectConfidence = structureRes.targetProjectConfidence;
-    routingFields.aiProjectReason = structureRes.targetProjectReason;
+    Object.assign(routingFields, projectRoutingHints(structureRes));
   }
 
   if (opts.json) {
@@ -559,9 +566,8 @@ async function runSmartCapture(rawText: string, opts: CaptureOpts): Promise<void
     if (outcome.relationsCreated) {
       log.dim(`  ${outcome.relationsCreated} relation${outcome.relationsCreated !== 1 ? "s" : ""} created.`);
     }
-    if (outcome.movedToWorkspace) {
-      log.dim(`  → filed into workspace ${outcome.movedToWorkspace}`);
-    }
+    const pending = formatPendingWorkspaceSwitch(outcome);
+    if (pending) log.dim(`  ${pending}`);
   }
   console.log("  " + formatLaneLine(report));
   renderProjectReceipt(executeRes as unknown as Record<string, unknown>, projectId, outcome.proposed);

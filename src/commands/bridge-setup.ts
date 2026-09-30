@@ -469,12 +469,10 @@ export async function bridgeSetup(opts: BridgeSetupOpts): Promise<void> {
   }
 
   // ── 4b. Seed the bundled instruction skills FIRST, then the capabilities ────
-  // Order matters: the `stellar-scf-grants-advisor` skill now ALSO ships embedded
-  // in the stellar-grant-client capability (so a plain `packages/apply` install
-  // stands it up with NO bridge-setup). Seeding the bundled SKILL.md dir first
-  // attaches its full reference-doc corpus; the capability apply below then
-  // REUSES that same pod-scoped skill row by name (create-from-definition is
-  // idempotent) instead of creating a docless instruction-only copy.
+  // Order matters: seeding the bundled SKILL.md dirs first attaches their full
+  // reference-doc corpus; a capability apply below that embeds a skill of the
+  // same name REUSES that pod-scoped row (create-from-definition is idempotent)
+  // instead of creating a docless instruction-only copy.
   await applyAgencySkills(cfg);
 
   // ── 4c. Apply the agency capability templates (idempotent, self-healing) ────
@@ -482,11 +480,9 @@ export async function bridgeSetup(opts: BridgeSetupOpts): Promise<void> {
 
   // ── 4e. Seed the GENERIC automation templates (idempotent, event-driven) ────
   // Only the domain-agnostic automations live in templates/automations/ now
-  // (mail-feed, url/bookmark capture). The grant-specific automations
-  // (stellar-grant-provision + proactive-grant-review) SHIP INSIDE the
-  // stellar-grant-client capability's automations[] (seeded above via
-  // applyAgencyCapabilities), so any install door — including a plain
-  // packages/apply with no bridge-setup — stands them up. Thread the operator's
+  // (mail-feed, url/bookmark capture). The grant operation itself ships with the
+  // `grants` workspace template (its "Grant Process" method + automations); the
+  // old stellar-grant-client capability was removed (D5, 2026-09-25). Thread the operator's
   // chosen proactive channel through — output nodes pin their post target with it
   // when it's a Synap channels.id (see the note in applyAutomationTemplates).
   await applyAutomationTemplates(cfg, workspaceId, opts.proactiveChannel);
@@ -598,11 +594,6 @@ const AGENCY_CAPABILITY_PLAN: Array<{
 }> = [
   { key: "nango-google",        needs: null,         params: {}, workspaceScoped: false },
   { key: "agency-skills",       needs: null,         params: {}, workspaceScoped: true  },
-  // stellar-grant-client bundles the grant PLAYBOOK, all four grant AUTOMATIONS
-  // (including stellar-grant-provision + proactive-grant-review, moved here from
-  // templates/automations/), and the stellar-scf-grants-advisor SKILL — so one
-  // capability apply stands up the whole grant operation on ANY install door.
-  { key: "stellar-grant-client", needs: null,        params: {}, workspaceScoped: true  },
   // Cal.com scheduling connector — requires a `calApiKey` param (a `cal_live_...`
   // token), so gate it like the other keyed connectors: skip gracefully unless
   // CALCOM_API_KEY is set. Seeds the `cal_com` tool + booking skills + vault key,

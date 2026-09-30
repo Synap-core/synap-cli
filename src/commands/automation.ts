@@ -765,7 +765,18 @@ export async function automationSchema(opts: SchemaOpts): Promise<void> {
   }
 }
 
-function buildSchemaMarkdown(schema: Record<string, unknown>, podUrl: string): string {
+/**
+ * Render the pod's automation-schema document as markdown.
+ *
+ * EVERY node type printed comes from the DOOR's payload — the CLI keeps no list
+ * of its own. It used to: the `else` branch below fabricated a two-node DSL
+ * ("trigger" + "output") whenever `nodeTypes` was absent, which is a second
+ * hand-maintained list and a confident lie about a 23-node grammar. An absent
+ * `nodeTypes` is now REPORTED as a stale/failed read, never papered over.
+ *
+ * Exported for the parity test (`automation-schema.test.ts`).
+ */
+export function buildSchemaMarkdown(schema: Record<string, unknown>, podUrl: string): string {
   const lines: string[] = [
     `# Synap Automation DSL Reference`,
     ``,
@@ -843,25 +854,13 @@ function buildSchemaMarkdown(schema: Record<string, unknown>, podUrl: string): s
       }
     }
   } else {
+    // NOT a fallback list. The node types are the pod's to declare; printing a
+    // guessed subset here is how the reference fell two node types behind the
+    // executor in the first place. Say the read came back empty instead.
     lines.push(
       ``,
-      `### trigger`,
-      ``,
-      `Entry point for the flow. Exactly one per automation.`,
-      ``,
-      `**data fields:**`,
-      `- \`triggerType\` — event | cron | webhook | manual`,
-      `- \`label\` — display name`,
-      `- \`config\` — trigger-specific config object (eventPattern, filters, expression)`,
-      ``,
-      `### output`,
-      ``,
-      `Sends a notification or message when reached.`,
-      ``,
-      `**data fields:**`,
-      `- \`outputType\` — notification | channel_message`,
-      `- \`label\` — display name`,
-      `- \`config\` — output-specific config (title, body for notification; channelId, content for channel_message)`,
+      `_This pod's schema document declared no node types — the reference could not be read._`,
+      `_Upgrade the pod, or read the raw document with \`synap automation schema --json\`._`,
     );
   }
 

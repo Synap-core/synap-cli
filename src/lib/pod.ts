@@ -32,6 +32,8 @@ export const SURFACE_NAMES = [
   "claude-desktop",
   "cursor",
   "codex",
+  "chatgpt",
+  "chatgpt-oauth",
   "opencode",
   "aider",
   "windsurf",

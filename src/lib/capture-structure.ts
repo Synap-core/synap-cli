@@ -13,7 +13,7 @@
  * ACTUALLY returned (applied vs proposed vs nothing-created) instead of guessing
  * off the planned proposal count.
  *
- * Kept local to the CLI (not imported from @synap/hub-rest-client) because the
+ * Kept local to the CLI (not imported from @synap-core/hub-rest-client) because the
  * CLI resolves the SDK via its built dist — the same reason the previous local
  * mirrors existed. This is now the ONE mirror instead of two.
  */
@@ -34,7 +34,7 @@ export interface StructureRelation {
   relationType: string;
 }
 
-// Mirrors @synap/hub-rest-client's StructuredFollowUp/FollowUpChip. The chip is
+// Mirrors @synap-core/hub-rest-client's StructuredFollowUp/FollowUpChip. The chip is
 // an OBJECT, not a string — a `string[]` here rendered chips as "[object Object]".
 export interface FollowUpChip {
   label: string;
@@ -49,6 +49,230 @@ export interface FollowUp {
   suggestions?: FollowUpChip[];
 }
 
+// ─── Structure → execute routing (mirror of @synap-core/types) ──────────────
+//
+// The ONE mapper lives in `@synap-core/types` (`capture-routing-types.ts`):
+// every capture door forwards the structure step's placement advice to
+// execute through it, so the route decision event records the same data
+// whatever door the capture came from. The CLI cannot import it today: it is
+// published unbundled (`tsc`), depends on no `@synap-core/types`, and the
+// published `@synap-core/types@1.12.0` predates the mapper. So this is a
+// VERBATIM mirror, pinned by `test/capture-routing-parity.test.ts`, which runs
+// the real mapper from the sibling source against this one. Retire it for a
+// plain import once a `@synap-core/types` carrying the mapper is published.
+
+/** The distribution behind an AI workspace pick (see the shared type). */
+export interface WorkspaceDecisionRecord {
+  decider: "jev" | "llm";
+  model?: string;
+  probabilities?: Record<string, number>;
+  candidates?: Array<{ id: string; name: string }>;
+}
+
+/** The placement advice a `capture.structure` result carries (a subset). */
+export interface CaptureStructureRouting {
+  targetWorkspaceId?: string | null;
+  targetWorkspaceReason?: string | null;
+  targetWorkspaceConfidence?: number | null;
+  targetWorkspaceDecision?: WorkspaceDecisionRecord | null;
+  targetProjectId?: string | null;
+  targetProjectReason?: string | null;
+  targetProjectConfidence?: number | null;
+}
+
+/** The advisory routing fields `capture.execute` accepts. */
+export interface CaptureExecuteRoutingHints {
+  aiWorkspaceId?: string | null;
+  aiWorkspaceConfidence?: number | null;
+  aiWorkspaceReason?: string | null;
+  aiWorkspaceDecision?: WorkspaceDecisionRecord | null;
+  aiProjectId?: string | null;
+  aiProjectConfidence?: number | null;
+  aiProjectReason?: string | null;
+}
+
+/**
+ * ADVISORY hints only — an AI pick proposes, it never places data. A user's
+ * deliberate choice (`--workspace` / `--project`) is NOT a hint.
+ */
+export function captureExecuteRoutingHints(
+  structured: CaptureStructureRouting
+): CaptureExecuteRoutingHints {
+  return {
+    aiWorkspaceId: structured.targetWorkspaceId,
+    aiWorkspaceConfidence: structured.targetWorkspaceConfidence,
+    aiWorkspaceReason: structured.targetWorkspaceReason,
+    aiWorkspaceDecision: structured.targetWorkspaceDecision,
+    aiProjectId: structured.targetProjectId,
+    aiProjectConfidence: structured.targetProjectConfidence,
+    aiProjectReason: structured.targetProjectReason,
+  };
+}
+
+/** The AI's workspace-side hints only (drop them when the user pinned a workspace). */
+export function workspaceRoutingHints(structured: CaptureStructureRouting) {
+  const { aiWorkspaceId, aiWorkspaceConfidence, aiWorkspaceReason, aiWorkspaceDecision } =
+    captureExecuteRoutingHints(structured);
+  return { aiWorkspaceId, aiWorkspaceConfidence, aiWorkspaceReason, aiWorkspaceDecision };
+}
+
+/** The AI's project-side hints only (drop them when the user pinned a project). */
+export function projectRoutingHints(structured: CaptureStructureRouting) {
+  const { aiProjectId, aiProjectConfidence, aiProjectReason } =
+    captureExecuteRoutingHints(structured);
+  return { aiProjectId, aiProjectConfidence, aiProjectReason };
+}
+
+// ─── Capture destination (structure → review → execute) ─────────────────────
+//
+// VERBATIM mirror of `CapturePlacement` / `WorkspaceChoice` /
+// `deriveWorkspacePlacementView` in `@synap-core/types`
+// (`capture-routing-types.ts`), for the same reason the mapper above is
+// mirrored — the CLI resolves its SDK from a published dist that predates
+// them. Pinned by `test/capture-routing-parity.test.ts`, which runs the REAL
+// derivation from the sibling source against this one. The CLI is a HEADLESS
+// door: it passes `interactive: false`, so a suggestion is never applied, only
+// reported (`workspaceChoice: "ignored"`).
+
+/** Where a capture will land, as `capture.structure` resolved it. */
+export interface CapturePlacement {
+  workspaceId: string | null;
+  workspaceName: string | null;
+  /** A deterministic rung placed it — never an AI guess. */
+  deterministic: boolean;
+  suggestion?: {
+    workspaceId: string;
+    workspaceName: string;
+    reason: string | null;
+    alternatives: Array<{ workspaceId: string; workspaceName: string; weight: number }>;
+  };
+}
+
+/** What the person did with the destination field before saving. */
+export type WorkspaceSelection =
+  | { kind: "default" }
+  | { kind: "chosen"; workspaceId: string; workspaceName: string }
+  | { kind: "removed" };
+
+export type WorkspaceChoice = "accepted" | "changed" | "removed" | "ignored";
+
+export interface WorkspacePlacementView {
+  destination: { workspaceId: string | null; workspaceName: string | null };
+  aiSuggested: boolean;
+  alternatives: NonNullable<CapturePlacement["suggestion"]>["alternatives"];
+  canRemove: boolean;
+  execute: { targetWorkspaceId?: string; workspaceChoice?: WorkspaceChoice };
+}
+
+/** THE destination rule — see the shared type's docblock. */
+export function deriveWorkspacePlacementView(
+  placement: CapturePlacement | null | undefined,
+  selection: WorkspaceSelection,
+  opts: { interactive: boolean }
+): WorkspacePlacementView {
+  if (!placement) {
+    return {
+      destination: { workspaceId: null, workspaceName: null },
+      aiSuggested: false,
+      alternatives: [],
+      canRemove: false,
+      execute: {},
+    };
+  }
+  const suggestion = placement.suggestion;
+  const base = {
+    workspaceId: placement.workspaceId,
+    workspaceName: placement.workspaceName,
+  };
+  const pinBase = (): WorkspacePlacementView["execute"] =>
+    placement.deterministic && placement.workspaceId
+      ? { targetWorkspaceId: placement.workspaceId }
+      : {};
+
+  if (selection.kind === "chosen") {
+    return {
+      destination: {
+        workspaceId: selection.workspaceId,
+        workspaceName: selection.workspaceName,
+      },
+      aiSuggested: false,
+      alternatives: suggestion?.alternatives ?? [],
+      canRemove: false,
+      execute: {
+        targetWorkspaceId: selection.workspaceId,
+        ...(suggestion
+          ? {
+              workspaceChoice:
+                selection.workspaceId === suggestion.workspaceId ? "accepted" : "changed",
+            }
+          : {}),
+      },
+    };
+  }
+
+  if (selection.kind === "removed" || !suggestion || !opts.interactive) {
+    const choice: WorkspaceChoice | undefined = !suggestion
+      ? undefined
+      : selection.kind === "removed"
+        ? "removed"
+        : "ignored";
+    return {
+      destination: base,
+      aiSuggested: false,
+      alternatives: suggestion?.alternatives ?? [],
+      canRemove: false,
+      execute: {
+        ...(choice === "removed" && placement.workspaceId
+          ? { targetWorkspaceId: placement.workspaceId }
+          : pinBase()),
+        ...(choice ? { workspaceChoice: choice } : {}),
+      },
+    };
+  }
+
+  return {
+    destination: {
+      workspaceId: suggestion.workspaceId,
+      workspaceName: suggestion.workspaceName,
+    },
+    aiSuggested: true,
+    alternatives: suggestion.alternatives,
+    canRemove: true,
+    execute: { targetWorkspaceId: suggestion.workspaceId, workspaceChoice: "accepted" },
+  };
+}
+
+/**
+ * The headless placement fields the CLI sends to `/capture/execute` — the ONE
+ * door, so the CLI can never hand-roll a destination. Headless ⇒ an AI
+ * suggestion stays a proposal; a deterministic placement is pinned explicitly.
+ */
+export function headlessPlacementFields(
+  structured: Pick<StructureResult, "placement">
+): { targetWorkspaceId?: string; workspaceChoice?: WorkspaceChoice } {
+  return deriveWorkspacePlacementView(structured.placement, { kind: "default" }, {
+    interactive: false,
+  }).execute;
+}
+
+/**
+ * The workspace line for a structure result: the NAME the pod resolved (never
+ * a raw id when a name is known) and the confidence percent, once.
+ */
+export function formatWorkspaceRouting(result: {
+  targetWorkspaceId?: string | null;
+  targetWorkspaceName?: string | null;
+  targetWorkspaceConfidence?: number | null;
+}): string | null {
+  const label = result.targetWorkspaceName || result.targetWorkspaceId;
+  if (!label) return null;
+  const conf =
+    typeof result.targetWorkspaceConfidence === "number"
+      ? ` (${Math.round(result.targetWorkspaceConfidence * 100)}%)`
+      : "";
+  return `${label}${conf}`;
+}
+
 /** Response of POST /capture/structure (the AI plan — writes NOTHING). */
 export interface StructureResult {
   proposals?: StructureProposal[];
@@ -56,11 +280,22 @@ export interface StructureResult {
   // May be a plain string OR a structured { question, suggestions[] } object.
   followUp?: string | FollowUp | null;
   targetWorkspaceId?: string | null;
+  /** The pod's display name for `targetWorkspaceId` — what the CLI prints. */
+  targetWorkspaceName?: string | null;
   targetWorkspaceConfidence?: number | null;
   targetWorkspaceReason?: string | null;
+  targetWorkspaceDecision?: WorkspaceDecisionRecord | null;
   targetProjectId?: string | null;
   targetProjectConfidence?: number | null;
   targetProjectReason?: string | null;
+  /**
+   * The honest destination block — where the capture lands and, separately,
+   * what the AI would SUGGEST. Read it through `headlessPlacementFields` /
+   * `deriveWorkspacePlacementView`, never by digging at `targetWorkspaceId`
+   * (which mixes a deterministic placement and an AI guess into one field).
+   * Absent on an older pod.
+   */
+  placement?: CapturePlacement | null;
   /** True when the IS structurer is down and the server returned a raw fallback. */
   degraded?: boolean;
   degradedReason?: DegradedReason;
@@ -112,7 +347,18 @@ export interface ExecuteResult {
   proposalId?: string;
   reviewUrl?: string;
   reviewPath?: string;
-  movedToWorkspace?: string | null;
+  /**
+   * The AI's outstanding "move to X?" suggestion. NOTHING was moved — the
+   * capture landed where it would have without the AI; re-file with an
+   * explicit workspace to accept it. (This replaced `movedToWorkspace`, which
+   * claimed a move the ladder never performs.)
+   */
+  pendingWorkspaceSwitch?: {
+    suggestedWorkspaceId: string;
+    suggestedWorkspaceName: string | null;
+    reason: string | null;
+    confidence: number | null;
+  } | null;
   message?: string;
   /**
    * Disposition of the ORIGINAL file, present only when the caller sent
@@ -141,7 +387,16 @@ export interface CaptureExecuteOutcome {
   relationsCreated: number;
   proposalId?: string;
   reviewUrl?: string;
-  movedToWorkspace?: string;
+  /**
+   * The AI suggested another workspace and the pod did NOT move anything —
+   * a proposal for the caller to confirm, never a receipt of a move.
+   */
+  pendingWorkspaceSwitch?: {
+    suggestedWorkspaceId: string;
+    suggestedWorkspaceName: string | null;
+    reason: string | null;
+    confidence: number | null;
+  };
 }
 
 /**
@@ -160,10 +415,27 @@ export function readCaptureExecute(res: ExecuteResult): CaptureExecuteOutcome {
     relationsCreated: Array.isArray(res.relations) ? res.relations.length : 0,
     proposalId: res.proposalId ? String(res.proposalId) : undefined,
     reviewUrl: res.reviewUrl ? String(res.reviewUrl) : undefined,
-    movedToWorkspace: res.movedToWorkspace
-      ? String(res.movedToWorkspace)
-      : undefined,
+    ...(res.pendingWorkspaceSwitch?.suggestedWorkspaceId
+      ? { pendingWorkspaceSwitch: res.pendingWorkspaceSwitch }
+      : {}),
   };
+}
+
+/**
+ * The one line every CLI surface prints for an outstanding workspace
+ * suggestion. It says what to DO (re-file with `--workspace`), because the pod
+ * moved nothing — the old "→ filed into workspace X" line reported a move that
+ * never happened.
+ */
+export function formatPendingWorkspaceSwitch(
+  outcome: Pick<CaptureExecuteOutcome, "pendingWorkspaceSwitch">
+): string | null {
+  const s = outcome.pendingWorkspaceSwitch;
+  if (!s) return null;
+  const label = s.suggestedWorkspaceName || s.suggestedWorkspaceId;
+  const conf =
+    typeof s.confidence === "number" ? ` (${Math.round(s.confidence * 100)}%)` : "";
+  return `AI suggests workspace ${label}${conf} — nothing was moved. Re-file with --workspace ${s.suggestedWorkspaceId} to accept.`;
 }
 
 /** True when the structure step degraded (nothing usable came back). */
@@ -187,9 +459,11 @@ export type DegradedReason =
   | "is_auth_error"
   | "is_invalid_response"
   | "is_empty_result"
+  | "llm_budget_exceeded"
   | "pdf_scanned_needs_ocr"
   | "pdf_missing_binary"
   | "vision_provider_not_configured"
+  | "vision_provider_failed"
   | "image_missing_binary"
   | "transcription_provider_not_configured"
   | "audio_missing_binary"
@@ -206,7 +480,7 @@ export type DegradedReason =
  * `@synap-core/capture-pipeline`'s `describeDegradedReason` is the existing
  * one-door for this copy, and it is the RIGHT door — but the CLI is a separate
  * pnpm workspace whose only Synap runtime dependencies are
- * `@synap/hub-rest-client` (a file: link into synap-backend) and
+ * `@synap-core/hub-rest-client` (a file: link into synap-backend) and
  * `@synap-core/workspace-templates`. It cannot reach a `synap-app` package
  * without a package.json/lockfile change. Same reason the `StructureResult`
  * mirror above is local.
@@ -230,6 +504,12 @@ export function describeDegradedReason(reason: DegradedReason | undefined): {
         detail:
           "This pod's Intelligence Service rejected its credentials. Check them with `synap doctor`, then re-run this import.",
       };
+    case "llm_budget_exceeded":
+      return {
+        title: "The monthly AI budget is used up",
+        detail:
+          "The Intelligence Service's monthly token budget is spent, so nothing was created. Re-run this import once the budget resets next month or an operator raises it.",
+      };
     case "pdf_scanned_needs_ocr":
       return {
         title: "This PDF has no text layer",
@@ -246,6 +526,12 @@ export function describeDegradedReason(reason: DegradedReason | undefined): {
         title: "Image reading isn't set up on this pod",
         detail:
           "No vision-capable model is configured, so images can't be described. Configure one in Settings → Intelligence; until then keep the original with `synap import --keep-raw <file>`.",
+      };
+    case "vision_provider_failed":
+      return {
+        title: "Couldn't reach the AI that reads images",
+        detail:
+          "A vision model is configured but the call failed (an outage, an unfunded key or an unknown model). Re-run this import later; `synap doctor` checks the pod.",
       };
     case "image_missing_binary":
       return {

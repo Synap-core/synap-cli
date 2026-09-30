@@ -187,11 +187,11 @@ export async function orient(opts: BaseOpts): Promise<void> {
       console.log(`  Workspace: ${cfg.workspaceId} ${chalk.dim("(active — use 'synap use <id>' to change)")}`);
     }
 
-    // ── Projects (companies / initiatives) — the primary lens ───────────────
+    // ── Projects (commitments) — the primary lens ────────────────────────────
     log.blank();
     log.heading("Projects");
     if (projList.length === 0) {
-      log.dim("No projects yet — a project is a company/initiative that ties workspaces together.");
+      log.dim("No projects yet — a project is a commitment (what you drive, with whom); it spans workspaces and ends when the commitment ends.");
     } else {
       for (const p of projList) {
         const isActive = p.id === activeProjectId;

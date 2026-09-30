@@ -119,7 +119,7 @@ function sectionGovernance(): void {
 
 function sectionTools(): void {
   console.log(chalk.bold("\n## Tools & External Services"));
-  console.log(chalk.dim("  39 Nango-powered integrations: Google, GitHub, Notion, Linear, Slack, Jira, …"));
+  console.log(chalk.dim("  External services connect through the pod's connection broker (Google, GitHub, Notion, …)."));
   console.log("");
   console.log(`  ${chalk.cyan("synap tools list")}            ${chalk.dim("→ available tools + connection status")}`);
   console.log(`  ${chalk.cyan("synap cap list")}               ${chalk.dim("→ capabilities, one row per pack, with status + connection")}`);

@@ -61,7 +61,7 @@ import {
   type CpMineRow,
   type TierInfo,
 } from "../lib/cp-packages.js";
-import { fetchInstalledSlugs, fetchInstalledTemplates, fetchInstalledTemplatesStrict, fetchWorkspaceAttachments, fetchWorkspaceAttachmentsStrict, verifyStampLanded, type InstalledTemplateInfo, type WorkspaceAttachment } from "../lib/installed.js";
+import { fetchInstalledSlugs, fetchInstalledTemplates, fetchInstalledInventory, fetchInstalledInventoryStrict, installedRowsToTemplates, fetchWorkspaceAttachments, fetchWorkspaceAttachmentsStrict, verifyStampLanded, INSTALLED_KINDS, type InstalledKind, type InstalledRow, type InstalledTemplateInfo, type WorkspaceAttachment } from "../lib/installed.js";
 import { isSuite } from "../lib/suite.js";
 import { capabilityAdd } from "./capability.js";
 import { bundledTemplatesVersion } from "../lib/bundle-version.js";
@@ -209,13 +209,21 @@ export async function buildMarketCatalog(filters?: PackageFilters): Promise<Mark
  * `marketInstallKind` honest against the pod's zod enum across repos.
  */
 const KIND_HEADINGS: Record<string, string> = {
-  capability: "Capabilities",
-  skill: "Skills",
-  workflow: "Automations",
+  capability: "Tools",
+  skill: "Tools",
+  // The CP publish vocabulary calls it `workflow`; the pod's install ledger
+  // (`GET /installed`) calls the same thing `automation`. Both tokens reach
+  // `kindHeading()` — `market --list` speaks CP, `market installed` speaks pod —
+  // so both are mapped, to the ONE plural the registry says.
+  workflow: "Rules",
+  automation: "Rules",
   view: "Views",
   cell: "Cards",
-  workspace: "Workspaces",
+  workspace: "Spaces",
 };
+
+/** Max width of the NAME column in `market installed` — see `displayName`. */
+const NAME_COL_MAX = 44;
 
 function kindHeading(kind: string): string {
   return KIND_HEADINGS[kind] ?? humanizeKindToken(kind);
@@ -426,11 +434,23 @@ export interface WorkspaceApplyResult {
   layers?: InstallLayerReport[];
 }
 
-/** One install layer's outcome, as the pod reports it. */
+/**
+ * One install layer's outcome, as the pod reports it.
+ *
+ * ⚠️ The failure text field is `message`, NOT `detail`. The pod's SSOT
+ * (`InstallLayerReport` in `@synap/database`'s
+ * `reconcile-workspace-from-definition.ts`) declares `message`, and all four
+ * producers write it — `summarizePostWorkspaceLayers`
+ * (`services/capabilities/install-layers.ts`, the ONE derivation) plus the three
+ * hand-pushed failed layers in `routers/workspaces/definition-engine.ts`. This
+ * mirror declared `detail`, a field the wire never carries — so `printLayerOutcomes`
+ * printed "no detail reported" on EVERY failed layer, and because the mirror is
+ * local, tsc could never see the drift.
+ */
 export interface InstallLayerReport {
   layer?: string;
   status?: string;
-  detail?: string;
+  message?: string;
 }
 
 /**
@@ -464,7 +484,7 @@ export function printLayerOutcomes(layers: InstallLayerReport[] | undefined): vo
   const failed = (layers ?? []).filter((l) => l?.status === "failed");
   if (failed.length === 0) return;
   for (const l of failed) {
-    log.error(`${l.layer ?? "(unnamed layer)"} — ${l.detail ?? "no detail reported"}`);
+    log.error(`${l.layer ?? "(unnamed layer)"} — ${l.message ?? "no detail reported"}`);
   }
   log.hint(
     "The workspace itself was created. Re-run the install to retry the failed layer(s); nothing above is retried automatically.",
@@ -1494,6 +1514,12 @@ export function computeUpdates(installedTemplates: InstalledTemplateInfo[], cat:
   });
 }
 
+/** First check per slug, order preserved — an update is applied per PACKAGE, not per installed object. */
+export function dedupeBySlug(checks: UpdateCheck[]): UpdateCheck[] {
+  const seen = new Set<string>();
+  return checks.filter((c) => (seen.has(c.slug) ? false : (seen.add(c.slug), true)));
+}
+
 /**
  * Apply one package via the SAME door `marketInstall` uses
  * (`POST /packages/apply`) — for an already-installed slug this re-runs the
@@ -1616,8 +1642,15 @@ export async function marketUpdate(
   // pod is empty, that reads as data loss) from "genuinely nothing installed".
   const cat = await buildMarketCatalog();
   let installedTemplates: InstalledTemplateInfo[];
+  // Whether the pod answered from the ONE read door (`GET /installed`, all six
+  // kinds) or is old enough that only workspace packages were visible. An old
+  // pod is not an empty pod — say which, rather than letting a narrower list
+  // read as the whole truth.
+  let degraded = false;
   try {
-    installedTemplates = await fetchInstalledTemplatesStrict();
+    const inv = await fetchInstalledInventoryStrict();
+    installedTemplates = installedRowsToTemplates(inv.rows);
+    degraded = inv.degraded;
   } catch (e) {
     // Unreachable ≠ success — a script checking `$?` (or `&&`-chaining) must see
     // failure, not exit 0, even though the JSON payload also carries the reason.
@@ -1632,17 +1665,29 @@ export async function marketUpdate(
     return;
   }
 
+  const degradedNote = degraded
+    ? "This pod does not serve GET /api/hub/installed — only workspace packages were checked. Capability / view / skill / automation / card installs were NOT (upgrade the pod to include them)."
+    : undefined;
+
   if (installedTemplates.length === 0) {
     if (opts.json) {
-      console.log(JSON.stringify({ checks: [], loggedIn: cat.loggedIn }, null, 2));
+      console.log(
+        JSON.stringify({ checks: [], loggedIn: cat.loggedIn, degraded, ...(degradedNote ? { degradedNote } : {}) }, null, 2)
+      );
       return;
     }
     log.warn("No installed packages found on this pod.");
+    if (degradedNote) log.dim(degradedNote);
     log.hint("Install one: synap market install <slug>");
     return;
   }
 
-  let checks = computeUpdates(installedTemplates, cat);
+  // ONE ROW PER SLUG. `GET /installed` reports one row per installed OBJECT —
+  // a views pack that installed four views is four rows — and an update is
+  // applied per PACKAGE, not per object. Without this the preview listed
+  // `task-views-pack` four times and the "N up to date" tally counted it four
+  // times. `market installed` has always deduped the same way.
+  let checks = dedupeBySlug(computeUpdates(installedTemplates, cat));
   const entryBySlug = new Map(cat.entries.map((e) => [e.slug, e]));
   const explicitSlugs = !!slugsArg && slugsArg.length > 0;
   let unknownSlugs: string[] = [];
@@ -1686,11 +1731,16 @@ export async function marketUpdate(
     log.heading("  Installed packages");
     log.blank();
     for (const c of checks) {
-      const label = c.noVersionInfo
-        ? noVersionLabel(entryBySlug.get(c.slug)?.isPrivate ?? false, cat.loggedIn)
-        : c.updateAvailable
-          ? chalk.yellow(`update available  `) + chalk.dim(c.installedVersion) + " → " + c.latestVersion
-          : chalk.green("up to date");
+      // ONE label door. This was a hand-rolled second copy that diverged from
+      // `installedStatusLabel` in two ways that both LIED: it had no cache-cold
+      // branch (so a pod with no catalog version to compare against printed a
+      // green "up to date" nothing had verified) and no hash-version branch (so
+      // a content change read as "update available").
+      const label = installedStatusLabel(
+        c,
+        entryBySlug.get(c.slug)?.isPrivate ?? false,
+        cat.loggedIn
+      );
       console.log("    " + chalk.cyan(c.slug.padEnd(28)) + label);
     }
     log.blank();
@@ -1699,6 +1749,7 @@ export async function marketUpdate(
         `${noVersionInfo.length} installed without a version stamp — can't check ${noVersionInfo.length === 1 ? "it" : "them"} for updates.`
       );
     }
+    if (degradedNote) log.dim(degradedNote);
   }
 
   if (withUpdates.length === 0) {
@@ -1973,14 +2024,26 @@ async function buildEdgesOf(
   return (slug: string) => cache.get(slug) ?? bundledEdgesOf(slug);
 }
 
-/** `CompositionInstalledEntry[]` from the Hub's installed-templates rows — the shape both `--tree` and `--layers` feed the engine. */
+/**
+ * `CompositionInstalledEntry[]` from the Hub's installed-templates rows — the
+ * shape both `--tree` and `--layers` feed the engine.
+ *
+ * POD-GLOBAL rows (`workspaceId: null` — a capability/cell/skill installed with
+ * no owning workspace) are dropped: `CompositionInstalledEntry` is
+ * workspace-keyed by construction, and the composition views answer "which
+ * workspace does this template land in", which a pod-wide row has no answer to.
+ * They are still listed by the flat `market installed` table, which is where
+ * they belong.
+ */
 function toInstalledEntries(installedTemplates: InstalledTemplateInfo[]): CompositionInstalledEntry[] {
-  return installedTemplates.map((t) => ({
-    slug: t.slug,
-    workspaceId: t.workspaceId,
-    workspaceName: t.workspaceName,
-    version: t.version,
-  }));
+  return installedTemplates
+    .filter((t): t is InstalledTemplateInfo & { workspaceId: string } => t.workspaceId != null)
+    .map((t) => ({
+      slug: t.slug,
+      workspaceId: t.workspaceId,
+      workspaceName: t.workspaceName,
+      version: t.version,
+    }));
 }
 
 // ── `synap market installed --tree` — nested composition view ──────────────
@@ -2090,7 +2153,7 @@ export async function buildCompositionTrees(
       relation: edge.relation,
       depKind: edge.depKind,
       installed: !!installedInfo,
-      workspaceId: installedInfo?.workspaceId,
+      workspaceId: installedInfo?.workspaceId ?? undefined,
       workspaceName: installedInfo?.workspaceName,
       installedVersion: check?.installedVersion,
       latestVersion: check?.latestVersion ?? null,
@@ -2308,20 +2371,102 @@ function printLayersGraph(graph: CompositionGraph, cat: MarketCatalog): void {
  * (`market update`'s own drift check), never writes anything. Pairs with
  * `market update` to apply what this surfaces.
  */
+/** Fan-out bucket for a POD-GLOBAL row — a row with no owning workspace. */
+const POD_WIDE = "\u0000pod-wide";
+
+/**
+ * "3 workspaces" / "pod-wide" / "2 workspaces · pod-wide" — where a slug landed.
+ *
+ * Counts DISTINCT placements, not rows. Since `GET /installed` reports one row
+ * per installed OBJECT (four `task-views-pack` views across two workspaces is
+ * four rows), tallying rows would have printed "4 workspaces" for two. The
+ * workspace-kind rows this replaced are one-per-workspace either way, so their
+ * output is unchanged.
+ */
+export function fanOutLabel(placements: Set<string>): string {
+  const podWide = placements.has(POD_WIDE);
+  const wsCount = placements.size - (podWide ? 1 : 0);
+  const parts: string[] = [];
+  if (wsCount > 0) parts.push(`${wsCount} workspace${wsCount === 1 ? "" : "s"}`);
+  if (podWide) parts.push("pod-wide");
+  return parts.join(" · ");
+}
+
+/**
+ * One INVENTORY-ONLY row — installed, source-linked, but NOT to a package slug,
+ * so `market update` structurally cannot act on it. Every `capability` row is
+ * one of these (its link is a CP template key), as is any cell whose type key
+ * carried the `"unknown"` sentinel.
+ *
+ * They are listed, never hidden: an unlisted install is exactly the blindness
+ * this door was built to remove. They are just kept OUT of the update table so
+ * nothing offers a slug the catalog does not have.
+ */
+export interface UnlinkedInstall {
+  kind: InstalledKind;
+  /** The CP template key, or null when the row has no source link at all. */
+  templateKey: string | null;
+  name: string;
+  placements: Set<string>;
+  note?: string;
+}
+
+/** Dedupe the not-package-linked rows by `kind + templateKey` (falling back to the row name). */
+export function collectUnlinked(rows: InstalledRow[]): UnlinkedInstall[] {
+  const byKey = new Map<string, UnlinkedInstall>();
+  for (const r of rows) {
+    if (r.packageSlug) continue;
+    const key = `${r.kind}::${r.templateKey ?? r.name}`;
+    const existing = byKey.get(key);
+    const placement = r.workspaceId ?? POD_WIDE;
+    if (existing) {
+      existing.placements.add(placement);
+      continue;
+    }
+    byKey.set(key, {
+      kind: r.kind,
+      templateKey: r.templateKey,
+      name: r.templateKey ?? r.name,
+      placements: new Set([placement]),
+      ...(r.note ? { note: r.note } : {}),
+    });
+  }
+  return [...byKey.values()];
+}
+
 export async function marketInstalled(opts: {
   json?: boolean;
   outdated?: boolean;
   tree?: boolean;
   layers?: boolean;
 }): Promise<void> {
-  const [installedTemplates, cat] = await Promise.all([fetchInstalledTemplates(), buildMarketCatalog()]);
+  // THE ONE READ DOOR. `GET /api/hub/installed` unions all four install
+  // ledgers; before this, `market installed` asked `GET /workspaces` and so
+  // reported workspace packages ONLY — a pod-wide capability, cell, skill or
+  // view install was invisible here, to `market update`, and to every drift
+  // marker. On a pod too old to serve it, `fetchInstalledInventory` degrades to
+  // exactly the old workspace-only behaviour and says so (`degraded`).
+  const [inv, cat] = await Promise.all([fetchInstalledInventory(), buildMarketCatalog()]);
+  const installedTemplates = installedRowsToTemplates(inv.rows);
+  const unlinked = collectUnlinked(inv.rows);
 
-  if (installedTemplates.length === 0) {
+  const degradedNote = inv.degraded
+    ? "This pod does not serve GET /api/hub/installed — showing workspace packages only. Capability / view / skill / automation / card installs are NOT listed (upgrade the pod to see them)."
+    : undefined;
+
+  if (installedTemplates.length === 0 && unlinked.length === 0) {
     if (opts.json) {
-      console.log(JSON.stringify({ rows: [], loggedIn: cat.loggedIn }, null, 2));
+      console.log(
+        JSON.stringify(
+          { rows: [], unlinked: [], loggedIn: cat.loggedIn, degraded: inv.degraded, degradedNote },
+          null,
+          2
+        )
+      );
       return;
     }
     log.warn("No installed packages found on this pod.");
+    if (degradedNote) log.dim(degradedNote);
     log.hint("Browse what's available: synap market --list");
     return;
   }
@@ -2329,12 +2474,22 @@ export async function marketInstalled(opts: {
   const checks = computeUpdates(installedTemplates, cat);
 
   // Multiple workspaces can install the same slug (a template composed onto
-  // several bases, or the same additive pack in >1 workspace) — one row per
-  // DISTINCT slug, with `workspaceCount` carrying the fan-out.
-  const workspaceCountBySlug = new Map<string, number>();
+  // several bases, the same additive pack in >1 workspace, a views pack whose
+  // views span workspaces) — one row per DISTINCT slug, with the fan-out
+  // carried as the set of PLACEMENTS it landed in.
+  const placementsBySlug = new Map<string, Set<string>>();
+  const kindBySlug = new Map<string, InstalledKind>();
   for (const t of installedTemplates) {
-    workspaceCountBySlug.set(t.slug, (workspaceCountBySlug.get(t.slug) ?? 0) + 1);
+    const set = placementsBySlug.get(t.slug) ?? new Set<string>();
+    set.add(t.workspaceId ?? POD_WIDE);
+    placementsBySlug.set(t.slug, set);
+    if (!kindBySlug.has(t.slug)) kindBySlug.set(t.slug, t.kind ?? "workspace");
   }
+  const workspaceCountBySlug = new Map(
+    [...placementsBySlug].map(([slug, set]) => [slug, set.size] as const)
+  );
+  const placementLabel = (slug: string): string =>
+    fanOutLabel(placementsBySlug.get(slug) ?? new Set());
   const seen = new Set<string>();
   let rows = checks.filter((c) => {
     if (seen.has(c.slug)) return false;
@@ -2358,6 +2513,7 @@ export async function marketInstalled(opts: {
             layers: graph.layers.map((bucket) => bucket.map((n) => n.slug)),
             cycles: graph.cycles,
             loggedIn: cat.loggedIn,
+            degraded: inv.degraded,
             nextSteps: steps,
           },
           null,
@@ -2373,6 +2529,7 @@ export async function marketInstalled(opts: {
     }
 
     printLayersGraph(graph, cat);
+    if (degradedNote) log.dim(degradedNote);
     if (!cat.loggedIn) log.dim("Not logged in — private template updates aren't visible. Run: synap login");
     renderNextSteps(steps);
     return;
@@ -2401,6 +2558,7 @@ export async function marketInstalled(opts: {
               };
             }),
             loggedIn: cat.loggedIn,
+            degraded: inv.degraded,
             nextSteps: steps,
           },
           null,
@@ -2430,7 +2588,6 @@ export async function marketInstalled(opts: {
         const entry = entryBySlug.get(c.slug);
         const name = entry?.name ?? c.slug;
         const priv = entry?.isPrivate ? chalk.yellow("private") : "";
-        const wsCount = workspaceCountBySlug.get(c.slug) ?? 0;
         console.log(
           "    " +
             chalk.bold(name.padEnd(nameW)) +
@@ -2439,12 +2596,13 @@ export async function marketInstalled(opts: {
             "  " +
             priv +
             (priv ? "  " : "") +
-            chalk.dim(`${wsCount} workspace${wsCount === 1 ? "" : "s"}`)
+            chalk.dim(placementLabel(c.slug))
         );
       }
       log.blank();
     }
 
+    if (degradedNote) log.dim(degradedNote);
     if (!cat.loggedIn) log.dim("Not logged in — private template updates aren't visible. Run: synap login");
     renderNextSteps(steps);
     return;
@@ -2459,6 +2617,9 @@ export async function marketInstalled(opts: {
             const entry = entryBySlug.get(c.slug);
             return {
               slug: c.slug,
+              // Which install ledger this row came from. Absent kinds mean the
+              // pod is older than `GET /installed` — see `degraded`.
+              kind: kindBySlug.get(c.slug) ?? "workspace",
               name: entry?.name ?? c.slug,
               installedVersion: c.installedVersion,
               latestVersion: c.latestVersion ?? null,
@@ -2467,9 +2628,24 @@ export async function marketInstalled(opts: {
               isPrivate: entry?.isPrivate ?? false,
               isHashVersion: isHashVersion(c.installedVersion) || isHashVersion(c.latestVersion ?? ""),
               workspaceCount: workspaceCountBySlug.get(c.slug) ?? 0,
+              placement: placementLabel(c.slug),
             };
           }),
+          // Installed but not package-source-linked: no slug, so no update
+          // path. `drift` is NOT COMPUTED for these — never reported as clean.
+          unlinked: opts.outdated
+            ? []
+            : unlinked.map((u) => ({
+                kind: u.kind,
+                templateKey: u.templateKey,
+                name: u.name,
+                driftComputed: false,
+                placement: fanOutLabel(u.placements),
+                ...(u.note ? { note: u.note } : {}),
+              })),
           loggedIn: cat.loggedIn,
+          degraded: inv.degraded,
+          ...(degradedNote ? { degradedNote } : {}),
           nextSteps: steps,
         },
         null,
@@ -2479,35 +2655,89 @@ export async function marketInstalled(opts: {
     return;
   }
 
-  if (rows.length === 0) {
+  if (rows.length === 0 && (opts.outdated || unlinked.length === 0)) {
     log.success(opts.outdated ? "Nothing outdated." : "Nothing installed.");
+    if (degradedNote) log.dim(degradedNote);
     return;
   }
 
   log.heading("  Installed packages");
-  log.blank();
 
-  const nameW = Math.max(4, ...rows.map((c) => (entryBySlug.get(c.slug)?.name ?? c.slug).length)) + 2;
-  const slugW = Math.max(4, ...rows.map((c) => c.slug.length)) + 2;
+  // Widths are computed across ALL rows (and the unlinked block below) so the
+  // per-kind groups stay in one column grid rather than each re-aligning.
+  //
+  // CAPPED: some CP catalog entries carry a sentence where a name belongs (the
+  // view packs' `name` is their whole description), which uncapped pushed the
+  // status column ~90 columns right and wrapped every line. The cap truncates
+  // the label; it never truncates the SLUG, which is the identifier a user
+  // retypes into `market update`.
+  const displayName = (raw: string): string =>
+    raw.length > NAME_COL_MAX ? raw.slice(0, NAME_COL_MAX - 1) + "…" : raw;
+  const labelLengths = [
+    ...rows.map((c) => displayName(entryBySlug.get(c.slug)?.name ?? c.slug).length),
+    ...unlinked.map((u) => displayName(u.name).length),
+  ];
+  const nameW = Math.max(4, ...labelLengths) + 2;
+  const slugW = Math.max(4, ...rows.map((c) => c.slug.length), ...unlinked.map((u) => u.name.length)) + 2;
 
-  for (const c of rows) {
-    const entry = entryBySlug.get(c.slug);
-    const name = entry?.name ?? c.slug;
-    const priv = entry?.isPrivate ? chalk.yellow("private") : "";
-    const wsCount = workspaceCountBySlug.get(c.slug) ?? 0;
-    console.log(
-      "    " +
-        chalk.bold(name.padEnd(nameW)) +
-        chalk.cyan(c.slug.padEnd(slugW)) +
-        installedStatusLabel(c, entry?.isPrivate ?? false, cat.loggedIn) +
-        "  " +
-        priv +
-        (priv ? "  " : "") +
-        chalk.dim(`${wsCount} workspace${wsCount === 1 ? "" : "s"}`)
-    );
+  // Grouped by the kind its ledger reports, in the canonical kind order, with
+  // headings from the pinned `KIND_HEADINGS` vocabulary (Card, never "cell";
+  // Automations, never "Workflow").
+  for (const kind of INSTALLED_KINDS) {
+    const group = rows.filter((c) => (kindBySlug.get(c.slug) ?? "workspace") === kind);
+    if (group.length === 0) continue;
+    log.heading(`  ${kindHeading(kind)}`);
+    for (const c of group) {
+      const entry = entryBySlug.get(c.slug);
+      const name = displayName(entry?.name ?? c.slug);
+      const priv = entry?.isPrivate ? chalk.yellow("private") : "";
+      console.log(
+        "    " +
+          chalk.bold(name.padEnd(nameW)) +
+          chalk.cyan(c.slug.padEnd(slugW)) +
+          installedStatusLabel(c, entry?.isPrivate ?? false, cat.loggedIn) +
+          "  " +
+          priv +
+          (priv ? "  " : "") +
+          chalk.dim(placementLabel(c.slug))
+      );
+    }
+    log.blank();
   }
-  log.blank();
 
+  // Installed, but with no package slug to update THROUGH — listed so they are
+  // not invisible, kept out of the table above so nothing offers `market update
+  // <templateKey>`, which the catalog would miss.
+  if (!opts.outdated && unlinked.length > 0) {
+    log.heading("  Installed, not from a package");
+    log.dim("    source-linked to a Control-Plane template, not a catalog slug — `market update` can't act on these");
+    for (const kind of INSTALLED_KINDS) {
+      const group = unlinked.filter((u) => u.kind === kind);
+      if (group.length === 0) continue;
+      log.blank();
+      log.heading(`  ${kindHeading(kind)}`);
+      for (const u of group) {
+        console.log(
+          "    " +
+            chalk.bold(displayName(u.name).padEnd(nameW)) +
+            // No slug column value: there IS no package slug for these rows,
+            // and printing the template key twice (it is already the label)
+            // invites pasting it into `market update`, which would miss.
+            chalk.dim("—".padEnd(slugW)) +
+            chalk.dim("drift not computed") +
+            "  " +
+            chalk.dim(fanOutLabel(u.placements)) +
+            // The pod's own explanation of WHY drift is unknown for this row —
+            // "not computed" without the reason is where a user gives up and
+            // assumes it means clean.
+            (u.note ? chalk.dim(`  ${u.note}`) : "")
+        );
+      }
+    }
+    log.blank();
+  }
+
+  if (degradedNote) log.dim(degradedNote);
   if (!cat.loggedIn) log.dim("Not logged in — private template updates aren't visible. Run: synap login");
   renderNextSteps(FLOW.afterMarketInstalledCheck(rows.filter((c) => c.updateAvailable).map((c) => c.slug)));
 }

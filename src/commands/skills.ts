@@ -234,6 +234,26 @@ export async function verifyCode(
     // non-fatal — still print the result
   }
 
+  // ALSO post it as evidence under key "codeQuality", so a `codeQuality`
+  // acceptance criterion (check.kind: "evidence", evidenceKey: "codeQuality")
+  // is graded by this same run. Distinct door from the PATCH above: the
+  // browser's VerificationBadge still reads `verificationReport` directly,
+  // and the pod now MERGES it at close rather than replacing it, so neither
+  // write erases the other.
+  try {
+    await hubPost(
+      `/focus-sessions/${sessionId}/evidence`,
+      {
+        evidence: {
+          codeQuality: { passed, detail: output.slice(0, 2000) },
+        },
+      },
+      cfg
+    );
+  } catch {
+    // non-fatal — still print the result
+  }
+
   if (opts.json) {
     console.log(JSON.stringify({ passed, cmd, elapsedMs, output }, null, 2));
     return;

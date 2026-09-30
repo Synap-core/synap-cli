@@ -20,6 +20,15 @@
  *     "definition": { "cells": [...] } | { "views": [...] }
  *   }
  *
+ * A `cells[]` entry may carry `codeFile` (a path to the cell's ESM entry
+ * source, resolved relative to the package file) INSTEAD of an inline `code`
+ * string — the indirection an author needs to publish from a real source file
+ * rather than hand-pasting a minified bundle into JSON. `codeFile` is CLI-only:
+ * the CP's `packageDefinitionSchema.cells[]` has no such slot (only `code`,
+ * required), so `resolveCellCodeFiles` bundles it (via `cell.ts`'s
+ * `buildCellFromSource` — the SAME esbuild path `cell build` uses) and inlines
+ * the result into `code` before the definition ever reaches `publishPackage`.
+ *
  * ✅ RESOLVED 2026-09-04 — this block used to claim that
  * `packageDefinitionSchema` requires `definition.profiles` to be non-empty
  * UNCONDITIONALLY, so a profile-less view/cell/skill package would 400 against
@@ -40,10 +49,16 @@
  * `validateStandalonePackage` reports this rather than inventing a shape.
  */
 
-import { readFileSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
+import { dirname, resolve as resolvePath } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { validateFlowDefinition } from "@synap-core/workspace-templates";
 import type { PackageDefinitionLike } from "./template-file.js";
+import {
+  CONTENT_KINDS,
+  parseContentKind,
+  buildCellFromSource,
+} from "../commands/cell.js";
 
 /**
  * The non-workspace package types this file knows how to shape. Mirrors the
@@ -168,6 +183,7 @@ export function parseStandalonePackageFile(
  */
 export function validateStandalonePackage(
   pkg: StandalonePackageFile,
+  opts: { baseDir?: string } = {},
 ): string[] {
   const errors: string[] = [];
   if (pkg.category === "cell") {
@@ -176,6 +192,116 @@ export function validateStandalonePackage(
       errors.push(
         `category "cell" requires a non-empty definition.cells[] array.`,
       );
+    } else {
+      cells.forEach((raw, i) => {
+        const c = (raw && typeof raw === "object" ? raw : {}) as Record<
+          string,
+          unknown
+        >;
+        const label =
+          typeof c.key === "string" && c.key.trim()
+            ? `cells[${i}] ("${c.key}")`
+            : `cells[${i}]`;
+
+        const hasCode = typeof c.code === "string" && c.code.trim().length > 0;
+        const hasCodeFile =
+          typeof c.codeFile === "string" && c.codeFile.trim().length > 0;
+        if (!hasCode && !hasCodeFile) {
+          errors.push(
+            `${label}: needs "code" (inline ESM source) or "codeFile" (a path to a source/bundle file, resolved and inlined at publish time).`,
+          );
+        }
+        if (hasCodeFile && opts.baseDir) {
+          const abs = resolvePath(opts.baseDir, c.codeFile as string);
+          if (!existsSync(abs)) {
+            errors.push(
+              `${label}: codeFile "${c.codeFile as string}" not found (resolved to ${abs}).`,
+            );
+          }
+        }
+
+        // Both of these are `.optional()` on the CP's `packageDefinitionSchema`
+        // (routes/packages.ts), so an omitted or mistyped value is stripped
+        // SILENTLY — not rejected — and the cell arrives at the pod as the
+        // inert "widget" default with no view-renderer affinity: placeable,
+        // permanently unpickable, and nothing downstream ever reports it (see
+        // `cell.ts`'s SELECTABILITY note, and `kind-package-scaffold-usable
+        // .test.ts`, which is exactly why the scaffold always sets both).
+        if (typeof c.contentKind !== "string" || !parseContentKind(c.contentKind)) {
+          errors.push(
+            `${label}: "contentKind" must be one of: ${CONTENT_KINDS.join(", ")} (got ${JSON.stringify(c.contentKind)}).`,
+          );
+        }
+        // `viewTypes` is OPTIONAL, and deliberately so: it is view-renderer
+        // affinity, a DIFFERENT axis from `contentKind`'s renderer slot. An
+        // `entity-detail` cell is a profile renderer and has no business
+        // declaring view types — the scaffold says so in its own comment
+        // ("remove if this cell is not a view renderer").
+        //
+        // ── VALIDATOR vs DOOR: a DELIBERATE asymmetry, do not "fix" it ──
+        // This validator requires `contentKind` UNCONDITIONALLY. The install
+        // door does NOT: `resolveCellContentKind` infers "collection" from a
+        // non-empty `viewTypes` when `contentKind` is absent.
+        //
+        // That is strict-in / permissive-out, on purpose:
+        //   • AUTHORING (here) is the last cheap moment to catch a mistake. An
+        //     omitted `contentKind` silently defaults the stored column to
+        //     "widget" — placeable, but never offered in the renderer slot the
+        //     cell was built for. Failing at `market validate` costs the author
+        //     seconds; discovering it after publish costs a republish.
+        //   • INSTALL (the door) must keep already-published packages working,
+        //     including ones authored before this rule existed. Rejecting them
+        //     there would break installs for cells nobody can now re-publish.
+        //
+        // So a package can be door-valid and validator-invalid, and that is the
+        // correct direction. Loosening this check to "match the door" would
+        // reintroduce the silent-widget trap for every new cell.
+
+        // Requiring it here would be worse than not checking: an author would
+        // add a meaningless `["list"]` to get past the validator, and that
+        // MANUFACTURES a false affinity — the cell then gets offered as a list
+        // renderer it was never built to be. That is the unpickability bug
+        // inverted, so we validate SHAPE when present and require presence only
+        // where absence is genuinely fatal.
+        if (c.viewTypes !== undefined) {
+          if (
+            !Array.isArray(c.viewTypes) ||
+            c.viewTypes.length === 0 ||
+            !c.viewTypes.every(
+              (v) => typeof v === "string" && v.trim().length > 0,
+            )
+          ) {
+            errors.push(
+              `${label}: "viewTypes", when present, must be a non-empty array of view-type strings (e.g. ["list","table"]). Omit it entirely if this cell is not a view renderer.`,
+            );
+          } else if (
+            typeof c.contentKind === "string" &&
+            parseContentKind(c.contentKind) &&
+            c.contentKind !== "collection"
+          ) {
+            // Match the door: `defineCell` rejects this same pair. `contentKind`
+            // is the renderer SLOT, `viewTypes` is view-renderer AFFINITY — a
+            // DIFFERENT axis, and a non-collection slot can never be selected by
+            // view-type affinity, so declaring both is a contradiction the
+            // author must resolve, not one this validator should coerce away
+            // (silently forcing "collection" would hand them a cell they never
+            // chose to be a view renderer). `contentKind` ABSENT is NOT this case
+            // — that is inference from silence (the door's own
+            // `resolveCellContentKind` infers "collection"), not a
+            // contradiction, and is how older cell packages install correctly.
+            errors.push(
+              `${label}: "viewTypes" is set (${JSON.stringify(c.viewTypes)}) but "contentKind" is "${c.contentKind}", not "collection" — view-type affinity only applies to a collection renderer. Drop "viewTypes", or set "contentKind": "collection".`,
+            );
+          }
+        } else if (c.contentKind === "collection") {
+          // The one case where absence IS fatal: a `collection` cell exists to
+          // render a view, so with no affinity the render chokepoint can never
+          // select it — installed and permanently unpickable.
+          errors.push(
+            `${label}: a "collection" cell must declare "viewTypes" (e.g. ["list","table"]) — without an affinity it can never be selected as a view renderer.`,
+          );
+        }
+      });
     }
   } else if (pkg.category === "view") {
     const views = pkg.definition.views;
@@ -233,6 +359,77 @@ export function validateStandalonePackage(
     );
   }
   return errors;
+}
+
+export interface ResolveCellCodeFilesResult {
+  definition: PackageDefinitionLike;
+  errors: string[];
+}
+
+/**
+ * Inline every cell's `codeFile` into `code` — the field the CP schema
+ * actually validates (`cells[].code: z.string().min(1)`, no `codeFile` slot).
+ * A no-op for anything but a `cell` package, and for a cell entry that has no
+ * `codeFile` (plain inline `code` is untouched).
+ *
+ * `codeFile` is bundled through the SAME esbuild path `cell build` uses
+ * (`buildCellFromSource`), so publishing from source needs no separate manual
+ * build step. `bundleDeps` defaults to `true` here — see `market-authoring.ts`
+ * `marketPublishStandalone` for why the DEFAULT flips only on this door.
+ * Author-declared `deps` on the cell entry win over the derived map, mirroring
+ * `cell build --deps`'s own override semantics.
+ */
+export async function resolveCellCodeFiles(
+  pkg: StandalonePackageFile,
+  baseDir: string,
+  opts: { bundleDeps?: boolean } = {},
+): Promise<ResolveCellCodeFilesResult> {
+  if (pkg.category !== "cell" || !Array.isArray(pkg.definition.cells)) {
+    return { definition: pkg.definition, errors: [] };
+  }
+  const bundleDeps = opts.bundleDeps ?? true;
+  const errors: string[] = [];
+  const resolved: unknown[] = [];
+
+  for (let i = 0; i < pkg.definition.cells.length; i++) {
+    const raw = pkg.definition.cells[i];
+    const c = (raw && typeof raw === "object" ? raw : {}) as Record<
+      string,
+      unknown
+    >;
+    if (typeof c.codeFile !== "string" || !c.codeFile.trim()) {
+      resolved.push(raw);
+      continue;
+    }
+    const label =
+      typeof c.key === "string" && c.key.trim()
+        ? `cells[${i}] ("${c.key}")`
+        : `cells[${i}]`;
+    const entry = resolvePath(baseDir, c.codeFile);
+    if (!existsSync(entry)) {
+      errors.push(
+        `${label}: codeFile "${c.codeFile}" not found (resolved to ${entry}).`,
+      );
+      resolved.push(raw);
+      continue;
+    }
+    try {
+      const built = await buildCellFromSource(entry, { bundleDeps });
+      const { codeFile: _codeFile, ...rest } = c;
+      resolved.push({
+        ...rest,
+        code: built.code,
+        deps: { ...built.deps, ...((c.deps as Record<string, string>) ?? {}) },
+      });
+    } catch (e) {
+      errors.push(
+        `${label}: failed to bundle codeFile "${c.codeFile}" — ${(e as Error).message}`,
+      );
+      resolved.push(raw);
+    }
+  }
+
+  return { definition: { ...pkg.definition, cells: resolved }, errors };
 }
 
 /**

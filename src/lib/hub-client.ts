@@ -25,7 +25,7 @@ import {
 } from "./directory-lens.js";
 import { preferClaudeCodeSurfaceKey } from "./key-source.js";
 import { samePodOrigin } from "./project-ref.js";
-import { HubRestClient } from "@synap/hub-rest-client";
+import { HubRestClient } from "@synap-core/hub-rest-client";
 import { log } from "../utils/logger.js";
 import chalk from "chalk";
 
@@ -472,6 +472,42 @@ function renderHubErrorBody(err: unknown): void {
     log.error(err.message);
     log.hint(
       "The workspace or target this run needs no longer exists on this pod. Run: synap orient"
+    );
+    return;
+  }
+  // SETUP-REQUIRED failure — the APPLY door (`POST /capabilities/apply`) returns
+  // a DUCK-TYPED body (412 for `no_connection`, 400 for `missing_field`) with
+  // `failureClass` (+ `missingFields` / `connection`) so an install that needs a
+  // human before it can apply survives as an actionable message. This is a
+  // client-ACTIONABLE, NON-retryable state — name the missing step instead of the
+  // generic status phrase below (a bare 412/400 tells the user nothing to do).
+  const setupBody = err.body as
+    | {
+        failureClass?: string;
+        missingFields?: unknown;
+        connection?: { provider?: string };
+      }
+    | undefined;
+  const failureClass = setupBody?.failureClass;
+  if (failureClass === "no_connection") {
+    const provider = setupBody?.connection?.provider;
+    log.error(
+      provider
+        ? `The "${provider}" provider isn't connected yet — connect it first (synap cap connect "${provider}").`
+        : 'A required provider isn\'t connected yet — connect it first (synap cap connect "<provider>").'
+    );
+    return;
+  }
+  if (failureClass === "missing_field") {
+    const missingFields = Array.isArray(setupBody?.missingFields)
+      ? setupBody.missingFields.filter(
+          (field): field is string => typeof field === "string"
+        )
+      : [];
+    log.error(
+      missingFields.length > 0
+        ? `Missing required value(s): ${missingFields.join(", ")}`
+        : "Missing required value(s)."
     );
     return;
   }
@@ -1146,4 +1182,4 @@ export function makeHubClient(cfg: HubConfig): HubRestClient {
   });
 }
 
-export { HubRestClient } from "@synap/hub-rest-client";
+export { HubRestClient } from "@synap-core/hub-rest-client";

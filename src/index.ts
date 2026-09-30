@@ -135,11 +135,11 @@ program
 program
   .command("connect")
   .description(
-    "Connect an AI surface (Claude Code, Cursor, Grok, Raycast, …) to a Synap pod"
+    "Connect an AI surface (Claude Code, Cursor, Grok, Raycast, ChatGPT, …) to a Synap pod"
   )
   .option(
     "--target <name>",
-    "AI surface: claude-code | claude-desktop | cursor | raycast | grok | codex | vscode | generic | … (synap connect --list)"
+    "AI surface: claude-code | claude-desktop | cursor | raycast | grok | codex | chatgpt | vscode | generic | … (synap connect --list)"
   )
   .option("--pod-url <url>", "Synap pod URL")
   .option("--api-key <key>", "Hub Protocol API key")
@@ -324,11 +324,29 @@ mcp
 
 mcp
   .command("connect [client]")
-  .description("Write the MCP config for a file-configurable client (Claude Code, Cursor, Desktop, …) — alias of `synap connect`")
+  .description("Write the MCP config for a file-configurable client (Claude Code, Cursor, Desktop, ChatGPT, …) — alias of `synap connect`")
   .option("--name <name>", "Pod profile to connect")
   .action(async (client: string | undefined, opts: { name?: string }) => {
     const { connect } = await import("./commands/connect.js");
     await connect({ target: client, name: opts.name });
+  });
+
+mcp
+  .command("connect-chatgpt")
+  .description("Connect ChatGPT (web) to Synap — API-key connector to your pod")
+  .option("--name <name>", "Pod profile to connect")
+  .action(async (opts: { name?: string }) => {
+    const { connect } = await import("./commands/connect.js");
+    await connect({ target: "chatgpt", name: opts.name });
+  });
+
+mcp
+  .command("connect-chatgpt-oauth")
+  .description("Connect ChatGPT (web) via Control Plane OAuth — multi-pod, no key to paste")
+  .option("--name <name>", "Pod profile to connect")
+  .action(async (opts: { name?: string }) => {
+    const { connect } = await import("./commands/connect.js");
+    await connect({ target: "chatgpt-oauth", name: opts.name });
   });
 
 mcp
@@ -341,6 +359,18 @@ mcp
   .action(async (opts) => {
     const { mcpConnectClaudeWeb } = await import("./commands/mcp.js");
     await mcpConnectClaudeWeb(opts);
+  });
+
+mcp
+  .command("ui-setup <client>")
+  .description("Print the exact form fields to fill in the client's MCP/Connector UI (ChatGPT, Codex, Cursor, etc.)")
+  .option("--name <name>", "Pod profile to use (default: active)")
+  .option("--workspace <id>", "Scope to a specific workspace")
+  .option("--project <id>", "Focus the agent on a project")
+  .option("--json", "Output as JSON")
+  .action(async (client: string, opts: { name?: string; workspace?: string; project?: string; json?: boolean }) => {
+    const { mcpUiSetup } = await import("./commands/mcp.js");
+    await mcpUiSetup(client, opts);
   });
 
 program
@@ -535,7 +565,7 @@ program
 // ─── project / lens (per-Claude-session scoping) ──────────────────────────────
 const project = program
   .command("project")
-  .description("Manage + focus the cross-cutting project lens (a company/initiative): list, new, use, clear");
+  .description("Manage + focus the project lens (a commitment, spanning workspaces): list, new, use, clear");
 project
   .command("list", { isDefault: true })
   .description("List projects on the active pod, with the pinned one marked (bare `synap project` runs this)")
@@ -548,7 +578,7 @@ project
   });
 project
   .command("new <name>")
-  .description("Create a project (a company/initiative) on the active pod, then guide you to pin + add to it")
+  .description("Create a project (a commitment you are driving, with whom) on the active pod, then guide you to pin + add to it")
   .option("--description <text>", "Optional one-line description")
   .option("--json", "Output as JSON (incl. nextSteps for agents)")
   .option("--pod-url <url>", "Pod URL override")
@@ -856,6 +886,58 @@ workspace
     await workspacePurge(target, opts);
   });
 
+// R8a — governed lifecycle: an agent key gets a proposal, an owner key applies.
+workspace
+  .command("archive <workspace>")
+  .description("Archive a workspace (hides it, pauses its workspace automations). Governed: agents propose")
+  .option("--reason <text>", "Why — shown to the reviewer")
+  .option("--json", "Output as JSON")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (target: string, opts) => {
+    const { workspaceArchive } = await import("./commands/workspace-ops.js");
+    await workspaceArchive(target, opts);
+  });
+
+workspace
+  .command("restore <workspace>")
+  .description("Restore an archived workspace (by id). Re-enables nothing; lists automations still paused")
+  .option("--reason <text>", "Why — shown to the reviewer")
+  .option("--json", "Output as JSON")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (target: string, opts) => {
+    const { workspaceRestore } = await import("./commands/workspace-ops.js");
+    await workspaceRestore(target, opts);
+  });
+
+workspace
+  .command("rename <workspace> <newName>")
+  .description("Rename a workspace. Governed: agents propose")
+  .option("--json", "Output as JSON")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (target: string, newName: string, opts) => {
+    const { workspaceRename } = await import("./commands/workspace-ops.js");
+    await workspaceRename(target, newName, opts);
+  });
+
+// R8a — `synap entity move`. (`get/create/set entity` stay under their verbs.)
+program
+  .command("entity")
+  .description("Entity operations: move")
+  .command("move <entityIds...>")
+  .description("Move entities into another workspace. Governed per entity: moved / proposed / errors")
+  .requiredOption("--to <workspace>", "Destination workspace id or name")
+  .option("--reason <text>", "Why they belong there — shown to the reviewer")
+  .option("--json", "Output as JSON")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (entityIds: string[], opts) => {
+    const { entityMove } = await import("./commands/workspace-ops.js");
+    await entityMove(entityIds, opts);
+  });
+
 // ─── list ─────────────────────────────────────────────────────────────────────
 
 const list = program
@@ -1061,9 +1143,12 @@ session
   .option("--workspace <id>", "Workspace that owns the session")
   .option("--project <id>", "Project that owns the session (defaults to the active project lens; the pod accepts a workspace OR a project)")
   .option("--task-id <id>", "Link session to an existing task entity")
+  .option("--track <id>", "Born inside a track (a project's method) — implies its project; filed at the track's current step")
   .option("--template <id>", "Start from a playbook (seeds currentStage from its stages)")
+  .option("--no-template", "Opt out of auto-matching a playbook — start ad-hoc")
   .option("--parent <id>", "Push from another session — records session --spawned_from--> session (the parent stays open)")
-  .option("--suspended-intent <text>", "One line naming what the PARENT was about to do, recorded on the parent")
+  .option("--suspended-intent <text>", "With --parent: this session BLOCKS the parent. One line naming what the parent was about to do; the parent waits until this session closes")
+  .option("--criteria <file.json>", "Path to a JSON file of binary acceptance criteria (SessionCriterion[])")
   .option("--json", "Output as JSON")
   .option("--pod-url <url>", "Pod URL override")
   .option("--api-key <key>", "API key override")
@@ -1076,7 +1161,9 @@ session
   .command("list", { isDefault: true })
   .description("List focus sessions in the active workspace")
   .option("--workspace <id>", "Scope to a specific workspace")
+  .option("--project <id>", "Scope to a project (its sessions across spaces)")
   .option("--status <status>", "Filter by status: active | paused | closed")
+  .option("--kind <kind>", "Filter by population: work | run | receipt | all", "all")
   .option("--limit <n>", "Max results", "20")
   .option("--json", "Output as JSON")
   .option("--pod-url <url>", "Pod URL override")
@@ -1168,6 +1255,152 @@ session
   .action(async (opts) => {
     const { sessionStatus } = await import("./commands/sessions.js");
     sessionStatus(opts);
+  });
+
+session
+  .command("evidence <key>")
+  .description("Post your own pass/fail report for one evidence-checked acceptance criterion")
+  .option("--session <id>", "Focus session ID (defaults to this terminal's active session)")
+  .option("--passed", "The criterion is satisfied")
+  .option("--failed", "The criterion is not satisfied")
+  .option("--detail <text>", "Optional note explaining the verdict")
+  .option("--json", "Output as JSON")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (key: string, opts) => {
+    const { evidenceSession } = await import("./commands/sessions.js");
+    await evidenceSession(key, opts);
+  });
+
+session
+  .command("evaluate")
+  .description("Run every pending acceptance-criterion check (evidence, capability, judge) and print the verdicts")
+  .option("--session <id>", "Focus session ID (defaults to this terminal's active session)")
+  .option("--json", "Output as JSON")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (opts) => {
+    const { evaluateSession } = await import("./commands/sessions.js");
+    await evaluateSession(opts);
+  });
+
+session
+  .command("wait <sessionId>")
+  .description(
+    "Block until the human replies in the session room, then print the reply. Exit 0 replied · 1 timeout · 2 failure (auth/network/broken read)"
+  )
+  .option(
+    "--since <iso>",
+    "Only answers strictly after this ISO timestamp (default: now — skips anything that predates this wait)"
+  )
+  .option("--timeout <duration>", "Give up after this long (e.g. 30m, 2h)", "30m")
+  .option("--interval <duration>", "Delay between checks (e.g. 10s)", "10s")
+  .option("--limit <n>", "Max answers per page, 1-100", "20")
+  .option("--json", "Output the reply(ies) — or the timeout — as JSON")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (sessionId: string, opts) => {
+    const { waitSessionCommand } = await import("./commands/session-wait.js");
+    await waitSessionCommand(sessionId, opts);
+  });
+
+// ─── track ────────────────────────────────────────────────────────────────────
+// A METHOD running inside a project (a project-scoped playbook): its steps,
+// where it stands, and the session each step offers. Writes are governed —
+// "queued for your review" is success.
+
+const track = program
+  .command("track")
+  .description("Manage tracks — the methods a project runs, step by step");
+
+track
+  .command("list")
+  .description("List a project's tracks (defaults to the active project lens)")
+  .option("--project <id>", "Project id (defaults to the active project lens)")
+  .option("--all", "Include archived tracks")
+  .option("--json", "Output as JSON")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (opts) => {
+    const { listTracks } = await import("./commands/tracks.js");
+    await listTracks(opts);
+  });
+
+track
+  .command("show <id>")
+  .description("Show one track: its steps and where it stands")
+  .option("--json", "Output as JSON")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (id: string, opts) => {
+    const { showTrack } = await import("./commands/tracks.js");
+    await showTrack(id, opts);
+  });
+
+track
+  .command("start")
+  .description("Start a method (a project-scoped playbook) on a project")
+  .requiredOption("--playbook <id>", "The track template (project-scoped playbook) to run")
+  .option("--project <id>", "Project id (defaults to the active project lens)")
+  .option("--name <name>", "Display name (defaults to the method's name)")
+  .option("--param <key=value>", "Answer a declared param (repeatable)", collect, [])
+  .option("--reason <text>", "Why — shown to the reviewer")
+  .option("--json", "Output as JSON")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (opts) => {
+    const { startTrack } = await import("./commands/tracks.js");
+    await startTrack(opts);
+  });
+
+track
+  .command("advance <id> <stage>")
+  .description("Move a track to a step (forward or back); prints the session that step offers")
+  .option("--reason <text>", "Why — shown to the reviewer")
+  .option("--json", "Output as JSON")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (id: string, stage: string, opts) => {
+    const { advanceTrack } = await import("./commands/tracks.js");
+    await advanceTrack(id, stage, opts);
+  });
+
+track
+  .command("status <id> <status>")
+  .description("Pause, resume, complete or archive a track (active|paused|completed|archived)")
+  .option("--reason <text>", "Why — shown to the reviewer")
+  .option("--json", "Output as JSON")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (id: string, status: string, opts) => {
+    const { setTrackStatus } = await import("./commands/tracks.js");
+    await setTrackStatus(id, status, opts);
+  });
+
+track
+  .command("params <id> <pairs...>")
+  .description("Answer the method's params as key=value (merged; key=null clears one)")
+  .option("--reason <text>", "Why — shown to the reviewer")
+  .option("--json", "Output as JSON")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (id: string, pairs: string[], opts) => {
+    const { setTrackParams } = await import("./commands/tracks.js");
+    await setTrackParams(id, pairs, opts);
+  });
+
+track
+  .command("start-step <id>")
+  .description("Start the work session of one step (defaults to the track's current step)")
+  .option("--stage <key>", "Step key (defaults to the current step)")
+  .option("--title <text>", "Session name (defaults to the step's name)")
+  .option("--goal <text>", "Outcome (defaults to the step's goal)")
+  .option("--json", "Output as JSON")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (id: string, opts) => {
+    const { startStep } = await import("./commands/tracks.js");
+    await startStep(id, opts);
   });
 
 // ─── skill ────────────────────────────────────────────────────────────────────
@@ -1900,10 +2133,12 @@ Examples:
 
 doc
   .command("update <documentId>")
-  .description("Update a document's content (full replacement, proposal-gated)")
+  .description("Update a document's content: the whole body, or one section (--section). Governed: an agent's edit is proposed.")
   .option("--content <text>", "New markdown content (inline)")
   .option("--file <path>", "Read new content from a file")
-  .option("--title <title>", "Update document title (requires --content too)")
+  .option("--section <id>", "Write ONE section by id (content = the section body) instead of the whole document")
+  .option("--section-title <title>", "The section heading (required with --section)")
+  .option("--base-revision <n>", "The revision you read; refused if the document changed since")
   .option("--open", "Open in the Synap desktop app after update")
   .option("--json", "JSON output")
   .option("--pod-url <url>", "Pod URL override")
@@ -1913,6 +2148,7 @@ Examples:
   synap doc update <id> --content "# Updated"
   synap doc update <id> --file ./notes.md
   cat notes.md | synap doc update <id>
+  synap doc update <id> --section risks --section-title "Risks" --file ./risks.md
   `)
   .action(async (documentId: string, opts) => {
     const { docUpdate } = await import("./commands/doc.js");
@@ -1996,6 +2232,10 @@ cell
   .command("build <entry>")
   .description("Bundle a multi-file cell/app into a single ESM module the runtime expects")
   .option("--out <file>", "Output file path (default: <entry>.bundle.js)")
+  .option(
+    "--bundle-deps",
+    "Inline all third-party deps into the bundle (only react/react-dom stay external) — output has deps={} and the runtime CSP drops esm.sh entirely"
+  )
   .option("--define", "Chain into cell define after bundling (requires --name)")
   .option("--name <name>", "Cell name (required with --define)")
   .option("--type-key <key>", "Explicit typeKey (used with --define)")
@@ -2012,12 +2252,20 @@ cell
   .option("--pod-url <url>", "Pod URL override")
   .option("--api-key <key>", "API key override")
   .addHelpText("after", `
-Output: a single ESM file. Bare imports (react, recharts, …) are externalized
-and emitted as a deps map. At runtime Synap resolves them via esm.sh importmap.
+Output: a single ESM file.
+
+Default mode: bare imports (react, recharts, …) are externalized and emitted
+as a deps map. At runtime Synap resolves them via esm.sh importmap.
+
+--bundle-deps mode: only react/react-dom are externalized (React is
+host-inlined at runtime, never via esm.sh); everything else is bundled into
+the output, so the deps map is empty. A cell built this way reaches no esm.sh
+origin at runtime — the runtime CSP collapses to drop it entirely.
 
 Examples:
   synap cell build ./src/chart.tsx --out ./dist/chart.js
   synap cell build ./src/chart.tsx --out ./dist/chart.js --define --name "Revenue Chart"
+  synap cell build ./src/chart.tsx --out ./dist/chart.js --bundle-deps
   `)
   .action(async (entry: string, opts) => {
     const { cellBuild } = await import("./commands/cell.js");
@@ -2076,7 +2324,7 @@ tools
 
 tools
   .command("connect <service>")
-  .description("Connect a credential to a tool (via Nango OAuth or vault)")
+  .description("Connect a credential to a tool (OAuth via the connection broker, or vault)")
   .option("--workspace <id>", "Workspace context")
   .option("--pod-url <url>", "Pod URL override")
   .option("--api-key <key>", "API key override")
@@ -2372,13 +2620,21 @@ market
 
 market
   .command("publish [file]")
-  .description("Validate then publish a template (or a standalone cell/view package) to the marketplace (private by default) — pass a file, or --from-workspace <id>")
+  .description("Validate then publish a template (or a standalone cell/view package) to the marketplace (private by default) — pass a file, --from-workspace <id>, or --from-project <id>")
   .option("--public", "Publish as PUBLIC (default is private)")
   .option("--private", "Publish as private (the default — stated explicitly)")
   .option("--from-workspace <id>", "Serialize a live workspace into a template and publish it (instead of a file)")
+  .option("--from-project <id>", "Serialize a live project's used workspaces into a suite package (tags: suite, require deps) and publish it")
+  .option("--price <usd>", "Stamp pricingModel=one_time + priceUsd (dollars→cents). Settlement/Stripe is not this wave — columns only.")
   .option("--json", "Output as JSON")
-  .option("--pod-url <url>", "Pod URL override (for --from-workspace)")
-  .option("--api-key <key>", "API key override (for --from-workspace)")
+  .option("--pod-url <url>", "Pod URL override (for --from-workspace / --from-project)")
+  .option("--api-key <key>", "API key override (for --from-workspace / --from-project)")
+  // Default ON for a cell package's `codeFile` resolution — see `cell build
+  // --bundle-deps`'s doc comment for why: a published cell's `deps` map is
+  // otherwise resolved through esm.sh at RUNTIME, so the artifact reviewed at
+  // publish time isn't what actually executes. `synap cell build` invoked
+  // directly is unaffected — its own default stays external-deps-via-esm.sh.
+  .option("--no-bundle-deps", "Publish a cell's codeFile with external deps via esm.sh instead of bundling them in (default: bundled)")
   .action(async (file: string | undefined, _opts, cmd) => {
     // Same parent/child `--json` collision as `market install` — see its comment.
     const opts = cmd.optsWithGlobals();
@@ -2565,6 +2821,36 @@ capConnections
   .action(async (capability: string, connectionId: string, opts) => {
     const { capabilityConnectionsRemove } = await import("./commands/cap-connections.js");
     await capabilityConnectionsRemove(capability, connectionId, opts);
+  });
+
+capability
+  .command("sync-status [provider]")
+  .description(
+    "Show sync status per provider × kind × connection (phase, counts, errors) — omit provider to see all"
+  )
+  .option("--workspace <id>", "Workspace context")
+  .option("--json", "Output as JSON")
+  .action(async (provider: string | undefined, opts) => {
+    const { capabilitySyncStatus } = await import("./commands/sync-status.js");
+    await capabilitySyncStatus(provider, opts);
+  });
+
+// ─── sync (thin alias root for `cap sync-status`) ──────────────────────────────
+
+const sync = program
+  .command("sync")
+  .description("Sync status for connected providers — see `cap sync-status`");
+
+sync
+  .command("status [provider]")
+  .description(
+    "Show sync status per provider × kind × connection (phase, counts, errors) — omit provider to see all. Alias of `synap cap sync-status`."
+  )
+  .option("--workspace <id>", "Workspace context")
+  .option("--json", "Output as JSON")
+  .action(async (provider: string | undefined, opts) => {
+    const { capabilitySyncStatus } = await import("./commands/sync-status.js");
+    await capabilitySyncStatus(provider, opts);
   });
 
 // ─── raycast (hidden power-user escape) ───────────────────────────────────────

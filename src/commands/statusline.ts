@@ -78,6 +78,18 @@ function compact(n: number): string {
 
 interface PodCache {
   ts: number; // last SUCCESSFUL fetch
+  /**
+   * Last refresh ATTEMPT, successful or not — the backoff clock.
+   *
+   * `ts` may not serve as that clock: it means "last SUCCESS", so while the pod
+   * is failing it never advances, every render sees a stale cache, and each one
+   * spawns another burst. A pod-side 500 then becomes a request storm that
+   * saturates the caller's rate-limit bucket (2026-09-19: /workspaces returned
+   * 500 for days and the statusline burned the whole 500-per-15-min budget, so
+   * the MCP server sharing that key got 429s). Optional: a cache written by an
+   * older CLI has none, and falls back to `ts`.
+   */
+  attemptedTs?: number;
   ok: boolean; // last fetch reached the pod
   podUrl: string; // this connection's pod — lets render() build /open bounce links with no network
   activeWorkspaceId: string; // the workspace THIS connection is scoped to (cfg.workspaceId)
@@ -98,7 +110,7 @@ interface PodCache {
 
 function emptyCache(): PodCache {
   return {
-    ts: 0, ok: false, podUrl: "", activeWorkspaceId: "", workspaces: [], projectName: "", projectId: "",
+    ts: 0, attemptedTs: 0, ok: false, podUrl: "", activeWorkspaceId: "", workspaces: [], projectName: "", projectId: "",
     skillCount: 0, proposalCount: 0, proposalsFetched: false, sessionGoal: "", sessionId: "", totalEntities: 0,
     actingAgentLabel: "", identityMismatch: false,
   };
@@ -163,7 +175,9 @@ async function refresh(): Promise<void> {
   const prev = readCache();
   try {
     const cfg = await resolveHubConfig({});
-    if (!cfg.podUrl || !cfg.apiKey) return;
+    // Thrown, not returned: the catch below stamps the attempt, so an
+    // unconfigured CLI also backs off instead of respawning every render.
+    if (!cfg.podUrl || !cfg.apiKey) throw new Error("statusline: no pod config");
 
     // This connection's per-Claude-session lens (forwarded as SYNAP_LENS_SESSION
     // by the render process). Drives WHICH project/session we show — the bound
@@ -282,6 +296,7 @@ async function refresh(): Promise<void> {
 
     const out: PodCache = {
       ts: Date.now(),
+      attemptedTs: Date.now(),
       ok: true,
       podUrl: cfg.podUrl,
       activeWorkspaceId: cfg.workspaceId ?? "", // the lens THIS connection resolves to
@@ -300,10 +315,15 @@ async function refresh(): Promise<void> {
 
     fs.writeFileSync(CACHE_FILE, JSON.stringify(out));
   } catch {
-    // Preserve last good cache, just mark it not-ok so render can dim the dot.
-    if (prev) {
-      try { fs.writeFileSync(CACHE_FILE, JSON.stringify({ ...prev, ok: false })); } catch {}
-    }
+    // Preserve last good cache, mark it not-ok so render can dim the dot, and
+    // STAMP THE ATTEMPT: without it the next render refreshes immediately and a
+    // failing pod turns every redraw into another burst. `ts` stays untouched —
+    // it still means "last success", which is what the staleness display reads.
+    // With no previous cache at all, write the empty one for the same reason.
+    try {
+      const failed: PodCache = { ...(prev ?? emptyCache()), ok: false, attemptedTs: Date.now() };
+      fs.writeFileSync(CACHE_FILE, JSON.stringify(failed));
+    } catch {}
   } finally {
     try { fs.unlinkSync(LOCK_FILE); } catch {}
   }
@@ -324,7 +344,9 @@ function render(): void {
 
   const cache = readCache();
   // Trigger a background refresh if cache is missing or stale.
-  if (!cache || Date.now() - cache.ts > REFRESH_TTL_MS) triggerRefresh(claudeSessionId);
+  // The backoff clock is the last ATTEMPT, not the last success (see PodCache).
+  if (!cache || Date.now() - (cache.attemptedTs ?? cache.ts) > REFRESH_TTL_MS)
+    triggerRefresh(claudeSessionId);
 
   const pod = cache ?? emptyCache();
 

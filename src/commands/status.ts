@@ -354,7 +354,7 @@ export async function status(opts: { json?: boolean } = {}): Promise<void> {
         if (nangoError?.message) log.dim(nangoError.message);
       } else if (providers.length === 0) {
         log.warn("No providers available — connecting a service will not work.");
-        log.dim("This pod's Nango declares no integrations. They're declared in the Nango dashboard.");
+        log.dim("The connection broker declares no integrations for this pod.");
       } else {
         const connectedProviders = providers.filter((p) => p.connected);
         log.info(

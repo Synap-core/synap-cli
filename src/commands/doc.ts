@@ -8,13 +8,15 @@
  *   synap doc create --title "My Doc" --file ./notes.md [--open]
  *   echo "# Hello" | synap doc create --title "My Doc"
  *
- *   synap doc update <id> --content "new body" [--title "New Title"]
+ *   synap doc update <id> --content "new body"
  *   synap doc update <id> --file ./notes.md
  *   echo "updated" | synap doc update <id>
+ *   synap doc update <id> --section risks --section-title "Risks" --file ./risks.md
  *
  * API:
- *   POST  /api/hub/documents        — { userId, workspaceId?, title, content?, type? }
- *   PATCH /api/hub/documents/:id    — { userId, content } (full-replace, proposal-gated)
+ *   POST  /api/hub/documents            — { userId, workspaceId?, title, content?, type? }
+ *   PATCH /api/hub/documents/:id        — { userId, content, baseRevision? } (full replace)
+ *   POST  /api/hub/documents/:id/patch  — { userId, ops, baseRevision? } (--section: one upsert_section op)
  */
 
 import { readFileSync } from "fs";
@@ -42,7 +44,12 @@ export interface DocCreateOpts {
 export interface DocUpdateOpts {
   content?: string;
   file?: string;
-  title?: string;
+  /** Write ONE section (by id) instead of replacing the whole body. */
+  section?: string;
+  /** The section's heading (required with --section). */
+  sectionTitle?: string;
+  /** The revision you read; the edit is refused if the document moved. */
+  baseRevision?: string;
   open?: boolean;
   json?: boolean;
   podUrl?: string;
@@ -212,23 +219,56 @@ export async function docUpdate(
 
     const content = await resolveContent(opts.content, opts.file);
 
-    if (content === undefined && opts.title === undefined) {
+    if (content === undefined) {
       log.error(
-        "Provide --content, --file, or pipe stdin to supply new content. " +
-          "Title-only updates require --content as well (backend limitation)."
+        "Provide --content, --file, or pipe stdin to supply new content."
       );
       process.exit(1);
     }
 
-    const body: Record<string, unknown> = { userId };
-    if (content !== undefined) body.content = content;
-    if (opts.title !== undefined) body.title = opts.title;
+    let baseRevision: number | undefined;
+    if (opts.baseRevision !== undefined) {
+      baseRevision = Number(opts.baseRevision);
+      if (!Number.isInteger(baseRevision) || baseRevision < 0) {
+        log.error("--base-revision must be a whole number (the `revision` a read returned).");
+        process.exit(1);
+      }
+    }
+    if (opts.section !== undefined && !opts.sectionTitle) {
+      log.error("--section needs --section-title (the section's heading).");
+      process.exit(1);
+    }
 
-    const res = (await hubPatch(
-      `/documents/${documentId}`,
-      body,
-      cfg
-    )) as Record<string, unknown>;
+    // --section writes ONE section through the patch door; otherwise the
+    // content replaces the whole body (PATCH, an alias of the same door).
+    const res = (
+      opts.section !== undefined
+        ? await hubPost(
+            `/documents/${documentId}/patch`,
+            {
+              userId,
+              ops: [
+                {
+                  op: "upsert_section",
+                  id: opts.section,
+                  title: opts.sectionTitle,
+                  body: content,
+                },
+              ],
+              ...(baseRevision !== undefined ? { baseRevision } : {}),
+            },
+            cfg
+          )
+        : await hubPatch(
+            `/documents/${documentId}`,
+            {
+              userId,
+              content,
+              ...(baseRevision !== undefined ? { baseRevision } : {}),
+            },
+            cfg
+          )
+    ) as Record<string, unknown>;
 
     if (opts.json) {
       console.log(JSON.stringify(res, null, 2));
@@ -246,7 +286,6 @@ export async function docUpdate(
     }
 
     log.success(`Document updated: ${documentId.slice(0, 8)}…`);
-    if (opts.title) log.dim(`  title: ${opts.title}`);
 
     if (opts.open) {
       await openInBrowser({ kind: "document", id: documentId });

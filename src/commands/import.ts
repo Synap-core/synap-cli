@@ -59,6 +59,11 @@ import {
   isDegraded,
   degradedMessage,
   readCaptureExecute,
+  formatWorkspaceRouting,
+  formatPendingWorkspaceSwitch,
+  headlessPlacementFields,
+  projectRoutingHints,
+  workspaceRoutingHints,
   type StructureResult,
   type ExecuteResult,
 } from "../lib/capture-structure.js";
@@ -571,11 +576,12 @@ function pct(c?: number | null): string {
 
 /** Print the AI's proposed workspace/project routing for this item. */
 function renderRouting(result: StructureResult, wsOverride?: string, projOverride?: string): void {
-  const ws = wsOverride ?? result.targetWorkspaceId ?? null;
+  // The pod's NAME for its pick, with its confidence once (never a raw id
+  // when the name is known). An override is the user's own id, shown as given.
+  const ws = wsOverride ? `${wsOverride} (override)` : formatWorkspaceRouting(result);
   const proj = projOverride ?? result.targetProjectId ?? null;
-  const wsSrc = wsOverride ? " (override)" : pct(result.targetWorkspaceConfidence);
   const projSrc = projOverride ? " (override)" : pct(result.targetProjectConfidence);
-  log.dim(`  → workspace: ${ws ?? "pod-wide / unclear"}${wsSrc}`);
+  log.dim(`  → workspace: ${ws ?? "pod-wide / unclear"}`);
   if (result.targetWorkspaceReason && !wsOverride) log.dim(`      ${result.targetWorkspaceReason.slice(0, 90)}`);
   log.dim(`  → project:   ${proj ?? "none / unclear"}${projSrc}`);
   if (result.targetProjectReason && !projOverride) log.dim(`      ${result.targetProjectReason.slice(0, 90)}`);
@@ -846,6 +852,8 @@ async function processItem(
   const structureRes = (await hubPost("/capture/structure", structureBody, cfg, 120_000)) as StructureResult;
 
   const wsTarget = wsOverride ?? structureRes.targetWorkspaceId ?? cfg.workspaceId ?? null;
+  // What the receipt reports for the project: the user's pin, else the AI's
+  // suggestion. Only the PIN is sent as `projectId` (see the execute body).
   const projTarget = projOverride ?? structureRes.targetProjectId ?? null;
   const proposals = structureRes.proposals ?? [];
 
@@ -900,9 +908,12 @@ async function processItem(
   //    forward the ambient workspace + the AI's routing signal and let the
   //    backend decide (auto = AI target wins over ambient when confidence is
   //    high enough AND the user is a member).
-  //    NOTE: the hub REST /capture/execute door currently forwards only
-  //    workspaceId (not projectId) to the tRPC caller; projectId is sent for
-  //    forward-compatibility but is not yet applied server-side via this door.
+  //    The AI's advice goes through the ONE structure → execute mapper
+  //    (`captureExecuteRoutingHints`, mirrored in capture-structure.ts) as
+  //    ADVISORY hints. Project: only an explicit --project is a `projectId`
+  //    pin; the AI's project pick is the advisory `aiProjectId` — promoting it
+  //    to `projectId` linked it outright (widening cross-workspace access)
+  //    before the user ever confirmed it.
   const executeBody: Record<string, unknown> = {
     userId,
     ...(wsOverride
@@ -910,11 +921,13 @@ async function processItem(
       : {
           ...(cfg.workspaceId ? { workspaceId: cfg.workspaceId } : {}),
           workspaceRouting: "auto",
-          aiWorkspaceId: structureRes.targetWorkspaceId,
-          aiWorkspaceConfidence: structureRes.targetWorkspaceConfidence,
-          aiWorkspaceReason: structureRes.targetWorkspaceReason,
+          // Headless door: the structure step's PLACEMENT decides what is
+          // pinned (the ONE derivation, shared with the pod's headless doors).
+          // An AI suggestion stays a proposal (`workspaceChoice: "ignored"`).
+          ...headlessPlacementFields(structureRes),
+          ...workspaceRoutingHints(structureRes),
         }),
-    ...(projTarget ? { projectId: projTarget } : {}),
+    ...(projOverride ? { projectId: projOverride } : projectRoutingHints(structureRes)),
     ...(sessionId ? { sessionId } : {}),
     entities: proposals,
     relations: structureRes.relations ?? [],
@@ -942,9 +955,10 @@ async function processItem(
 
   const entityCount = outcome.entitiesCreated;
   const relCount = outcome.relationsCreated;
-  // Final resting workspace: the backend may have moved it (auto routing);
-  // otherwise fall back to the pre-execute guess.
-  const finalWorkspaceId = outcome.movedToWorkspace ?? wsTarget;
+  // Final resting workspace: the pre-execute target. The ladder NEVER moves a
+  // capture on an AI guess (rung 5 proposes), so there is nothing to override
+  // it with — a pending suggestion is reported separately, below.
+  const finalWorkspaceId = wsTarget;
 
   if (!opts.json) {
     const report: LaneReport = {
@@ -957,10 +971,15 @@ async function processItem(
     if (outcome.entitiesLinked) {
       log.dim(`  ${outcome.entitiesLinked} linked to existing entit${outcome.entitiesLinked !== 1 ? "ies" : "y"}`);
     }
-    console.log("  " + formatLaneLine(report) + (projTarget ? chalk.dim(` [project ${projTarget.slice(0, 8)}]`) : ""));
-    if (outcome.movedToWorkspace) {
-      log.dim(`  → filed into workspace ${outcome.movedToWorkspace}`);
-    }
+    // Only a --project pin is filed; the AI's pick is a suggestion to confirm.
+    const projTag = projOverride
+      ? ` [project ${projOverride.slice(0, 8)}]`
+      : projTarget
+        ? ` [project ${projTarget.slice(0, 8)} suggested]`
+        : "";
+    console.log("  " + formatLaneLine(report) + (projTag ? chalk.dim(projTag) : ""));
+    const pending = formatPendingWorkspaceSwitch(outcome);
+    if (pending) log.dim(`  ${pending}`);
     const kept = keepRawLine(executeRes);
     if (kept) log.dim(`  ${kept}`);
   }

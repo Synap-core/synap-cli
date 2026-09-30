@@ -393,7 +393,7 @@ function buildToolSchemaMarkdown(schema: Record<string, unknown>, podUrl: string
     lines.push(
       ``,
       `Providers are configured in Nango. Common integrations include:`,
-      `- Google Workspace (gmail, google-calendar, google-drive)`,
+      `- Google Workspace — ONE provider id \`google\` (gmail + calendar + contacts, one OAuth connection)`,
       `- GitHub (github)`,
       `- Notion (notion)`,
       `- Linear (linear)`,

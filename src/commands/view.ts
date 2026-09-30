@@ -184,7 +184,7 @@ export async function viewArrange(
     } else {
       log.error(
         "Provide layout JSON via --file <path> or pipe stdin.\n" +
-          "  Format: array of { id, kind, x?, y?, w?, h?, config? } objects, or { widgets: [...] }."
+          "  Format: array of { key, x, y, w?, h?, config? } objects (key = a widget key from `synap_list_widgets`), or { widgets: [...] }."
       );
       process.exit(1);
     }

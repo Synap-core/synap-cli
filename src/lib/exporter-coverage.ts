@@ -1,20 +1,28 @@
 /**
- * What `--from-workspace` does NOT carry out of a live workspace.
- * =================================================================
+ * What `--from-workspace` / `--from-project` do NOT carry out of a live pod.
+ * ==========================================================================
  *
  * `synap market publish --from-workspace <id>` serialises a LIVE workspace
  * through the pod's `workspaceToPackageDefinition`
  * (synap-backend/packages/api/src/services/workspace-to-package-definition.ts)
- * and posts the result. That serialiser is a **lossy projection**: it emits 20
- * of `packageDefinitionSchema`'s keys and has no projection at all for the ones
- * below. A workspace carrying them exports WITHOUT them — no error, no signal.
+ * and posts the result. `--from-project` walks the same serialiser for every
+ * workspace a project `uses`, then composes a suite — so the same drop-list
+ * applies to each constituent. That serialiser is a **lossy projection**: it
+ * emits 21 of `packageDefinitionSchema`'s keys and has no projection at all
+ * for the ones below. A workspace carrying them exports WITHOUT them — no
+ * error, no signal.
+ *
+ * Loops stay here deliberately: there is no durable loop row to reverse-
+ * serialise (`createLoopFromDefinition` dissolves into playbooks + triggers).
  *
  * `TEMPLATE-DEV-GUIDE.md` used to assert, unqualified, that a
  * `PackageDefinition` "round-trips". It does not, in this direction, and the
- * consequence is the shape this repo keeps paying for: an author who built
- * Cards in Card Studio publishes their workspace, ships a gutted package, and
- * gets a success message. Same class as `status ?? "installed"` — a claim of
- * completeness nobody verified.
+ * consequence is the shape this repo keeps paying for: an author who built one
+ * of the things below publishes their workspace, ships a thinner-than-expected
+ * package, and gets a success message. Same class as `status ?? "installed"` —
+ * a claim of completeness nobody verified. (Cards authored in Card Studio USED
+ * to be one of these — `workspaceToPackageDefinition` now emits them into
+ * `cells[]`, so that loss is fixed; the list below is what remains.)
  *
  * ── WHY THIS LIST IS UNCONDITIONAL, NOT DETECTED ────────────────────────────
  * The CLI never sees the workspace, only the projection's OUTPUT. "key absent
@@ -52,7 +60,6 @@ export interface UnemittedKey {
  *     body and publish-time provenance. Not this door's business.
  */
 export const EXPORTER_UNEMITTED_KEYS: readonly UnemittedKey[] = [
-  { key: "cells", loses: "Cards — everything authored in Card Studio" },
   { key: "commands", loses: "workspace commands" },
   { key: "relationDefs", loses: "relation definitions" },
   { key: "loops", loses: "loops" },
@@ -88,6 +95,7 @@ export const EXPORTER_EMITTED_KEYS: readonly string[] = [
   "capabilities",
   "layoutConfig",
   "actionPlacements",
+  "cells",
 ];
 
 /**

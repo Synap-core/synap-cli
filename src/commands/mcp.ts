@@ -265,7 +265,7 @@ export async function mcpVerify(opts: McpBaseOpts): Promise<void> {
  * starts with `pod.` — anything else (localhost, a custom domain, …) can't be
  * derived confidently, so the caller falls back to a placeholder + `--cp-url`.
  */
-function deriveCpOrigin(podUrl: string): { cpOrigin: string; derived: boolean } {
+export function deriveCpOrigin(podUrl: string): { cpOrigin: string; derived: boolean } {
   try {
     const host = new URL(podUrl).hostname;
     const labels = host.split(".");
@@ -367,6 +367,172 @@ export async function mcpConnectClaudeWeb(
     );
   } catch (e) {
     log.error(`Could not build the claude.ai connection: ${(e as Error).message}`);
+    process.exit(1);
+  }
+}
+
+/**
+ * `synap mcp ui-setup <client>` — print the exact form fields to fill in a
+ * client's MCP/Connector UI. Supports ChatGPT (API key), Codex, Cursor,
+ * VS Code, Claude Desktop, and generic clients.
+ */
+export async function mcpUiSetup(
+  client: string,
+  opts: { name?: string; workspace?: string; project?: string; json?: boolean; podUrl?: string; apiKey?: string }
+): Promise<void> {
+  try {
+    const hubCfg = await resolveHubConfig({ podUrl: opts.podUrl, apiKey: opts.apiKey });
+    const { url, workspaceId, projectId } = resolveMcpTarget(hubCfg, { workspace: opts.workspace, project: opts.project });
+
+    const { hubApiKey, agentUserId } = await provisionAgentKey(
+      hubCfg.podUrl,
+      hubCfg.apiKey,
+      "generic",
+      { requireApproval: false }
+    );
+
+    const normalizedClient = client.toLowerCase().replace(/-/g, "");
+    let output = "";
+
+    const clientConfigs: Record<string, { name: string; format: "http" | "stdio" | "file"; fields: Record<string, string>; notes: string[] }> = {
+      chatgpt: {
+        name: "ChatGPT (API key)",
+        format: "http",
+        fields: {
+          "Connector Name": "Synap",
+          "URL": url,
+          "Auth Type": "API Key",
+          "API Key": hubApiKey,
+        },
+        notes: [
+          "ChatGPT → Settings → Connectors → Add custom connector",
+          "Paste the URL and API Key exactly as shown above",
+          "If your build shows a Header field instead: Authorization: Bearer <key>",
+        ],
+      },
+      chatgptoauth: {
+        name: "ChatGPT (OAuth via Control Plane)",
+        format: "http",
+        fields: {
+          "Connector Name": "Synap (Control Plane)",
+          "URL": "https://api.synap.live/mcp",
+          "Auth Type": "OAuth",
+          "API Key": "(leave blank — OAuth flow)",
+        },
+        notes: [
+          "ChatGPT → Settings → Connectors → Add custom connector",
+          "Use the Control Plane OAuth URL (multi-pod support)",
+          "After connecting, ask ChatGPT: 'list my Synap pods' then 'connect pod <name>'",
+        ],
+      },
+      codex: {
+        name: "OpenAI Codex (config.toml)",
+        format: "file",
+        fields: {
+          "Config file": "~/.codex/config.toml",
+          "Section to add": `[mcp_servers.synap]`,
+          "url": url,
+          "http_headers": `{ Authorization = "Bearer ${hubApiKey}" }`,
+          "startup_timeout_sec": "30",
+          "enabled": "true",
+        },
+        notes: [
+          "Open ~/.codex/config.toml and add the [mcp_servers.synap] section",
+          "Restart Codex CLI to pick up the new MCP server",
+          "The synap tool set will appear in agent mode",
+        ],
+      },
+      cursor: {
+        name: "Cursor (mcp.json)",
+        format: "http",
+        fields: {
+          "Config file": "~/.cursor/mcp.json",
+          "mcpServers.synap.url": url,
+          "mcpServers.synap.headers.Authorization": `Bearer ${hubApiKey}`,
+        },
+        notes: [
+          "Cursor reads native HTTP MCP format from ~/.cursor/mcp.json",
+          "Restart Cursor. The synap tool set will appear in agent mode.",
+        ],
+      },
+      vscode: {
+        name: "VS Code (Kilo Code / Cline / Continue / Copilot)",
+        format: "http",
+        fields: {
+          "Config file": "~/Library/Application Support/Code/User/mcp.json (macOS)",
+          "servers.synap.type": "http",
+          "servers.synap.url": url,
+          "servers.synap.headers.Authorization": `Bearer ${hubApiKey}`,
+        },
+        notes: [
+          "VS Code 1.99+ uses 'servers' format (not mcpServers)",
+          "Picked up automatically by Kilo Code, Cline, Continue, and GitHub Copilot",
+          "Reload VS Code (or open the MCP panel) to activate",
+        ],
+      },
+      "claude-desktop": {
+        name: "Claude Desktop (stdio bridge)",
+        format: "stdio",
+        fields: {
+          "Config file": "~/Library/Application Support/Claude/claude_desktop_config.json (macOS)",
+          "mcpServers.synap.command": "npx",
+          "mcpServers.synap.args": `-y mcp-remote ${url} --header "Authorization: Bearer ${hubApiKey}"`,
+        },
+        notes: [
+          "Claude Desktop only supports stdio MCP — uses mcp-remote bridge",
+          "Fully quit Claude Desktop (Cmd+Q), then relaunch",
+          "Look for the MCP tools icon under the input box — 'synap' should appear",
+        ],
+      },
+      "claude-code": {
+        name: "Claude Code (native HTTP MCP)",
+        format: "http",
+        fields: {
+          "Command": `claude mcp add --transport http synap-${new URL(hubCfg.podUrl).hostname.split(".")[1] || "pod"} ${url} --header "Authorization: Bearer ${hubApiKey}" --scope user`,
+        },
+        notes: [
+          "Runs `claude mcp add` for you — writes to user-scope registry",
+          "Relaunch Claude Code to load the tools",
+        ],
+      },
+      generic: {
+        name: "Generic MCP Client (HTTP)",
+        format: "http",
+        fields: {
+          "URL": url,
+          "Headers": `Authorization: Bearer ${hubApiKey}`,
+        },
+        notes: [
+          "Paste URL and add Authorization header in your client's MCP config",
+          "Supports any MCP-compatible client with HTTP transport",
+        ],
+      },
+    };
+
+    const clientConfig = clientConfigs[normalizedClient] || clientConfigs.generic;
+
+    if (opts.json) {
+      console.log(JSON.stringify({ client: clientConfig.name, format: clientConfig.format, fields: clientConfig.fields, notes: clientConfig.notes }, null, 2));
+      return;
+    }
+
+    log.heading(`MCP UI Setup — ${clientConfig.name}`);
+    log.blank();
+    log.info("Form fields to fill in your client's MCP/Connector settings:");
+    log.blank();
+    for (const [key, value] of Object.entries(clientConfig.fields)) {
+      console.log(`  ${chalk.bold(key)}: ${chalk.cyan(value)}`);
+    }
+    log.blank();
+    log.info("Notes:");
+    for (const note of clientConfig.notes) {
+      console.log(`  • ${note}`);
+    }
+    log.blank();
+    log.dim("Agent key provisioned for this session. Re-run with --name to target another pod.");
+
+  } catch (e) {
+    log.error(`Could not build UI setup: ${(e as Error).message}`);
     process.exit(1);
   }
 }

@@ -625,7 +625,19 @@ export async function createVendor(
 
 export async function publishPackage(
   def: PackageDefinitionLike,
-  opts: { isPublic: boolean; category?: string; slug?: string; displayName?: string },
+  opts: {
+    isPublic: boolean;
+    category?: string;
+    slug?: string;
+    displayName?: string;
+    /**
+     * Pricing stamp for the CP row. `one_time` + `priceUsd` (USD cents) marks
+     * a paid listing. Settlement/Stripe is NOT this client — columns only.
+     */
+    pricingModel?: "free" | "tier_included" | "one_time";
+    /** Price in USD cents. */
+    priceUsd?: number | null;
+  },
   deps: CpWriteDeps = {},
 ): Promise<PublishResult> {
   const fetchImpl = deps.fetchImpl ?? fetch;
@@ -688,6 +700,10 @@ export async function publishPackage(
       // Attribute the package to the author's publisher profile when they have
       // one. Omitted (not null) when they do not — the CP branches on presence.
       ...(vendorId ? { vendorId } : {}),
+      ...(opts.pricingModel !== undefined
+        ? { pricingModel: opts.pricingModel }
+        : {}),
+      ...(opts.priceUsd !== undefined ? { priceUsd: opts.priceUsd } : {}),
       definition,
     }),
     signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),

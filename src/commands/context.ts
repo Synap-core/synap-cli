@@ -17,6 +17,7 @@ import { log } from "../utils/logger.js";
 import { resolveHubConfig, hubGet, type HubConfig } from "../lib/hub-client.js";
 import { unwrapList } from "../lib/unwrapList.js";
 import { getAgentWorkspaceRouting } from "../lib/pod.js";
+import { sessionKindLabel, resolveSessionTitle } from "./sessions.js";
 
 export interface ContextOpts {
   repo?: string;
@@ -170,9 +171,14 @@ export async function contextSummary(opts: ContextOpts): Promise<void> {
     } else {
       for (const s of sessions as Array<Record<string, unknown>>) {
         const progress = typeof s.progress === "number" ? ` ${chalk.dim(`[${s.progress}%]`)}` : "";
+        // `kind` is projected on every row by the Hub REST list door — before
+        // this, a run or receipt printed here indistinguishable from a
+        // person's own work (same audit finding as `synap session list`).
+        const kindLabel = typeof s.kind === "string" ? sessionKindLabel(s.kind) : null;
+        const kindCol = kindLabel ? ` ${chalk.dim(`[${kindLabel}]`)}` : "";
         // Full id — feeds straight into `synap session update/attach <id>`.
         const id = String(s.id ?? "");
-        console.log(`- ${chalk.cyan(id)}${progress}  ${String(s.goal ?? "")}`);
+        console.log(`- ${chalk.cyan(id)}${kindCol}${progress}  ${resolveSessionTitle(s)}`);
       }
     }
 

@@ -75,9 +75,13 @@ describe("exporter coverage claim matches the exporter's source", () => {
     for (const k of EXPORTER_UNEMITTED_KEYS) {
       expect(warnings.some((w) => w.startsWith(`${k.key} —`))).toBe(true);
     }
-    // Vocabulary: the product word is Card, never the machine token "cell".
-    const cells = warnings.find((w) => w.startsWith("cells —"));
-    expect(cells).toContain("Cards");
+    // Vocabulary: any "what is lost" phrasing that names Cards must use the
+    // product word Card, never the machine token "cell" — cells[] itself no
+    // longer appears here (the exporter now emits it), but the rule holds for
+    // whatever future key might mention Cards again.
+    for (const k of EXPORTER_UNEMITTED_KEYS) {
+      expect(k.loses.toLowerCase()).not.toMatch(/\bcell\b/);
+    }
   });
 
   it.runIf(hasExporter)("no UNEMITTED key is actually assigned", () => {
@@ -109,19 +113,23 @@ describe("exporter coverage claim matches the exporter's source", () => {
  * repeatedly — and it would be invisible to every test above, all of which
  * exercise the helper directly.
  *
- * Source-scanned rather than executed because the only caller is behind a live
- * pod fetch (`--from-workspace` → the pod's `to-template` door). Same technique
- * `market-validate-standalone.test.ts` uses for the same reason.
+ * Source-scanned rather than executed because the only callers are behind a
+ * live pod fetch (`--from-workspace` → `to-template`, `--from-project` →
+ * `to-suite-template`). Same technique `market-validate-standalone.test.ts`
+ * uses for the same reason.
  */
-describe("the drop-list is wired into `market publish --from-workspace`", () => {
+describe("the drop-list is wired into live-serialize publish doors", () => {
   const SRC = readFileSync(
     join(process.cwd(), "src/commands/market-authoring.ts"),
     "utf8",
   );
+  const INDEX = readFileSync(join(process.cwd(), "src/index.ts"), "utf8");
 
   it("reads the real file (guards against a vacuous pass)", () => {
     expect(SRC.length).toBeGreaterThan(5000);
     expect(SRC).toContain("--from-workspace");
+    expect(SRC).toContain("--from-project");
+    expect(INDEX).toContain("--from-project");
   });
 
   it("imports and calls exporterDropWarnings", () => {
@@ -129,18 +137,25 @@ describe("the drop-list is wired into `market publish --from-workspace`", () => 
     expect(SRC).toMatch(/dropWarnings\s*=\s*exporterDropWarnings\(\)/);
   });
 
-  it("populates it ONLY on the --from-workspace branch", () => {
+  it("populates it on BOTH --from-workspace and --from-project branches", () => {
     // A hand-written file is not a projection: what the author wrote is what
     // gets published, so warning there would be a false alarm.
-    const branch = SRC.slice(SRC.indexOf("if (opts.fromWorkspace) {"));
-    const elseAt = branch.indexOf("\n  } else {");
-    expect(elseAt).toBeGreaterThan(0);
-    expect(branch.slice(0, elseAt)).toContain("exporterDropWarnings()");
+    const fromWs = SRC.slice(SRC.indexOf("if (opts.fromWorkspace) {"));
+    const fromWsEnd = fromWs.indexOf("\n  } else if (opts.fromProject)");
+    expect(fromWsEnd, "--from-workspace branch missing else-if fromProject").toBeGreaterThan(0);
+    expect(fromWs.slice(0, fromWsEnd)).toContain("exporterDropWarnings()");
+
+    const fromProj = SRC.slice(SRC.indexOf("} else if (opts.fromProject) {"));
+    const fromProjEnd = fromProj.indexOf("\n  } else {");
+    expect(fromProjEnd).toBeGreaterThan(0);
+    expect(fromProj.slice(0, fromProjEnd)).toContain("exporterDropWarnings()");
+    expect(fromProj.slice(0, fromProjEnd)).toContain("fetchProjectAsSuiteTemplate");
   });
 
   it("surfaces the warning BEFORE the publish call, not after", () => {
-    const warnAt = SRC.indexOf("Serialising a live workspace is a LOSSY projection");
-    const publishAt = SRC.indexOf("await publishPackage(def, { isPublic })");
+    const warnAt = SRC.indexOf("is a LOSSY projection");
+    // publishPackage may be called with a spread opts object now (pricing).
+    const publishAt = SRC.search(/await publishPackage\(def,/);
     expect(warnAt, "warning text not found").toBeGreaterThan(0);
     expect(publishAt).toBeGreaterThan(0);
     expect(warnAt, "the author is told what was dropped only AFTER it shipped")
@@ -149,5 +164,13 @@ describe("the drop-list is wired into `market publish --from-workspace`", () => 
 
   it("carries the warnings in --json output too", () => {
     expect(SRC).toMatch(/warnings:\s*dropWarnings/);
+  });
+
+  it("registers --from-project and --price on the publish command", () => {
+    const publishBlock = INDEX.slice(INDEX.indexOf('.command("publish [file]")'));
+    const nextCmd = publishBlock.indexOf("\nmarket\n");
+    const block = nextCmd > 0 ? publishBlock.slice(0, nextCmd) : publishBlock.slice(0, 2500);
+    expect(block).toContain("--from-project");
+    expect(block).toContain("--price");
   });
 });
