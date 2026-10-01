@@ -4,10 +4,10 @@
  * A connection is a named, optionally-secret credential/context binding for an
  * installed capability (e.g. a vault key, an OAuth account, a per-context object
  * binding). Backend surface (base `${podUrl}/api/hub`):
- *   GET    /capabilities/:capabilityId/connections
- *   POST   /capabilities/:capabilityId/connections
- *   PATCH  /capabilities/:capabilityId/connections/:id
- *   DELETE /capabilities/:capabilityId/connections/:id
+ *   GET    /capabilities/:capabilityId/credentials
+ *   POST   /capabilities/:capabilityId/credentials
+ *   PATCH  /capabilities/:capabilityId/credentials/:id
+ *   DELETE /capabilities/:capabilityId/credentials/:id
  *
  * Capability name→id is resolved LOCALLY against GET /capabilities/catalog (the
  * card's `id` is the installed container id; null means uninstalled).
@@ -113,8 +113,8 @@ export async function capabilityConnectionsList(
   const spinner = ora({ text: `Fetching connections for ${chalk.bold(name)}…`, color: "cyan" }).start();
   let connections: Connection[];
   try {
-    const res = await hubGet(`/capabilities/${capId}/connections`, {}, cfg);
-    connections = unwrapList<Connection>(res, ["connections"]);
+    const res = await hubGet(`/capabilities/${capId}/credentials`, {}, cfg);
+    connections = unwrapList<Connection>(res, ["credentials"]);
     spinner.stop();
   } catch (err) {
     spinner.fail(chalk.red("Failed to fetch connections"));
@@ -189,7 +189,7 @@ export async function capabilityConnectionsAdd(
   const spinner = ora({ text: `Adding connection to ${chalk.bold(name)}…`, color: "cyan" }).start();
   let res: Record<string, unknown>;
   try {
-    res = (await hubPost(`/capabilities/${capId}/connections`, body, cfg)) as Record<string, unknown>;
+    res = (await hubPost(`/capabilities/${capId}/credentials`, body, cfg)) as Record<string, unknown>;
     spinner.stop();
   } catch (err) {
     spinner.fail(chalk.red("Failed to add connection"));
@@ -243,7 +243,7 @@ export async function capabilityConnectionsUpdate(
 
   const spinner = ora({ text: `Updating connection…`, color: "cyan" }).start();
   try {
-    await hubPatch(`/capabilities/${capId}/connections/${connectionId}`, body, cfg);
+    await hubPatch(`/capabilities/${capId}/credentials/${connectionId}`, body, cfg);
     spinner.succeed(chalk.green(`Updated connection ${chalk.cyan(connectionId)}.`));
   } catch (err) {
     spinner.fail(chalk.red("Failed to update connection"));
@@ -275,7 +275,7 @@ export async function capabilityConnectionsRemove(
 
   const spinner = ora({ text: `Removing connection…`, color: "cyan" }).start();
   try {
-    await hubDelete(`/capabilities/${capId}/connections/${connectionId}`, cfg);
+    await hubDelete(`/capabilities/${capId}/credentials/${connectionId}`, cfg);
     spinner.succeed(chalk.green(`Removed connection ${chalk.cyan(connectionId)}.`));
   } catch (err) {
     spinner.fail(chalk.red("Failed to remove connection"));

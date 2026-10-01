@@ -916,8 +916,8 @@ async function resolveGoogleConnectionId(
     const containers = unwrapList<{ id: string; name?: string }>(res, ["capabilities"]);
     const google = containers.find((c) => /google/i.test(c.name ?? ""));
     if (!google?.id) return null;
-    const connRes = await hubGet(`/capabilities/${google.id}/connections`, {}, cfg);
-    const conns = unwrapList<{ id: string; isDefault?: boolean }>(connRes, ["connections"]);
+    const connRes = await hubGet(`/capabilities/${google.id}/credentials`, {}, cfg);
+    const conns = unwrapList<{ id: string; isDefault?: boolean }>(connRes, ["credentials"]);
     if (conns.length === 0) return null;
     return (conns.find((c) => c.isDefault) ?? conns[0]).id;
   } catch {
