@@ -53,13 +53,6 @@ on:
   # whoever merged, not by whoever released.
   workflow_dispatch:
 
-# `contents: write` is REQUIRED, not decorative: the "Commit the version bump"
-# step pushes with GITHUB_TOKEN, and an org (or repo) whose default workflow
-# permission is read-only makes that push fail. Under the old ordering that
-# failure was silent-but-fatal — see the step's own comment.
-permissions:
-  contents: write
-
 # One publish at a time. Two concurrent runs would each `npm version patch`
 # from the same base, race on the push, and the loser would try to publish a
 # version the winner already put on the registry (EPUBLISHCONFLICT).
@@ -72,6 +65,19 @@ concurrency:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    # Least privilege.
+    #
+    # `contents: write` is REQUIRED, not decorative: the "Commit the version bump"
+    # step pushes with GITHUB_TOKEN, and an org (or repo) whose default workflow
+    # permission is read-only makes that push fail. Under the old ordering that
+    # failure was silent-but-fatal — see the step's own comment.
+    #
+    # `id-token: write` is required for npm Trusted Publishing (OIDC). It is
+    # inert until npm is told to trust this workflow, so it is safe to declare
+    # ahead of the npm UI configuration.
+    permissions:
+      contents: write
+      id-token: write
     steps:
       - name: Checkout synap-cli
         uses: actions/checkout@v4
