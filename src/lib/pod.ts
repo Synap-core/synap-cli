@@ -926,6 +926,16 @@ function hasSynapCompose(dir: string): boolean {
 }
 
 /**
+ * The compose project pinned in a pod's .env (`COMPOSE_PROJECT_NAME=`), or
+ * null when unpinned or not a valid compose project name.
+ */
+export function composeProjectFromEnv(envContent: string): string | null {
+  const raw = /^COMPOSE_PROJECT_NAME=(.*)$/m.exec(envContent)?.[1];
+  const value = raw?.trim().replace(/^["']|["']$/g, "");
+  return value && /^[a-z0-9][a-z0-9_-]*$/.test(value) ? value : null;
+}
+
+/**
  * Write OpenClaw env vars into the deploy dir .env and start the container.
  * Does NOT wait for health — OpenClaw can take several minutes to initialize
  * (first run pulls ~1GB image + runs setup). Caller should tell user to run
@@ -960,10 +970,23 @@ export function startOpenClawOnServer(
   // Project is a peer lens to workspace — only injected when one is resolved.
   if (projectId) envVars.SYNAP_PROJECT_ID = projectId;
 
-  let envContent = "";
-  try {
-    envContent = fs.existsSync(envFile) ? fs.readFileSync(envFile, "utf-8") : "";
-  } catch { /* start fresh */ }
+  // Merge only the keys above into the EXISTING .env. A missing or unreadable
+  // .env is an error — "start fresh" here used to replace the pod's whole
+  // configuration (DB password, secrets) with these four keys.
+  if (!fs.existsSync(envFile)) {
+    throw new Error(`No .env in ${deployDir} — this is not an installed Synap pod (run \`synap install\` there first).`);
+  }
+  let envContent = fs.readFileSync(envFile, "utf-8");
+
+  // The compose project MUST be the pod's pinned one: a bare
+  // `docker compose -f docker-compose.yml` in deploy/ is named after the
+  // directory ("deploy") and would start a parallel, empty stack.
+  const project = composeProjectFromEnv(envContent);
+  if (!project) {
+    throw new Error(
+      `COMPOSE_PROJECT_NAME is not pinned in ${envFile}. Run \`synap update\` on the pod (it pins it), then retry.`
+    );
+  }
 
   for (const [key, value] of Object.entries(envVars)) {
     const regex = new RegExp(`^${key}=.*`, "m");
@@ -984,7 +1007,7 @@ export function startOpenClawOnServer(
   // pipe stderr to /dev/null to suppress WARN lines about unset env vars
   // (those warnings are cosmetic — other services' vars not needed by openclaw)
   execSync(
-    `docker compose -f ${composeFile} --profile openclaw up -d openclaw 2>/dev/null`,
+    `docker compose -p ${project} -f ${composeFile} --profile openclaw up -d openclaw 2>/dev/null`,
     { stdio: ["ignore", "inherit", "ignore"], cwd: deployDir, timeout: 300_000 }
   );
 
