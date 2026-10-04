@@ -841,7 +841,7 @@ export function checkServerResources(): {
 
 /**
  * Start OpenClaw as a Docker addon on the local server.
- * Writes env vars to the pod's .env file and runs docker compose --profile openclaw.
+ * Sets env vars through the pod's `synap config set` and runs `synap profiles enable openclaw`.
  * Only works when the CLI is running ON the pod server.
  */
 /**

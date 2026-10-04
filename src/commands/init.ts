@@ -547,8 +547,8 @@ async function pathBExisting(opts: InitOptions, detectedUrl: string): Promise<vo
   const deployDir = findSynapDeployDir();
   if (!deployDir) {
     log.warn("Could not find your Synap deploy directory automatically.");
-    log.dim("Start OpenClaw manually from your synap-backend dir:");
-    log.dim("  docker compose --profile openclaw up -d openclaw");
+    log.dim("Start OpenClaw manually on the pod host (the pod's CLI pins the compose project):");
+    log.dim("  <synap-backend>/synap profiles enable openclaw");
     log.dim("Then run: synap update");
     return;
   }
@@ -558,9 +558,9 @@ async function pathBExisting(opts: InitOptions, detectedUrl: string): Promise<vo
 
   const localConfig = getLocalPodConfig();
 
-  // Stop any spinner before running docker compose — its output goes to stdout
+  // Stop any spinner before running the pod's CLI — its output goes to stdout
   // and will conflict with ora. We print progress directly.
-  log.info("Running: docker compose --profile openclaw up -d openclaw");
+  log.info("Running: synap config set (OpenClaw keys) + synap profiles enable openclaw");
   log.dim("(The first run pulls a ~1GB image and may take a few minutes.)");
   log.blank();
 
@@ -588,7 +588,7 @@ async function pathBExisting(opts: InitOptions, detectedUrl: string): Promise<vo
     log.dim("Check progress at any time: synap status");
   } else {
     log.info("Start OpenClaw manually:");
-    console.log(chalk.cyan(`\n  cd ${deployDir} && docker compose --profile openclaw up -d openclaw\n`));
+    console.log(chalk.cyan(`\n  ${deployDir}/../synap profiles enable openclaw\n`));
     log.dim("Then run: synap update");
   }
 }
@@ -651,7 +651,7 @@ async function pathB(opts: InitOptions): Promise<void> {
 
   if (installChoice === "bundle") {
     log.blank();
-    log.info("Running: docker compose --profile openclaw up -d openclaw");
+    log.info("Running: synap config set (OpenClaw keys) + synap profiles enable openclaw");
     log.dim("(The first run pulls a ~1GB image and may take a few minutes.)");
     log.blank();
     try {
