@@ -2,7 +2,7 @@
  * Synap pod connection and management utilities.
  */
 
-import { execSync } from "child_process";
+import { execSync, spawnSync } from "child_process";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
@@ -936,7 +936,8 @@ export function composeProjectFromEnv(envContent: string): string | null {
 }
 
 /**
- * Write OpenClaw env vars into the deploy dir .env and start the container.
+ * Set the OpenClaw env vars through the pod's `synap config set` and start the
+ * container with `synap profiles enable openclaw` (pinned project, guarded).
  * Does NOT wait for health — OpenClaw can take several minutes to initialize
  * (first run pulls ~1GB image + runs setup). Caller should tell user to run
  * `synap finish` once it's up.
@@ -976,7 +977,7 @@ export function startOpenClawOnServer(
   if (!fs.existsSync(envFile)) {
     throw new Error(`No .env in ${deployDir} — this is not an installed Synap pod (run \`synap install\` there first).`);
   }
-  let envContent = fs.readFileSync(envFile, "utf-8");
+  const envContent = fs.readFileSync(envFile, "utf-8");
 
   // The compose project MUST be the pod's pinned one: a bare
   // `docker compose -f docker-compose.yml` in deploy/ is named after the
@@ -988,28 +989,41 @@ export function startOpenClawOnServer(
     );
   }
 
-  for (const [key, value] of Object.entries(envVars)) {
-    const regex = new RegExp(`^${key}=.*`, "m");
-    const line = `${key}=${value}`;
-    envContent = regex.test(envContent)
-      ? envContent.replace(regex, line)
-      : (envContent.endsWith("\n") || envContent === ""
-          ? envContent + line + "\n"
-          : envContent + "\n" + line + "\n");
+  // ── Write env vars + start, through the pod's own CLI ────────────────────
+  // update-door plan P4: this tool never edits the pod's .env or runs compose
+  // against its deploy dir. `synap config set` is the pod's ONE validated
+  // writer (schema, atomic, .env.bak.<ts>; values on stdin — never argv, which
+  // every local user can read in `ps`); `synap profiles enable openclaw`
+  // starts the container under the pinned project and the pgdata guard.
+  const synapScript = path.join(path.dirname(deployDir), "synap");
+  if (!fs.existsSync(synapScript) || !fs.existsSync(path.join(deployDir, "env-config.sh"))) {
+    throw new Error(
+      `No synap CLI with the config door beside ${deployDir} (expected ${synapScript} + deploy/env-config.sh).\n` +
+        "Update the pod first (`synap update` on the host), then retry."
+    );
   }
-  fs.writeFileSync(envFile, envContent, { mode: 0o600 });
+  const env = { ...process.env, SYNAP_DEPLOY_DIR: deployDir, COMPOSE_PROJECT_NAME: project };
+  const set = spawnSync("bash", [synapScript, "config", "set", "--stdin"], {
+    cwd: deployDir,
+    env,
+    input: Object.entries(envVars).map(([k, v]) => `${k}=${v}`).join("\n") + "\n",
+    encoding: "utf-8",
+    timeout: 120_000,
+  });
+  if (set.status !== 0) {
+    throw new Error(`synap config set refused the OpenClaw keys:\n${(set.stderr || set.stdout || "").trim()}`);
+  }
 
-  // ── Start container ──────────────────────────────────────────────────────
-  const composeFile = fs.existsSync(path.join(deployDir, "docker-compose.standalone.yml"))
-    ? "docker-compose.standalone.yml"
-    : "docker-compose.yml";
-
-  // pipe stderr to /dev/null to suppress WARN lines about unset env vars
-  // (those warnings are cosmetic — other services' vars not needed by openclaw)
-  execSync(
-    `docker compose -p ${project} -f ${composeFile} --profile openclaw up -d openclaw 2>/dev/null`,
-    { stdio: ["ignore", "inherit", "ignore"], cwd: deployDir, timeout: 300_000 }
-  );
+  // Does NOT wait for health (see above).
+  const up = spawnSync("bash", [synapScript, "profiles", "enable", "openclaw"], {
+    cwd: deployDir,
+    env,
+    stdio: ["ignore", "inherit", "inherit"],
+    timeout: 300_000,
+  });
+  if (up.status !== 0) {
+    throw new Error(`synap profiles enable openclaw exited ${up.status ?? "?"} — see the output above.`);
+  }
 
   return deployDir;
 }
