@@ -16,8 +16,8 @@
  * Three ways in, picked by `planAgentAdd`:
  *   known   — a client we can wire (claude-code, cursor, codex, …): mint, write
  *             its config, verify. Same installer as before (`installForTarget`).
- *   custom  — anything else: mint, print the URL + key + paste-ready snippets,
- *             verify.
+ *   custom  — anything else: mint, verify, then ONE card with the URL + key
+ *             (snippets on demand: `synap agents info <name> --snippets`).
  *   detect  — nothing named: find the agents on this machine, pick, plus a
  *             "something else" row that falls through to custom.
  * And one way to bring a key you already hold (`--api-key`), which only
@@ -38,7 +38,6 @@ import {
 } from "./pod.js";
 import {
   buildMcpUrl,
-  configureAgentContext,
   enrollAgentIfNeeded,
   installForTarget,
   isTargetName,
@@ -48,7 +47,6 @@ import {
   type TargetName,
 } from "./targets.js";
 import { addAgent, type AgentProfile } from "./agents-config.js";
-import { printMcpConnection } from "./mcp-snippets.js";
 
 // ─── Plan (pure) ──────────────────────────────────────────────────────────────
 
@@ -274,7 +272,7 @@ export interface CustomAgentRequest {
   label?: string;
 }
 
-/** Mint → print URL + key + snippets → verify → remember locally. */
+/** Mint → verify → remember locally → print the URL + key card last. */
 export async function createCustomAgent(
   pod: AgentPod,
   req: CustomAgentRequest,
@@ -342,24 +340,15 @@ export async function createCustomAgent(
     return false;
   }
 
-  // No workspace = enrolled across every workspace (pod-wide).
-  await enrollAgentIfNeeded(pod.podUrl, pod.apiKey, agentUserId, scope.workspaceId, { role });
-
-  const url = buildMcpUrl(pod.podUrl, scope.workspaceId, scope.projectId);
-  printMcpConnection({ url, hubApiKey, agentUserId, ...scope });
-  log.blank();
-  console.log(chalk.yellow("  Save this key now — the pod never shows it again."));
+  // No workspace = enrolled across every workspace (pod-wide). Quiet: the card
+  // below states the scope; a progress line here only pushes the key up.
+  await enrollAgentIfNeeded(pod.podUrl, pod.apiKey, agentUserId, scope.workspaceId, { role, quiet: true });
 
   const verifySpinner = ora(`Verifying ${agentName} can reach Synap…`).start();
   const v = await verifyMcpConnection(pod.podUrl, hubApiKey, { timeoutMs: 20_000 }).catch(
     (err: Error) => ({ ok: false as const, error: err.message })
   );
-  if (v.ok) {
-    verifySpinner.succeed(`${agentName} verified — ${v.toolCount} Synap tool(s) reachable at ${pod.podUrl}/mcp`);
-  } else {
-    verifySpinner.warn(`${agentName} was created but verification FAILED.`);
-    log.warn(`  ${v.error}`);
-  }
+  verifySpinner.stop();
 
   const profile: AgentProfile = {
     podName: pod.podName ?? "default",
@@ -370,15 +359,55 @@ export async function createCustomAgent(
     agentUserId,
   };
   if (scope.workspaceId) profile.workspaceId = scope.workspaceId;
+  if (scope.projectId) profile.projectId = scope.projectId;
   addAgent(localName, profile);
-  log.dim(`Saved locally as '${localName}' — SYNAP_AGENT=${localName} acts as this agent.`);
 
-  try {
-    await configureAgentContext(pod.podUrl, hubApiKey, agentType, agentUserId);
-  } catch (err) {
-    log.warn(`Agent context wizard failed: ${err instanceof Error ? err.message : String(err)}`);
-  }
+  // No CONTEXT.md wizard here: for a custom agent it wrote
+  // ~/.synap/contexts/<type>.md, which no client reads, and its template prompt
+  // scrolled the key off screen. The card is the LAST thing printed.
+  printAgentCard({
+    name: agentName,
+    localName,
+    url: buildMcpUrl(pod.podUrl, scope.workspaceId, scope.projectId),
+    hubApiKey,
+    scope,
+    verified: v.ok ? { toolCount: v.toolCount ?? 0 } : { error: v.error ?? "unknown error" },
+  });
   return v.ok;
+}
+
+/**
+ * What a custom agent needs to be used: the URL, the key, where it looks, and
+ * whether it works — nothing else. `synap agents info <name> --show-key`
+ * prints the same card from the local cache, so the key is never lost to
+ * scrollback.
+ */
+export function printAgentCard(c: {
+  name: string;
+  localName: string;
+  url: string;
+  hubApiKey: string;
+  scope: AgentScope;
+  verified?: { toolCount: number } | { error: string };
+}): void {
+  log.blank();
+  if (!c.verified) {
+    console.log(`  ${chalk.bold(c.name)}  ${chalk.dim(`(${describeScope(c.scope)})`)}`);
+  } else if ("toolCount" in c.verified) {
+    console.log(
+      `  ${chalk.green("✔")} ${chalk.bold(c.name)} is ready  ${chalk.dim(`(${describeScope(c.scope)} · ${c.verified.toolCount} tools reachable)`)}`
+    );
+  } else {
+    console.log(`  ${chalk.yellow("⚠")} ${chalk.bold(c.name)} was created, but its key could not reach Synap: ${c.verified.error}`);
+  }
+  log.blank();
+  console.log(`  ${chalk.dim("MCP URL")}   ${c.url}`);
+  console.log(`  ${chalk.dim("API key")}   ${chalk.green(c.hubApiKey)}`);
+  console.log(`  ${chalk.dim("Header")}    Authorization: Bearer <API key>`);
+  log.blank();
+  console.log("  Paste the URL and key into your agent's MCP / connector settings.");
+  log.dim(`  Show again:     synap agents info ${c.localName} --show-key`);
+  log.dim(`  Config snippets (Claude Code, Cursor, stdio): synap agents info ${c.localName} --snippets`);
 }
 
 async function twinName(pod: AgentPod): Promise<string> {

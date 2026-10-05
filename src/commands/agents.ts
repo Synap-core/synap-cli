@@ -326,13 +326,46 @@ export function agentsRemove(name: string): void {
 
 // ─── info ─────────────────────────────────────────────────────────────────────
 
-export function agentsInfo(name: string): void {
+export async function agentsInfo(
+  name: string,
+  opts: { showKey?: boolean; snippets?: boolean } = {}
+): Promise<void> {
   const profile = getAgent(name);
 
   if (!profile) {
     log.error(`Agent '${name}' not found.`);
     const all = listAgents();
     if (all.length > 0) log.dim("Available: " + all.map((a) => a.name).join(", "));
+    return;
+  }
+
+  if (opts.showKey || opts.snippets) {
+    const podUrl = listPodProfiles().find((p) => p.name === profile.podName)?.config.podUrl;
+    if (!podUrl) {
+      log.error(podNotFoundMessage(profile.podName));
+      return;
+    }
+    const { buildMcpUrl } = await import("../lib/targets.js");
+    const url = buildMcpUrl(podUrl, profile.workspaceId, profile.projectId);
+    if (opts.snippets) {
+      const { printMcpConnection } = await import("../lib/mcp-snippets.js");
+      printMcpConnection({
+        url,
+        hubApiKey: profile.apiKey,
+        agentUserId: profile.agentUserId ?? "",
+        workspaceId: profile.workspaceId,
+        projectId: profile.projectId,
+      });
+      return;
+    }
+    const { printAgentCard } = await import("../lib/agent-door.js");
+    printAgentCard({
+      name: profile.label ?? name,
+      localName: name,
+      url,
+      hubApiKey: profile.apiKey,
+      scope: { workspaceId: profile.workspaceId, projectId: profile.projectId },
+    });
     return;
   }
 
@@ -347,6 +380,7 @@ export function agentsInfo(name: string): void {
   console.log(`  ${"Created".padEnd(12)}  ${chalk.dim(profile.createdAt)}`);
   log.blank();
   log.dim(`Usage: SYNAP_AGENT=${name} synap <command>`);
+  log.dim(`URL + full key: synap agents info ${name} --show-key`);
 }
 
 // ─── add (the one door) ──────────────────────────────────────────────────────

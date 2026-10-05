@@ -1735,9 +1735,11 @@ agents
 agents
   .command("info <name>")
   .description("Show details for a named agent identity (local cache only)")
-  .action(async (name: string) => {
+  .option("--show-key", "Print the MCP URL and the full API key")
+  .option("--snippets", "Print paste-ready configs (Claude Code, Cursor, stdio clients)")
+  .action(async (name: string, opts: { showKey?: boolean; snippets?: boolean }) => {
     const { agentsInfo } = await import("./commands/agents.js");
-    agentsInfo(name);
+    await agentsInfo(name, opts);
   });
 
 // ─── agent (autonomous runner) ───────────────────────────────────────────────

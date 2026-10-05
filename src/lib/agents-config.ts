@@ -14,6 +14,8 @@ export interface AgentProfile {
   template?: "twin" | "assistant" | "custom";
   /** The agent user ID on the pod (from agentUsers.create) */
   agentUserId?: string;
+  /** Optional project focus the agent was added with (pod-wide when absent). */
+  projectId?: string;
 }
 
 interface ConfigWithAgents {

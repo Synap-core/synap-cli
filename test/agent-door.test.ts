@@ -132,7 +132,7 @@ describe("custom agent through the real entry points", () => {
   it("an asked-for workspace is passed through, with the role", async () => {
     await agentsAdd("researcher", { workspace: "ws-9", role: "viewer" });
     expect(enrollAgentIfNeeded.mock.calls[0][3]).toBe("ws-9");
-    expect(enrollAgentIfNeeded.mock.calls[0][4]).toEqual({ role: "viewer" });
+    expect(enrollAgentIfNeeded.mock.calls[0][4]).toMatchObject({ role: "viewer" });
   });
 
   it("a name that slugs to a client type is refused before anything is minted", async () => {
@@ -140,6 +140,20 @@ describe("custom agent through the real entry points", () => {
     await agentsAdd(undefined, { name: "Claude Code" });
     expect(provisionAgentKey).not.toHaveBeenCalled();
     expect(process.exitCode).toBe(1);
+  });
+
+  it("ends on the key: printed once, at the bottom, with no template wizard after it", async () => {
+    await agentsAdd("deepseek", {});
+    // The wizard's template prompt is what scrolled the key off screen.
+    expect(configureAgentContext).not.toHaveBeenCalled();
+    const lines = (console.log as unknown as { mock: { calls: unknown[][] } }).mock.calls.map((c) =>
+      c.map(String).join(" ")
+    );
+    const withKey = lines.map((l, i) => (l.includes("agent-key") ? i : -1)).filter((i) => i >= 0);
+    expect(withKey).toHaveLength(1);
+    // only the card's own trailing lines may follow the key
+    expect(lines.length - 1 - withKey[0]).toBeLessThanOrEqual(5);
+    expect(lines.some((l) => l.includes("https://pod.test/mcp"))).toBe(true);
   });
 
   it("a failed verification marks the run failed", async () => {
