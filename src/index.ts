@@ -2240,6 +2240,9 @@ cell
     "--bundle-deps",
     "Inline all third-party deps into the bundle (only react/react-dom stay external) — output has deps={} and the runtime CSP drops esm.sh entirely"
   )
+  .option("--self-contained", 'Build ONE complete HTML document (React, CSS, brand fonts inlined; nothing external) — the code of a rendererType "mcp-app" cell')
+  .option("--fonts", "With --self-contained: require the inlined brand fonts (default: include when @synap-core/design-tokens resolves)")
+  .option("--no-fonts", "With --self-contained: skip the inlined brand fonts")
   .option("--define", "Chain into cell define after bundling (requires --name)")
   .option("--name <name>", "Cell name (required with --define)")
   .option("--type-key <key>", "Explicit typeKey (used with --define)")
