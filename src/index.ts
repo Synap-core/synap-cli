@@ -738,8 +738,10 @@ program
 
 program
   .command("upload <path>")
-  .description("Upload a file (≤10MB) to the pod as a file entity")
-  .option("--workspace <id>", "Workspace to store the file in")
+  .description("Upload a file to the pod as an entity (>10MB goes direct to storage: video ≤500MB, audio ≤100MB, zip ≤200MB)")
+  .option("--workspace <id>", "Pin the entity to this workspace (explicit placement)")
+  .option("--profile <slug>", "Entity kind to create (default: file), e.g. brand-asset")
+  .option("--prop <key=value>", "Entity property (repeatable)", (v: string, acc: string[] = []) => [...acc, v])
   .option("--attach <entityId>", "After upload, link the document to this entity (references relation)")
   .option("--title <title>", "Title for the created document")
   .option("--open", "Open in the Synap desktop app after upload")
@@ -751,6 +753,8 @@ Examples:
   synap upload ./report.pdf
   synap upload ./logo.png --title "Brand logo" --workspace <id>
   synap upload ./spec.pdf --attach <entityId>
+  synap upload ./logo.svg --profile brand-asset --prop variant=dark --workspace <id>
+  synap upload ./launch.mp4 --workspace <id>
   synap upload ./report.pdf --open
   `)
   .action(async (path: string, opts) => {

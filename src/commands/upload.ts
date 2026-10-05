@@ -9,14 +9,26 @@
  * Usage:
  *   synap upload ./report.pdf
  *   synap upload ./logo.png --title "Brand logo" --workspace <id>
+ *   synap upload ./logo.svg --profile brand-asset --prop variant=dark
+ *   synap upload ./launch.mp4 --workspace <id>      # >10MB → presigned lane
  *   synap upload ./spec.pdf --attach <entityId>   # also link doc → entity
  *
  * API:
- *   POST /api/hub/files  (multipart)  — field `file` (≤10MB) + REQUIRED
- *                                       workspaceId (membership-gated) +
- *                                       optional title → { fileEntityId, documentId }
+ *   POST /api/hub/files  (multipart)  — ≤10MB (fonts ≤5MB): field `file` +
+ *                                       workspaceId (membership-gated) + optional
+ *                                       title / profileSlug / properties /
+ *                                       targetWorkspaceId → { fileEntityId, documentId }
+ *   POST /api/hub/files/uploads       — >10MB: presigned PUT URL (caps per mime:
+ *        PUT <uploadUrl>                video 500MB · audio 100MB · zip 200MB);
+ *   POST /api/hub/files/uploads/finalize  the bytes go straight to storage, then
+ *                                       finalize mints the entity (same shape).
  *   POST /api/hub/relations           — with --attach: `references` relation
  *                                       from the target entity to the new doc.
+ *
+ * `--workspace` is an EXPLICIT placement pin (sent as `targetWorkspaceId`).
+ * Without it the configured workspace is only context, and a pod-scope kind
+ * such as `file` lands pod-wide — which is why `--workspace` used to look
+ * ignored (the entity came back with workspaceId null).
  */
 
 import { readFileSync } from "fs";
@@ -25,15 +37,27 @@ import { log } from "../utils/logger.js";
 import {
   resolveHubConfig,
   resolveUserId,
+  hubPost,
   hubPostMultipart,
   renderHubError,
+  type HubConfig,
 } from "../lib/hub-client.js";
 import { writeGovernance } from "../lib/capture-lane.js";
 import { createRelation } from "./data.js";
 import { openInBrowser } from "./open.js";
 
-/** Mirror of the pinned /api/hub/files contract: reject >10MB before the round-trip. */
-const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
+const MB = 1024 * 1024;
+/** The buffered multipart door's ceiling (the pod holds that body in memory). */
+const MAX_BUFFERED_BYTES = 10 * MB;
+
+/** Mirror of the pod's per-mime caps (C4) — refuse before any round-trip. */
+export function maxUploadBytesForMime(mime: string): number {
+  if (mime.startsWith("video/")) return 500 * MB;
+  if (mime.startsWith("audio/")) return 100 * MB;
+  if (mime === "application/zip") return 200 * MB;
+  if (mime.startsWith("font/")) return 5 * MB;
+  return MAX_BUFFERED_BYTES;
+}
 
 /** Best-effort extension → mime. Backend accepts arbitrary mime; octet-stream is the safe default. */
 const MIME: Record<string, string> = {
@@ -60,21 +84,113 @@ const MIME: Record<string, string> = {
   ".ogg": "audio/ogg",
   ".mp4": "video/mp4",
   ".mov": "video/quicktime",
+  ".webm": "video/webm",
   ".zip": "application/zip",
+  ".woff2": "font/woff2",
+  ".woff": "font/woff",
+  ".ttf": "font/ttf",
+  ".otf": "font/otf",
 };
 
-function mimeFor(path: string): string {
+export function mimeFor(path: string): string {
   return MIME[extname(path).toLowerCase()] ?? "application/octet-stream";
+}
+
+/** `--prop key=value` (repeatable) → the entity `properties` object. */
+export function parseProps(pairs: string[] | undefined): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const pair of pairs ?? []) {
+    const i = pair.indexOf("=");
+    if (i <= 0) throw new Error(`--prop expects key=value, got "${pair}"`);
+    out[pair.slice(0, i)] = pair.slice(i + 1);
+  }
+  return out;
 }
 
 export interface UploadOpts {
   workspace?: string;
+  /** Entity kind to create (default `file`), e.g. `brand-asset`. */
+  profile?: string;
+  /** Repeatable `key=value` entity properties. */
+  prop?: string[];
   attach?: string;
   title?: string;
   open?: boolean;
   json?: boolean;
   podUrl?: string;
   apiKey?: string;
+}
+
+export interface UploadRequest {
+  buf: Buffer<ArrayBuffer>;
+  filename: string;
+  mimeType: string;
+  workspaceId?: string;
+  targetWorkspaceId?: string;
+  title?: string;
+  profileSlug?: string;
+  properties: Record<string, string>;
+}
+
+/**
+ * Pick the lane by size: the buffered multipart door up to 10MB, the presigned
+ * lane above it (request → PUT straight to storage → finalize). Both answer
+ * `{ fileEntityId, documentId }` or a governed `proposed` handle.
+ */
+export async function sendUpload(
+  req: UploadRequest,
+  cfg: HubConfig
+): Promise<Record<string, unknown>> {
+  const hasProps = Object.keys(req.properties).length > 0;
+  if (req.buf.byteLength <= MAX_BUFFERED_BYTES) {
+    const form = new FormData();
+    form.append("file", new File([req.buf], req.filename, { type: req.mimeType }));
+    if (req.workspaceId) form.append("workspaceId", req.workspaceId);
+    if (req.targetWorkspaceId) form.append("targetWorkspaceId", req.targetWorkspaceId);
+    if (req.title) form.append("title", req.title);
+    if (req.profileSlug) form.append("profileSlug", req.profileSlug);
+    if (hasProps) form.append("properties", JSON.stringify(req.properties));
+    return (await hubPostMultipart("/files", form, cfg)) as Record<string, unknown>;
+  }
+
+  const ticket = (await hubPost(
+    "/files/uploads",
+    {
+      workspaceId: req.workspaceId,
+      ...(req.targetWorkspaceId ? { targetWorkspaceId: req.targetWorkspaceId } : {}),
+      filename: req.filename,
+      mimeType: req.mimeType,
+      size: req.buf.byteLength,
+    },
+    cfg
+  )) as { uploadUrl: string; uploadToken: string; headers?: Record<string, string> };
+
+  // Straight to object storage — signed for exactly this type and length.
+  const put = await fetch(ticket.uploadUrl, {
+    method: "PUT",
+    headers: { ...(ticket.headers ?? {}), "Content-Type": req.mimeType },
+    body: req.buf,
+    signal: AbortSignal.timeout(30 * 60_000),
+  });
+  if (!put.ok) {
+    const detail = await put.text().catch(() => "");
+    throw new Error(
+      `Upload to storage failed (HTTP ${put.status})${detail ? `: ${detail.slice(0, 300)}` : ""}`
+    );
+  }
+
+  return (await hubPost(
+    "/files/uploads/finalize",
+    {
+      uploadToken: ticket.uploadToken,
+      ...(req.title ? { title: req.title } : {}),
+      ...(req.profileSlug ? { profileSlug: req.profileSlug } : {}),
+      ...(hasProps ? { properties: req.properties } : {}),
+      ...(req.targetWorkspaceId ? { targetWorkspaceId: req.targetWorkspaceId } : {}),
+    },
+    cfg,
+    60_000
+  )) as Record<string, unknown>;
 }
 
 export async function uploadFile(path: string, opts: UploadOpts): Promise<void> {
@@ -100,24 +216,37 @@ export async function uploadFile(path: string, opts: UploadOpts): Promise<void> 
       log.error(`File is empty: ${path}`);
       process.exit(1);
     }
-    if (buf.byteLength > MAX_UPLOAD_BYTES) {
+    const filename = basename(path);
+    const mimeType = mimeFor(path);
+    const cap = maxUploadBytesForMime(mimeType);
+    if (buf.byteLength > cap) {
       log.error(
-        `File too large: ${(buf.byteLength / 1024 / 1024).toFixed(1)}MB — the pod accepts up to 10MB.`
+        `File too large: ${(buf.byteLength / MB).toFixed(1)}MB — the pod accepts up to ${cap / MB}MB for ${mimeType}.`
       );
       process.exit(1);
     }
+    let properties: Record<string, string>;
+    try {
+      properties = parseProps(opts.prop);
+    } catch (e) {
+      log.error((e as Error).message);
+      process.exit(1);
+    }
 
-    const filename = basename(path);
-    const form = new FormData();
-    // Field name + optional fields per the pinned /api/hub/files contract.
-    form.append("file", new File([buf], filename, { type: mimeFor(path) }));
-    if (workspaceId) form.append("workspaceId", workspaceId);
-    if (opts.title) form.append("title", opts.title);
-
-    const res = (await hubPostMultipart("/files", form, cfg)) as Record<
-      string,
-      unknown
-    >;
+    const res = await sendUpload(
+      {
+        buf,
+        filename,
+        mimeType,
+        workspaceId,
+        // Only an explicit --workspace pins; the configured default stays context.
+        targetWorkspaceId: opts.workspace,
+        title: opts.title,
+        profileSlug: opts.profile,
+        properties,
+      },
+      cfg
+    );
 
     const governance = writeGovernance(res);
     const fileEntityId = String(res.fileEntityId ?? "");
