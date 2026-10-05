@@ -2509,7 +2509,7 @@ export async function ensureAgentGovernance(
         {
           title: "Follow the pod default (recommended)",
           description:
-            "Uses your pod's trust setting (Settings › Trust rules); change it there anytime.",
+            "Uses your pod's trust setting (Settings › Approvals); change it there anytime.",
           value: POD_DEFAULT_CHOICE,
         },
         {
