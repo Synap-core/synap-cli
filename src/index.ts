@@ -133,31 +133,27 @@ program
   });
 
 program
-  .command("connect")
+  .command("connect [thing]")
   .description(
-    "Connect an AI surface (Claude Code, Cursor, Grok, Raycast, ChatGPT, …) to a Synap pod"
+    "Plug something into your pod: an AI agent (claude-code, cursor, codex, …) or a tool/account (gmail, github, …)"
   )
-  .option(
-    "--target <name>",
-    "AI surface: claude-code | claude-desktop | cursor | raycast | grok | codex | chatgpt | vscode | generic | … (synap connect --list)"
-  )
+  .option("--tool", "Treat <thing> as a tool/account even if it is also an agent name (no <thing>: list connectable services)")
+  .option("--workspace <id>", "Focus on one workspace (default: pod-wide)")
+  .option("--project <id>", "Focus on one project (agents only; composable with --workspace)")
   .option("--pod-url <url>", "Synap pod URL")
   .option("--api-key <key>", "Hub Protocol API key")
-  .option("--name <name>", "Pod profile name to save credentials under (default: 'default')")
-  .option("--list", "List supported targets and exit")
-  .option(
-    "--manual-key",
-    "Skip the browser approval flow and paste a key (or provisioning token)"
-  )
-  .option("--pin-workspace <id>", "Pin the connection to one workspace (default: pod-wide lens)")
-  .option("--pin-project <id>", "Pin the connection to one project (composable with --pin-workspace)")
+  .option("--name <name>", "Pod profile to use (default: active pod)")
+  .option("--list", "List what can be connected and exit")
   .option(
     "--with-mcp",
     "Raycast only: also install the full 56-tool MCP server via mcp-remote (names overlap @synap)"
   )
-  .action(async (opts) => {
+  .option("--target <name>", "Legacy spelling of <thing>")
+  .option("--pin-workspace <id>", "Legacy spelling of --workspace")
+  .option("--pin-project <id>", "Legacy spelling of --project")
+  .action(async (thing: string | undefined, opts) => {
     const { connect } = await import("./commands/connect.js");
-    await connect(opts);
+    await connect(thing, opts);
   });
 
 // ─── pods ─────────────────────────────────────────────────────────────────────
@@ -284,7 +280,7 @@ program
 program
   .command("connections")
   .alias("conn")
-  .description("Show which pod each agent surface (Claude Code, Desktop, Cursor, Raycast) is connected to")
+  .description("Show everything connected: which pod each agent points at, and which tools the pod has connected")
   .action(async () => {
     const { connections } = await import("./commands/connections.js");
     await connections();
@@ -324,11 +320,11 @@ mcp
 
 mcp
   .command("connect [client]")
-  .description("Write the MCP config for a file-configurable client (Claude Code, Cursor, Desktop, ChatGPT, …) — alias of `synap connect`")
+  .description("Write the MCP config for a file-configurable client (Claude Code, Cursor, Desktop, ChatGPT, …) — alias of `synap agents add <client>`")
   .option("--name <name>", "Pod profile to connect")
   .action(async (client: string | undefined, opts: { name?: string }) => {
     const { connect } = await import("./commands/connect.js");
-    await connect({ target: client, name: opts.name });
+    await connect(client, { name: opts.name });
   });
 
 mcp
@@ -337,7 +333,7 @@ mcp
   .option("--name <name>", "Pod profile to connect")
   .action(async (opts: { name?: string }) => {
     const { connect } = await import("./commands/connect.js");
-    await connect({ target: "chatgpt", name: opts.name });
+    await connect("chatgpt", { name: opts.name });
   });
 
 mcp
@@ -346,7 +342,7 @@ mcp
   .option("--name <name>", "Pod profile to connect")
   .action(async (opts: { name?: string }) => {
     const { connect } = await import("./commands/connect.js");
-    await connect({ target: "chatgpt-oauth", name: opts.name });
+    await connect("chatgpt-oauth", { name: opts.name });
   });
 
 mcp
@@ -1687,28 +1683,34 @@ agents
   });
 
 agents
-  .command("add")
-  .description("Register a pre-existing agent credential locally. Use `synap agents create` for new agents.")
-  .option("--name <name>", "Agent name (e.g. researcher, builder)")
-  .option("--api-key <key>", "Hub Protocol API key for this agent")
-  .option("--pod <name>", "Pod profile to link (default: active pod)")
-  .option("--workspace <id>", "Default workspace for this agent")
+  .command("add [kind]")
+  .description(
+    "Bring an agent into the pod: a client (claude-code, cursor, codex, …), your own (--name → URL + key), or pick from this machine (no kind)"
+  )
+  .option("--name <name>", "Name your own agent (e.g. researcher) — prints a URL + key to paste")
+  .option("--template <tmpl>", "Your own agent's template: twin | assistant | custom (default: custom)")
+  .option("--type <type>", "Explicit agent type for your own agent (default: a slug of --name)")
+  .option("--role <role>", "Workspace role: admin | editor | viewer (default: editor)")
+  .option("--workspace <id>", "Focus on one workspace (default: pod-wide)")
+  .option("--project <id>", "Focus on one project (composable with --workspace)")
+  .option("--with-mcp", "Raycast only: also install the full MCP server via mcp-remote")
+  .option("--api-key <key>", "Register a key you already hold, on this machine only (mints nothing)")
   .option("--label <label>", "Human-readable description")
-  .action(async (opts) => {
+  .action(async (kind: string | undefined, opts) => {
     const { agentsAdd } = await import("./commands/agents.js");
-    await agentsAdd(opts);
+    await agentsAdd(kind, opts);
   });
 
 agents
   .command("create")
-  .description("Create or reuse an agent principal on the pod (template-aware). Replaces `add` for new agents.")
+  .description("Deprecated — use `synap agents add` (same flags)")
   .option("--template <tmpl>", "Agent template: twin | assistant | custom (default: custom)")
   .option("--name <name>", "Agent name (not needed for twin — auto-generated)")
   .option("--type <type>", "Agent type string for custom agents (default: matches template)")
-  .option("--role <role>", "Workspace role: admin | editor | viewer (default: editor; twin auto-inherits)")
-  .option("--workspace <id>", "Workspace ID to add the agent to (auto-detected if omitted)")
-  .option("--pod <name>", "Pod profile to use (default: active pod)")
-  .action(async (opts: { template?: string; name?: string; type?: string; role?: string; workspace?: string; pod?: string }) => {
+  .option("--role <role>", "Workspace role: admin | editor | viewer (default: editor)")
+  .option("--workspace <id>", "Focus on one workspace (default: pod-wide)")
+  .option("--project <id>", "Focus on one project")
+  .action(async (opts) => {
     const { agentsCreate } = await import("./commands/agents.js");
     await agentsCreate(opts);
   });

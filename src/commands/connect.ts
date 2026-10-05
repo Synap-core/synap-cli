@@ -1,222 +1,114 @@
 /**
- * synap connect
+ * synap connect [thing]
  *
- * Wire an AI surface to a configured Synap pod. Credentials come from stored
- * pod profiles (synap pods add) — no re-authentication needed.
+ * The umbrella for "plug something into my pod". It owns no logic of its own:
+ * an agent goes through `synap agents add` (lib/agent-door.ts), a tool or
+ * account through `synap cap connect`.
  *
  * Usage:
- *   synap connect                              (interactive: pick surface + pod)
- *   synap connect --target=claude-code
- *   synap connect --target=claude-desktop
- *   synap connect --target=cursor
- *   synap connect --target=raycast
- *   synap connect --target=raycast --with-mcp   (opt-in full MCP via mcp-remote)
- *   synap connect --target=openclaw
- *   synap connect --target=claude-code --name=team   (use specific pod profile)
+ *   synap connect                         (interactive: an AI agent, or a tool/account?)
+ *   synap connect cursor                  (a client → synap agents add cursor)
+ *   synap connect gmail                   (anything else → synap cap connect gmail)
+ *   synap connect gmail --tool            (force the tool reading when a name is both)
+ *   synap connect claude-code --project <id>   (scope; default pod-wide)
+ *   synap connect --target=raycast --with-mcp  (legacy flag, still accepted)
  *
  * Escape hatch for scripting:
- *   synap connect --pod-url <url> --api-key <key>    (bypass stored profiles)
+ *   synap connect cursor --pod-url <url> --api-key <key>
  */
 
 import prompts from "prompts";
-import ora from "ora";
-import chalk from "chalk";
 import { log, banner } from "../utils/logger.js";
-import { checkPodHealth, listPodProfiles, podNotFoundMessage, type LocalPodConfig } from "../lib/pod.js";
-import {
-  installForTarget,
-  isTargetName,
-  listTargets,
-  TARGETS,
-  type TargetName,
-} from "../lib/targets.js";
-import { podsAdd } from "./pods.js";
+import { isTargetName, listTargets, type TargetName } from "../lib/targets.js";
+import { connectKnownAgent, resolveAgentPod } from "../lib/agent-door.js";
 
 interface ConnectOptions {
   podUrl?: string;
   apiKey?: string;
+  /** Legacy spelling of the positional. */
   target?: string;
   list?: boolean;
+  /** Pod profile to use. */
   name?: string;
-  manualKey?: boolean;
-  // Pin lenses into the connection (default: pod-wide). Composable.
+  /** Force the tool reading of a name that is also an agent client. */
+  tool?: boolean;
+  workspace?: string;
+  project?: string;
+  /** Legacy spellings of --workspace / --project. */
   pinWorkspace?: string;
   pinProject?: string;
   /** Raycast only: also install the full mcp-remote MCP server. */
   withMcp?: boolean;
 }
 
-export async function connect(opts: ConnectOptions): Promise<void> {
+export type ConnectRoute =
+  | { kind: "agent"; target: TargetName }
+  | { kind: "tool"; name?: string }
+  | { kind: "pick" };
+
+/**
+ * A known agent client wins a name; everything else is a tool. `--tool`
+ * forces the tool reading (and, with no name, opens the tool picker).
+ */
+export function routeConnect(thing: string | undefined, opts: { tool?: boolean } = {}): ConnectRoute {
+  const t = thing?.trim() || undefined;
+  if (opts.tool) return { kind: "tool", name: t };
+  if (!t) return { kind: "pick" };
+  if (isTargetName(t)) return { kind: "agent", target: t };
+  return { kind: "tool", name: t };
+}
+
+export async function connect(thing: string | undefined, opts: ConnectOptions = {}): Promise<void> {
   banner();
 
   if (opts.list) {
+    log.heading("Agents");
     listTargets();
+    log.dim("Any other agent: synap agents add --name <name>  (prints a URL + key to paste)");
+    log.heading("Tools & accounts");
+    log.dim("synap connect --tool   lists the services this pod can connect");
     return;
   }
 
-  // ── Step 1: Pod (data source) ───────────────────────────────────────────
-  // Resolve pod first — the surface config depends on which pod to point at.
-  let podUrl = opts.podUrl;
-  let apiKey = opts.apiKey;
-  let workspaceId: string | undefined;
-  let agentUserId: string | undefined;
+  const scope = {
+    workspaceId: opts.workspace ?? opts.pinWorkspace,
+    projectId: opts.project ?? opts.pinProject,
+  };
+  let route = routeConnect(thing ?? opts.target, { tool: opts.tool });
 
-  if (!podUrl || !apiKey) {
-    const resolved = await resolvePodFromProfiles(opts.name);
-    if (!resolved) return;
-    podUrl = resolved.podUrl;
-    apiKey = resolved.hubApiKey;
-    workspaceId = resolved.workspaceId || undefined;
-    agentUserId = resolved.agentUserId || undefined;
-  }
-
-  // ── Step 2: Health check ────────────────────────────────────────────────
-  const spinner = ora("Checking pod health...").start();
-  const health = await checkPodHealth(podUrl);
-  if (!health.healthy) {
-    spinner.fail(`Pod not reachable at ${podUrl}`);
-    return;
-  }
-  spinner.succeed(`Pod healthy at ${podUrl}`);
-
-  // ── Step 3: Target (AI surface) ─────────────────────────────────────────
-  const target = await resolveTarget(opts.target);
-  if (!target) return;
-
-  if (opts.withMcp && target !== "raycast") {
-    log.warn("--with-mcp is Raycast-only; ignored for this target.");
-  }
-
-  // ── Step 4: Install ─────────────────────────────────────────────────────
-  log.heading(`Connecting ${TARGETS[target].label} → ${podUrl}`);
-
-  // Default pod-wide: a workspace is a lens, not a container — don't weld the
-  // profile's workspace into the connection. Pin only when explicitly asked
-  // (`--pin-workspace` / `--pin-project`, composable). With no pin, the agent
-  // is enrolled across ALL the user's workspaces and scopes consciously per call.
-  void workspaceId; // profile default no longer scopes the connection
-  const ok = await installForTarget(target, {
-    podUrl,
-    apiKey,
-    workspaceId: opts.pinWorkspace,
-    projectId: opts.pinProject,
-    agentUserId,
-    withMcp: opts.withMcp,
-  });
-
-  log.blank();
-  if (ok) {
-    log.success(`${TARGETS[target].label} connected to ${podUrl}`);
-    log.dim("Run 'synap connections' to see all surface connections.");
-  } else {
-    log.warn(`${TARGETS[target].label} install did not complete — see above.`);
-  }
-}
-
-// ─── Helpers ─────────────────────────────────────────────────────────────────
-
-async function resolvePodFromProfiles(preferredName?: string): Promise<LocalPodConfig | null> {
-  let profiles = listPodProfiles();
-
-  // No pods yet — offer to add one inline instead of dead-ending
-  if (profiles.length === 0) {
-    log.blank();
-    log.info("No pods configured yet.");
-    const { shouldAdd } = await prompts({
-      type: "confirm",
-      name: "shouldAdd",
-      message: "Add a pod now?",
-      initial: true,
+  if (route.kind === "pick") {
+    if (!process.stdin.isTTY) {
+      log.error("Say what to connect: synap connect <client|tool>  (synap connect --list)");
+      process.exitCode = 1;
+      return;
+    }
+    const { what } = await prompts({
+      type: "select",
+      name: "what",
+      message: "What are you connecting?",
+      choices: [
+        { title: "An AI agent", description: "Claude Code, Cursor, Codex, … or your own", value: "agent" },
+        { title: "A tool or account", description: "Gmail, GitHub, Notion, …", value: "tool" },
+      ],
     });
-    if (!shouldAdd) return null;
-    log.blank();
-    await podsAdd();
-    profiles = listPodProfiles();
-    if (profiles.length === 0) return null; // user bailed out of add flow
-  }
-
-  // --name flag: use that profile directly
-  if (preferredName) {
-    const match = profiles.find((p) => p.name === preferredName);
-    if (!match) {
-      log.error(podNotFoundMessage(preferredName));
-      return null;
+    if (!what) return;
+    if (what === "agent") {
+      const { agentsAdd } = await import("./agents.js");
+      await agentsAdd(undefined, { workspace: scope.workspaceId, project: scope.projectId });
+      return;
     }
-    log.info(`Using pod: ${chalk.bold(match.name)}  ${chalk.dim(match.config.podUrl)}`);
-    return match.config;
+    route = { kind: "tool" };
   }
 
-  // Single profile: show it so the user knows what they're connecting to
-  if (profiles.length === 1) {
-    const p = profiles[0];
-    log.info(`Pod: ${chalk.bold(p.name)}  ${chalk.dim(p.config.podUrl)}`);
-    return p.config;
+  if (route.kind === "tool") {
+    if (scope.projectId) log.warn("--project doesn't apply to a tool connection; ignored.");
+    const { capabilityConnect } = await import("./capability.js");
+    await capabilityConnect(route.name, { workspace: scope.workspaceId });
+    return;
   }
 
-  // Multiple profiles: let user pick
-  const active = profiles.find((p) => p.active);
-  const { profileName } = await prompts({
-    type: "select",
-    name: "profileName",
-    message: "Which pod?",
-    choices: [
-      ...profiles.map((p) => ({
-        title: `${chalk.bold(p.name)}${p.active ? chalk.green("  ← active") : ""}  ${chalk.dim(p.config.podUrl)}`,
-        value: p.name,
-      })),
-      { title: chalk.dim("Add a new pod…"), value: "__add__" },
-    ],
-    initial: active ? profiles.indexOf(active) : 0,
-  });
-
-  if (!profileName) return null;
-
-  if (profileName === "__add__") {
-    log.blank();
-    await podsAdd();
-    const updated = listPodProfiles();
-    // Return the most recently added profile (last in list)
-    const newest = updated.filter((p) => !profiles.some((o) => o.name === p.name));
-    if (newest.length > 0) {
-      log.info(`Using pod: ${chalk.bold(newest[0].name)}  ${chalk.dim(newest[0].config.podUrl)}`);
-      return newest[0].config;
-    }
-    return null;
-  }
-
-  return profiles.find((p) => p.name === profileName)!.config;
+  const pod = await resolveAgentPod({ podUrl: opts.podUrl, apiKey: opts.apiKey, profileName: opts.name });
+  if (!pod) return;
+  const ok = await connectKnownAgent(route.target, pod, scope, { withMcp: opts.withMcp });
+  if (!ok) process.exitCode = 1;
 }
-
-async function resolveTarget(raw?: string): Promise<TargetName | null> {
-  if (raw) {
-    if (!isTargetName(raw)) {
-      log.error(`Unknown target: ${raw}`);
-      log.dim("Run `synap connect --list` to see supported targets.");
-      return null;
-    }
-    return raw;
-  }
-
-  const { target } = await prompts({
-    type: "select",
-    name: "target",
-    message: "Which AI surface are you connecting?",
-    choices: Object.values(TARGETS).map((t) => ({
-      title: `${t.label}${describeCaps(t.supports)}`,
-      value: t.name,
-    })),
-  });
-
-  if (!target || !isTargetName(target)) return null;
-  return target;
-}
-
-function describeCaps(supports: { skills: boolean; mcp: boolean }): string {
-  const parts: string[] = [];
-  if (supports.skills) parts.push("skills");
-  if (supports.mcp) parts.push("MCP");
-  return parts.length ? `  ${chalk.dim(`(${parts.join(" + ")})`)}` : "";
-}
-
-// (detectAndSaveAgentWorkspaceRouting removed — agents are pod-wide now; there
-// is no "memory workspace" to auto-detect and pin. Memory is automatic.)

@@ -1,8 +1,9 @@
 /**
  * synap connections
  *
- * Show which Synap pod each agent surface is currently pointing at,
- * and which stored profile it matches.
+ * Everything plugged into your pods, in two sections:
+ *   Agents — which pod each agent client points at, and which profile it matches.
+ *   Tools  — which services (Gmail, GitHub, …) the active pod has connected.
  *
  *   synap connections
  */
@@ -14,6 +15,7 @@ import os from "node:os";
 import { log } from "../utils/logger.js";
 import { listPodProfiles } from "../lib/pod.js";
 import { TARGETS } from "../lib/targets.js";
+import { hubGet, resolveHubConfig } from "../lib/hub-client.js";
 
 
 
@@ -45,40 +47,71 @@ export async function connections(): Promise<void> {
   const configured = surfaces.filter((s) => s.configured);
   const unconfigured = surfaces.filter((s) => !s.configured);
 
-  log.heading("Agent surface connections");
+  log.heading("Agents");
 
-  if (configured.length === 0 && unconfigured.length === surfaces.length) {
-    log.dim("No surfaces connected yet.");
-    log.blank();
-    log.info("Connect a surface:  synap connect");
-    return;
+  if (configured.length === 0) {
+    log.dim("  No agent connected yet.");
+  } else {
+    // Widths for alignment
+    const labelW = Math.max(...surfaces.map((s) => s.label.length)) + 2;
+    const profileW = Math.max(10, ...configured.map((s) => (s.profile ?? "(unknown)").length)) + 2;
+
+    for (const s of configured) {
+      const icon = s.profile ? chalk.green("●") : chalk.yellow("●");
+      const label = s.label.padEnd(labelW);
+      const profileStr = s.profile
+        ? chalk.bold(s.profile.padEnd(profileW))
+        : chalk.yellow("(unknown pod)".padEnd(profileW));
+      const url = chalk.dim(s.podUrl ?? "");
+      console.log(`  ${icon} ${label} ${profileStr} ${url}`);
+    }
+
+    for (const s of unconfigured) {
+      console.log(`  ${chalk.dim("○")} ${chalk.dim(s.label.padEnd(labelW))} ${chalk.dim("not configured")}`);
+    }
   }
 
-  // Widths for alignment
-  const labelW = Math.max(...surfaces.map((s) => s.label.length)) + 2;
-  const profileW = Math.max(10, ...configured.map((s) => (s.profile ?? "(unknown)").length)) + 2;
-
-  for (const s of configured) {
-    const icon = s.profile ? chalk.green("●") : chalk.yellow("●");
-    const label = s.label.padEnd(labelW);
-    const profileStr = s.profile
-      ? chalk.bold(s.profile.padEnd(profileW))
-      : chalk.yellow("(unknown pod)".padEnd(profileW));
-    const url = chalk.dim(s.podUrl ?? "");
-    console.log(`  ${icon} ${label} ${profileStr} ${url}`);
-  }
-
-  for (const s of unconfigured) {
-    console.log(`  ${chalk.dim("○")} ${chalk.dim(s.label.padEnd(labelW))} ${chalk.dim("not configured")}`);
-  }
+  if (profiles.length > 0) await printTools();
 
   log.blank();
-
   if (profiles.length > 1) {
-    log.dim("synap pods use <name>      — switch ALL surfaces to a pod");
+    log.dim("synap pods use <name>      — switch ALL agents to a pod");
   }
-  log.dim("synap connect              — wire a surface to a specific pod");
-  log.dim("synap pods list            — show configured pods");
+  log.dim("synap connect              — connect an agent or a tool");
+  log.dim("synap agents list          — every agent on the pod, not only this machine's");
+}
+
+/**
+ * The active pod's connected services. A failed read says so — it must never
+ * render as "none connected".
+ */
+async function printTools(): Promise<void> {
+  log.heading("Tools & accounts");
+  let res: {
+    providers?: Array<{ provider: string; displayName?: string; connected: boolean }>;
+    nangoStatus?: "ok" | "error";
+    nangoError?: { reason?: string; message?: string };
+  };
+  try {
+    const cfg = await resolveHubConfig();
+    res = (await hubGet("/connectors/providers", {}, cfg)) as typeof res;
+  } catch (err) {
+    log.warn(`  Couldn't check tools: ${err instanceof Error ? err.message : String(err)}`);
+    return;
+  }
+  if (res.nangoStatus === "error") {
+    log.warn(`  Couldn't check tools (${res.nangoError?.reason ?? "unknown"}) — state unknown.`);
+    return;
+  }
+  const providers = res.providers ?? [];
+  const connected = providers.filter((p) => p.connected);
+  if (connected.length === 0) {
+    log.dim("  None connected yet.");
+  } else {
+    for (const p of connected) console.log(`  ${chalk.green("●")} ${p.displayName ?? p.provider}`);
+  }
+  const available = providers.length - connected.length;
+  if (available > 0) log.dim(`  ${available} more available — synap connect --tool`);
 }
 
 // ─── Surface detectors ────────────────────────────────────────────────────────

@@ -2,8 +2,10 @@
  * synap agents — manage agent principals on your pod
  *
  *   synap agents list              list your agents on this pod (default) or --local cache
- *   synap agents add               add a named agent identity (legacy — use create for new agents)
- *   synap agents create            create or reuse an agent principal on the pod
+ *   synap agents add [kind]        THE door: a client (claude-code, cursor…), a custom
+ *                                  agent (--name), or what's on this machine (no kind).
+ *                                  --api-key registers a key you already hold.
+ *   synap agents create            deprecated alias of `add`
  *   synap agents remove <name>     remove from local cache only
  *   synap agents info <name>       show local cache details only
  *   synap agents rotate-key <n>    rotate key using local cache only
@@ -20,11 +22,16 @@ import {
   removeAgent,
   type AgentProfile,
 } from "../lib/agents-config.js";
-import { getActivePodConfig, getPodOverride, findPodNameByUrl, listPodProfiles, podNotFoundMessage, RESERVED_AGENT_TYPES } from "../lib/pod.js";
+import { getActivePodConfig, getPodOverride, findPodNameByUrl, listPodProfiles, podNotFoundMessage } from "../lib/pod.js";
 import { resolveHubConfig, hubGet, hubPost, renderHubError } from "../lib/hub-client.js";
 import { unwrapList } from "../lib/unwrapList.js";
-import { samePodOrigin } from "../lib/project-ref.js";
-import { provisionAgentKey, enrollAgentIfNeeded, configureAgentContext } from "../lib/targets.js";
+import {
+  addDetectedAgents,
+  connectKnownAgent,
+  createCustomAgent,
+  planAgentAdd,
+  resolveAgentPod,
+} from "../lib/agent-door.js";
 
 function maskKey(key: string): string {
   if (key.length <= 12) return key.slice(0, 4) + "...";
@@ -82,7 +89,7 @@ export async function agentsList(
     }
     if (agents.length === 0) {
       log.info(
-        "No local agent cache. Use: synap agents create | synap connect  (or omit --local for pod roster)"
+        "No local agent cache. Use: synap agents add  (or omit --local for pod roster)"
       );
       return;
     }
@@ -144,7 +151,7 @@ export async function agentsList(
 
   if (rows.length === 0) {
     log.info(
-      "No agents on this pod for you yet. Use: synap connect --target=<surface>  or  synap agents create --name <n>"
+      "No agents on this pod for you yet. Use: synap agents add  (a client, --name <n> for your own, or pick from this machine)"
     );
     log.dim("You get one agent per type; multi-machine reuses the same principal.");
     return;
@@ -167,22 +174,24 @@ export async function agentsList(
   }
 
   log.blank();
-  log.dim("synap agents create / synap connect  — create or reuse (you × type)");
+  log.dim("synap agents add  — create or reuse (you × type)");
   log.dim("synap agents list --local            — ~/.synap cache only");
   log.dim("synap whoami                        — current agent principal");
 }
 
-// ─── add (legacy) ─────────────────────────────────────────────────────────────
-// Deprecated: Use `synap agents create` for new agents.
-// `add` is for registering pre-existing agent credentials.
+// ─── add --api-key ────────────────────────────────────────────────────────────
 
-export async function agentsAdd(opts: {
+/**
+ * `synap agents add --api-key <key>`: register a key you already hold, on THIS
+ * machine only. Mints nothing — the agent already exists on the pod.
+ */
+async function registerAgentKey(opts: {
   name?: string;
   apiKey?: string;
   pod?: string;
   workspace?: string;
   label?: string;
-} = {}): Promise<void> {
+}): Promise<void> {
   const isTTY = process.stdin.isTTY;
 
   // ── name ──────────────────────────────────────────────────────────────────
@@ -340,10 +349,56 @@ export function agentsInfo(name: string): void {
   log.dim(`Usage: SYNAP_AGENT=${name} synap <command>`);
 }
 
-// ─── create ───────────────────────────────────────────────────────────────────
+// ─── add (the one door) ──────────────────────────────────────────────────────
 
-type AgentTemplate = "twin" | "assistant" | "custom";
-type AgentRole = "admin" | "editor" | "viewer";
+export interface AgentsAddOpts {
+  name?: string;
+  template?: string;
+  type?: string;
+  role?: string;
+  workspace?: string;
+  project?: string;
+  apiKey?: string;
+  label?: string;
+  pod?: string;
+  withMcp?: boolean;
+}
+
+/**
+ * `synap agents add [kind]` — bring an agent into the pod. See
+ * `lib/agent-door.ts` for the three ways in; this only dispatches.
+ */
+export async function agentsAdd(kind: string | undefined, opts: AgentsAddOpts = {}): Promise<void> {
+  const plan = planAgentAdd(kind, opts);
+  if (plan.mode === "existing-key") {
+    await registerAgentKey({ ...opts, name: opts.name ?? kind });
+    return;
+  }
+
+  const pod = await resolveAgentPod({});
+  if (!pod) return;
+  const scope = { workspaceId: opts.workspace, projectId: opts.project };
+
+  let ok: boolean;
+  if (plan.mode === "known") {
+    ok = await connectKnownAgent(plan.target, pod, scope, { withMcp: opts.withMcp });
+  } else if (plan.mode === "custom") {
+    ok = await createCustomAgent(
+      pod,
+      { name: plan.name, template: opts.template, type: opts.type, role: opts.role, label: opts.label },
+      scope
+    );
+  } else {
+    ok = await addDetectedAgents(pod, scope);
+  }
+  if (!ok) process.exitCode = 1;
+}
+
+/** Deprecated: `synap agents create` → `synap agents add`. */
+export async function agentsCreate(opts: Omit<AgentsAddOpts, "apiKey"> = {}): Promise<void> {
+  log.dim("`synap agents create` is now `synap agents add` — same flags.");
+  await agentsAdd(opts.template && opts.template !== "custom" ? undefined : "custom", opts);
+}
 
 interface TrpcResponse<T> {
   result?: { data?: T };
@@ -372,215 +427,6 @@ async function trpcMutation<T>(
   }
   if (!body.result?.data) throw new Error("Unexpected empty response from tRPC");
   return body.result.data;
-}
-
-async function resolveWorkspace(
-  cfg: Awaited<ReturnType<typeof resolveHubConfig>>,
-  preferredWorkspaceId?: string
-): Promise<string> {
-  if (preferredWorkspaceId) return preferredWorkspaceId;
-
-  const result = await hubGet("/workspaces", {}, cfg) as { workspaces?: Array<{ id: string; name: string }> };
-  const list = unwrapList<{ id: string; name: string }>(result, ["workspaces"]);
-
-  if (list.length === 0) throw new Error("No workspaces found on this pod.");
-  if (list.length === 1) return list[0].id;
-
-  if (!process.stdin.isTTY) return list[0].id;
-
-  const { picked } = await prompts({
-    type: "select",
-    name: "picked",
-    message: "Which workspace should this agent belong to?",
-    choices: list.map((ws) => ({ title: `${ws.name} (${ws.id.slice(0, 8)}…)`, value: ws.id })),
-  });
-  if (!picked) throw new Error("Workspace selection cancelled.");
-  return picked as string;
-}
-
-export async function agentsCreate(opts: {
-  template?: string;
-  name?: string;
-  type?: string;
-  role?: string;
-  workspace?: string;
-  pod?: string;
-} = {}): Promise<void> {
-  const template = (opts.template ?? "custom") as AgentTemplate;
-  if (!["twin", "assistant", "custom"].includes(template)) {
-    log.error(`Unknown template '${template}'. Use: twin | assistant | custom`);
-    return;
-  }
-
-  // Hub config: `--pod <name>` is consumed from argv by `bootstrapPodOverride`
-  // (pod.ts:255 — `agents` is NOT in NATIVE_POD_FLAG_COMMANDS), so `opts.pod` is
-  // always undefined here and `resolveHubConfig()` already honours the override.
-  // This block used to branch on `opts.pod` and hand-build `cfg` — an unreachable
-  // second config path that skipped resolveHubConfig's cross-pod `safeWs` rule.
-  // ONE door.
-  const allProfiles = listPodProfiles();
-  let cfg: Awaited<ReturnType<typeof resolveHubConfig>>;
-  try {
-    cfg = await resolveHubConfig();
-  } catch (err) {
-    log.error(err instanceof Error ? err.message : String(err));
-    return;
-  }
-  const activePod =
-    allProfiles.find((p) => samePodOrigin(p.config.podUrl, cfg.podUrl)) ??
-    allProfiles.find((p) => p.active) ??
-    allProfiles[0] ??
-    null;
-
-  // Resolve workspace
-  let workspaceId: string;
-  try {
-    workspaceId = await resolveWorkspace(cfg, opts.workspace);
-  } catch (err) {
-    renderHubError(err);
-    return;
-  }
-
-  // Resolve name
-  let agentName = opts.name;
-  if (template === "twin") {
-    // Fetch the caller's display name for a generated twin name
-    try {
-      const me = await hubGet("/users/me", {}, cfg) as { name?: string; email?: string };
-      agentName = agentName ?? `${me.name ?? me.email ?? "User"}'s Twin`;
-    } catch {
-      agentName = agentName ?? "My Twin";
-    }
-  } else if (!agentName) {
-    if (!process.stdin.isTTY) {
-      log.error("--name is required for assistant/custom templates in non-interactive mode");
-      return;
-    }
-    const { inputName } = await prompts({
-      type: "text",
-      name: "inputName",
-      message: `Agent name (template: ${template}):`,
-      validate: (v: string) => v.trim().length > 0 || "Name is required",
-    });
-    if (!inputName) return;
-    agentName = (inputName as string).trim();
-  }
-
-  // Determine a safe local name for this agent identity (also the fallback
-  // agentType — see CAPABILITY DELTA note below).
-  const localName = agentName
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-|-$/g, "") || template;
-
-  // Resolve agentType.
-  //
-  // CAPABILITY DELTA vs the old agentUsers.create tRPC path: that endpoint
-  // created a brand-new named agent user on every call, so one workspace
-  // could hold many distinct "custom"/"assistant" agents side by side.
-  // `/api/hub/setup/agent` (via provisionAgentKey → provisionSurfaceAgentKey)
-  // treats (createdByUserId, agentType) as the SINGLETON — one agent user per
-  // human per type. Multi-machine reuses the same principal with key instanceId.
-  // Differently-NAMED agents without --type use a slug of the name as agentType
-  // so "Bob" and "Alice" stay separate; two creates with the same name reuse.
-  let agentType = opts.type;
-  if (!agentType) {
-    agentType = template === "twin" ? "twin" : localName;
-  }
-
-  // GUARD — derived name must not collide with a reserved surface agentType
-  // (claude-code, cursor, …) for THIS user, or create reuses that surface
-  // principal. Explicit --type is deliberate.
-  if (!opts.type && RESERVED_AGENT_TYPES.has(agentType)) {
-    console.error(
-      chalk.red(`The name "${agentName}" maps to the reserved surface type "${agentType}".`)
-    );
-    log.dim(`That agent type is owned by a connect surface (e.g. \`synap connect\`). ` +
-      `Pick a different --name, or pass an explicit --type <unique> to avoid overwriting it.`);
-    process.exit(1);
-  }
-
-  // Resolve role — twin inherits, others default to editor.
-  // Validate up front: an invalid --role would otherwise be sent to the backend,
-  // which treats a 400 as non-fatal (warn, don't throw) — so a typo'd role would
-  // silently print as applied. Fail fast instead.
-  const VALID_ROLES: readonly AgentRole[] = ["admin", "editor", "viewer"];
-  if (opts.role && !VALID_ROLES.includes(opts.role as AgentRole)) {
-    console.error(chalk.red(`Invalid --role "${opts.role}".`));
-    log.dim(`Valid roles: ${VALID_ROLES.join(", ")}.`);
-    process.exit(1);
-  }
-  const role = template === "twin"
-    ? "editor"
-    : ((opts.role as AgentRole | undefined) ?? "editor") as AgentRole;
-
-  const spinner = ora(`Creating ${template} agent on pod...`).start();
-
-  try {
-    // Provision through the ONE canonical door (POST /api/hub/setup/agent via
-    // the shared wrapper) — same primitive every MCP target and bridge-setup
-    // use. Replaces the direct agentUsers.create + apiKeys.create tRPC calls;
-    // those tRPC procedures still exist for other consumers, the CLI just no
-    // longer calls them here.
-    const podUrl = cfg.podUrl;
-    const { hubApiKey, agentUserId, reused } = await provisionAgentKey(
-      podUrl,
-      cfg.apiKey,
-      agentType,
-      // idempotent: re-running `agents create` for the same name REUSES the
-      // existing key rather than minting a fresh one + revoking the old (which
-      // would break anything already holding it) — same reasoning bridge-setup uses.
-      { requireApproval: false, idempotent: true }
-    );
-
-    await enrollAgentIfNeeded(podUrl, cfg.apiKey, agentUserId, workspaceId, { role });
-
-    spinner.succeed(
-      reused
-        ? `Agent reused: ${chalk.bold(agentName)}`
-        : `Agent created or reused: ${chalk.bold(agentName)}`
-    );
-    log.blank();
-    console.log(`  ${"ID".padEnd(12)}  ${chalk.dim(agentUserId)}`);
-    console.log(`  ${"Name".padEnd(12)}  ${chalk.bold(agentName)}`);
-    console.log(`  ${"Template".padEnd(12)}  ${template}`);
-    console.log(`  ${"Type".padEnd(12)}  ${agentType}`);
-    console.log(`  ${"Role".padEnd(12)}  ${role}`);
-    console.log(`  ${"Workspace".padEnd(12)}  ${workspaceId.slice(0, 8)}…`);
-    log.blank();
-
-    console.log(chalk.yellow("  *** Save this API key — it will not be shown again ***"));
-    console.log();
-    console.log(`  ${chalk.bold("API key:")}  ${chalk.green(hubApiKey)}`);
-    console.log();
-    console.log(chalk.yellow("  *** End of key — store it securely now ***"));
-    log.blank();
-
-    // Store locally in agents config (cache — pod remains SSOT)
-    const profile: AgentProfile = {
-      podName: activePod?.name ?? "default",
-      apiKey: hubApiKey,
-      workspaceId,
-      label: agentName,
-      createdAt: new Date().toISOString(),
-      template,
-      agentUserId,
-    };
-    addAgent(localName, profile);
-
-    log.success(`Agent identity '${localName}' saved locally.`);
-    log.dim(`Use SYNAP_AGENT=${localName} to activate this identity.`);
-
-    // Same CONTEXT.md routing file every other provisioned agent gets.
-    try {
-      await configureAgentContext(podUrl, hubApiKey, agentType, agentUserId);
-    } catch (err) {
-      log.warn(`Agent context wizard failed: ${err instanceof Error ? err.message : String(err)}`);
-    }
-  } catch (err) {
-    spinner.fail("Agent creation failed.");
-    renderHubError(err);
-  }
 }
 
 // ─── rotate-key ───────────────────────────────────────────────────────────────

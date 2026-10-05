@@ -39,17 +39,16 @@ import {
   setActivePod,
   type LocalPodConfig,
 } from "../lib/pod.js";
-import { provisionAgentKey, configureAgentContext, installForTarget } from "../lib/targets.js";
+import { provisionAgentKey, configureAgentContext } from "../lib/targets.js";
 import { seedAgentEntities } from "../lib/seed.js";
 import { login, isLoggedIn, listPods, getStoredToken, waitForPodCallback } from "../lib/auth.js";
 import { detectAgents, type DetectableAgent } from "../lib/agent-detect.js";
 import { createPodInBrowser } from "../lib/init-pod.js";
 import { buildPairLink, renderTerminalQr } from "../lib/pair-link.js";
 import { buildHandoff } from "../lib/init-handoff.js";
-import { approveAgentKeysAtOnce } from "../lib/batch-approval.js";
-import { connectAgents } from "../lib/init-connect.js";
+import { connectAgentsBatch } from "../lib/agent-door.js";
 import { INIT_EXIT, InitExit } from "../lib/init-exit.js";
-import { withHeldOutput, reserveStdoutForJson } from "../lib/init-output.js";
+import { reserveStdoutForJson } from "../lib/init-output.js";
 
 /** Where a phone without Relay gets it (synap-landing/app/download/relay). */
 const RELAY_DOWNLOAD_URL = "https://synap.live/download/relay";
@@ -406,19 +405,9 @@ async function connectAgentsStep(
   }
 
   // One click for every key that needs approval (V1 D5): mint them all first,
-  // open ONE review page, then install with the approved keys.
-  const result = await connectAgents(picked, {
-    approve: (targets) => approveAgentKeysAtOnce(podUrl, humanKey, targets),
-    install: async (target) => {
-      const run = await withHeldOutput(() =>
-        installForTarget(target, { podUrl, apiKey: humanKey, unattended: true })
-      );
-      return {
-        ok: run.value === true,
-        output: run.held,
-        error: run.error === undefined ? undefined : run.error instanceof Error ? run.error.message : String(run.error),
-      };
-    },
+  // open ONE review page, then install with the approved keys. The same batch
+  // door `synap agents add` uses — pod-wide, no scope.
+  const result = await connectAgentsBatch({ podUrl, apiKey: humanKey }, picked, {}, {
     after: async (target) => {
       if (target !== "openclaw") return;
       const oc = detectOpenClaw();
