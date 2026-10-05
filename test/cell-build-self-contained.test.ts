@@ -257,3 +257,58 @@ describe("market publish: an mcp-app cell's codeFile is built self-contained", (
     expect(errors.join("\n")).toMatch(/card\.css/);
   });
 });
+
+/**
+ * ONE React per document. In synap-app a dependency that imports react without
+ * declaring it resolves UPWARD to a different copy than the cell's own (Vite
+ * masks it with `dedupe`), and the document then ships two Reacts — two hook
+ * dispatchers. Here `dep` carries its OWN nested react with a distinct marker:
+ * plain node resolution would bundle both.
+ */
+describe("cell build --self-contained resolves React once, from the entry", () => {
+  const ENTRY_REACT = "__react_copy_entry__";
+  const NESTED_REACT = "__react_copy_nested__";
+
+  function stubReact(dir: string, marker: string) {
+    write(join(dir, "package.json"), JSON.stringify({ name: "react", main: "index.js" }));
+    write(join(dir, "index.js"), `export const COPY = "${marker}";\n`);
+    write(join(dir, "jsx-runtime.js"), `export const JSX_COPY = "${marker}";\n`);
+  }
+
+  function twoCopies(opts: { entryHasReact: boolean }) {
+    const dir = mkdtempSync(join(tmpdir(), "synap-react-dedupe-"));
+    const nm = join(dir, "node_modules");
+    if (opts.entryHasReact) stubReact(join(nm, "react"), ENTRY_REACT);
+    write(join(nm, "dep/package.json"), JSON.stringify({ name: "dep", main: "index.js" }));
+    write(
+      join(nm, "dep/index.js"),
+      `import { COPY } from "react";\nimport { JSX_COPY } from "react/jsx-runtime";\nexport const depCopies = [COPY, JSX_COPY];\n`,
+    );
+    stubReact(join(nm, "dep/node_modules/react"), NESTED_REACT);
+    write(
+      join(dir, "entry.ts"),
+      `import { COPY } from "react";\nimport { depCopies } from "dep";\n(globalThis as any).probe = [COPY, ...depCopies];\n`,
+    );
+    return join(dir, "entry.ts");
+  }
+
+  it("the fixture really holds two copies (both markers on disk)", () => {
+    const entry = twoCopies({ entryHasReact: true });
+    const nm = join(resolve(entry, ".."), "node_modules");
+    expect(existsSync(join(nm, "react/index.js"))).toBe(true);
+    expect(existsSync(join(nm, "dep/node_modules/react/index.js"))).toBe(true);
+  });
+
+  it("bundles exactly the entry's copy — including the react/jsx-runtime subpath", async () => {
+    const html = (await buildCellFromSource(twoCopies({ entryHasReact: true }), { selfContained: true })).code;
+    const script = scriptOf(html);
+    expect(script.match(new RegExp(ENTRY_REACT, "g"))?.length ?? 0).toBeGreaterThanOrEqual(1);
+    expect(script).not.toContain(NESTED_REACT);
+  });
+
+  it("fails loudly when react does not resolve from the entry (never falls back to a dependency's copy)", async () => {
+    await expect(
+      buildCellFromSource(twoCopies({ entryHasReact: false }), { selfContained: true }),
+    ).rejects.toThrow(/"react" \(imported by [^)]*\) does not resolve from the cell entry's directory/);
+  });
+});

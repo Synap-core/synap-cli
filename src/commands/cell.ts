@@ -299,6 +299,41 @@ const SELF_CONTAINED_ASSET_LOADERS: Record<string, "dataurl"> = {
   ".svg": "dataurl",
 };
 
+/** `react`, `react-dom`, and any subpath of either (`react/jsx-runtime`, `react-dom/client`, …). */
+const REACT_IMPORT = /^react(?:-dom)?(?:\/.*)?$/;
+
+/**
+ * Resolve every React import ONCE, from the entry's directory — esbuild's
+ * equivalent of Vite's `resolve.dedupe`. Without it, a dependency that imports
+ * react without declaring it (in synap-app: spatial-ui → react-dom,
+ * proposal-types → react) resolves UPWARD to whatever copy sits nearest to it,
+ * and the document ships two Reacts — two dispatchers, so hooks throw. A
+ * nested copy is never the one the cell's own tree renders with, so the
+ * entry's copy wins; if the entry cannot reach react at all, that is an error
+ * here, not a silent fallback to some dependency's copy.
+ */
+function dedupeReactPlugin(entryDir: string): import("esbuild").Plugin {
+  return {
+    name: "dedupe-react",
+    setup(build) {
+      build.onResolve({ filter: REACT_IMPORT }, async (args) => {
+        if (args.pluginData?.dedupeReact) return undefined;
+        const r = await build.resolve(args.path, {
+          kind: args.kind,
+          resolveDir: entryDir,
+          pluginData: { dedupeReact: true },
+        });
+        if (r.errors.length > 0) {
+          throw new CellBundleError(
+            `"${args.path}" (imported by ${args.importer}) does not resolve from the cell entry's directory ${entryDir} — add react/react-dom to the cell's own package so every import shares ONE copy.`
+          );
+        }
+        return { path: r.path, sideEffects: r.sideEffects };
+      });
+    },
+  };
+}
+
 /** Call esbuild programmatically. Returns { code, externals, css }. Exported for tests. */
 export async function bundleWithEsbuild(
   entry: string,
@@ -307,8 +342,9 @@ export async function bundleWithEsbuild(
   const esbuild = await loadEsbuild();
 
   if (opts.selfContained) {
-    // No plugin, no externals: every import — React included — is resolved
-    // from the entry's own node_modules and bundled. An import esbuild cannot
+    // No externals: every import — React included — is resolved from the
+    // entry's own node_modules and bundled (React deduped to ONE copy, see
+    // `dedupeReactPlugin`). An import esbuild cannot
     // resolve (a URL, a missing package) is a build error, never a runtime
     // fetch. `outdir` is virtual (write: false); it only gives esbuild a place
     // to emit the CSS bundle beside the JS one.
@@ -326,6 +362,7 @@ export async function bundleWithEsbuild(
         // `process` — which does not exist in the host's iframe.
         define: { "process.env.NODE_ENV": '"production"' },
         loader: SELF_CONTAINED_ASSET_LOADERS,
+        plugins: [dedupeReactPlugin(dirname(entry))],
         logLevel: "silent",
       });
     } catch (e) {
