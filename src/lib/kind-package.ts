@@ -378,6 +378,12 @@ export interface ResolveCellCodeFilesResult {
  * `marketPublishStandalone` for why the DEFAULT flips only on this door.
  * Author-declared `deps` on the cell entry win over the derived map, mirroring
  * `cell build --deps`'s own override semantics.
+ *
+ * A cell declaring `rendererType: "mcp-app"` is built `--self-contained`
+ * instead, whatever `bundleDeps` says: its `code` is the complete HTML document
+ * a foreign MCP-Apps host loads verbatim (React, CSS and brand fonts inlined),
+ * and its `deps` is `{}` — that host's CSP admits no esm.sh, so an author
+ * `deps` on such a cell is refused rather than shipped inert.
  */
 export async function resolveCellCodeFiles(
   pkg: StandalonePackageFile,
@@ -413,8 +419,24 @@ export async function resolveCellCodeFiles(
       resolved.push(raw);
       continue;
     }
+    const selfContained = c.rendererType === "mcp-app";
+    if (
+      selfContained &&
+      c.deps &&
+      typeof c.deps === "object" &&
+      Object.keys(c.deps).length > 0
+    ) {
+      errors.push(
+        `${label}: an "mcp-app" cell is one self-contained HTML document — remove "deps" (every import is bundled in; nothing resolves via esm.sh).`,
+      );
+      resolved.push(raw);
+      continue;
+    }
     try {
-      const built = await buildCellFromSource(entry, { bundleDeps });
+      const built = await buildCellFromSource(
+        entry,
+        selfContained ? { selfContained: true } : { bundleDeps },
+      );
       const { codeFile: _codeFile, ...rest } = c;
       resolved.push({
         ...rest,

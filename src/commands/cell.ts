@@ -12,6 +12,7 @@
  *   synap cell build ./src/chart.tsx --out ./dist/chart.js
  *   synap cell build ./src/chart.tsx --out ./dist/chart.js --define   # bundle then define
  *   synap cell build ./src/chart.tsx --out ./dist/chart.js --bundle-deps   # no esm.sh at runtime
+ *   synap cell build ./src/card.tsx --out ./dist/card.html --self-contained  # one HTML doc (mcp-app)
  *
  * API:
  *   POST /api/hub/cells/define — { name, rendererSource, workspaceId?, typeKey?,
@@ -47,10 +48,25 @@
  *     `ViewFrame.buildFrameCsp`'s `fullyBundled` branch) — this mode is
  *     opt-in; the default build is byte-identical to before this flag existed
  *   - the output module default-exports a React component (or plain module)
+ *   - default and `--bundle-deps` modes REFUSE an imported `.css` file (a
+ *     `CellBundleError` naming it): the output is one JS module with nowhere to
+ *     put a stylesheet, so the CSS could only be lost. `--self-contained` is the
+ *     mode that keeps it.
+ *   - `--self-contained` mode (an `rendererType: "mcp-app"` cell — a foreign
+ *     MCP-Apps host loads ONE sandboxed HTML document whose CSP admits no
+ *     esm.sh, no Google Fonts, no host-supplied React): NOTHING is external —
+ *     React included. Imported CSS is collected and inlined in `<style>`, the
+ *     brand faces (`@synap-core/design-tokens/fonts`, base64 woff2) are
+ *     prepended when they resolve from the entry's package, and the result is
+ *     wrapped into a complete HTML document whose inline `<script
+ *     type="module">` is the bundle. The output (the cell `code`) IS that
+ *     document; `deps` is always `{}`. The entry is the document's only script,
+ *     so it must mount itself (a `#root` element is provided).
  */
 
 import { readFileSync, writeFileSync, existsSync } from "fs";
 import { dirname, resolve, basename } from "path";
+import { runInNewContext } from "vm";
 import { log } from "../utils/logger.js";
 import {
   resolveHubConfig,
@@ -130,6 +146,10 @@ export interface CellBuildOpts {
   out?: string;
   define?: boolean;
   bundleDeps?: boolean;
+  /** One complete HTML document, nothing external (an `mcp-app` cell). */
+  selfContained?: boolean;
+  /** `--self-contained` only: `false` skips the brand faces; `true` requires them. */
+  fonts?: boolean;
   name?: string;
   typeKey?: string;
   deps?: string;
@@ -244,33 +264,97 @@ export const BUNDLE_DEPS_KEEP_EXTERNAL = new Set([
   "@synap/view-sdk",
 ]);
 
-/** Call esbuild programmatically. Returns { code, externals }. Exported for tests. */
-export async function bundleWithEsbuild(
-  entry: string,
-  opts: { bundleDeps?: boolean } = {}
-): Promise<{ code: string; externals: string[] }> {
+/** Load esbuild from the CLI's own install. */
+async function loadEsbuild(): Promise<typeof import("esbuild")> {
   // Dynamic import so the CLI only requires esbuild when `cell build` is used.
   // esbuild is a real `dependency` of this package (not a devDependency) —
   // Node resolves it from the CLI's OWN install location, not the caller's
   // project, so it is present under `npx @synap-core/cli` too. This catch is
   // therefore a last-resort guard against a corrupted install, not the
   // expected path; the fix is reinstalling the CLI, not the user's project.
-  let esbuild: typeof import("esbuild");
   try {
-    esbuild = await import("esbuild");
+    return await import("esbuild");
   } catch {
     throw new CellBundleError(
       "esbuild failed to load from the CLI's own install. Reinstall the CLI (npm install -g @synap-core/cli) or re-run via npx."
     );
   }
+}
+
+/**
+ * Asset types a self-contained build inlines as `data:` URIs — a stylesheet's
+ * `url(./icon.svg)` or `@font-face` src has no origin to load from inside the
+ * host's sandbox.
+ */
+const SELF_CONTAINED_ASSET_LOADERS: Record<string, "dataurl"> = {
+  ".woff2": "dataurl",
+  ".woff": "dataurl",
+  ".ttf": "dataurl",
+  ".otf": "dataurl",
+  ".png": "dataurl",
+  ".jpg": "dataurl",
+  ".jpeg": "dataurl",
+  ".gif": "dataurl",
+  ".webp": "dataurl",
+  ".svg": "dataurl",
+};
+
+/** Call esbuild programmatically. Returns { code, externals, css }. Exported for tests. */
+export async function bundleWithEsbuild(
+  entry: string,
+  opts: { bundleDeps?: boolean; selfContained?: boolean } = {}
+): Promise<{ code: string; externals: string[]; css: string }> {
+  const esbuild = await loadEsbuild();
+
+  if (opts.selfContained) {
+    // No plugin, no externals: every import — React included — is resolved
+    // from the entry's own node_modules and bundled. An import esbuild cannot
+    // resolve (a URL, a missing package) is a build error, never a runtime
+    // fetch. `outdir` is virtual (write: false); it only gives esbuild a place
+    // to emit the CSS bundle beside the JS one.
+    let result: import("esbuild").BuildResult<{ write: false; outdir: string }>;
+    try {
+      result = await esbuild.build({
+        entryPoints: [entry],
+        bundle: true,
+        format: "esm",
+        platform: "browser",
+        write: false,
+        outdir: "/__synap_cell_out__",
+        minify: true,
+        // React (and most libs) branch on this; unset, the bundle reads
+        // `process` — which does not exist in the host's iframe.
+        define: { "process.env.NODE_ENV": '"production"' },
+        loader: SELF_CONTAINED_ASSET_LOADERS,
+        logLevel: "silent",
+      });
+    } catch (e) {
+      throw new CellBundleError(`esbuild failed:\n${(e as Error).message}`);
+    }
+    const js = result.outputFiles.find((f) => f.path.endsWith(".js"))?.text ?? "";
+    const css = result.outputFiles
+      .filter((f) => f.path.endsWith(".css"))
+      .map((f) => f.text)
+      .join("\n");
+    return { code: js, externals: [], css };
+  }
 
   // First pass: bundle without any externals to discover all bare imports.
   // We use a custom plugin to collect them instead of failing.
   const externalSet = new Set<string>();
+  const cssImports: string[] = [];
 
   const collectPlugin: import("esbuild").Plugin = {
     name: "collect-externals",
     setup(build) {
+      // A stylesheet has nowhere to go in a single-JS-module output: a
+      // relative one used to die on esbuild's opaque "without an output path
+      // configured", a bare one (`pkg/style.css`) was externalized as an
+      // import the runtime cannot load. Collect them and refuse by name below.
+      build.onResolve({ filter: /\.css$/ }, (args) => {
+        cssImports.push(args.path);
+        return { path: args.path, external: true };
+      });
       // Intercept every non-relative, non-absolute import
       build.onResolve({ filter: /^[^./]/ }, (args) => {
         // Extract the package name (handle scoped packages like @org/pkg)
@@ -306,8 +390,77 @@ export async function bundleWithEsbuild(
     throw new CellBundleError(`esbuild failed:\n${msgs}`);
   }
 
+  if (cssImports.length > 0) {
+    throw new CellBundleError(
+      `this cell imports CSS, which a single-module build would drop: ${[
+        ...new Set(cssImports),
+      ].join(", ")}. Build it with --self-contained (CSS inlined into one HTML document), or move the styles into the component.`
+    );
+  }
+
   const code = result.outputFiles[0]?.text ?? "";
-  return { code, externals: Array.from(externalSet).sort() };
+  return { code, externals: Array.from(externalSet).sort(), css: "" };
+}
+
+/** The `@synap-core/design-tokens` export that carries the inlined brand faces. */
+export const FONTS_MODULE = "@synap-core/design-tokens/fonts";
+
+/**
+ * `SYNAP_FONT_FACE_CSS`, resolved from `fromDir` the way the entry's own
+ * imports resolve — or `null` when the package is not reachable from there.
+ * The module is TypeScript source (the package ships `src/`), so it is run
+ * through esbuild and evaluated in an empty VM context rather than imported.
+ */
+export async function resolveFontFaceCss(fromDir: string): Promise<string | null> {
+  const esbuild = await loadEsbuild();
+  let text: string;
+  try {
+    const r = await esbuild.build({
+      stdin: {
+        contents: `export { SYNAP_FONT_FACE_CSS } from ${JSON.stringify(FONTS_MODULE)};`,
+        resolveDir: fromDir,
+        loader: "ts",
+      },
+      bundle: true,
+      format: "cjs",
+      platform: "neutral",
+      write: false,
+      logLevel: "silent",
+    });
+    text = r.outputFiles[0]?.text ?? "";
+  } catch {
+    return null;
+  }
+  const mod: { exports: Record<string, unknown> } = { exports: {} };
+  runInNewContext(text, { module: mod, exports: mod.exports });
+  const css = mod.exports.SYNAP_FONT_FACE_CSS;
+  return typeof css === "string" && css.length > 0 ? css : null;
+}
+
+/**
+ * Wrap a self-contained bundle into the complete HTML document an MCP-Apps
+ * host loads verbatim. `</style` / `</script` are escaped so inlined text can
+ * never close its own element early (`<\/` is the same character sequence to
+ * the CSS and JS parsers, but not to the HTML tokenizer).
+ */
+export function wrapSelfContainedHtml(parts: { js: string; css: string }): string {
+  const css = parts.css.replace(/<\/(style)/gi, "<\\/$1");
+  const js = parts.js.replace(/<\/(script)/gi, "<\\/$1");
+  return [
+    "<!doctype html>",
+    '<html lang="en">',
+    "<head>",
+    '<meta charset="utf-8">',
+    '<meta name="viewport" content="width=device-width, initial-scale=1">',
+    `<style>\n${css}\n</style>`,
+    "</head>",
+    "<body>",
+    '<div id="root"></div>',
+    `<script type="module">\n${js}\n</script>`,
+    "</body>",
+    "</html>",
+    "",
+  ].join("\n");
 }
 
 export interface BuiltCell {
@@ -328,8 +481,39 @@ export interface BuiltCell {
  */
 export async function buildCellFromSource(
   entry: string,
-  opts: { bundleDeps?: boolean; deps?: string } = {}
+  opts: {
+    bundleDeps?: boolean;
+    deps?: string;
+    selfContained?: boolean;
+    fonts?: boolean;
+  } = {}
 ): Promise<BuiltCell> {
+  if (opts.selfContained) {
+    // A self-contained document reaches no module origin, so a deps map —
+    // "modules the runtime resolves via esm.sh" — can only be a lie here.
+    if (opts.deps) {
+      throw new CellBundleError(
+        "--deps does not apply to --self-contained: every import is bundled into the document, nothing resolves via esm.sh."
+      );
+    }
+    const { code: js, css } = await bundleWithEsbuild(entry, { selfContained: true });
+    let fontCss = "";
+    if (opts.fonts !== false) {
+      const resolved = await resolveFontFaceCss(dirname(entry));
+      if (resolved) fontCss = resolved;
+      else if (opts.fonts === true) {
+        throw new CellBundleError(
+          `--fonts: ${FONTS_MODULE} does not resolve from ${dirname(entry)} — add @synap-core/design-tokens to the cell's package.`
+        );
+      }
+    }
+    const code = wrapSelfContainedHtml({
+      js,
+      css: [fontCss, css].filter(Boolean).join("\n"),
+    });
+    return { code, deps: {}, externals: [] };
+  }
+
   const { code, externals } = await bundleWithEsbuild(entry, {
     bundleDeps: opts.bundleDeps,
   });
@@ -501,12 +685,20 @@ export async function cellBuild(
     const { code, deps: depsMap, externals } = await buildCellFromSource(absEntry, {
       bundleDeps: opts.bundleDeps,
       deps: opts.deps,
+      selfContained: opts.selfContained,
+      fonts: opts.fonts,
     });
 
     // Write output file
     const outPath = opts.out
       ? resolve(process.cwd(), opts.out)
-      : resolve(dirname(absEntry), basename(absEntry).replace(/\.[^.]+$/, ".bundle.js"));
+      : resolve(
+          dirname(absEntry),
+          basename(absEntry).replace(
+            /\.[^.]+$/,
+            opts.selfContained ? ".html" : ".bundle.js"
+          )
+        );
 
     writeFileSync(outPath, code, "utf-8");
 
