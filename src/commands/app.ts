@@ -599,9 +599,14 @@ export async function appConnect(): Promise<void> {
       isApproved: (d) => classifyProposalStatus(statusOf(d)) === "approved",
       isRejected: (d) => classifyProposalStatus(statusOf(d)) === "rejected",
       onApproved: (d) => d as Record<string, unknown>,
-      rejectedError: `The access request for "${manifest.name}" was rejected. Re-run \`synap app connect\` to ask again.`,
+      // `classifyProposalStatus` maps rejected / expired / withdrawn /
+      // approval_failed to one "rejected" — say "not approved", never assert a
+      // rejection we cannot prove.
+      rejectedError: `The access request for "${manifest.name}" was not approved (rejected, expired or withdrawn). Re-run \`synap app connect\` to ask again.`,
+      // A timeout is NOT proof the human declined: the pod may have been
+      // unreachable while polling. Name both causes.
       timeoutError:
-        `Timed out waiting for approval (120s). Open ${reviewUrl} and approve, then re-run \`synap app connect\`.`,
+        `Timed out waiting for approval (120s). If the pod was unreachable, check your connection; otherwise open ${reviewUrl} and approve, then re-run \`synap app connect\`.`,
     });
   } finally {
     clearInterval(ticker);
@@ -626,6 +631,7 @@ export async function appConnect(): Promise<void> {
   log.blank();
   log.success(`Key written to ${where}`);
   for (const { name } of assignments) log.dim(`${name}=…`);
+  log.dim("See or revoke this app in Pod Admin → My connections.");
   log.dim(
     manifest.deploy.target === "vercel"
       ? "Deploy with `vercel --prod` to pick up the new env vars."
