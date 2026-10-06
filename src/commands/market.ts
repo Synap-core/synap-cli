@@ -1525,7 +1525,7 @@ export async function resolveInstallPayload(
   if (!cat.bundledSlugs.has(slug)) {
     const def = await fetchPackageDefinition(slug, cpToken);
     if (!def) return null;
-    return { pkg: stampVersion(def, catalogVersion), from: "catalog", catalogVersion };
+    return { pkg: stampVersion(def, slug, catalogVersion), from: "catalog", catalogVersion };
   }
 
   if (catalogVersion && cat.reachedCp) {
@@ -1538,19 +1538,26 @@ export async function resolveInstallPayload(
         bundleVersion: bundledTemplatesVersion(),
       }).entries.find((e) => e.slug === slug);
       if (winner?.source === "remote") {
-        return { pkg: stampVersion(def, catalogVersion), from: "catalog", catalogVersion };
+        return { pkg: stampVersion(def, slug, catalogVersion), from: "catalog", catalogVersion };
       }
     }
   }
 
   const bundleVersion = bundledTemplatesVersion();
   const pkg = toPackageDefinition(slug) as unknown as Record<string, unknown>;
-  return { pkg: stampVersion(pkg, bundleVersion ? `bundle@${bundleVersion}` : undefined), from: "bundle" };
+  return { pkg: stampVersion(pkg, slug, bundleVersion ? `bundle@${bundleVersion}` : undefined), from: "bundle" };
 }
 
-function stampVersion(pkg: Record<string, unknown>, version: string | undefined): Record<string, unknown> {
-  if (!version) return pkg;
-  return { ...pkg, _meta: { ...((pkg._meta as Record<string, unknown> | undefined) ?? {}), version } };
+/**
+ * Label the payload with the slug it was resolved for and the version it came
+ * from. The SLUG is load-bearing: a catalog definition carries no `_meta` (the
+ * official publish strips it), and the pod keys "which existing workspace is
+ * this?" on `body._meta.slug`. Without it a governed apply's approval matched
+ * nothing and CREATED a second "Content OS" (2026-10-06) instead of updating.
+ */
+function stampVersion(pkg: Record<string, unknown>, slug: string, version: string | undefined): Record<string, unknown> {
+  const meta = (pkg._meta as Record<string, unknown> | undefined) ?? {};
+  return { ...pkg, _meta: { ...meta, slug, ...(version ? { version } : {}) } };
 }
 
 // ── `synap market update [slug]` — drift detection + version-aware re-apply ──

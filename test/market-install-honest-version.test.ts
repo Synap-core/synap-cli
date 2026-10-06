@@ -101,6 +101,7 @@ describe("market install — the version label matches the definition sent", () 
     expect(body.layoutConfig?.primarySurface ?? null).toBeNull();
     expect(body._meta?.version).toBe(`bundle@${bundledTemplatesVersion()}`);
     expect(body._meta?.version).not.toBe(CATALOG_VERSION);
+    expect((body._meta as { slug?: string } | undefined)?.slug).toBe("content-os");
     // The pod's stamp can't be predicted for a bundle — never "verify" against the catalog.
     expect(verifyStampLanded).not.toHaveBeenCalled();
   });
@@ -111,6 +112,9 @@ describe("market install — the version label matches the definition sent", () 
     const body = sentBody();
     expect(body.layoutConfig?.primarySurface).toEqual(FRESH_SURFACE);
     expect(body._meta?.version).toBe(CATALOG_VERSION);
+    // A catalog row has no `_meta`; the pod finds the existing workspace by
+    // `_meta.slug` — without it an approved apply created a duplicate space.
+    expect((body._meta as { slug?: string } | undefined)?.slug).toBe("content-os");
     expect(verifyStampLanded).toHaveBeenCalledWith("ws-1", CATALOG_VERSION, expect.anything());
   });
 
