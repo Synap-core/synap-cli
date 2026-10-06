@@ -286,6 +286,29 @@ program
     await connections();
   });
 
+// ─── app ────────────────────────────────────────────────────────────────────
+// The App Connect flow: a `synap.app.json` in your app repo → one command wires
+// the app's key into its deploy target. See APP-CONNECT-SPEC §5.
+const app = program
+  .command("app")
+  .description("Connect an app in this repo to your pod (synap.app.json)");
+
+app
+  .command("init")
+  .description("Write synap.app.json (asks name, pod, permissions) and register the app")
+  .action(async () => {
+    const { appInitCommand } = await import("./commands/app.js");
+    await appInitCommand();
+  });
+
+app
+  .command("connect")
+  .description("Request the app's access, await approval, then write its key into the deploy target")
+  .action(async () => {
+    const { appConnectCommand } = await import("./commands/app.js");
+    await appConnectCommand();
+  });
+
 // ─── mcp ────────────────────────────────────────────────────────────────────
 // The MCP front door: point any AI client at the pod's /mcp server.
 const mcp = program
