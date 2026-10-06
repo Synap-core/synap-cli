@@ -30,6 +30,8 @@ import {
   isHashVersion,
   listPublicTemplates,
   listWorkspaceTemplates,
+  getWorkspaceTemplate,
+  mergeCatalog,
   toPackageDefinition,
   layerTemplateGraph,
   bundledEdgesOf,
@@ -1041,7 +1043,7 @@ export async function marketInstall(
     onto?: string;
     /** Preview the create path write-free (`/packages/preflight`) — reports would-create / reuse / conflicts and writes nothing. */
     dryRun?: boolean;
-    /** Install a NAMED instance of a workspace template — a deliberate second copy (one Brand Library per brand). Sent as `instanceName`; the same name again reuses that instance. Absent = the template's singleton. */
+    /** Install a NAMED instance of a workspace template — a deliberate second copy (e.g. a sandbox to trial a template beside your live space; brands and clients are separated by PROJECT inside one space, never by a second copy). Sent as `instanceName`; the same name again reuses that instance. Absent = the template's singleton. */
     as?: string;
     /** Acting workspace (UUID) an `automation`/`workflow` install is added TO — the
      * backend `market.install` verb requires one for that kind (an automation
@@ -1109,7 +1111,7 @@ export async function marketInstall(
   const instanceName = opts.as?.trim();
   if (opts.as !== undefined) {
     if (!instanceName) {
-      log.error("--as needs a name, e.g. --as \"Architech Brand\".");
+      log.error("--as needs a name, e.g. --as \"Sandbox\".");
       process.exit(1);
     }
     if (type !== "workspace") {
@@ -1337,24 +1339,17 @@ export async function marketInstall(
   // Build the install payload — bundled (offline, byte-identical to the CP
   // definition) when available, else the authed CP definition.
   const cpToken = getStoredToken()?.token;
-  let pkg: Record<string, unknown>;
-  if (cat.bundledSlugs.has(slug)) {
-    pkg = toPackageDefinition(slug) as unknown as Record<string, unknown>;
-  } else {
-    const def = await fetchPackageDefinition(slug, cpToken);
-    if (!def) {
-      log.error(`Couldn't fetch "${entry.name}"'s definition from the control plane.`);
-      log.hint(cat.loggedIn ? "" : "It may be private — try: synap login");
-      process.exit(1);
-    }
-    pkg = def;
+  // The definition + an HONEST version label (see `resolveInstallPayload`):
+  // the catalog version only rides on the catalog's own definition.
+  const payload = await resolveInstallPayload(slug, cat, cpToken);
+  if (!payload) {
+    log.error(`Couldn't fetch "${entry.name}"'s definition from the control plane.`);
+    log.hint(cat.loggedIn ? "" : "It may be private — try: synap login");
+    process.exit(1);
   }
-
-  // Stamp the version the catalog resolved for this slug — including the
-  // authed `/mine` version for private templates — so the pod records the
-  // installed baseline and later `market update` drift checks work.
-  const remoteVersion = cat.remoteVersionBySlug.get(slug);
-  if (remoteVersion) pkg._meta = { ...(pkg._meta as Record<string, unknown> | undefined ?? {}), version: remoteVersion };
+  const pkg = payload.pkg;
+  // Only a catalog-sourced install can predict the stamp the pod will record.
+  const remoteVersion = payload.catalogVersion;
 
   // ── --dry-run: write-free preflight of the CREATE path. ───────────────────
   // Runs the pod's REAL resolver (write-free) so a template author sees
@@ -1492,6 +1487,72 @@ export async function marketInstall(
   }
 }
 
+// ── Install payload: which definition, labelled with WHOSE version ──────────
+
+/** The definition a workspace install sends, and the version label it carries. */
+export interface InstallPayload {
+  pkg: Record<string, unknown>;
+  /** Where `pkg` came from. */
+  from: "catalog" | "bundle";
+  /**
+   * The CATALOG version, set ONLY when `pkg` is that catalog row's own
+   * definition — the one value the CLI may expect the pod to stamp. Never set
+   * for a bundled definition (incident 2026-10-06: the bundle's OLD content-os
+   * went out labelled with the catalog's `h-448ffcae9220`, and the pod recorded
+   * a stale layout as up to date).
+   */
+  catalogVersion?: string;
+}
+
+/**
+ * Pick the install definition through the SAME winner rule the catalog uses
+ * (`mergeCatalog`: an official CP row wins over this CLI's frozen bundle only
+ * when its `definition.sourcePackage.version` is strictly newer), and label it
+ * honestly: a catalog definition carries the catalog version; a bundled one
+ * carries the bundle's own package version (`bundle@x.y.z`), never the
+ * catalog's. The pod re-derives the stamp from what it applied either way.
+ *
+ * Returns `null` only for a non-bundled slug whose definition could not be
+ * fetched (the caller reports it). A failed fetch for a BUNDLED slug falls back
+ * to the bundle — the documented offline path — labelled as the bundle.
+ */
+export async function resolveInstallPayload(
+  slug: string,
+  cat: Pick<MarketCatalog, "bundledSlugs" | "remoteVersionBySlug" | "reachedCp">,
+  cpToken: string | undefined,
+): Promise<InstallPayload | null> {
+  const catalogVersion = cat.remoteVersionBySlug.get(slug);
+  if (!cat.bundledSlugs.has(slug)) {
+    const def = await fetchPackageDefinition(slug, cpToken);
+    if (!def) return null;
+    return { pkg: stampVersion(def, catalogVersion), from: "catalog", catalogVersion };
+  }
+
+  if (catalogVersion && cat.reachedCp) {
+    const def = await fetchPackageDefinition(slug, cpToken).catch(() => null);
+    const tpl = getWorkspaceTemplate(slug);
+    if (def && tpl) {
+      const winner = mergeCatalog({
+        bundled: [tpl],
+        remote: [{ slug, name: slug, definition: def as { sourcePackage?: { version?: string } } }],
+        bundleVersion: bundledTemplatesVersion(),
+      }).entries.find((e) => e.slug === slug);
+      if (winner?.source === "remote") {
+        return { pkg: stampVersion(def, catalogVersion), from: "catalog", catalogVersion };
+      }
+    }
+  }
+
+  const bundleVersion = bundledTemplatesVersion();
+  const pkg = toPackageDefinition(slug) as unknown as Record<string, unknown>;
+  return { pkg: stampVersion(pkg, bundleVersion ? `bundle@${bundleVersion}` : undefined), from: "bundle" };
+}
+
+function stampVersion(pkg: Record<string, unknown>, version: string | undefined): Record<string, unknown> {
+  if (!version) return pkg;
+  return { ...pkg, _meta: { ...((pkg._meta as Record<string, unknown> | undefined) ?? {}), version } };
+}
+
 // ── `synap market update [slug]` — drift detection + version-aware re-apply ──
 
 export interface UpdateCheck extends TemplateUpdateCheck {
@@ -1601,25 +1662,16 @@ async function applyOnePackage(
   }
 
   const cpToken = getStoredToken()?.token;
-  let pkg: Record<string, unknown>;
-  if (cat.bundledSlugs.has(entry.slug)) {
-    pkg = toPackageDefinition(entry.slug) as unknown as Record<string, unknown>;
-  } else {
-    const def = await fetchPackageDefinition(entry.slug, cpToken);
-    if (!def) {
-      if (!opts.json) {
-        log.error(`Couldn't fetch "${entry.name}"'s definition from the control plane.`);
-        if (!cat.loggedIn) log.hint("It may be private — try: synap login");
-      }
-      return { slug: entry.slug, outcome: "fetch-failed", status: "fetch-failed", warnings: [] };
+  // Same honest payload as `marketInstall` (see `resolveInstallPayload`).
+  const payload = await resolveInstallPayload(entry.slug, cat, cpToken);
+  if (!payload) {
+    if (!opts.json) {
+      log.error(`Couldn't fetch "${entry.name}"'s definition from the control plane.`);
+      if (!cat.loggedIn) log.hint("It may be private — try: synap login");
     }
-    pkg = def;
+    return { slug: entry.slug, outcome: "fetch-failed", status: "fetch-failed", warnings: [] };
   }
-
-  // Same version stamp as `marketInstall` — needed for private templates too,
-  // since `applyOnePackage` re-runs the apply door on every update.
-  const remoteVersion = cat.remoteVersionBySlug.get(entry.slug);
-  if (remoteVersion) pkg._meta = { ...(pkg._meta as Record<string, unknown> | undefined ?? {}), version: remoteVersion };
+  const pkg = payload.pkg;
 
   const s = opts.json ? null : ora(`Updating ${entry.name}…`).start();
   try {
@@ -1644,7 +1696,7 @@ async function applyOnePackage(
     // stamp-contradiction check is therefore a no-op here by design; it's
     // `marketInstall`'s job to catch it on a first-time/unstamped install.
     const verdict = classifyApplyResult(entry, ws, dependencies, seedSummary, {
-      remoteVersionSent: remoteVersion,
+      remoteVersionSent: payload.catalogVersion,
       wasUnstamped: false,
     });
     if (!opts.json) {
