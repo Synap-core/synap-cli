@@ -62,6 +62,11 @@ export interface OrientSpaceBrief {
   anchors?: { root?: { kind: string; entityId?: string }; context?: string[] };
   /** Keys of the rules this space's template installed. */
   rules?: string[];
+  /**
+   * Skills this space DECLARES (`{ slug, mode, when }`). Structural and
+   * all-optional, like the rest: an older pod simply sends none.
+   */
+  skills?: Array<{ slug: string; mode?: string; when?: string }>;
   collect?: Array<{ kind: string; what?: string; cardinality?: string }>;
   keyKinds?: Array<{ slug: string; entityCount?: number }> | { status: "unavailable" };
   keyKindsTotal?: number;
@@ -113,6 +118,14 @@ export function renderSpaceBriefLines(brief: OrientSpaceBrief | undefined): stri
   if (root) out.push(`read first: ${root.kind}${root.entityId ? ` ${root.entityId}` : ""}`);
   if (brief.anchors?.context?.length) out.push(`context: ${brief.anchors.context.join(", ")}`);
   if (brief.rules?.length) out.push(`rules: ${brief.rules.join(", ")}`);
+  if (brief.skills?.length) {
+    // `always` is the load-bearing mark: that skill is already in effect here.
+    out.push(
+      `skills: ${brief.skills
+        .map((s) => (s.mode ? `${s.slug} (${s.mode})` : s.slug))
+        .join(", ")}`
+    );
+  }
   const k = brief.keyKinds;
   if (k && !Array.isArray(k)) out.push("kinds: unavailable (read failed)");
   else if (k && k.length) {

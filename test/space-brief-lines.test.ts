@@ -41,4 +41,27 @@ describe("renderSpaceBriefLines", () => {
       })
     ).toContain("playbooks: Build the kit …+1");
   });
+
+  it("renders the space's declared skills WITH their mode", () => {
+    // `always` is the load-bearing mark — that skill is already in effect here,
+    // which is what a reader needs to know at a glance.
+    const lines = renderSpaceBriefLines({
+      skills: [
+        {
+          slug: "system/synap/creative-director",
+          mode: "always",
+          when: "any content ask",
+        },
+        { slug: "system/synap/onboard", mode: "on-demand" },
+      ],
+    });
+    expect(lines).toContain(
+      "skills: system/synap/creative-director (always), system/synap/onboard (on-demand)"
+    );
+  });
+
+  it("a space with no declared skills adds no line (and never throws)", () => {
+    const lines = renderSpaceBriefLines({ purpose: "p" });
+    expect(lines.some((l) => l.startsWith("skills:"))).toBe(false);
+  });
 });
