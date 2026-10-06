@@ -5,6 +5,7 @@ import { unwrapList } from "../lib/unwrapList.js";
 import { reportWrite } from "../lib/capture-lane.js";
 import { renderNextSteps, FLOW } from "../lib/next-steps.js";
 import { requireFullId } from "../lib/id.js";
+import { resolveWorkspaceRef } from "./workspace-ops.js";
 
 export interface BaseOpts {
   json?: boolean;
@@ -149,9 +150,23 @@ export function renderSpaceBriefLines(brief: OrientSpaceBrief | undefined): stri
   return out;
 }
 
-export async function orient(opts: BaseOpts): Promise<void> {
+export async function orient(
+  opts: BaseOpts & { workspace?: string }
+): Promise<void> {
   try {
     const cfg = await resolveHubConfig(opts);
+    // `--workspace` targets ONE space for this call WITHOUT touching the pinned
+    // lens. `synap use` is the wrong tool for "just show me that space's brief":
+    // it MUTATES the lens for the directory, so asking about a second space
+    // means changing what every later command means. The flag wins over the pin
+    // because it is the more explicit statement.
+    //
+    // Resolved through the SAME door `workspace use`/`archive`/`rename` use, so
+    // an id, an exact name and the "Available: …" error for a wrong one behave
+    // identically everywhere — never a second name→id lookup.
+    const targetWorkspaceId = opts.workspace
+      ? (await resolveWorkspaceRef(opts.workspace, cfg)).id
+      : cfg.workspaceId;
     // ONE canonical shape: the backend `discover()` service (via GET /orient)
     // assembles the lens map — workspaces + projects + profile sample +
     // disclosure (onboarding→goal, entity counts, per-ws profiles under full).
@@ -161,17 +176,17 @@ export async function orient(opts: BaseOpts): Promise<void> {
       "/orient",
       {
         ...(opts.details ? { detail: "full" } : {}),
-        // Ask for THIS lens's space, so the pod returns its `brief`.
+        // Ask for THIS space, so the pod returns its `brief`.
         //
         // Without this the pod has no pinned space, returns no `brief`, and
         // `renderSpaceBriefLines` below is dead code that always receives
         // `undefined` — no "Space brief" section, ever. That renders the whole
-        // point of pinning a space invisible: the brief is where a space says
+        // point of naming a space invisible: the brief is where a space says
         // what it is for, which rules it installed and which SKILLS it declares
         // (`synap orient` is one of the two doors the space-linked-skills work
         // exists to serve). Omitting the param is silent — an absent section
         // reads like "this space has nothing to say".
-        ...(cfg.workspaceId ? { workspaceId: cfg.workspaceId } : {}),
+        ...(targetWorkspaceId ? { workspaceId: targetWorkspaceId } : {}),
       },
       cfg
     )) as OrientResult;
@@ -182,7 +197,7 @@ export async function orient(opts: BaseOpts): Promise<void> {
     if (opts.json) {
       console.log(
         JSON.stringify(
-          { ...res, podUrl: cfg.podUrl, workspaceId: cfg.workspaceId, nextSteps: FLOW.afterOrient() },
+          { ...res, podUrl: cfg.podUrl, workspaceId: targetWorkspaceId, nextSteps: FLOW.afterOrient() },
           null,
           2
         )

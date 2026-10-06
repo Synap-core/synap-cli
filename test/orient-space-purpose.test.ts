@@ -167,6 +167,35 @@ describe("synap orient — each space's purpose", () => {
     expect(h.calls).toContainEqual(["/orient", {}]);
   });
 
+  it("--workspace targets ONE space for this call, without moving the lens", async () => {
+    // The point of the flag: `synap use` MUTATES the lens for the directory, so
+    // asking about a second space would change what every later command means.
+    // `--workspace` answers "show me THAT space's brief" and changes nothing.
+    h.activeWorkspaceId = undefined; // and nothing is pinned either
+    h.payload = {
+      ...lightPayload,
+      brief: { workspaceId: BRAND, name: "Brand Library", purpose: "p" },
+    };
+    const { orient } = await import("../src/commands/data.js");
+    await orient({ workspace: BRAND });
+
+    expect(h.calls).toContainEqual(["/orient", { workspaceId: BRAND }]);
+    // A UUID needs no lookup — the flag must not cost an extra read.
+    expect(h.calls.some((c) => (c as unknown[])[0] === "/workspaces")).toBe(false);
+  });
+
+  it("--workspace takes a NAME, through the SAME door `workspace use` uses", async () => {
+    h.payload = {
+      ...lightPayload, // already lists a workspace named "Brand Library" → BRAND
+      brief: { workspaceId: BRAND, name: "Brand Library", purpose: "p" },
+    };
+    const { orient } = await import("../src/commands/data.js");
+    await orient({ workspace: "brand library" });
+
+    expect(h.calls.some((c) => (c as unknown[])[0] === "/workspaces")).toBe(true);
+    expect(h.calls).toContainEqual(["/orient", { workspaceId: BRAND }]);
+  });
+
   it("no brief key ⇒ no brief section", async () => {
     h.payload = lightPayload;
     const { orient } = await import("../src/commands/data.js");

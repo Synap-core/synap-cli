@@ -524,6 +524,10 @@ program
   .description("Show a lightweight lens map: who you are, your projects (companies/initiatives), and workspaces (operational domains)")
   .option("--json", "Output as JSON")
   .option("--details", "Include per-workspace profiles + entity counts (heavier)")
+  .option(
+    "--workspace <space>",
+    "Orient ONE space by name or id, for this call only — shows its brief (purpose, kinds, rules, skills) without changing your pinned lens",
+  )
   .option("--pod-url <url>", "Pod URL override")
   .option("--api-key <key>", "API key override")
   .action(async (opts) => {
