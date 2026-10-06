@@ -159,7 +159,20 @@ export async function orient(opts: BaseOpts): Promise<void> {
     // assembly, no N+1 fanout — the server does the shaping.
     const res = (await hubGet(
       "/orient",
-      opts.details ? { detail: "full" } : {},
+      {
+        ...(opts.details ? { detail: "full" } : {}),
+        // Ask for THIS lens's space, so the pod returns its `brief`.
+        //
+        // Without this the pod has no pinned space, returns no `brief`, and
+        // `renderSpaceBriefLines` below is dead code that always receives
+        // `undefined` — no "Space brief" section, ever. That renders the whole
+        // point of pinning a space invisible: the brief is where a space says
+        // what it is for, which rules it installed and which SKILLS it declares
+        // (`synap orient` is one of the two doors the space-linked-skills work
+        // exists to serve). Omitting the param is silent — an absent section
+        // reads like "this space has nothing to say".
+        ...(cfg.workspaceId ? { workspaceId: cfg.workspaceId } : {}),
+      },
       cfg
     )) as OrientResult;
     const userId = String(res.me?.userId ?? cfg.userId);

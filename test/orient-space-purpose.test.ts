@@ -9,7 +9,12 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
-const h = vi.hoisted(() => ({ payload: {} as Record<string, unknown>, calls: [] as unknown[] }));
+const h = vi.hoisted(() => ({
+  payload: {} as Record<string, unknown>,
+  calls: [] as unknown[],
+  /** The active lens's workspace — what `synap use <space>` sets. */
+  activeWorkspaceId: undefined as string | undefined,
+}));
 
 vi.mock("../src/lib/hub-client.js", () => ({
   hubGet: vi.fn(async (path: string, query: unknown) => {
@@ -18,7 +23,12 @@ vi.mock("../src/lib/hub-client.js", () => ({
   }),
   hubPost: vi.fn(),
   hubPatch: vi.fn(),
-  resolveHubConfig: vi.fn(async () => ({ podUrl: "http://pod.test", apiKey: "k", userId: "u1" })),
+  resolveHubConfig: vi.fn(async () => ({
+    podUrl: "http://pod.test",
+    apiKey: "k",
+    userId: "u1",
+    ...(h.activeWorkspaceId ? { workspaceId: h.activeWorkspaceId } : {}),
+  })),
   resolveUserId: vi.fn(async () => "u1"),
   resolveActiveSessionId: vi.fn(),
   renderHubError: vi.fn((e: unknown) => {
@@ -134,6 +144,27 @@ describe("synap orient — each space's purpose", () => {
     h.payload = { ...lightPayload, brief: { status: "unavailable" } };
     await orient({});
     expect(plain().join("\n")).toContain("Space brief: unavailable");
+  });
+
+  it("ASKS for the pinned space — without it the pod never sends a brief at all", async () => {
+    // The request used to omit `workspaceId` unconditionally, so the pod had no
+    // pinned space and returned no `brief`: the section rendered by the case
+    // above was UNREACHABLE in practice. The absence is silent — a space with a
+    // brief and a space with none look identical on screen.
+    h.activeWorkspaceId = BRAND;
+    h.payload = {
+      ...lightPayload,
+      brief: { workspaceId: BRAND, name: "Brand Library", purpose: "p" },
+    };
+    const { orient } = await import("../src/commands/data.js");
+    await orient({});
+    expect(h.calls).toContainEqual(["/orient", { workspaceId: BRAND }]);
+
+    // Two-way: with no pinned space the request stays pod-wide.
+    h.activeWorkspaceId = undefined;
+    h.calls = [];
+    await orient({});
+    expect(h.calls).toContainEqual(["/orient", {}]);
   });
 
   it("no brief key ⇒ no brief section", async () => {
