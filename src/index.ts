@@ -1088,6 +1088,14 @@ proposals
   .description("Approve a pending proposal (interactive only — requires a TTY and a typed confirmation)")
   .option("--reason <text>", "Optional approval note")
   .option(
+    "--verb <verb>",
+    "Same-name choice: fill_empty | keep_existing | use_capture | separate"
+  )
+  .option(
+    "--existing <uuid>",
+    "Existing record id — required for fill_empty, keep_existing, and use_capture"
+  )
+  .option(
     "--yes",
     "Accepted for symmetry with other commands, but does NOT skip the typed confirmation — approval is always deliberate"
   )
@@ -2929,6 +2937,29 @@ providers
   .action(async (opts: { target?: string; podUrl?: string; apiKey?: string }) => {
     const { providersPull } = await import("./commands/providers.js");
     await providersPull(opts);
+  });
+
+providers
+  .command("set-key <providerId>")
+  .description("Store your own API key override for a provider (BYOI)")
+  .option("--workspace <id>", "Workspace ID for workspace-scoped override")
+  .option("--api-key <key>", "API key (prompted if omitted)")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--hub-api-key <key>", "Hub API key override")
+  .action(async (opts: { providerId: string; workspaceId?: string; apiKey?: string; podUrl?: string; hubApiKey?: string }) => {
+    const { providersSetKey } = await import("./commands/providers.js");
+    await providersSetKey({ ...opts, providerId: opts.providerId });
+  });
+
+providers
+  .command("list-keys")
+  .description("List user/workspace-level provider key overrides")
+  .option("--workspace <id>", "Workspace ID to check")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--hub-api-key <key>", "Hub API key override")
+  .action(async (opts: { workspaceId?: string; podUrl?: string; hubApiKey?: string }) => {
+    const { providersListKeys } = await import("./commands/providers.js");
+    await providersListKeys(opts);
   });
 
 // ─── keys ────────────────────────────────────────────────────────────────────

@@ -213,3 +213,158 @@ export async function providersPull(opts: {
     process.exit(1);
   }
 }
+
+/**
+ * Store a per-user API key override for a provider.
+ *
+ * synap providers set-key <providerId> [--workspace <id>]
+ */
+export async function providersSetKey(opts: {
+  providerId: string;
+  workspaceId?: string;
+  apiKey?: string;
+  podUrl?: string;
+  hubApiKey?: string;
+}): Promise<void> {
+  let podUrl = opts.podUrl;
+  let hubApiKey = opts.hubApiKey;
+
+  if (!podUrl || !hubApiKey) {
+    const cfg = getActivePodConfig();
+    podUrl = podUrl ?? cfg?.podUrl;
+    hubApiKey = hubApiKey ?? cfg?.hubApiKey;
+  }
+
+  if (!podUrl || !hubApiKey) {
+    log.error("Not connected to a pod. Run: synap init");
+    process.exit(1);
+  }
+
+  // Prompt for API key if not provided
+  let apiKey = opts.apiKey;
+  if (!apiKey) {
+    apiKey = await prompts({
+      type: "password",
+      name: "apiKey",
+      message: `Enter API key for provider "${opts.providerId}":`,
+      validate: (value) => value.length > 0 ? true : "API key is required",
+    }).then((r) => r.apiKey);
+    if (!apiKey) return; // cancelled
+  }
+
+  const base = podUrl.replace(/\/$/, "");
+  const url = opts.workspaceId
+    ? `${base}/api/hub/ai-providers/credentials?workspaceId=${encodeURIComponent(opts.workspaceId)}`
+    : `${base}/api/hub/ai-providers/credentials`;
+
+  const spinner = ora("Storing provider credential...").start();
+  try {
+    const res = await fetch(url, {
+      method: "PATCH",
+      headers: {
+        Authorization: `Bearer ${hubApiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        providerId: opts.providerId,
+        apiKey,
+        enabled: true,
+        priority: 5,
+      }),
+    });
+
+    if (res.status === 401 || res.status === 403) {
+      throw new Error("Credentials rejected by pod — check your API key.");
+    }
+    if (!res.ok) {
+      const err = await res.text();
+      throw new Error(`Pod returned HTTP ${res.status}: ${err}`);
+    }
+
+    spinner.succeed(
+      `Stored key for "${opts.providerId}"${opts.workspaceId ? ` (workspace: ${opts.workspaceId})` : ""}`
+    );
+    log.blank();
+    log.dim("Your key will be used when making requests through the pod's Intelligence Service.");
+  } catch (err) {
+    spinner.fail((err as Error).message);
+    process.exit(1);
+  }
+}
+
+/**
+ * List user/workspace-level key overrides.
+ *
+ * synap providers list-keys [--workspace <id>]
+ */
+export async function providersListKeys(opts: {
+  workspaceId?: string;
+  podUrl?: string;
+  hubApiKey?: string;
+}): Promise<void> {
+  let podUrl = opts.podUrl;
+  let hubApiKey = opts.hubApiKey;
+
+  if (!podUrl || !hubApiKey) {
+    const cfg = getActivePodConfig();
+    podUrl = podUrl ?? cfg?.podUrl;
+    hubApiKey = hubApiKey ?? cfg?.hubApiKey;
+  }
+
+  if (!podUrl || !hubApiKey) {
+    log.error("Not connected to a pod. Run: synap init");
+    process.exit(1);
+  }
+
+  const base = podUrl.replace(/\/$/, "");
+  const url = opts.workspaceId
+    ? `${base}/api/hub/ai-providers/credentials?workspaceId=${encodeURIComponent(opts.workspaceId)}`
+    : `${base}/api/hub/ai-providers/credentials`;
+
+  const spinner = ora("Fetching credentials...").start();
+  try {
+    const res = await fetch(url, {
+      headers: { Authorization: `Bearer ${hubApiKey}` },
+    });
+
+    if (res.status === 401 || res.status === 403) {
+      throw new Error("Credentials rejected by pod — check your API key.");
+    }
+    if (!res.ok) {
+      const err = await res.text();
+      throw new Error(`Pod returned HTTP ${res.status}: ${err}`);
+    }
+
+    const data = (await res.json()) as {
+      providers: Array<{ providerId: string; apiKey: string | null; source: string }>;
+    };
+
+    spinner.succeed(`Found ${data.providers.length} provider(s).`);
+    console.log();
+
+    if (data.providers.length === 0) {
+      log.warn("No providers configured on this pod.");
+      return;
+    }
+
+    for (const p of data.providers) {
+      const hasKey = !!p.apiKey;
+      const maskKey = p.apiKey ? `${p.apiKey.slice(0, 8)}...${p.apiKey.slice(-4)}` : "none";
+      const sourceBadge = p.source === "user"
+        ? chalk.green("★")
+        : p.source === "workspace"
+          ? chalk.yellow("◆")
+          : chalk.dim("●");
+
+      console.log(
+        `  ${sourceBadge} ${chalk.bold(p.providerId.padEnd(20))} ${chalk.cyan(maskKey)}`
+      );
+    }
+
+    console.log();
+    log.dim("Tip: Use 'synap providers set-key <providerId>' to store your own API key.");
+  } catch (err) {
+    spinner.fail((err as Error).message);
+    process.exit(1);
+  }
+}

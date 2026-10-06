@@ -118,13 +118,87 @@ function printOutcome(proposal: Record<string, unknown> | null | undefined): voi
   if (summary) log.dim(`  ${summary}`);
 }
 
+// ─── approve body ─────────────────────────────────────────────────────────────
+
+const IDENTITY_VERBS = ["fill_empty", "keep_existing", "use_capture", "separate"] as const;
+type IdentityVerb = (typeof IDENTITY_VERBS)[number];
+/** These three name an existing record. `separate` does not. */
+const VERBS_REQUIRING_EXISTING = new Set<IdentityVerb>([
+  "fill_empty",
+  "keep_existing",
+  "use_capture",
+]);
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export interface ApproveRequestBody {
+  reason?: string;
+  identityResolution?: {
+    verb: IdentityVerb;
+    existingEntityId?: string;
+  };
+}
+
+/**
+ * Build the approve POST body. No flags ⇒ `{ reason }` only, same as before.
+ * A verb is sent whole as `identityResolution`; `--existing` without `--verb`
+ * is refused so the body never drops `verb`.
+ */
+export function buildApproveRequestBody(opts: {
+  reason?: string;
+  verb?: string;
+  existing?: string;
+}): { ok: true; body: ApproveRequestBody } | { ok: false; message: string } {
+  const verb = opts.verb?.trim() || undefined;
+  const existing = opts.existing?.trim() || undefined;
+  if (!verb && !existing) {
+    return { ok: true, body: { reason: opts.reason } };
+  }
+  if (!verb) {
+    return {
+      ok: false,
+      message:
+        "--existing requires --verb (fill_empty, keep_existing, use_capture, or separate).",
+    };
+  }
+  if (!(IDENTITY_VERBS as readonly string[]).includes(verb)) {
+    return {
+      ok: false,
+      message: "--verb must be fill_empty, keep_existing, use_capture, or separate.",
+    };
+  }
+  const chosen = verb as IdentityVerb;
+  if (VERBS_REQUIRING_EXISTING.has(chosen) && !existing) {
+    return { ok: false, message: `--verb ${chosen} requires --existing <uuid>.` };
+  }
+  if (existing && !UUID_RE.test(existing)) {
+    return { ok: false, message: "--existing must be a UUID." };
+  }
+  return {
+    ok: true,
+    body: {
+      reason: opts.reason,
+      identityResolution: {
+        verb: chosen,
+        ...(existing ? { existingEntityId: existing } : {}),
+      },
+    },
+  };
+}
+
 // ─── approveProposal ──────────────────────────────────────────────────────────
 
 export async function approveProposal(
   id: string,
-  opts: BaseOpts & { reason?: string }
+  opts: BaseOpts & { reason?: string; verb?: string; existing?: string }
 ): Promise<void> {
   requireFullId(id, "proposal", chalk, log);
+
+  const built = buildApproveRequestBody(opts);
+  if (!built.ok) {
+    log.error(built.message);
+    process.exit(1);
+    return;
+  }
 
   // ── Credential: the HUMAN key on disk, NOT the session's ambient key ───────
   // Resolved through `resolveReviewConfig`, a door that never consults
@@ -166,7 +240,7 @@ export async function approveProposal(
 
     const res = await hubPost(
       `/proposals/${id}/approve`,
-      { reason: opts.reason },
+      built.body,
       cfg
     ) as Record<string, unknown>;
 
