@@ -167,7 +167,9 @@ describe("the drop-list is wired into live-serialize publish doors", () => {
   });
 
   it("registers --from-project and --price on the publish command", () => {
-    const publishBlock = INDEX.slice(INDEX.indexOf('.command("publish [file]")'));
+    const at = INDEX.indexOf('.command("publish [targets...]")');
+    expect(at).toBeGreaterThan(0); // the anchor must exist — slice(-1) would scan one char
+    const publishBlock = INDEX.slice(at);
     const nextCmd = publishBlock.indexOf("\nmarket\n");
     const block = nextCmd > 0 ? publishBlock.slice(0, nextCmd) : publishBlock.slice(0, 2500);
     expect(block).toContain("--from-project");

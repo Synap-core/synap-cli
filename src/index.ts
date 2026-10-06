@@ -2631,8 +2631,12 @@ market
   });
 
 market
-  .command("publish [file]")
-  .description("Validate then publish a template (or a standalone cell/view package) to the marketplace (private by default) — pass a file, --from-workspace <id>, or --from-project <id>")
+  .command("publish [targets...]")
+  .description("Validate then publish a template (or a standalone cell/view package) to the marketplace (private by default) — pass a file, --from-workspace <id>, or --from-project <id>. Founder: --official [slug...] publishes the official catalog from the monorepo checkout")
+  .option("--official", "Publish the OFFICIAL Synap catalog (all templates, or the named slugs) from the monorepo checkout — requires a `synap login` session that owns the synap-official vendor; previews and asks first")
+  .option("--templates-dir <dir>", "With --official: path to synap-app/packages/workspace-templates (default: found by walking up from cwd)")
+  .option("--dry-run", "With --official: preview what would change against the live catalog, publish nothing")
+  .option("--yes", "With --official: skip the confirmation prompt")
   .option("--public", "Publish as PUBLIC (default is private)")
   .option("--private", "Publish as private (the default — stated explicitly)")
   .option("--from-workspace <id>", "Serialize a live workspace into a template and publish it (instead of a file)")
@@ -2647,11 +2651,24 @@ market
   // publish time isn't what actually executes. `synap cell build` invoked
   // directly is unaffected — its own default stays external-deps-via-esm.sh.
   .option("--no-bundle-deps", "Publish a cell's codeFile with external deps via esm.sh instead of bundling them in (default: bundled)")
-  .action(async (file: string | undefined, _opts, cmd) => {
+  .action(async (targets: string[] | undefined, _opts, cmd) => {
     // Same parent/child `--json` collision as `market install` — see its comment.
     const opts = cmd.optsWithGlobals();
+    const args = targets ?? [];
+    if (opts.official) {
+      const { marketPublishOfficial } = await import("./commands/market-official.js");
+      process.exitCode = await marketPublishOfficial(args, opts);
+      return;
+    }
+    const { nonOfficialUsageError } = await import("./commands/market-official.js");
+    const usage = nonOfficialUsageError(args, opts);
+    if (usage) {
+      console.error(`  ✗ ${usage}`);
+      process.exitCode = 2;
+      return;
+    }
     const { marketPublish } = await import("./commands/market-authoring.js");
-    await marketPublish(file, opts);
+    await marketPublish(args[0], opts);
   });
 
 market
