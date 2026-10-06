@@ -608,7 +608,19 @@ async function grantRedeemAccess(
       `/vault/secrets/${secretId}/grant`,
       { grantedTo: principal, scope: "permanent" },
       cfg
-    )) as { grantId?: string; reused?: boolean };
+    )) as {
+      grantId?: string;
+      reused?: boolean;
+      status?: string;
+      reviewUrl?: string;
+    };
+    if (res.status === "proposed") {
+      // An agent key cannot grant vault access by itself: the pod filed it for
+      // the secret owner's approval. Nothing is granted until it is approved.
+      spinner.warn("Redeem access is waiting for your approval");
+      if (res.reviewUrl) log.dim(`  Approve it: ${res.reviewUrl}`);
+      return false;
+    }
     spinner.succeed(
       `Redeem access granted${res.reused ? " (existing)" : ""} — password stays in the vault`
     );
