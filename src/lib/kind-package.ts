@@ -41,12 +41,18 @@
  * Left as a tombstone rather than deleted because the stale claim outlived its
  * fix and was still being cited as fact months later.
  *
- * ⚠️ "skill" ALSO HAS NO PAYLOAD SLOT: `packageDefinitionSchema` (and the
- * `PackageDefinition` TS type it validates) carry no top-level `skills[]`
- * array — a skill's `{ slug, name, code|instructions, … }` today only has a
- * home NESTED inside a `capability`'s `skills[]`. A truly standalone skill
- * package has nowhere to land until the CP schema grows a slot for it.
- * `validateStandalonePackage` reports this rather than inventing a shape.
+ * ✅ RESOLVED 2026-10-06 — "skill" NOW HAS A PAYLOAD SLOT. This block used to
+ * warn that `packageDefinitionSchema` carried no top-level slot for a standalone
+ * skill, so one had nowhere to land and `validateStandalonePackage` reported it
+ * rather than inventing a shape. Both halves are now false: the CP grew a
+ * SINGULAR `skill:` slot (`synap-control-plane-api/src/routes/packages.ts`,
+ * beside `capability:`) whose field names mirror the pod's own create door, and
+ * the pod grew an applier + resolver entry so a `skill` dependency installs
+ * itself. Note the shape is `skill`, NOT `skills` — the plural is the workspace
+ * template's DECLARED-skills array, an unrelated lane that already existed.
+ *
+ * Left as a tombstone, like the block above: the stale claim was load-bearing
+ * (it is why `skill` was refused at scaffold) and would otherwise be cited again.
  */
 
 import { readFileSync, existsSync } from "node:fs";
@@ -88,10 +94,12 @@ import {
  *     (marketplace-install.ts:263).
  * So the whole loop — scaffold → validate → publish → install — closes.
  *
- * `skill` stays here but is NOT scaffoldable and cannot really publish: it is
- * the one kind with no payload slot (see the file header). Adding one is a
- * CHECK-constraint migration (`drizzle/0049_package_vocabulary.sql`) mirrored
- * across ~24 files in 6 repos — a schema change, not an authoring change.
+ * `skill` is a full member as of 2026-10-06: it has a CP payload slot, a
+ * scaffold arm, a validator arm, and a pod applier, so it scaffolds, validates,
+ * publishes and installs like the rest. (The old note here claimed it needed a
+ * CHECK-constraint migration "mirrored across ~24 files in 6 repos" — that was
+ * never true for `skill`: the category was ALREADY in `PACKAGE_TYPES` and in
+ * migration 0049's CHECK. What was missing was only the payload slot.)
  */
 export const STANDALONE_KINDS = [
   "view",
@@ -354,9 +362,35 @@ export function validateStandalonePackage(
         );
     }
   } else if (pkg.category === "skill") {
-    errors.push(
-      `category "skill" has no standalone payload slot in the CP's package schema yet (a skill only exists today nested inside a capability's skills[]) — publish will likely be rejected. See kind-package.ts header.`,
-    );
+    // `packageDefinitionSchema.skill` is the standalone-skill slot (SINGULAR —
+    // `skills[]`, plural, is a workspace template's DECLARED-skills refs, an
+    // unrelated shape three lines away in the same file). What this checks is
+    // presence plus the one rule the POD enforces — a skill needs documentation
+    // or code — so the loop fails at AUTHORING time instead of at install time
+    // (where a bodiless skill is refused by `skillsRouter.create`).
+    const raw = (pkg.definition as { skill?: unknown }).skill;
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+      errors.push(
+        `category "skill" requires a definition.skill object — ONE skill ({ slug, name, kind, body | code }).`,
+      );
+    } else {
+      const s = raw as Record<string, unknown>;
+      const body = typeof s.body === "string" ? s.body.trim() : "";
+      const code = typeof s.code === "string" ? s.code.trim() : "";
+      if (!body && !code && s.providerSpec == null) {
+        errors.push(
+          `definition.skill needs documentation or code — the pod refuses a skill with neither, so this would publish and then fail to install.`,
+        );
+      }
+      const name = typeof s.name === "string" ? s.name : s.displayName;
+      if (typeof name !== "string" || !name.trim())
+        errors.push(`definition.skill.name must be a non-empty string.`);
+      if (typeof s.slug === "string" && s.slug.startsWith("system/")) {
+        errors.push(
+          `definition.skill.slug cannot start with "system/" — that namespace is reserved for seeded skills.`,
+        );
+      }
+    }
   }
   return errors;
 }
@@ -511,16 +545,18 @@ function validateWorkflowFlows(automations: unknown[]): string[] {
  * `workflow` (which `validateStandalonePackage` has always accepted), so the
  * documented loop offered a dead option and concealed a working one.
  *
- * `skill` is deliberately absent: `STANDALONE_KINDS` carries it because a
- * hand-written skill file must still be *recognised* and told the truth, but
- * there is no known-good publishable shape (see the file header), so scaffold
- * refuses it rather than writing a file that cannot publish.
+ * `skill` joined this list when the CP grew its standalone `skill` payload slot
+ * and the pod grew an applier for it — before that, scaffold refused it because
+ * there was no publishable shape to write. The barrier is gone; the refusal
+ * went with it. (`SCAFFOLDABLE_KINDS` is still what the help string is built
+ * from, so the two cannot drift again — see `scaffold-kind-help-parity.test.ts`.)
  */
 export const SCAFFOLDABLE_KINDS = [
   "cell",
   "view",
   "workflow",
   "capability",
+  "skill",
 ] as const;
 export type ScaffoldableKind = (typeof SCAFFOLDABLE_KINDS)[number];
 
@@ -717,6 +753,32 @@ function scaffoldDefinition(
             },
           },
         ],
+      };
+    case "skill":
+      return {
+        skill: {
+          // The pod-side `load_skill` ref. Bare — `system/` is reserved for
+          // seeded skills and both the CP slot and the pod's create door refuse
+          // it. Defaults to the package slug so a scaffolded file links as soon
+          // as a space declares it.
+          slug,
+          name: displayName,
+          // `instruction` = a prompt/doc skill the agent reads. No sandboxed
+          // code and no connector, so it is usable on a fresh pod with no
+          // credentials — the smallest working skill. Use `code` when the skill
+          // must actually run something.
+          kind: "instruction",
+          // Pod-wide: any space may then declare it in its own `skills:` block.
+          scope: "pod",
+          description: `What ${displayName} teaches — replace this before publishing.`,
+          // The body is what the pod REQUIRES (documentation or code); an empty
+          // one publishes and then fails to install, which is the shape this
+          // scaffold exists to avoid.
+          body:
+            `## ${displayName}\n\n` +
+            `Describe the process an agent should follow, the rules it must not break, ` +
+            `and the DO NOTs — this is the instruction a space applies when it declares this skill.\n`,
+        },
       };
     default: {
       const unhandled: never = kind;

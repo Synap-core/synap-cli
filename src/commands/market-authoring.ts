@@ -137,33 +137,16 @@ export async function marketScaffold(
   slug: string,
   opts: { json?: boolean; kind?: string },
 ): Promise<void> {
-  // `--kind cell|view|workflow` scaffolds a STANDALONE package file instead of
-  // a workspace template — see `lib/kind-package.ts`. `skill` is refused: there
-  // is no known-good standalone shape yet (the CP schema has no slot for one),
-  // so a scaffold would just produce a file that can't publish.
+  // `--kind cell|view|workflow|capability|skill` scaffolds a STANDALONE package
+  // file instead of a workspace template — see `lib/kind-package.ts`.
+  // (`skill` used to be refused here, on the grounds that the CP had no slot to
+  // publish one into; that slot now exists, so the special case is gone.)
   //
   // The accepted list is `SCAFFOLDABLE_KINDS` — the same constant `src/index.ts`
   // builds the `--kind` help string from, so the help can never again advertise
   // a kind this branch refuses (it advertised `skill`) or hide one it accepts
   // (it hid `workflow`, which `validateStandalonePackage` has always handled).
   if (opts.kind && opts.kind !== "workspace") {
-    if (opts.kind === "skill") {
-      if (opts.json) {
-        console.log(
-          JSON.stringify(
-            { ok: false, error: "unsupported-kind", kind: "skill" },
-            null,
-            2,
-          ),
-        );
-      } else {
-        log.error(`--kind skill isn't scaffoldable yet.`);
-        log.hint(
-          "The CP's package schema has no standalone slot for a skill (skills only exist nested inside a capability's skills[]) — see lib/kind-package.ts.",
-        );
-      }
-      process.exit(1);
-    }
     if (!(SCAFFOLDABLE_KINDS as readonly string[]).includes(opts.kind)) {
       log.error(
         `Unknown --kind "${opts.kind}" — expected one of: ${SCAFFOLDABLE_KINDS.join(", ")}.`,

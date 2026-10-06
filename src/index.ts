@@ -2616,7 +2616,7 @@ market
   // option and hides a working one is the documented-loop defect class.
   .option(
     "--kind <kind>",
-    "Scaffold a standalone package instead of a workspace template: cell, view, workflow, capability (skill is not scaffoldable — the CP package schema has no standalone slot for one)",
+    "Scaffold a standalone package instead of a workspace template: cell, view, workflow, capability, skill",
   )
   .option("--json", "Output as JSON")
   .action(async (slug: string, _opts, cmd) => {
