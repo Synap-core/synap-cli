@@ -2457,7 +2457,6 @@ market
   .option("--project <id>", "Optionally tag the seeded entities to a project (installs are pod-wide by default)")
   .option("--workspace <id>", "Acting workspace (UUID) a workflow/automation package is added to (required for that kind; defaults to your active lens). Ignored for pod-wide kinds")
   .option("--onto <workspaceId>", "Reconcile this template ONTO an existing workspace (additive) instead of creating a new one")
-  .option("--as <name>", "Install a NAMED instance of a workspace template (a deliberate second copy, e.g. a sandbox to trial it beside your live space — separate brands or clients with a project, not a copy). Re-running with the same name reuses it")
   .option("--dry-run", "Preview the create path write-free — report would-create / reuse / conflicts, install nothing")
   .option("--timeout <seconds>", "How long to wait for the apply to finish (default: 120)")
   .option("--json", "Output as JSON")

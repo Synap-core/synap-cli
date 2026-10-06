@@ -632,34 +632,6 @@ export function classifyApplyResult(
   return { status: "no-workspace", warnings: [] };
 }
 
-/**
- * The verdict line for a NAMED instance install (`market install <slug> --as
- * <name>`). A named install exists to make a SECOND copy of a template, so the
- * one thing the user must not misread is whether a new workspace appeared or an
- * existing one with that name was reused. `null` = no instance-specific line
- * (compose / contradiction / unknown) — fall back to `printApplyVerdict`.
- */
-export function instanceVerdictLine(
-  instanceName: string,
-  verdict: ApplyVerdict
-): { level: "success" | "warn" | "info"; text: string } | null {
-  const ws = `"${instanceName}"`;
-  switch (verdict.status) {
-    case "installed":
-      return { level: "success", text: `Created workspace ${ws}.` };
-    case "installed-with-failures":
-      return { level: "warn", text: `Created workspace ${ws} — completed with capability failures (see below).` };
-    case "updated":
-      return { level: "success", text: `Reused existing workspace ${ws} — updated to the latest template.` };
-    case "updated-with-failures":
-      return { level: "warn", text: `Reused existing workspace ${ws} — updated, with capability failures (see below).` };
-    case "unchanged":
-      return { level: "info", text: `Reused existing workspace ${ws} — already up to date.` };
-    default:
-      return null;
-  }
-}
-
 /** Render a `classifyApplyResult` verdict — the ONE honest-text door for both `marketInstall` and `applyOnePackage`. */
 export function printApplyVerdict(entry: CatalogEntry, verdict: ApplyVerdict): void {
   switch (verdict.status) {
@@ -1043,8 +1015,6 @@ export async function marketInstall(
     onto?: string;
     /** Preview the create path write-free (`/packages/preflight`) — reports would-create / reuse / conflicts and writes nothing. */
     dryRun?: boolean;
-    /** Install a NAMED instance of a workspace template — a deliberate second copy (e.g. a sandbox to trial a template beside your live space; brands and clients are separated by PROJECT inside one space, never by a second copy). Sent as `instanceName`; the same name again reuses that instance. Absent = the template's singleton. */
-    as?: string;
     /** Acting workspace (UUID) an `automation`/`workflow` install is added TO — the
      * backend `market.install` verb requires one for that kind (an automation
      * lives in a workspace). Defaults to the active lens (`synap use` / env); a
@@ -1104,24 +1074,6 @@ export async function marketInstall(
       `Only workspace packages have a write-free preflight. Nothing was installed. To install for real: synap market install ${slug}`,
     );
     process.exit(1);
-  }
-
-  // `--as` names a NEW workspace instance — only a workspace template makes
-  // one, and it contradicts `--onto` (install onto an EXISTING workspace).
-  const instanceName = opts.as?.trim();
-  if (opts.as !== undefined) {
-    if (!instanceName) {
-      log.error("--as needs a name, e.g. --as \"Sandbox\".");
-      process.exit(1);
-    }
-    if (type !== "workspace") {
-      log.error(`--as isn't available for ${type} packages — only a workspace template can have named instances.`);
-      process.exit(1);
-    }
-    if (opts.onto) {
-      log.error("--as creates (or reuses) a NAMED workspace; --onto installs onto an existing one. Pass one, not both.");
-      process.exit(1);
-    }
   }
 
   // A CAPABILITY installs through the SAME door as `cap add` — one code path, so
@@ -1392,7 +1344,7 @@ export async function marketInstall(
     // existing workspace instead of creating a new one.
     const res = (await hubPost(
       "/packages/apply",
-      { ...pkg, projectId, targetWorkspaceId: opts.onto, ...(instanceName ? { instanceName } : {}) },
+      { ...pkg, projectId, targetWorkspaceId: opts.onto },
       cfg,
       applyTimeoutMs
     )) as Record<string, unknown>;
@@ -1402,10 +1354,10 @@ export async function marketInstall(
       const steps = FLOW.afterMarketInstall({ slug, proposed: true, projectName });
       s?.stop();
       if (opts.json) {
-        console.log(JSON.stringify({ slug, outcome: "proposed", proposalId, projectId, instanceName, nextSteps: steps }, null, 2));
+        console.log(JSON.stringify({ slug, outcome: "proposed", proposalId, projectId, nextSteps: steps }, null, 2));
         return;
       }
-      log.info(`${instanceName ? `${entry.name} "${instanceName}"` : entry.name} — proposed (under review, not live yet).`);
+      log.info(`${entry.name} — proposed (under review, not live yet).`);
       if (proposalId) log.hint(`Approve: synap proposals approve ${proposalId}`);
       renderNextSteps(steps);
       return;
@@ -1442,7 +1394,6 @@ export async function marketInstall(
             seedSummary,
             projectId,
             onto: opts.onto,
-            instanceName,
             nextSteps: steps,
           },
           null,
@@ -1472,9 +1423,7 @@ export async function marketInstall(
           printApplyVerdict(entry, verdict);
       }
     } else {
-      const line = instanceName ? instanceVerdictLine(instanceName, verdict) : null;
-      if (line) log[line.level](line.text);
-      else printApplyVerdict(entry, verdict);
+      printApplyVerdict(entry, verdict);
     }
     printSeedOutcomes(dependencies, seedSummary);
     printLayerOutcomes(ws?.layers);
