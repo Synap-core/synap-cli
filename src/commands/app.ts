@@ -269,10 +269,20 @@ export function applyEnvContent(
  * existing value first (`vercel env add` refuses a duplicate name), then add.
  */
 export function writeVercelEnv(name: string, value: string): void {
+  // Order is rm → add because `vercel env add` refuses an existing name. A
+  // not-found rm is the normal first-run case; any other rm failure is surfaced
+  // (the add below then fails loudly if the old var really is still there).
   try {
-    execFileSync("vercel", ["env", "rm", name, "production", "-y"], { stdio: "ignore" });
-  } catch {
-    /* no existing var — add below */
+    execFileSync("vercel", ["env", "rm", name, "production", "-y"], {
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+  } catch (err) {
+    const stderr = String((err as { stderr?: unknown }).stderr ?? "");
+    if (!/not found/i.test(stderr)) {
+      log.warn(
+        `\`vercel env rm ${name} production\` failed: ${stderr.trim() || (err as Error).message}`
+      );
+    }
   }
   try {
     execFileSync("vercel", ["env", "add", name, "production"], {
@@ -282,7 +292,7 @@ export function writeVercelEnv(name: string, value: string): void {
   } catch (err) {
     throw new Error(
       `\`vercel env add ${name} production\` failed: ${(err as Error).message}\n` +
-        `Run it by hand:  echo "${value}" | vercel env add ${name} production`
+        `Fix the Vercel CLI (\`vercel login\`, \`vercel link\`), then re-run \`synap app connect\`.`
     );
   }
 }
@@ -614,13 +624,17 @@ export async function appConnect(): Promise<void> {
   }
   log.success("Approved.");
 
-  // ── 3. Mint the app key (rotates any existing — `connect` is re-runnable) ────
-  const { apiKey } = await client.mintAppKey(manifest.id!);
-
-  // ── 4. Deploy: write the declared env vars into the target ──────────────────
+  // ── 3. Resolve + validate everything fallible BEFORE minting — a throw after
+  //       the mint would lose the key and a re-run would mint an orphan. ────────
   const workspaceId = manifest.deploy.env.workspaceId
     ? await resolveWorkspaceIdFor(client, manifest.requests)
     : undefined;
+  buildEnvAssignments(manifest.deploy, { apiKey: "", podUrl: creds.podUrl, workspaceId });
+
+  // ── 4. Mint the app key (rotates any existing — `connect` is re-runnable) ────
+  const { apiKey } = await client.mintAppKey(manifest.id!);
+
+  // ── 5. Deploy: write the declared env vars into the target ──────────────────
   const assignments = buildEnvAssignments(manifest.deploy, {
     apiKey,
     podUrl: creds.podUrl,
