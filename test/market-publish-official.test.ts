@@ -33,27 +33,94 @@ const CREDS = {
 
 type Call = { url: string; method: string; body?: any };
 
-function fakeCp(opts: { vendor?: unknown; live?: Record<string, unknown> } = {}) {
+/** A catalog row as the CP stores it (only the columns the preview reads). */
+type Row = {
+  id: string;
+  slug: string;
+  category: string;
+  version: string;
+  vendorId?: string | null;
+  authorId?: string | null;
+  createdAt: string;
+  definition: Record<string, unknown>;
+};
+
+/**
+ * THE ADOPTION RULE, as `GET /api/packages/:slug?category=` answers it: rows
+ * of that slug AND category owned by the official vendor or unowned (no vendor,
+ * no author); official first, then oldest, then lowest id. `undefined` = 404.
+ */
+function adoptionPick(rows: Row[], slug: string, category: string): Row | undefined {
+  return rows
+    .filter((r) => r.slug === slug && r.category === category)
+    .filter((r) => r.vendorId === OFFICIAL.id || (r.vendorId == null && r.authorId == null))
+    .sort(
+      (a, b) =>
+        Number(b.vendorId === OFFICIAL.id) - Number(a.vendorId === OFFICIAL.id) ||
+        a.createdAt.localeCompare(b.createdAt) ||
+        a.id.localeCompare(b.id),
+    )[0];
+}
+
+/**
+ * A fake control plane answering the reads the lib's preview makes:
+ *   GET /api/vendors/mine
+ *   GET /api/packages/:slug?category=<kind>   → the adoption pick, else 404
+ *   GET /api/packages/:slug/:version          → that row, else 404
+ *   GET /api/packages?search=&category=&limit=&offset=  → { packages, total }
+ *   POST /api/packages
+ * Anything else is a 500, which the lib treats as a failed read.
+ */
+function fakeCp(opts: { vendor?: unknown; rows?: Row[] } = {}) {
   const calls: Call[] = [];
+  const rows = opts.rows ?? [];
   const fetchImpl = (async (url: string, init: RequestInit = {}) => {
     const method = init.method ?? "GET";
     const body = init.body ? JSON.parse(String(init.body)) : undefined;
     calls.push({ url, method, body });
     const json = (status: number, payload: unknown) =>
       new Response(JSON.stringify(payload), { status, headers: { "content-type": "application/json" } });
-    if (url.endsWith("/api/vendors/mine")) return json(200, { vendor: opts.vendor ?? OFFICIAL });
-    if (method === "GET" && url.includes("/api/packages/")) {
-      const slug = decodeURIComponent(url.split("/api/packages/")[1]);
-      const row = opts.live?.[slug];
-      return row ? json(200, { package: row }) : json(404, { error: "Package not found" });
+    const notFound = () => json(404, { error: "Package not found" });
+    const u = new URL(url);
+    const parts = u.pathname.split("/").filter(Boolean).map(decodeURIComponent); // ["api", "packages", slug?, version?]
+    if (method === "GET" && u.pathname === "/api/vendors/mine") return json(200, { vendor: opts.vendor ?? OFFICIAL });
+    if (method === "GET" && u.pathname === "/api/packages") {
+      const search = u.searchParams.get("search") ?? "";
+      const category = u.searchParams.get("category");
+      const limit = Number(u.searchParams.get("limit") ?? 20);
+      const offset = Number(u.searchParams.get("offset") ?? 0);
+      const hits = rows.filter((r) => r.slug.includes(search) && (!category || r.category === category));
+      return json(200, { packages: hits.slice(offset, offset + limit), total: hits.length });
     }
-    if (method === "POST" && url.endsWith("/api/packages")) {
+    if (method === "GET" && parts[0] === "api" && parts[1] === "packages" && parts.length === 3) {
+      const category = u.searchParams.get("category");
+      if (!category) return json(500, { error: "the preview must pass ?category=" });
+      const row = adoptionPick(rows, parts[2], category);
+      return row ? json(200, { package: row }) : notFound();
+    }
+    if (method === "GET" && parts[0] === "api" && parts[1] === "packages" && parts.length === 4) {
+      const row = rows.find((r) => r.slug === parts[2] && r.version === parts[3]);
+      return row ? json(200, { package: row }) : notFound();
+    }
+    if (method === "POST" && u.pathname === "/api/packages") {
       return json(200, { package: { slug: body.slug, version: "h-next", definition: body.definition } });
     }
     return json(500, { error: `unexpected ${method} ${url}` });
   }) as unknown as typeof fetch;
   return { calls, fetchImpl };
 }
+
+const officialContentOs = (over: Partial<Row> = {}): Row => ({
+  id: "row-official",
+  slug: "content-os",
+  category: "workspace",
+  version: "h-448ffcae9220",
+  vendorId: OFFICIAL.id,
+  authorId: CREDS.userId,
+  createdAt: "2026-09-01T00:00:00Z",
+  definition: { profiles: [{ slug: "legacy-thing" }] },
+  ...over,
+});
 
 function run(slugs: string[], opts: Record<string, unknown>, deps: Partial<OfficialPublishDeps> = {}) {
   const lines: string[] = [];
@@ -165,21 +232,32 @@ describe.runIf(hasCheckout)("against the REAL lib in the checkout", () => {
     expect(calls.map((c) => c.url)).toEqual(["https://cp.test/api/vendors/mine"]);
   });
 
-  it("dry run previews the diff for the workspace kind and writes nothing", async () => {
-    const { calls, fetchImpl } = fakeCp({
-      live: {
-        "content-os": {
-          slug: "content-os",
-          version: "h-448ffcae9220",
-          authorId: CREDS.userId,
-          definition: { profiles: [{ slug: "legacy-thing" }] },
-        },
-      },
-    });
+  it("dry run previews the diff against the row the publish adopts, and writes nothing", async () => {
+    const { calls, fetchImpl } = fakeCp({ rows: [officialContentOs()] });
     const { code, text } = await run(["content-os"], { dryRun: true }, { fetchImpl });
     expect(code).toBe(0);
-    expect(text).toMatch(/(CHANGED|NEW)\s+workspace\/content-os/);
+    expect(text).toMatch(/CHANGED\s+workspace\/content-os/);
     expect(calls.filter((c) => c.method === "POST")).toHaveLength(0);
+    // the live row was read for THIS kind
+    expect(calls.some((c) => c.url.startsWith("https://cp.test/api/packages/content-os?category=workspace"))).toBe(true);
+  });
+
+  it("a same-slug row of ANOTHER kind is never the target: the preview says NEW", async () => {
+    const { fetchImpl } = fakeCp({ rows: [officialContentOs({ category: "capability" })] });
+    const { code, text } = await run(["content-os"], { dryRun: true }, { fetchImpl });
+    expect(code).toBe(0);
+    expect(text).toMatch(/NEW\s+workspace\/content-os/);
+  });
+
+  it("a failed live read is an error, never NEW", async () => {
+    const { fetchImpl: ok } = fakeCp({ rows: [officialContentOs()] });
+    const failing = (async (url: string, init?: RequestInit) =>
+      String(url).includes("/api/packages/content-os?")
+        ? new Response(JSON.stringify({ error: "boom" }), { status: 502 })
+        : ok(url, init)) as unknown as typeof fetch;
+    const { code, text } = await run(["content-os"], { dryRun: true, json: true }, { fetchImpl: failing });
+    expect(code).toBe(1);
+    expect(JSON.parse(text)).toMatchObject({ ok: false, error: "live-read-failed" });
   });
 
   it("--yes POSTs with the official vendorId and definition.sourcePackage", async () => {
