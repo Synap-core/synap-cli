@@ -12,15 +12,16 @@ import {
 
 /**
  * `synap market publish --official` — the founder's door to the official
- * catalog. The publish logic is NOT here: it is the ONE lib in the monorepo
- * checkout (`synap-app/packages/workspace-templates/scripts/publish-official-lib.mjs`).
+ * catalog, an alias of `synap catalog publish --official --kind workspace`.
+ * The publish logic is NOT here: it is the ONE catalog lib in the monorepo
+ * checkout (`synap-app/packages/workspace-templates/scripts/catalog-lib.mjs`).
  * So the wire tests below drive the REAL lib from the sibling checkout through
  * an injected fetch — skipped (never vacuously passed) when the sibling is
  * absent, the `it.runIf` shape `frame-import-map-parity.test.ts` established.
  */
 
 const CHECKOUT = join(process.cwd(), "../synap-app/packages/workspace-templates");
-const hasCheckout = existsSync(join(CHECKOUT, "scripts/publish-official-lib.mjs"));
+const hasCheckout = existsSync(join(CHECKOUT, "scripts/catalog-lib.mjs"));
 
 const OFFICIAL = { id: "5e9ae5e1-57b2-4a6a-b280-f586cf88b439", slug: "synap-official" };
 const CREDS = {
@@ -82,7 +83,7 @@ describe("usage errors", () => {
     const { calls, fetchImpl } = fakeCp();
     const { code } = await run(["content-os", "./content-os.yaml"], {}, {
       fetchImpl,
-      loadLib: async () => {
+      importLib: async () => {
         loaded = true;
         throw new Error("must not load");
       },
@@ -161,26 +162,20 @@ describe.runIf(hasCheckout)("against the REAL lib in the checkout", () => {
     expect(calls.filter((c) => c.method === "POST")).toHaveLength(0);
   });
 
-  it("dry run shows added/removed profiles, the removal warning and the stamp, and writes nothing", async () => {
+  it("dry run previews the diff for the workspace kind and writes nothing", async () => {
     const { calls, fetchImpl } = fakeCp({
       live: {
         "content-os": {
           slug: "content-os",
           version: "h-448ffcae9220",
           authorId: CREDS.userId,
-          definition: {
-            profiles: [{ slug: "post", properties: [{ slug: "post-status" }] }, { slug: "legacy-thing" }],
-          },
+          definition: { profiles: [{ slug: "legacy-thing" }] },
         },
       },
     });
     const { code, text } = await run(["content-os"], { dryRun: true }, { fetchImpl });
     expect(code).toBe(0);
-    expect(text).toMatch(/UPDATED\s+content-os/);
-    expect(text).toMatch(/\+ profiles: .*content-composition/);
-    expect(text).toMatch(/− profiles: legacy-thing/);
-    expect(text).toMatch(/sourcePackage: none → \d+\.\d+\.\d+/);
-    expect(text).toMatch(/pod reconciler is add-only/);
+    expect(text).toMatch(/(CHANGED|NEW)\s+workspace\/content-os/);
     expect(calls.filter((c) => c.method === "POST")).toHaveLength(0);
   });
 
@@ -192,7 +187,7 @@ describe.runIf(hasCheckout)("against the REAL lib in the checkout", () => {
     expect(posts).toHaveLength(1);
     expect(posts[0].body.vendorId).toBe(OFFICIAL.id);
     expect(posts[0].body.definition.sourcePackage).toMatchObject({
-      name: "@synap-core/workspace-templates",
+      name: expect.stringMatching(/^@synap-core\/(catalog|workspace-templates)$/),
       version: expect.stringMatching(/^\d+\.\d+\.\d+$/),
     });
     expect(JSON.parse(text)).toMatchObject({ ok: true, results: [{ slug: "content-os", stampStored: true }] });

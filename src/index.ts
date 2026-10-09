@@ -2666,9 +2666,9 @@ market
 
 market
   .command("publish [targets...]")
-  .description("Validate then publish a template (or a standalone cell/view package) to the marketplace (private by default) — pass a file, --from-workspace <id>, or --from-project <id>. Founder: --official [slug...] publishes the official catalog from the monorepo checkout")
+  .description("Validate then publish a template (or a standalone cell/view package) to the marketplace (private by default) — pass a file, --from-workspace <id>, or --from-project <id>. Founder: --official [slug...] publishes the official catalog from the monorepo checkout (alias of `synap catalog publish --official --kind workspace`)")
   .option("--official", "Publish the OFFICIAL Synap catalog (all templates, or the named slugs) from the monorepo checkout — requires a `synap login` session that owns the synap-official vendor; previews and asks first")
-  .option("--templates-dir <dir>", "With --official: path to synap-app/packages/workspace-templates (default: found by walking up from cwd)")
+  .option("--templates-dir <dir>", "With --official: path to the catalog package — synap-app/packages/catalog or workspace-templates (default: found by walking up from cwd)")
   .option("--dry-run", "With --official: preview what would change against the live catalog, publish nothing")
   .option("--yes", "With --official: skip the confirmation prompt")
   .option("--public", "Publish as PUBLIC (default is private)")
@@ -2715,6 +2715,40 @@ market
     const { marketUnpublish } = await import("./commands/market-authoring.js");
     await marketUnpublish(slug, opts);
   });
+
+// ─── catalog ──────────────────────────────────────────────────────────────────
+// The team's ONE door to the official catalog (every installable kind). Thin
+// wiring: `runCatalog` (commands/catalog.ts) calls the ONE catalog lib in the
+// monorepo checkout. `market publish --official` is its alias (kind workspace).
+
+const catalog = program
+  .command("catalog")
+  .description("Validate, diff and publish the OFFICIAL template catalog (workspaces, capabilities, skills, packs, automations) from the monorepo checkout");
+
+for (const verb of ["validate", "diff", "publish"] as const) {
+  const sub = catalog
+    .command(`${verb} [slugs...]`)
+    .description(
+      verb === "validate"
+        ? "Validate the catalog (per-kind schema, cross-kind refs, goal grammar, duplicates) — offline"
+        : verb === "diff"
+          ? "Show what would change against the live control-plane catalog (new / changed / unchanged)"
+          : "Validate, preview the diff, confirm, then publish to the control plane — founder only: --official + a `synap login` session that owns synap-official",
+    )
+    .option("--kind <kind>", "Only this kind: workspace | capability | skill | pack | automation")
+    .option("--catalog-dir <dir>", "Path to the catalog package (default: found by walking up from cwd)")
+    .option("--json", "Output as JSON");
+  if (verb === "publish") {
+    sub
+      .option("--official", "Publish as the synap-official vendor (required)")
+      .option("--dry-run", "Preview the diff only — publish nothing")
+      .option("--yes", "Skip the confirmation prompt");
+  }
+  sub.action(async (slugs: string[] | undefined, opts) => {
+    const { runCatalog } = await import("./commands/catalog.js");
+    process.exitCode = await runCatalog(verb, slugs ?? [], opts);
+  });
+}
 
 // ─── capability ───────────────────────────────────────────────────────────────
 
