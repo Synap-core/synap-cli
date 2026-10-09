@@ -12,8 +12,8 @@ importers:
         specifier: ^1.1.1
         version: 1.4.0
       '@synap-core/workspace-templates':
-        specifier: ^0.11.0
-        version: 0.11.0
+        specifier: '>=0.12.0 <1.0.0'
+        version: 0.12.0
       chalk:
         specifier: ^5.4.0
         version: 5.6.2
@@ -350,8 +350,8 @@ packages:
   '@synap-core/hub-rest-client@1.4.0':
     resolution: {integrity: sha512-Jenb4/caOCn5yYdJ0Gid1ABkjU92oXUSKmejI676z33G7wDxrXQU+ikQ/KGAr7iwslZsU84DmnF054UEO5+AAQ==}
 
-  '@synap-core/workspace-templates@0.11.0':
-    resolution: {integrity: sha512-/XQwnfrETYM8P+vsxRHma1QWX7/BKBqNS9+sHL/YIp3DfqxE/Pxlfe7gqWBjOm+vVbUvhGs3DznfNxYvtb9etw==}
+  '@synap-core/workspace-templates@0.12.0':
+    resolution: {integrity: sha512-lRsUCEXCBC7+n9SSJ61X24UDMV1T0LvzveuMl3T4iGmrvs/5E/pLWVQz+bJ1rnlrT32w+u2/sP3hr6mg+yuJuw==}
 
   '@types/chai@5.2.3':
     resolution: {integrity: sha512-Mw558oeA9fFbv65/y4mHtXDs9bPnFMZAL/jxdPFUpOHHIXX91mcgEHbS5Lahr+pwZFR8A7GQleRWeI6cGFC2UA==}
@@ -999,7 +999,7 @@ snapshots:
 
   '@synap-core/hub-rest-client@1.4.0': {}
 
-  '@synap-core/workspace-templates@0.11.0':
+  '@synap-core/workspace-templates@0.12.0':
     dependencies:
       js-yaml: 4.3.0
       zod: 3.25.76
