@@ -83,13 +83,24 @@ export interface CatalogPublishResult {
   error?: string;
   [k: string]: unknown;
 }
+export interface CatalogLoadResult {
+  entries: CatalogEntry[];
+  /** Every loaded entry — `entries` is validated AGAINST it (cross-kind refs, duplicates). */
+  corpus?: CatalogEntry[];
+  problems: CatalogProblem[];
+}
+export interface CatalogLoadOptions {
+  root?: string;
+  dirs?: Record<string, string[]>;
+  kinds?: string[];
+  slugs?: string[];
+  capabilityOverlay?: unknown;
+}
 export interface CatalogLib {
-  loadCatalog(opts: { root?: string; kinds?: string[]; slugs?: string[] }):
-    | Promise<{ entries: CatalogEntry[]; problems: CatalogProblem[] }>
-    | { entries: CatalogEntry[]; problems: CatalogProblem[] };
+  loadCatalog(opts: CatalogLoadOptions): Promise<CatalogLoadResult> | CatalogLoadResult;
   validateCatalog(
     entries: CatalogEntry[],
-    opts?: { siblingRepos?: unknown },
+    opts?: { corpus?: CatalogEntry[]; siblingRepos?: unknown },
   ): Promise<CatalogProblem[]> | CatalogProblem[];
   diffCatalog(
     entries: CatalogEntry[],
@@ -97,15 +108,21 @@ export interface CatalogLib {
   ): Promise<CatalogDiffRow[]> | CatalogDiffRow[];
   publishCatalog(opts: {
     entries: CatalogEntry[];
+    corpus?: CatalogEntry[];
     cpUrl: string;
     token: string;
     official: boolean;
     dryRun: boolean;
-    confirm: () => Promise<boolean>;
+    confirm: (plan: unknown) => Promise<boolean>;
     fetchImpl?: typeof fetch;
     callerUserId?: string;
     log?: (line: string) => void;
   }): Promise<CatalogPublishResult[]> | CatalogPublishResult[];
+  // ── Optional (used when present; NOT part of the shape check) ──
+  /** Load options that read the CP repo's capability JSON (the seeder's file set + overlay). */
+  cpCapabilitySource?: (cpRoot: string) => Promise<CatalogLoadOptions> | CatalogLoadOptions;
+  mergeCatalogs?: (...results: CatalogLoadResult[]) => CatalogLoadResult;
+  DEFAULT_SIBLING_REPOS?: { backend?: string; cp?: string };
 }
 
 const REQUIRED_EXPORTS = ["loadCatalog", "validateCatalog", "diffCatalog", "publishCatalog"] as const;
@@ -297,7 +314,36 @@ function formatDiff(rows: CatalogDiffRow[]): string {
 }
 
 function resultFailed(r: CatalogPublishResult): boolean {
-  return r.outcome === "failed" || r.status === "failed" || typeof r.error === "string";
+  return r.outcome === "failed" || r.outcome === "declined" || r.status === "failed" || typeof r.error === "string";
+}
+
+/**
+ * Load the corpus. Capabilities do not live in the catalog package yet — they
+ * are the CP repo's JSON (lane L / D6). For the READ-ONLY verbs the CP source is
+ * merged in when the lib offers it and the sibling repo is on disk, so
+ * `validate`/`diff --kind capability` see the real set. `publish` deliberately
+ * does NOT read the CP source: the HTTP door still upserts by (slug, author) and
+ * drops `syncByDefault`, so publishing the seeded capabilities would fork every
+ * row (catalog-K findings). Once they move into the catalog package, publish
+ * sees them through the plain load.
+ *
+ * Slugs are filtered HERE, over the merged corpus, so a slug found only in one
+ * source is never an "unknown slug" of the other.
+ */
+async function loadCorpus(
+  lib: CatalogLib,
+  catalogDir: string,
+  kinds: string[] | undefined,
+  includeCp: boolean,
+): Promise<{ result: CatalogLoadResult; cpRoot: string | null }> {
+  const own = await lib.loadCatalog({ root: catalogDir, kinds });
+  const wantsCapability = !kinds || kinds.includes("capability");
+  const cpRoot = lib.DEFAULT_SIBLING_REPOS?.cp;
+  if (!includeCp || !wantsCapability || !lib.cpCapabilitySource || !lib.mergeCatalogs || !cpRoot || !existsSync(cpRoot)) {
+    return { result: own, cpRoot: null };
+  }
+  const cp = await lib.loadCatalog(await lib.cpCapabilitySource(cpRoot));
+  return { result: lib.mergeCatalogs(own, cp), cpRoot };
 }
 
 // ── The command ─────────────────────────────────────────────────────────────
@@ -369,15 +415,18 @@ export async function runCatalog(
 
   try {
     // 1. Load + validate (every verb).
-    const loaded = await libCall("load", () =>
-      lib.loadCatalog({ kinds: opts.kind ? [opts.kind] : undefined, slugs: slugs.length ? slugs : undefined }),
+    const { result: loaded, cpRoot } = await libCall("load", () =>
+      loadCorpus(lib, catalogDir, opts.kind ? [opts.kind] : undefined, verb !== "publish"),
     );
     if (!loaded || !Array.isArray(loaded.entries) || !Array.isArray(loaded.problems)) {
       return fail("lib-shape", `loadCatalog in ${join(catalogDir, CATALOG_LIB_PATH)} did not return { entries[], problems[] } — pull synap-app.`);
     }
-    const entries = loaded.entries;
+    // Validate the selection AGAINST the whole loaded corpus: a workspace's
+    // compose/require deps are other entries, which a slug filter would drop.
+    const corpus = Array.isArray(loaded.corpus) ? loaded.corpus : loaded.entries;
+    const entries = slugs.length ? corpus.filter((e) => slugs.includes(e.slug)) : loaded.entries;
     const missing = slugs.filter((s) => !entries.some((e) => e.slug === s));
-    const validated = await libCall("validate", () => lib.validateCatalog(entries));
+    const validated = await libCall("validate", () => lib.validateCatalog(entries, { corpus }));
     if (!Array.isArray(validated)) {
       return fail("lib-shape", `validateCatalog in ${join(catalogDir, CATALOG_LIB_PATH)} did not return Problem[] — pull synap-app.`);
     }
@@ -387,6 +436,7 @@ export async function runCatalog(
       ...missing.map((slug): CatalogProblem => ({
         slug,
         kind: opts.kind,
+        code: "unknown-slug",
         message: `no ${opts.kind ?? "catalog"} entry with this slug`,
       })),
     ];
@@ -394,11 +444,11 @@ export async function runCatalog(
     const scope = `${opts.kind ?? "all kinds"}${slugs.length ? ` · ${slugs.join(", ")}` : ""}`;
 
     if (!opts.json) {
-      log.heading(`Catalog ${verb} — ${scope} — from ${catalogDir}`);
+      log.heading(`Catalog ${verb} — ${scope} — from ${catalogDir}${cpRoot ? ` + ${cpRoot} (capabilities)` : ""}`);
       for (const p of problems) out(formatProblem(p));
     }
     if (errors.length > 0) {
-      if (opts.json) out(JSON.stringify({ ok: false, error: "invalid", entries: entries.length, problems }, null, 2));
+      if (opts.json) out(JSON.stringify({ ok: false, error: "invalid-template", entries: entries.length, problems }, null, 2));
       else log.error(`${errors.length} problem(s) in ${entries.length} entr${entries.length === 1 ? "y" : "ies"}${verb === "validate" ? "" : ` — nothing to ${verb} until they are fixed`}.`);
       return 1;
     }
@@ -436,6 +486,7 @@ export async function runCatalog(
     const results = await libCall("publish", () =>
       lib.publishCatalog({
         entries,
+        corpus,
         cpUrl,
         token: creds!.token,
         official: true,

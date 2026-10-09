@@ -50,17 +50,22 @@ const ENTRY = (kind: string, slug: string) => ({
 function mockLib(over: { problems?: unknown[]; validate?: unknown[]; diff?: unknown[]; entries?: unknown[] } = {}) {
   const calls: Array<{ fn: string; args: unknown }> = [];
   const lib = {
-    loadCatalog: async (args: { kinds?: string[]; slugs?: string[] }) => {
-      calls.push({ fn: "loadCatalog", args });
-      const all = (over.entries as any[]) ?? [ENTRY("workspace", "content-os"), ENTRY("capability", "agency-skills")];
-      const entries = all.filter(
-        (e) => (!args.kinds || args.kinds.includes(e.kind)) && (!args.slugs || args.slugs.includes(e.slug)),
-      );
-      return { entries, problems: over.problems ?? [] };
+    loadCatalog: async (args: { root?: string; kinds?: string[]; slugs?: string[] }) => {
+      calls.push({ fn: "loadCatalog", args: { kinds: args.kinds, slugs: args.slugs, hasRoot: typeof args.root === "string" } });
+      const all = (over.entries as any[]) ?? [ENTRY("workspace", "content-os"), ENTRY("workspace", "foundation"), ENTRY("capability", "agency-skills")];
+      const corpus = all.filter((e) => !args.kinds || args.kinds.includes(e.kind));
+      const entries = corpus.filter((e) => !args.slugs || args.slugs.includes(e.slug));
+      return { entries, corpus, problems: over.problems ?? [] };
     },
-    validateCatalog: async (entries: unknown[]) => {
-      calls.push({ fn: "validateCatalog", args: (entries as any[]).map((e) => e.slug) });
-      return over.validate ?? [];
+    // Like the real lib: a dependency must resolve in the CORPUS it is handed
+    // (default: the entries themselves) — content-os composes foundation.
+    validateCatalog: async (entries: any[], opts: { corpus?: any[] } = {}) => {
+      const corpus = opts.corpus ?? entries;
+      calls.push({ fn: "validateCatalog", args: { slugs: entries.map((e) => e.slug), corpus: corpus.length } });
+      const dangling = entries.some((e) => e.slug === "content-os") && !corpus.some((e) => e.slug === "foundation")
+        ? [{ severity: "error", code: "dangling-ref", kind: "workspace", slug: "content-os", message: "dependency workspace:foundation resolves to no catalog entry" }]
+        : [];
+      return [...dangling, ...((over.validate as any[]) ?? [])];
     },
     diffCatalog: async (entries: any[], opts: { cpUrl: string; token?: string }) => {
       calls.push({ fn: "diffCatalog", args: { slugs: entries.map((e) => e.slug), cpUrl: opts.cpUrl, token: opts.token } });
@@ -69,7 +74,7 @@ function mockLib(over: { problems?: unknown[]; validate?: unknown[]; diff?: unkn
     publishCatalog: async (opts: any) => {
       calls.push({
         fn: "publishCatalog",
-        args: { slugs: opts.entries.map((e: any) => e.slug), cpUrl: opts.cpUrl, token: opts.token, official: opts.official, dryRun: opts.dryRun },
+        args: { slugs: opts.entries.map((e: any) => e.slug), corpus: opts.corpus?.length, cpUrl: opts.cpUrl, token: opts.token, official: opts.official, dryRun: opts.dryRun },
       });
       return opts.entries.map((e: any) => ({ kind: e.kind, slug: e.slug, outcome: "updated" }));
     },
@@ -126,13 +131,15 @@ describe("argument parsing", () => {
     const { lib, calls } = mockLib();
     const ok = await run("validate", ["content-os"], { kind: "workspace" }, { lib });
     expect(ok.code).toBe(0);
-    expect(calls[0]).toEqual({ fn: "loadCatalog", args: { kinds: ["workspace"], slugs: ["content-os"] } });
+    expect(calls[0]).toEqual({ fn: "loadCatalog", args: { kinds: ["workspace"], slugs: undefined, hasRoot: true } });
+    // One slug is validated against the WHOLE corpus (its compose dep is another entry).
+    expect(calls[1]).toEqual({ fn: "validateCatalog", args: { slugs: ["content-os"], corpus: 2 } });
     const all = await run("validate", [], {}, { lib: mockLib().lib });
     expect(all.code).toBe(0);
 
     const missing = await run("validate", ["ghost"], { kind: "workspace", json: true }, { lib: mockLib().lib });
     expect(missing.code).toBe(1);
-    expect(JSON.parse(missing.text).problems).toEqual([expect.objectContaining({ slug: "ghost" })]);
+    expect(JSON.parse(missing.text).problems).toEqual([expect.objectContaining({ slug: "ghost", code: "unknown-slug" })]);
   });
 
   it("validate never reads credentials; diff passes the token only when the session is valid", async () => {
@@ -249,8 +256,44 @@ describe("publish safety", () => {
     expect(asked).toMatch(/Publish 1 catalog entry \(capability\)/);
     expect(calls.at(-1)).toEqual({
       fn: "publishCatalog",
-      args: { slugs: ["agency-skills"], cpUrl: "https://cp.test", token: "tok", official: true, dryRun: false },
+      args: { slugs: ["agency-skills"], corpus: 1, cpUrl: "https://cp.test", token: "tok", official: true, dryRun: false },
     });
+  });
+
+  it("CP capabilities are merged for validate/diff, never for publish", async () => {
+    const cpRoot = mkdtempSync(join(tmpdir(), "synap-cp-"));
+    const withCp = () => {
+      const m = mockLib();
+      const lib = {
+        ...m.lib,
+        DEFAULT_SIBLING_REPOS: { cp: cpRoot },
+        cpCapabilitySource: async (root: string) => ({ root, kinds: ["capability"], cpSource: true }),
+        loadCatalog: async (args: any) => {
+          if (args.cpSource) {
+            m.calls.push({ fn: "loadCatalog:cp", args: args.root });
+            const e = [ENTRY("capability", "web-read")];
+            return { entries: e, corpus: e, problems: [] };
+          }
+          return m.lib.loadCatalog(args);
+        },
+        mergeCatalogs: (...rs: any[]) => ({
+          entries: rs.flatMap((r) => r.entries),
+          corpus: rs.flatMap((r) => r.corpus),
+          problems: rs.flatMap((r) => r.problems),
+        }),
+      };
+      return { lib, calls: m.calls };
+    };
+    const d = withCp();
+    expect((await run("diff", ["web-read"], { kind: "capability" }, { lib: d.lib })).code).toBe(0);
+    expect(d.calls).toContainEqual({ fn: "loadCatalog:cp", args: cpRoot });
+    expect(d.calls.find((c) => c.fn === "diffCatalog")?.args).toMatchObject({ slugs: ["web-read"] });
+
+    const p = withCp();
+    const r = await run("publish", ["web-read"], { kind: "capability", official: true, yes: true, json: true }, { lib: p.lib });
+    expect(r.code).toBe(1);
+    expect(p.calls.some((c) => c.fn === "loadCatalog:cp")).toBe(false);
+    expect(p.calls.some((c) => c.fn === "publishCatalog")).toBe(false);
   });
 });
 
