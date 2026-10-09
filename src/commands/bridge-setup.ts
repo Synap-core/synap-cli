@@ -40,7 +40,13 @@ import prompts from "prompts";
 import { resolveHubConfig, hubGet, hubPost, hubPatch, resolveUserId, renderHubError, type HubConfig } from "../lib/hub-client.js";
 import { unwrapList } from "../lib/unwrapList.js";
 import { fetchProjects } from "../lib/project.js";
-import { discoverSkillDirs, parseSkillDir, importSkill } from "../lib/skill-import.js";
+import { parseSkillDir, importSkill } from "../lib/skill-import.js";
+import {
+  CLI_TEMPLATES_DIR,
+  resolveAgencySkillDirs,
+  resolveAutomationTemplatesDir,
+  resolveInstalledCatalogRoot,
+} from "../lib/catalog-templates.js";
 import {
   checkPodHealth,
   getSurfaceAgentKey,
@@ -479,10 +485,11 @@ export async function bridgeSetup(opts: BridgeSetupOpts): Promise<void> {
   await applyAgencyCapabilities(cfg, workspaceId);
 
   // ── 4e. Seed the GENERIC automation templates (idempotent, event-driven) ────
-  // Only the domain-agnostic automations live in templates/automations/ now
-  // (mail-feed, url/bookmark capture). The grant operation itself ships with the
-  // `grants` workspace template (its "Grant Process" method + automations); the
-  // old stellar-grant-client capability was removed (D5, 2026-09-25). Thread the operator's
+  // Only the domain-agnostic automations are seeded here (mail-feed,
+  // url/bookmark capture), read from the installed catalog package when it
+  // ships them, else from templates/automations/. The grant operation itself
+  // ships with the `grants` workspace template (its "Grant Process" method +
+  // automations). Thread the operator's
   // chosen proactive channel through — output nodes pin their post target with it
   // when it's a Synap channels.id (see the note in applyAutomationTemplates).
   await applyAutomationTemplates(cfg, workspaceId, opts.proactiveChannel);
@@ -622,26 +629,6 @@ const AGENCY_CAPABILITY_PLAN: Array<{
 ];
 
 /**
- * Resolve the automations templates directory — CLI-BUNDLED (like the skills at
- * templates/skills). The backend stays agnostic: it ships no feature templates;
- * automation config is bundled with the CLI that seeds it.
- *
- * Resolution order:
- *   1. AUTOMATION_TEMPLATES_DIR env var (override for CI / custom installs)
- *   2. CLI-bundled default: <cli-package-root>/templates/automations
- */
-function resolveAutomationsTemplatesDir(): string | null {
-  if (process.env.AUTOMATION_TEMPLATES_DIR) {
-    const override = process.env.AUTOMATION_TEMPLATES_DIR;
-    return fs.existsSync(override) ? override : null;
-  }
-  const thisFile = fileURLToPath(import.meta.url);
-  const cliRoot = path.resolve(path.dirname(thisFile), "..", "..");
-  const candidate = path.resolve(cliRoot, "templates", "automations");
-  return fs.existsSync(candidate) ? candidate : null;
-}
-
-/**
  * Apply the agency capability templates idempotently via the Control Plane catalog.
  *
  * - POSTs to /capabilities/apply with { templateKey, params, workspaceId? }; the
@@ -718,19 +705,24 @@ export function resolveBundledSkillsDir(): string | null {
 }
 
 /**
- * Seed the bundled Synap-native skills from templates/skills/ (standard SKILL.md
- * directories). Each becomes a pod-wide instruction skill via /agent-skills/import;
- * references/ files become linked documents. Idempotent (slug-unique guard).
+ * Seed the Synap-native skills (standard SKILL.md directories): the agency
+ * skills from the installed catalog package when it ships them, else from
+ * templates/skills/; the CLI runtime skills from templates/skills/. Each becomes
+ * a pod-wide instruction skill via /agent-skills/import; references/ files
+ * become linked documents. Idempotent (slug-unique guard).
  */
 async function applyAgencySkills(
   cfg: Awaited<ReturnType<typeof resolveHubConfig>>
 ): Promise<void> {
-  const skillsDir = resolveBundledSkillsDir();
-  if (!skillsDir) { log.warn("Bundled skill templates not found — skipping."); return; }
+  const catalogRoot = resolveInstalledCatalogRoot();
+  const { dirs, fromCatalog } = resolveAgencySkillDirs({ cliSkillsDir: resolveBundledSkillsDir(), catalogRoot });
+  if (dirs.length === 0) { log.warn("Bundled skill templates not found — skipping."); return; }
 
   const userId = await resolveUserId(cfg);
-  const dirs = discoverSkillDirs(skillsDir);
-  log.dim(`Seeding ${dirs.length} bundled skill(s) from ${skillsDir}…`);
+  log.dim(
+    `Seeding ${dirs.length} skill(s)` +
+      (fromCatalog.length ? ` (${fromCatalog.length} from ${catalogRoot})` : "") + "…"
+  );
 
   for (const dir of dirs) {
     const parsed = parseSkillDir(dir);
@@ -926,7 +918,9 @@ async function resolveGoogleConnectionId(
 }
 
 /**
- * Apply automation templates from the CLI-bundled templates/automations/*.automation.json.
+ * Apply the *.automation.json templates: AUTOMATION_TEMPLATES_DIR when set, else
+ * the installed catalog package's automations/ when it ships them, else the
+ * CLI's templates/automations/.
  *
  * For each file:
  *  - Fill placeholders + validate references in the flowDefinition:
@@ -948,7 +942,11 @@ async function applyAutomationTemplates(
   workspaceId: string | undefined,
   feedChannelId?: string
 ): Promise<void> {
-  const templatesDir = resolveAutomationsTemplatesDir();
+  const templatesDir = resolveAutomationTemplatesDir({
+    override: process.env.AUTOMATION_TEMPLATES_DIR,
+    catalogRoot: resolveInstalledCatalogRoot(),
+    cliDir: path.join(CLI_TEMPLATES_DIR, "automations"),
+  });
   if (!templatesDir) {
     log.warn(
       "Automation templates dir not found — skipping. " +

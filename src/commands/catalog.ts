@@ -7,7 +7,7 @@
  * catalog, the `synap-official` preflight and the POSTs are ONE lib in the
  * monorepo checkout — `scripts/catalog-lib.mjs` of the catalog package
  * (`@synap-core/catalog`, or `@synap-core/workspace-templates` before the
- * rename). Its interface is fixed by the catalog brief:
+ * rename). The surface this command relies on:
  *
  *   loadCatalog({ root?, kinds?, slugs? })            → { entries, problems }
  *   validateCatalog(entries, { siblingRepos? })       → Problem[]
@@ -102,7 +102,6 @@ export interface CatalogLoadOptions {
   dirs?: Record<string, string[]>;
   kinds?: string[];
   slugs?: string[];
-  capabilityOverlay?: unknown;
 }
 export interface CatalogLib {
   loadCatalog(opts: CatalogLoadOptions): Promise<CatalogLoadResult> | CatalogLoadResult;

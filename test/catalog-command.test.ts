@@ -455,6 +455,20 @@ describe("one error table: every code has exactly one next step", () => {
   });
 });
 
+describe.runIf(hasLib)("the CLI's typed lib surface declares no option the lib does not accept", () => {
+  it("every CatalogLoadOptions key is a key of the lib's LoadOptions", () => {
+    const keysOf = (src: string, iface: string) => {
+      const body = src.match(new RegExp(`export interface ${iface} \\{([\\s\\S]*?)\\n\\}`))?.[1] ?? "";
+      return [...body.matchAll(/^\s+([A-Za-z]+)\??:/gm)].map((m) => m[1]!);
+    };
+    const cli = keysOf(SRC, "CatalogLoadOptions");
+    const lib = keysOf(readFileSync(join(LIB_DIR, "catalog-lib.d.mts"), "utf8"), "LoadOptions");
+    expect(cli).toContain("root"); // non-vacuity: both scans still see the interfaces
+    expect(lib).toContain("compiler");
+    expect(cli.filter((k) => !lib.includes(k))).toEqual([]);
+  });
+});
+
 // ── The real lib, every kind (sibling checkout) ─────────────────────────────
 
 describe.runIf(hasLib)("catalog validate over EVERY kind, against the real checkout", () => {

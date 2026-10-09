@@ -6,8 +6,8 @@
  * The agency/domain skills (`templates/skills/<name>/`, with every reference
  * file) and the bridge-setup automations (`templates/automations/*.automation.json`)
  * now live in the catalog (`skills/<name>/`, `automations/`). The CLI keeps its
- * copies only until the catalog package is published and the CLI pin bumped
- * (deploy steps), because `bridge-setup` still reads them from here. Until then
+ * copies only until the INSTALLED catalog package ships them: `bridge-setup`
+ * reads each from the installed package when it ships it, else from here. Until then
  * an edit on ONE side silently forks the two, so this test requires the files
  * to be byte-identical, in both directions (a file added on either side is a
  * difference).
@@ -18,14 +18,18 @@
  *
  * Skips, with the reason logged, when the sibling synap-app checkout is absent.
  *
- * RETIRES when the CLI's local copies are deleted (bridge-setup then installs
- * the published catalog entries): delete this file in that same change.
+ * Local-only: CLI CI checks out this repo alone, so this test skips there.
+ *
+ * RETIRES when the CLI's local copies are deleted. `test/catalog-templates.test.ts`
+ * forces that the day the installed package ships them: delete this file in
+ * that same change.
  */
 
 import { describe, it, expect } from "vitest";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
+import { AGENCY_SKILLS } from "../src/lib/catalog-templates.js";
 
 const CLI = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const PACKAGES = path.resolve(CLI, "..", "synap-app", "packages");
@@ -38,14 +42,8 @@ const CLI_AUTOMATIONS = path.join(CLI, "templates", "automations");
 if (!CATALOG)
   console.warn(`[catalog-mirror] SKIP: no catalog checkout with skills/ + automations/ under ${PACKAGES}`);
 
-/** The agency/domain skill folders that moved to the catalog (catalog-M.md). */
-const SHARED_SKILLS = [
-  "bookmark-enrichment",
-  "mapping-the-server",
-  "reading-client-progress",
-  "routing-to-channels",
-  "stellar-scf-grants-advisor",
-];
+/** The agency/domain skill folders whose home is the catalog. */
+const SHARED_SKILLS = [...AGENCY_SKILLS].sort();
 
 /** Every file under `dir`, relative, sorted (`.DS_Store` ignored). */
 function filesUnder(dir: string): string[] {
