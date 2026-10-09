@@ -140,7 +140,8 @@ describe("auth", () => {
       credentials: { ...CREDS, expiresAt: "2000-01-01T00:00:00Z" },
       fetchImpl,
     });
-    expect(JSON.parse(expired.text).message).toMatch(/synap login/);
+    // The remedy lives in the one error table (`hint`), the message says what happened.
+    expect(JSON.parse(expired.text)).toMatchObject({ error: "not-logged-in", message: expect.stringMatching(/expired/), hint: expect.stringMatching(/synap login/) });
     expect(calls).toHaveLength(0);
   });
 
@@ -160,6 +161,8 @@ describe.runIf(hasCheckout)("against the REAL lib in the checkout", () => {
     expect(code).toBe(1);
     expect(JSON.parse(text)).toMatchObject({ ok: false, error: "not-official-publisher" });
     expect(calls.filter((c) => c.method === "POST")).toHaveLength(0);
+    // Refused by the read-only preflight BEFORE the preview: not one live row is read.
+    expect(calls.map((c) => c.url)).toEqual(["https://cp.test/api/vendors/mine"]);
   });
 
   it("dry run previews the diff for the workspace kind and writes nothing", async () => {

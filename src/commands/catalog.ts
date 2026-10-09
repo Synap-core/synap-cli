@@ -13,6 +13,14 @@
  *   validateCatalog(entries, { siblingRepos? })       → Problem[]
  *   diffCatalog(entries, { cpUrl, token? })           → DiffRow[]
  *   publishCatalog({ entries, cpUrl, token, official, dryRun, confirm }) → results[]
+ *   checkPublisher({ cpUrl, token })                  → { official, vendor?, reason? }   (optional)
+ *
+ * ONE READ PATH: every kind — capabilities included — is read from the catalog
+ * package by `loadCatalog` (its default kind dirs). The CLI never reads the
+ * control-plane repo; the CP's capability JSON is only a guarded mirror now.
+ *
+ * ONE ERROR TABLE: every code the lib throws (and every refusal of this
+ * command) maps to ONE next step in `CATALOG_ERROR_HINTS`.
  *
  * `synap market publish --official` is an ALIAS of
  * `synap catalog publish --official --kind workspace` — `marketPublishOfficial`
@@ -119,10 +127,50 @@ export interface CatalogLib {
     log?: (line: string) => void;
   }): Promise<CatalogPublishResult[]> | CatalogPublishResult[];
   // ── Optional (used when present; NOT part of the shape check) ──
-  /** Load options that read the CP repo's capability JSON (the seeder's file set + overlay). */
-  cpCapabilitySource?: (cpRoot: string) => Promise<CatalogLoadOptions> | CatalogLoadOptions;
-  mergeCatalogs?: (...results: CatalogLoadResult[]) => CatalogLoadResult;
-  DEFAULT_SIBLING_REPOS?: { backend?: string; cp?: string };
+  /**
+   * READ-ONLY official preflight. A failed read THROWS (`cp-unreachable`) — it
+   * is never returned as `official:false`. Absent in an older checkout: the
+   * lib's own preflight inside `publishCatalog` still refuses, only later.
+   */
+  checkPublisher?: (opts: { cpUrl: string; token: string | undefined; fetchImpl?: typeof fetch }) => Promise<CatalogPublisherCheck>;
+}
+
+export type CatalogPublisherCheck =
+  | { official: true; vendor: { id: string; slug: string } }
+  | { official: false; reason: "not-logged-in" | "not-official-publisher" | string; message: string; vendor?: { slug: string } };
+
+// ── One error table ─────────────────────────────────────────────────────────
+
+/**
+ * Every code the catalog lib throws (`CatalogErrorCode` in the checkout's
+ * `scripts/catalog-lib.d.mts` — a tripwire keeps this list a superset) plus this
+ * command's own refusals, each mapped to ONE next step. The lib's message says
+ * WHAT happened (it carries the detail: stale slugs, the vendor found…); the
+ * hint says what to DO. Nowhere else in this command writes a remedy string.
+ */
+export const CATALOG_ERROR_HINTS = {
+  // The lib's codes.
+  "stale-build": "Rebuild the catalog package, then re-run: pnpm --filter @synap-core/workspace-templates build",
+  "invalid-template": "Fix the listed problems in the catalog files, then re-run: synap catalog validate",
+  "unknown-slug": "Check the slug — run: synap catalog validate --json to list every entry",
+  "not-logged-in": "Sign in to the control plane — run: synap login",
+  "not-official-publisher": "Sign in (synap login) with the account that owns the synap-official vendor",
+  "cp-unreachable": "The control plane did not answer — check your network / SYNAP_CP_URL and retry; nothing was published",
+  "live-read-failed": "A live catalog row could not be read — retry; nothing was published blind",
+  "not-confirmed": "The write was not confirmed — re-run and answer yes, or pass --yes",
+  "unsupported-runtime": "Use Node ≥ 22.18 (the catalog schema is TypeScript loaded by native type stripping)",
+  // This command's own refusals.
+  usage: "Run: synap catalog --help",
+  "checkout-not-found": "Run from inside the Synap monorepo, or pass --catalog-dir (market publish: --templates-dir) <path to the catalog package>",
+  "lib-load-failed": "Pull synap-app (the checkout's catalog lib is missing, older or newer than this CLI)",
+  "lib-shape": "Pull synap-app (the checkout's catalog lib returned an unexpected shape)",
+  "confirmation-required": "Re-run with --dry-run to preview, or --yes to publish non-interactively",
+} as const satisfies Record<string, string>;
+export type CatalogErrorCode = keyof typeof CATALOG_ERROR_HINTS;
+
+/** The one next step for a code (an unknown code from a newer lib gets the pull hint). */
+export function catalogErrorHint(code: string): string {
+  return (CATALOG_ERROR_HINTS as Record<string, string>)[code] ?? CATALOG_ERROR_HINTS["lib-load-failed"];
 }
 
 const REQUIRED_EXPORTS = ["loadCatalog", "validateCatalog", "diffCatalog", "publishCatalog"] as const;
@@ -137,7 +185,7 @@ export function catalogLibShapeError(mod: unknown, libFile: string): string | nu
   if (missing.length === 0) return null;
   return (
     `${libFile} does not export the catalog interface — missing or not a function: ${missing.join(", ")}. ` +
-    `Expected ${REQUIRED_EXPORTS.join(", ")}. Pull synap-app (the checkout's catalog lib is older or newer than this CLI).`
+    `Expected ${REQUIRED_EXPORTS.join(", ")}.`
   );
 }
 
@@ -259,7 +307,7 @@ export async function loadCatalogLib(
   const libFile = join(catalogDir, CATALOG_LIB_PATH);
   if (!existsSync(libFile)) {
     throw new CatalogLoadError(
-      `${libFile} not found — this checkout predates the one catalog lib. Pull synap-app.`,
+      `${libFile} not found — this checkout predates the one catalog lib.`,
     );
   }
   let mod: unknown;
@@ -317,35 +365,6 @@ function resultFailed(r: CatalogPublishResult): boolean {
   return r.outcome === "failed" || r.outcome === "declined" || r.status === "failed" || typeof r.error === "string";
 }
 
-/**
- * Load the corpus. Capabilities do not live in the catalog package yet — they
- * are the CP repo's JSON (lane L / D6). For the READ-ONLY verbs the CP source is
- * merged in when the lib offers it and the sibling repo is on disk, so
- * `validate`/`diff --kind capability` see the real set. `publish` deliberately
- * does NOT read the CP source: the HTTP door still upserts by (slug, author) and
- * drops `syncByDefault`, so publishing the seeded capabilities would fork every
- * row (catalog-K findings). Once they move into the catalog package, publish
- * sees them through the plain load.
- *
- * Slugs are filtered HERE, over the merged corpus, so a slug found only in one
- * source is never an "unknown slug" of the other.
- */
-async function loadCorpus(
-  lib: CatalogLib,
-  catalogDir: string,
-  kinds: string[] | undefined,
-  includeCp: boolean,
-): Promise<{ result: CatalogLoadResult; cpRoot: string | null }> {
-  const own = await lib.loadCatalog({ root: catalogDir, kinds });
-  const wantsCapability = !kinds || kinds.includes("capability");
-  const cpRoot = lib.DEFAULT_SIBLING_REPOS?.cp;
-  if (!includeCp || !wantsCapability || !lib.cpCapabilitySource || !lib.mergeCatalogs || !cpRoot || !existsSync(cpRoot)) {
-    return { result: own, cpRoot: null };
-  }
-  const cp = await lib.loadCatalog(await lib.cpCapabilitySource(cpRoot));
-  return { result: lib.mergeCatalogs(own, cp), cpRoot };
-}
-
 // ── The command ─────────────────────────────────────────────────────────────
 
 /**
@@ -360,8 +379,12 @@ export async function runCatalog(
 ): Promise<number> {
   const out = deps.out ?? ((l: string) => console.log(l));
   const fail = (code: string, message: string, exit = 1): number => {
-    if (opts.json) out(JSON.stringify({ ok: false, error: code, message }, null, 2));
-    else log.error(message);
+    const hint = catalogErrorHint(code);
+    if (opts.json) out(JSON.stringify({ ok: false, error: code, message, hint }, null, 2));
+    else {
+      log.error(message);
+      out(`  → ${hint}`);
+    }
     return exit;
   };
 
@@ -375,7 +398,7 @@ export async function runCatalog(
       "checkout-not-found",
       opts.catalogDir
         ? `${opts.catalogDir} is not the catalog package (no package.json named ${CATALOG_PACKAGE_NAMES.join(" or ")}).`
-        : `Could not find the catalog checkout from ${cwd}. Run from inside the Synap monorepo, or pass --catalog-dir <path to synap-app/packages/catalog>.`,
+        : `Could not find the catalog checkout from ${cwd}.`,
     );
   }
 
@@ -385,7 +408,7 @@ export async function runCatalog(
   if (verb === "publish" && !sessionOk) {
     return fail(
       "not-logged-in",
-      creds?.token ? "Your control-plane session has expired — run: synap login" : "Not signed in to the Synap control plane — run: synap login",
+      creds?.token ? "Your control-plane session has expired." : "Not signed in to the Synap control plane.",
     );
   }
 
@@ -393,7 +416,7 @@ export async function runCatalog(
   if (verb === "publish" && !opts.dryRun && !opts.yes && !interactive) {
     return fail(
       "confirmation-required",
-      "Refusing to publish the official catalog without a confirmation. Re-run with --dry-run to preview, or --yes to publish non-interactively.",
+      "Refusing to publish the official catalog without a confirmation.",
     );
   }
 
@@ -415,11 +438,10 @@ export async function runCatalog(
 
   try {
     // 1. Load + validate (every verb).
-    const { result: loaded, cpRoot } = await libCall("load", () =>
-      loadCorpus(lib, catalogDir, opts.kind ? [opts.kind] : undefined, verb !== "publish"),
-    );
+    // ONE read path: the catalog package's own kind dirs (capabilities included).
+    const loaded = await libCall("load", () => lib.loadCatalog({ root: catalogDir, kinds: opts.kind ? [opts.kind] : undefined }));
     if (!loaded || !Array.isArray(loaded.entries) || !Array.isArray(loaded.problems)) {
-      return fail("lib-shape", `loadCatalog in ${join(catalogDir, CATALOG_LIB_PATH)} did not return { entries[], problems[] } — pull synap-app.`);
+      return fail("lib-shape", `loadCatalog in ${join(catalogDir, CATALOG_LIB_PATH)} did not return { entries[], problems[] }.`);
     }
     // Validate the selection AGAINST the whole loaded corpus: a workspace's
     // compose/require deps are other entries, which a slug filter would drop.
@@ -428,7 +450,7 @@ export async function runCatalog(
     const missing = slugs.filter((s) => !entries.some((e) => e.slug === s));
     const validated = await libCall("validate", () => lib.validateCatalog(entries, { corpus }));
     if (!Array.isArray(validated)) {
-      return fail("lib-shape", `validateCatalog in ${join(catalogDir, CATALOG_LIB_PATH)} did not return Problem[] — pull synap-app.`);
+      return fail("lib-shape", `validateCatalog in ${join(catalogDir, CATALOG_LIB_PATH)} did not return Problem[].`);
     }
     const problems = [
       ...loaded.problems,
@@ -444,11 +466,11 @@ export async function runCatalog(
     const scope = `${opts.kind ?? "all kinds"}${slugs.length ? ` · ${slugs.join(", ")}` : ""}`;
 
     if (!opts.json) {
-      log.heading(`Catalog ${verb} — ${scope} — from ${catalogDir}${cpRoot ? ` + ${cpRoot} (capabilities)` : ""}`);
+      log.heading(`Catalog ${verb} — ${scope} — from ${catalogDir}`);
       for (const p of problems) out(formatProblem(p));
     }
     if (errors.length > 0) {
-      if (opts.json) out(JSON.stringify({ ok: false, error: "invalid-template", entries: entries.length, problems }, null, 2));
+      if (opts.json) out(JSON.stringify({ ok: false, error: "invalid-template", hint: catalogErrorHint("invalid-template"), entries: entries.length, problems }, null, 2));
       else log.error(`${errors.length} problem(s) in ${entries.length} entr${entries.length === 1 ? "y" : "ies"}${verb === "validate" ? "" : ` — nothing to ${verb} until they are fixed`}.`);
       return 1;
     }
@@ -458,22 +480,45 @@ export async function runCatalog(
       return 0;
     }
 
-    // 2. Diff against the live catalog (diff + publish).
     const cpUrl = deps.cpUrl ?? getCpUrl();
+    const token = sessionOk ? creds!.token : undefined;
+
+    // 2. Official preflight, BEFORE the preview (read-only, the lib's one rule):
+    //    publish → refuse here, so a non-official account never sees a preview
+    //    it could not act on; diff → warn and still show the diff.
+    let publisherWarning: { code: string; message: string } | undefined;
+    if (lib.checkPublisher) {
+      const check = await libCall("preflight", () => lib.checkPublisher!({ cpUrl, token, fetchImpl: deps.fetchImpl }));
+      if (!check.official) {
+        if (verb === "publish") return fail(check.reason, check.message);
+        publisherWarning = { code: check.reason, message: check.message };
+        if (!opts.json) {
+          log.warn(`Publishing would be refused: ${check.message}`);
+          out(`  → ${catalogErrorHint(check.reason)}`);
+        }
+      }
+    }
+
+    // 3. Diff against the live catalog (diff + publish).
     const rows = await libCall("diff", () =>
-      lib.diffCatalog(entries, { cpUrl, token: sessionOk ? creds!.token : undefined, fetchImpl: deps.fetchImpl }),
+      lib.diffCatalog(entries, { cpUrl, token, fetchImpl: deps.fetchImpl }),
     );
     if (!Array.isArray(rows)) {
-      return fail("lib-shape", `diffCatalog in ${join(catalogDir, CATALOG_LIB_PATH)} did not return a row array — pull synap-app.`);
+      return fail("lib-shape", `diffCatalog in ${join(catalogDir, CATALOG_LIB_PATH)} did not return a row array.`);
     }
     if (!opts.json) out(formatDiff(rows));
     if (verb === "diff" || opts.dryRun) {
-      if (opts.json) out(JSON.stringify({ ok: true, dryRun: verb === "publish" ? true : undefined, cpUrl, diff: rows }, null, 2));
+      if (opts.json) {
+        const publishable = publisherWarning
+          ? { publishable: false, publishRefusal: { ...publisherWarning, hint: catalogErrorHint(publisherWarning.code) } }
+          : {};
+        out(JSON.stringify({ ok: true, dryRun: verb === "publish" ? true : undefined, cpUrl, diff: rows, ...publishable }, null, 2));
+      }
       else if (opts.dryRun) log.info("Dry run — nothing was published.");
       return 0;
     }
 
-    // 3. Confirm, then the ONE write door.
+    // 4. Confirm, then the ONE write door.
     if (!opts.yes) {
       const ok = await (deps.confirm ?? readlineConfirm)(
         `\n  Publish ${entries.length} catalog entr${entries.length === 1 ? "y" : "ies"} (${scope}) to ${cpUrl} as synap-official? [y/N] `,

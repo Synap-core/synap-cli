@@ -1,8 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  CATALOG_ERROR_HINTS,
   catalogLibShapeError,
   catalogUsageError,
   findCatalogDir,
@@ -199,7 +200,7 @@ describe("the lib shape check", () => {
       },
     });
     expect(code).toBe(1);
-    expect(JSON.parse(text).message).toMatch(/catalog-lib\.mjs not found.*Pull synap-app/);
+    expect(JSON.parse(text)).toMatchObject({ message: expect.stringMatching(/catalog-lib\.mjs not found/), hint: expect.stringMatching(/Pull synap-app/) });
     expect(imported).toBe(false);
   });
 
@@ -258,42 +259,6 @@ describe("publish safety", () => {
       fn: "publishCatalog",
       args: { slugs: ["agency-skills"], corpus: 1, cpUrl: "https://cp.test", token: "tok", official: true, dryRun: false },
     });
-  });
-
-  it("CP capabilities are merged for validate/diff, never for publish", async () => {
-    const cpRoot = mkdtempSync(join(tmpdir(), "synap-cp-"));
-    const withCp = () => {
-      const m = mockLib();
-      const lib = {
-        ...m.lib,
-        DEFAULT_SIBLING_REPOS: { cp: cpRoot },
-        cpCapabilitySource: async (root: string) => ({ root, kinds: ["capability"], cpSource: true }),
-        loadCatalog: async (args: any) => {
-          if (args.cpSource) {
-            m.calls.push({ fn: "loadCatalog:cp", args: args.root });
-            const e = [ENTRY("capability", "web-read")];
-            return { entries: e, corpus: e, problems: [] };
-          }
-          return m.lib.loadCatalog(args);
-        },
-        mergeCatalogs: (...rs: any[]) => ({
-          entries: rs.flatMap((r) => r.entries),
-          corpus: rs.flatMap((r) => r.corpus),
-          problems: rs.flatMap((r) => r.problems),
-        }),
-      };
-      return { lib, calls: m.calls };
-    };
-    const d = withCp();
-    expect((await run("diff", ["web-read"], { kind: "capability" }, { lib: d.lib })).code).toBe(0);
-    expect(d.calls).toContainEqual({ fn: "loadCatalog:cp", args: cpRoot });
-    expect(d.calls.find((c) => c.fn === "diffCatalog")?.args).toMatchObject({ slugs: ["web-read"] });
-
-    const p = withCp();
-    const r = await run("publish", ["web-read"], { kind: "capability", official: true, yes: true, json: true }, { lib: p.lib });
-    expect(r.code).toBe(1);
-    expect(p.calls.some((c) => c.fn === "loadCatalog:cp")).toBe(false);
-    expect(p.calls.some((c) => c.fn === "publishCatalog")).toBe(false);
   });
 });
 
@@ -363,4 +328,144 @@ describe("locating the checkout", () => {
     writeFileSync(join(impostor, "package.json"), JSON.stringify({ name: "other" }));
     expect(findCatalogDir(impostor, ".")).toBeNull();
   });
+});
+
+// ── One read path ────────────────────────────────────────────────────────────
+
+describe("one read path: every kind comes from the catalog package", () => {
+  it("validate and diff never ask the lib for the CP repo's capabilities, even when it still offers them", async () => {
+    const cpRoot = mkdtempSync(join(tmpdir(), "synap-cp-"));
+    for (const verb of ["validate", "diff"]) {
+      const m = mockLib();
+      let cpAsked = false;
+      const lib = {
+        ...m.lib,
+        DEFAULT_SIBLING_REPOS: { cp: cpRoot },
+        cpCapabilitySource: async () => {
+          cpAsked = true;
+          return { root: cpRoot };
+        },
+        mergeCatalogs: () => {
+          cpAsked = true;
+          return { entries: [], corpus: [], problems: [] };
+        },
+      };
+      expect((await run(verb, [], { kind: "capability" }, { lib })).code).toBe(0);
+      expect(cpAsked).toBe(false);
+      expect(m.calls.filter((c) => c.fn === "loadCatalog")).toEqual([{ fn: "loadCatalog", args: { kinds: ["capability"], slugs: undefined, hasRoot: true } }]);
+    }
+  });
+});
+
+// ── Official preflight (checkPublisher) ────────────────────────────────────
+
+describe("official preflight before the preview", () => {
+  const NOT_OFFICIAL = {
+    official: false,
+    reason: "not-official-publisher",
+    message: 'This account is not the official Synap publisher (its vendor is "acme").',
+    vendor: { slug: "acme" },
+  };
+  function withPreflight(answer: unknown) {
+    const m = mockLib();
+    const lib = {
+      ...m.lib,
+      checkPublisher: async (opts: { cpUrl: string; token?: string }) => {
+        m.calls.push({ fn: "checkPublisher", args: { cpUrl: opts.cpUrl, token: opts.token } });
+        if (answer instanceof Error) throw answer;
+        return answer;
+      },
+    };
+    return { lib, calls: m.calls };
+  }
+
+  it("publish: a non-official account is refused BEFORE the diff, the question and any write", async () => {
+    const { lib, calls } = withPreflight(NOT_OFFICIAL);
+    let asked = false;
+    const r = await run("publish", [], { official: true, json: true }, { lib, isInteractive: true, confirm: async () => (asked = true) });
+    expect(r.code).toBe(1);
+    expect(JSON.parse(r.text)).toMatchObject({ ok: false, error: "not-official-publisher", hint: CATALOG_ERROR_HINTS["not-official-publisher"] });
+    expect(calls.map((c) => c.fn)).toEqual(["loadCatalog", "validateCatalog", "checkPublisher"]);
+    expect(asked).toBe(false);
+  });
+
+  it("publish --dry-run is refused the same way (no preview of a publish that cannot happen)", async () => {
+    const { lib, calls } = withPreflight(NOT_OFFICIAL);
+    expect((await run("publish", [], { official: true, dryRun: true }, { lib })).code).toBe(1);
+    expect(calls.some((c) => c.fn === "diffCatalog")).toBe(false);
+  });
+
+  it("diff: warns that publishing would be refused, and still shows the diff", async () => {
+    const { lib, calls } = withPreflight(NOT_OFFICIAL);
+    const human = await run("diff", [], {}, { lib });
+    expect(human.code).toBe(0);
+    expect(human.text).toContain(CATALOG_ERROR_HINTS["not-official-publisher"]);
+    expect(calls.map((c) => c.fn)).toEqual(["loadCatalog", "validateCatalog", "checkPublisher", "diffCatalog"]);
+    const json = await run("diff", [], { json: true }, { lib: withPreflight(NOT_OFFICIAL).lib });
+    expect(JSON.parse(json.text)).toMatchObject({ ok: true, publishable: false, publishRefusal: { code: "not-official-publisher" } });
+  });
+
+  it("an official account goes on to the diff and publish, the session token handed to the preflight", async () => {
+    const { lib, calls } = withPreflight({ official: true, vendor: { id: "v", slug: "synap-official" } });
+    expect((await run("publish", [], { official: true, yes: true }, { lib })).code).toBe(0);
+    expect(calls.find((c) => c.fn === "checkPublisher")?.args).toEqual({ cpUrl: "https://cp.test", token: "tok" });
+    expect(calls.at(-1)?.fn).toBe("publishCatalog");
+  });
+
+  it("a FAILED preflight read is a failure with its code, never a warning (diff included)", async () => {
+    const down = Object.assign(new Error("Could not reach the control plane"), { code: "cp-unreachable" });
+    const { lib, calls } = withPreflight(down);
+    const r = await run("diff", [], { json: true }, { lib });
+    expect(r.code).toBe(1);
+    expect(JSON.parse(r.text)).toMatchObject({ error: "cp-unreachable", hint: CATALOG_ERROR_HINTS["cp-unreachable"] });
+    expect(calls.some((c) => c.fn === "diffCatalog")).toBe(false);
+  });
+});
+
+// ── One error table ──────────────────────────────────────────────────────────
+
+const SRC = readFileSync(join(process.cwd(), "src/commands/catalog.ts"), "utf8");
+const LIB_DIR = join(process.cwd(), "../synap-app/packages/workspace-templates/scripts");
+const hasLib = existsSync(join(LIB_DIR, "catalog-lib.mjs"));
+
+describe("one error table: every code has exactly one next step", () => {
+  it("every code this command fails with is in CATALOG_ERROR_HINTS (derived from the source)", () => {
+    const own = [...SRC.matchAll(/fail\(\s*"([a-z-]+)"/g)].map((m) => m[1]!);
+    expect(own.length).toBeGreaterThanOrEqual(5); // non-vacuity: the scan still sees the fail() calls
+    expect(own).toContain("checkout-not-found"); // self-check on a literal sample
+    for (const code of own) expect(CATALOG_ERROR_HINTS, code).toHaveProperty(code);
+  });
+
+  it("no remedy is spelled twice: every hint is distinct, and none is hand-written into a fail() message", () => {
+    const hints = Object.values(CATALOG_ERROR_HINTS);
+    expect(new Set(hints).size).toBe(hints.length);
+    expect(SRC.match(/run: synap login/g)?.length).toBe(1); // only in the table
+    expect(SRC).not.toMatch(/Pull synap-app\./);
+  });
+
+  it.runIf(hasLib)("covers every code the checkout's lib can throw (its .d.mts union AND its literal throws)", () => {
+    const dts = readFileSync(join(LIB_DIR, "catalog-lib.d.mts"), "utf8");
+    const union = dts.match(/export type CatalogErrorCode =([^;]+);/)?.[1] ?? "";
+    const fromTypes = [...union.matchAll(/'([a-z-]+)'/g)].map((m) => m[1]!);
+    const mjs = readFileSync(join(LIB_DIR, "catalog-lib.mjs"), "utf8");
+    const fromThrows = [...mjs.matchAll(/OfficialPublishError\(\s*'([a-z-]+)'/g)].map((m) => m[1]!);
+    expect(fromTypes.length).toBeGreaterThanOrEqual(8);
+    expect(fromThrows).toContain("not-official-publisher");
+    for (const code of new Set([...fromTypes, ...fromThrows])) expect(CATALOG_ERROR_HINTS, code).toHaveProperty(code);
+  });
+});
+
+// ── The real lib, every kind (sibling checkout) ─────────────────────────────
+
+describe.runIf(hasLib)("catalog validate over EVERY kind, against the real checkout", () => {
+  it("is clean, and capabilities come from the catalog package (no CP read)", async () => {
+    const lines: string[] = [];
+    const code = await runCatalog("validate", [], { json: true, catalogDir: join(LIB_DIR, "..") }, { cwd: process.cwd(), out: (l) => lines.push(l) });
+    const body = JSON.parse(lines.join("\n"));
+    expect(body.problems.filter((p: { severity?: string }) => p.severity !== "warning")).toEqual([]);
+    expect(code).toBe(0);
+    expect(body.entries).toBeGreaterThanOrEqual(70);
+    const cap = await runCatalog("validate", [], { json: true, kind: "capability", catalogDir: join(LIB_DIR, "..") }, { cwd: process.cwd(), out: () => {} });
+    expect(cap).toBe(0);
+  }, 60_000);
 });
