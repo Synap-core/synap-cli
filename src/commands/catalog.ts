@@ -80,6 +80,8 @@ export interface CatalogDiffRow {
   status: "new" | "changed" | "unchanged";
   hashBefore?: string;
   hashAfter?: string;
+  /** Row columns the publish would change on the row it writes. */
+  columns?: Array<{ column: string; before: unknown; after: unknown }>;
   /** Optional lib-provided detail lines (e.g. a profile-removal warning). */
   warnings?: string[];
 }
@@ -348,12 +350,24 @@ const STATUS_LABEL: Record<CatalogDiffRow["status"], string> = {
   unchanged: "unchanged",
 };
 
-function formatDiff(rows: CatalogDiffRow[]): string {
+function shortValue(v: unknown): string {
+  const text = JSON.stringify(v) ?? "null";
+  return text.length > 70 ? `${text.slice(0, 69)}…` : text;
+}
+
+export function formatDiff(rows: CatalogDiffRow[]): string {
   const lines = rows.map((r) => {
     const hashes = r.status === "changed" ? `  ${r.hashBefore ?? "?"} → ${r.hashAfter ?? "?"}` : "";
     const head = `  ${STATUS_LABEL[r.status] ?? r.status} ${r.kind}/${r.slug}${hashes}`;
+    const detail: string[] = [];
+    if (r.status === "changed" && r.hashBefore && r.hashAfter && r.hashBefore !== r.hashAfter) {
+      detail.push("      ~ definition: new content version");
+    }
+    if (r.status === "changed" && Array.isArray(r.columns)) {
+      for (const c of r.columns) detail.push(`      ~ ${c.column}: ${shortValue(c.before)} → ${shortValue(c.after)}`);
+    }
     const warn = Array.isArray(r.warnings) ? r.warnings.map((w) => `      ! ${w}`) : [];
-    return [head, ...warn].join("\n");
+    return [head, ...detail, ...warn].join("\n");
   });
   const count = (s: CatalogDiffRow["status"]) => rows.filter((r) => r.status === s).length;
   lines.push(`\n  ${count("new")} new · ${count("changed")} changed · ${count("unchanged")} unchanged`);

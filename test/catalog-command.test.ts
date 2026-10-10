@@ -7,6 +7,7 @@ import {
   catalogLibShapeError,
   catalogUsageError,
   findCatalogDir,
+  formatDiff,
   runCatalog,
   type CatalogDeps,
   type CatalogOpts,
@@ -482,4 +483,30 @@ describe.runIf(hasLib)("catalog validate over EVERY kind, against the real check
     const cap = await runCatalog("validate", [], { json: true, kind: "capability", catalogDir: join(LIB_DIR, "..") }, { cwd: process.cwd(), out: () => {} });
     expect(cap).toBe(0);
   }, 60_000);
+});
+
+describe("the preview names what changes", () => {
+  it("prints each changed column and a content-version change, so a source-only flip reads as one", () => {
+    const text = formatDiff([
+      {
+        kind: "capability",
+        slug: "fireflies",
+        status: "changed",
+        hashBefore: "h-a",
+        hashAfter: "h-a",
+        columns: [{ column: "source", before: "file-seed", after: "api" }],
+      },
+      {
+        kind: "capability",
+        slug: "proton",
+        status: "changed",
+        hashBefore: "h-a",
+        hashAfter: "h-b",
+        columns: [],
+      },
+    ]);
+    expect(text).toContain('capability/fireflies  h-a → h-a\n      ~ source: "file-seed" → "api"');
+    expect(text).not.toMatch(/fireflies[^\n]*\n\s+~ definition/);
+    expect(text).toContain("capability/proton  h-a → h-b\n      ~ definition: new content version");
+  });
 });
