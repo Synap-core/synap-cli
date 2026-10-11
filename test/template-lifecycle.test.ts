@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import {
+  dataChangeRefusalMessage,
   parseDataChanges,
   decideConsent,
   dataChangesFromRefusal,
@@ -222,5 +223,26 @@ describe("fetchWorkspaceAttachmentsStrict carries lifecycle from the wire", () =
       warning: 'The "radar" template was retired. Folded.',
     });
     expect(rows[1]!.lifecycle).toBeUndefined();
+  });
+});
+
+describe("dataChangeRefusalMessage — the pod's other data-change refusals, in words", () => {
+  const err = (status: number, code: string, extra: Record<string, unknown> = {}) =>
+    new HubError({ message: "x", status, code, body: { code, ...extra }, rawBody: "", path: "/p", method: "POST" });
+
+  it("names the pod-admin rule for 403 DATA_CHANGES_NEED_POD_ADMIN", () => {
+    expect(dataChangeRefusalMessage(err(403, "DATA_CHANGES_NEED_POD_ADMIN"))).toMatch(/pod owner or admin/);
+  });
+
+  it("says the template was not applied for 409 DATA_CHANGES_FAILED, with the pod's reason", () => {
+    const msg = dataChangeRefusalMessage(err(409, "DATA_CHANGES_FAILED", { error: "op crm.x hit a lock." }));
+    expect(msg).toMatch(/template was not applied/);
+    expect(msg).toMatch(/op crm\.x hit a lock\./);
+  });
+
+  it("leaves every other error to the generic path (a consent refusal is not a failure)", () => {
+    expect(dataChangeRefusalMessage(err(409, "DATA_CHANGES_NEED_CONSENT"))).toBeNull();
+    expect(dataChangeRefusalMessage(err(403, "FORBIDDEN"))).toBeNull();
+    expect(dataChangeRefusalMessage(new Error("boom"))).toBeNull();
   });
 });

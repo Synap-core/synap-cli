@@ -71,6 +71,7 @@ import { HubNetworkError } from "../lib/hub-client.js";
 import {
   parseDataChanges,
   dataChangesFromRefusal,
+  dataChangeRefusalMessage,
   printDataChanges,
   parseAcceptList,
   decideConsent,
@@ -1712,9 +1713,11 @@ async function applyOnePackage(
       };
     }
     const timedOut = e instanceof HubNetworkError && e.code === "TIMEOUT";
+    const refusal = dataChangeRefusalMessage(e);
     if (!opts.json) {
       log.error(`${entry.name} update failed`);
-      renderHubError(e);
+      if (refusal) log.warn(refusal);
+      else renderHubError(e);
     }
     return {
       slug: entry.slug,

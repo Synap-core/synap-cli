@@ -88,6 +88,28 @@ export function dataChangesFromRefusal(err: unknown): DataChange[] | null {
   return parseDataChanges(body) ?? [];
 }
 
+/**
+ * The pod's two other data-change refusals, in plain words. `null` for any
+ * other error (the caller's generic failure path renders those).
+ * - 403 `DATA_CHANGES_NEED_POD_ADMIN`: you agreed, but a data change rewrites
+ *   its kind pod-wide, so only a pod owner or admin may run it.
+ * - 409 `DATA_CHANGES_FAILED`: a change failed mid-run; the template was NOT
+ *   applied. Changes that ran stay applied, so a re-run lists only the rest.
+ */
+export function dataChangeRefusalMessage(err: unknown): string | null {
+  if (!(err instanceof HubError)) return null;
+  const body = err.body as Record<string, unknown> | undefined;
+  const code = err.code ?? (typeof body?.code === "string" ? body.code : undefined);
+  if (err.status === 403 && code === "DATA_CHANGES_NEED_POD_ADMIN") {
+    return "Its data changes rewrite records across the whole pod, so only a pod owner or admin can run them. Nothing was written.";
+  }
+  if (err.status === 409 && code === "DATA_CHANGES_FAILED") {
+    const detail = typeof body?.error === "string" && body.error.trim() ? ` ${body.error.trim()}` : "";
+    return `A data change failed, so the template was not applied.${detail} The changes that ran stay done; run the update again to finish.`;
+  }
+  return null;
+}
+
 function countPhrase(n: number | null): string {
   if (n === null) return "count not reported";
   return `${n} ${n === 1 ? "record" : "records"}`;
