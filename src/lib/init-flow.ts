@@ -32,25 +32,26 @@ export function chooseInitFlow(input: {
   return input.localPodUrl ? "server" : "desktop";
 }
 
-export type KeyChoice = "signin" | "paste" | "provisioning";
+export type KeyChoice = "device" | "paste" | "provisioning";
 
 /**
- * How to get the first key for a pod, in order. Sign-in first (it mints the key
- * for any pod linked to the account); the rest are advanced. A synap.live pod
- * has no .env, so no PROVISIONING_TOKEN. Once sign-in has been tried and gave
- * no access, it is not offered again.
+ * How to get the first key for a pod, in order. Connecting this computer first
+ * (the pod's device flow: a code approved on any device, on self-hosted and
+ * managed pods alike); the rest are advanced. A synap.live pod has no .env, so
+ * no PROVISIONING_TOKEN. A pod that cannot run the device flow (too old) is not
+ * offered it again; after a denied or expired code it is offered as a retry.
  */
-export function keyChoices(input: { managed: boolean; signInTried: boolean }): Array<{
+export function keyChoices(input: { managed: boolean; deviceTried: boolean; deviceAvailable: boolean }): Array<{
   title: string;
   description: string;
   value: KeyChoice;
 }> {
   const choices: Array<{ title: string; description: string; value: KeyChoice }> = [];
-  if (!input.signInTried) {
+  if (input.deviceAvailable) {
     choices.push({
-      title: "Sign in to Synap (recommended)",
-      description: "Gives you a link and a code. Works from any device.",
-      value: "signin",
+      title: input.deviceTried ? "Connect this computer again (new code)" : "Connect this computer (recommended)",
+      description: "Gives you a link and a code. Approve it from any device.",
+      value: "device",
     });
   }
   choices.push({

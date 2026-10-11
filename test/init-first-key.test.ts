@@ -107,20 +107,28 @@ describe("chooseInitFlow: a server only when a pod runs here", () => {
   });
 });
 
-describe("keyChoices: sign-in first, advanced last", () => {
-  it("self-hosted pod: sign in, then paste, then PROVISIONING_TOKEN", () => {
-    const c = keyChoices({ managed: false, signInTried: false });
-    expect(c.map((x) => x.value)).toEqual(["signin", "paste", "provisioning"]);
+describe("keyChoices: connect this computer first, advanced last", () => {
+  const fresh = { deviceTried: false, deviceAvailable: true };
+
+  it("self-hosted pod: connect this computer, then paste, then PROVISIONING_TOKEN", () => {
+    const c = keyChoices({ managed: false, ...fresh });
+    expect(c.map((x) => x.value)).toEqual(["device", "paste", "provisioning"]);
     expect(c[0].title).toMatch(/recommended/);
     expect(c.slice(1).every((x) => /^Advanced/.test(x.title))).toBe(true);
   });
 
   it("synap.live pod: no PROVISIONING_TOKEN (it has no .env)", () => {
-    expect(keyChoices({ managed: true, signInTried: false }).map((x) => x.value)).toEqual(["signin", "paste"]);
+    expect(keyChoices({ managed: true, ...fresh }).map((x) => x.value)).toEqual(["device", "paste"]);
   });
 
-  it("after a sign-in that gave no access: only the advanced ways", () => {
-    expect(keyChoices({ managed: false, signInTried: true }).map((x) => x.value)).toEqual([
+  it("after a denied or expired code: offered again as a retry, first", () => {
+    const c = keyChoices({ managed: false, deviceTried: true, deviceAvailable: true });
+    expect(c.map((x) => x.value)).toEqual(["device", "paste", "provisioning"]);
+    expect(c[0].title).toMatch(/again/);
+  });
+
+  it("a pod too old for the device flow: only the advanced ways", () => {
+    expect(keyChoices({ managed: false, deviceTried: true, deviceAvailable: false }).map((x) => x.value)).toEqual([
       "paste",
       "provisioning",
     ]);
@@ -133,19 +141,19 @@ describe("synap init on a linux + docker workstation", () => {
     await init({ podUrl });
   }
 
-  it("a synap.live pod: signs in, then offers sign-in first; never asks for a PROVISIONING_TOKEN", async () => {
+  it("a synap.live pod: no account sign-in; connects this computer first; never asks for a PROVISIONING_TOKEN", async () => {
     await runInit(MANAGED);
-    expect(loginCalls).toEqual(["login"]);
+    expect(loginCalls).toEqual([]); // the pod's own device flow, not the CP session
     const select = asked.find((q) => q.type === "select");
     expect(select?.message).toBe("How do you want to connect to this pod?");
-    expect(select?.choices?.map((c) => c.value)).toEqual(["signin", "paste"]);
+    expect(select?.choices?.map((c) => c.value)).toEqual(["device", "paste"]);
     expect(asked.some((q) => /PROVISIONING_TOKEN/.test(q.message))).toBe(false);
   });
 
-  it("a self-hosted pod not on this machine: sign-in first, advanced last", async () => {
+  it("a self-hosted pod not on this machine: connect this computer first, advanced last", async () => {
     await runInit("https://pod.example.com");
-    expect(loginCalls).toEqual([]); // offered, not forced: it may not be on the account
+    expect(loginCalls).toEqual([]);
     expect(asked[0]?.message).toBe("How do you want to connect to this pod?");
-    expect(asked[0]?.choices?.map((c) => c.value)).toEqual(["signin", "paste", "provisioning"]);
+    expect(asked[0]?.choices?.map((c) => c.value)).toEqual(["device", "paste", "provisioning"]);
   });
 });

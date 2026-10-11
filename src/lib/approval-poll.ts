@@ -17,6 +17,23 @@ export interface PollForApprovalOptions<T> {
   url: string;
   /** Auth/other headers sent on every poll (e.g. Bearer pollSecret). */
   headers?: Record<string, string>;
+  /** HTTP method. Default GET. */
+  method?: "GET" | "POST";
+  /** JSON body sent on every poll (POST), e.g. an RFC 8628 `device_code`. */
+  body?: string;
+  /**
+   * Hand a 4xx JSON body to the predicates instead of treating it as a blip.
+   * RFC 8628 answers every not-yet-approved poll with a 400
+   * (`authorization_pending`, `slow_down`, `access_denied`, `expired_token`).
+   * 5xx and unparsable bodies stay transient. Default false.
+   */
+  readErrorBodies?: boolean;
+  /**
+   * The delay before the next poll, given the parsed response and the current
+   * delay — RFC 8628 §3.5 `slow_down` widens it for the rest of the wait.
+   * Default: unchanged.
+   */
+  nextIntervalMs?: (data: unknown, currentMs: number) => number;
   /** Delay between polls. Default 2000ms. */
   intervalMs?: number;
   /** Overall deadline. Default 120_000ms. */
@@ -53,7 +70,7 @@ export interface PollForApprovalOptions<T> {
 export async function pollForApproval<T>(
   opts: PollForApprovalOptions<T>,
 ): Promise<T> {
-  const intervalMs = opts.intervalMs ?? 2000;
+  let intervalMs = opts.intervalMs ?? 2000;
   const timeoutMs = opts.timeoutMs ?? 120_000;
   const requestTimeoutMs = opts.requestTimeoutMs ?? 30_000;
   const startedAt = Date.now();
@@ -67,14 +84,17 @@ export async function pollForApproval<T>(
     let res: Response;
     try {
       res = await fetch(opts.url, {
-        headers: opts.headers,
+        method: opts.method ?? "GET",
+        headers: opts.body ? { "Content-Type": "application/json", ...opts.headers } : opts.headers,
+        ...(opts.body ? { body: opts.body } : {}),
         signal: AbortSignal.timeout(requestTimeoutMs),
       });
     } catch {
       tick(null);
       continue; // network blip — retry
     }
-    if (!res.ok) {
+    const readable = res.ok || (opts.readErrorBodies === true && res.status >= 400 && res.status < 500);
+    if (!readable) {
       tick(null);
       continue; // transient (throttle/5xx) — retry
     }
@@ -85,6 +105,7 @@ export async function pollForApproval<T>(
       continue;
     }
     tick(data);
+    if (opts.nextIntervalMs) intervalMs = opts.nextIntervalMs(data, intervalMs);
 
     if (opts.isRejected(data)) {
       throw new Error(opts.rejectedError ?? "Request was rejected.");

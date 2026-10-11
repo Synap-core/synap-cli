@@ -86,6 +86,8 @@ describe("synap init, unattended", () => {
     const r = await runInit(["--pod-url", podUrl, "--agents", "codex", "--json"]);
     expect(r.code).toBe(5);
     expect(JSON.parse(r.stdout).error).toMatch(/--api-key/);
+    // Nobody can approve a code: the device flow is never started.
+    expect(hits).not.toContain("POST /api/hub/setup/device");
   }, 30_000);
 
   it("no agent connected: exit 6, the JSON says why, and the closing line points at connect instead of example prompts", async () => {

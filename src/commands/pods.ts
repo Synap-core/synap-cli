@@ -182,7 +182,7 @@ export async function podsAdd(name?: string, podUrlArg?: string): Promise<void> 
     name: "method",
     message: "Authentication:",
     choices: [
-      { title: "Open browser to approve (recommended)", value: "browser" },
+      { title: "Connect this computer (recommended)", description: "A link and a code to approve from any device", value: "device" },
       { title: "Paste existing API key", value: "paste" },
       { title: "Generate via PROVISIONING_TOKEN (self-hosted admin)", value: "provisioning" },
     ],
@@ -190,29 +190,20 @@ export async function podsAdd(name?: string, podUrlArg?: string): Promise<void> 
   if (!method) return;
 
   let apiKey: string | undefined;
-  let workspaceId: string | undefined;
   let agentUserId: string | undefined;
   const podUrl = url as string;
 
-  if (method === "browser") {
-    const browserSpinner = ora("Opening browser to approve...").start();
-    try {
-      const result = await runBrowserAuth({
-        podUrl,
-        integration: "cli",
-        onUrlReady: (authUrl) => {
-          browserSpinner.stop();
-          log.info(`Opening ${chalk.cyan(authUrl)}`);
-          log.dim("Sign in and click Generate & connect.");
-        },
-      });
-      apiKey = result.apiKey;
-      workspaceId = result.workspaceId;
-    } catch (err) {
-      browserSpinner.stop();
-      log.error(err instanceof Error ? err.message : "Browser flow failed");
-      return;
-    }
+  if (method === "device") {
+    // The pod's device flow: this computer's own key, saved under this profile,
+    // and each approved agent's key written into its config.
+    const { connectThisComputer } = await import("../lib/device-connect.js");
+    const saved = await connectThisComputer(podUrl, { name: profileName });
+    if (!saved) return;
+    if (label) addPodProfile(profileName, { ...saved, label: label as string });
+    log.blank();
+    log.success(`Pod '${profileName}' saved.`);
+    log.dim(`Run: synap pods use ${profileName}  — to make it active`);
+    return;
   } else if (method === "paste") {
     const { key } = await prompts({ type: "password", name: "key", message: "Hub Protocol API key:" });
     apiKey = key as string | undefined;
@@ -241,7 +232,7 @@ export async function podsAdd(name?: string, podUrlArg?: string): Promise<void> 
 
   addPodProfile(profileName, {
     podUrl,
-    workspaceId: workspaceId ?? "",
+    workspaceId: "",
     agentUserId: agentUserId ?? "",
     hubApiKey: apiKey,
     label: (label as string | undefined) || undefined,
@@ -574,45 +565,16 @@ export async function podsReconnect(name?: string): Promise<void> {
   }
   spinner.succeed("Pod is reachable");
 
-  let apiKey: string | undefined;
-  let workspaceId: string | undefined;
-
-  const browserSpinner = ora("Opening browser to approve new credentials...").start();
-  try {
-    const result = await runBrowserAuth({
-      podUrl,
-      integration: "cli",
-      onUrlReady: (authUrl) => {
-        browserSpinner.stop();
-        log.info(`Opening ${chalk.cyan(authUrl)}`);
-        log.dim("Sign in and click Generate & connect.");
-      },
-    });
-    apiKey = result.apiKey;
-    workspaceId = result.workspaceId;
-  } catch (err) {
-    browserSpinner.stop();
-    log.error(err instanceof Error ? err.message : "Browser flow failed");
+  // The pod's device flow. A reconnect from the same computer is offered the
+  // existing computer on the approval page (its agents, history and rules kept);
+  // the approved agents' configs are rewritten with their new keys.
+  const { connectThisComputer } = await import("../lib/device-connect.js");
+  const saved = await connectThisComputer(podUrl, { name: targetName });
+  if (!saved) {
+    log.error("Reconnect cancelled. The saved profile is unchanged.");
     return;
   }
-
-  if (!apiKey) {
-    log.error("No API key received. Reconnect cancelled.");
-    return;
-  }
-
-  // Update the saved profile in place — preserve everything except credentials
-  addPodProfile(targetName, {
-    ...profile.config,
-    hubApiKey: apiKey,
-    ...(workspaceId ? { workspaceId } : {}),
-    savedAt: new Date().toISOString(),
-  });
-
   log.success(`Pod '${targetName}' credentials refreshed.`);
-
-  // Propagate the new key to connected surfaces (same as podsUse)
-  await podsUse(targetName);
 }
 
 // ─── update (change URL in place) ─────────────────────────────────────────────

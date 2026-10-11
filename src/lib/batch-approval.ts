@@ -54,6 +54,16 @@ export function takePreApprovedKey(agentType: string): ReadyAgentKey | undefined
   return key;
 }
 
+/**
+ * Hand an installer a key that is already approved — the device flow returns
+ * one per agent the person approved with the computer (`device-connect.ts`).
+ * The installer's own `provisionAgentKey` call then takes it instead of minting,
+ * and `approveAgentKeysAtOnce` asks for nothing more for that agent.
+ */
+export function presetApprovedKey(agentType: string, key: ReadyAgentKey): void {
+  ready.set(agentType, key);
+}
+
 /** The ONE review page for several pending keys, on the same origin as a single key's review URL. */
 export function batchReviewUrl(reviewUrl: string, keyIds: readonly string[]): string {
   const origin = new URL(reviewUrl).origin;
@@ -120,6 +130,8 @@ export async function approveAgentKeysAtOnce(
   for (const target of targets) {
     const spec = TARGET_KEY_MINT[target];
     if (!spec) continue;
+    // Approved already (with the computer, in the device flow): nothing to ask.
+    if (ready.has(spec.agentType)) continue;
     try {
       const r = await provision(podUrl, humanApiKey, spec.agentType, {
         idempotent: spec.idempotent,

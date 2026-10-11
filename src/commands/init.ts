@@ -27,9 +27,6 @@ import {
 
 import {
   checkPodHealth,
-  setupAgentViaPod,
-  provisionUserOnPod,
-  PodExchangeError,
   installSynapSkill,
   saveLocalPodConfig,
   checkServerResources,
@@ -53,6 +50,14 @@ import { connectAgentsBatch } from "../lib/agent-door.js";
 import { INIT_EXIT, InitExit } from "../lib/init-exit.js";
 import { reserveStdoutForJson } from "../lib/init-output.js";
 import { chooseInitFlow, isManagedPod, keyChoices, type KeyChoice } from "../lib/init-flow.js";
+import {
+  computerKeyNeedsRenewal,
+  deviceConnect,
+  DeviceStartError,
+  saveDeviceGrant,
+  wireApprovedAgents,
+  type DeviceGrant,
+} from "../lib/device-connect.js";
 
 /** Where a phone without Relay gets it (synap-landing/app/download/relay). */
 const RELAY_DOWNLOAD_URL = "https://synap.live/download/relay";
@@ -180,9 +185,19 @@ async function runInit(opts: InitOptions): Promise<InitSummary | null> {
 async function desktopFlow(opts: InitOptions, agents?: DetectableAgent[]): Promise<InitSummary> {
   log.heading("Your pod");
   const pod = await resolveDesktopPod(opts);
-  const humanKey = await ensurePodKey(pod.podUrl, opts, pod.podId);
+  // The agents asked for WITH the computer: --agents, else the ones found here.
+  const wanted = agents ?? detectAgents().filter((r) => r.found).map((r) => r.target);
+  const { key: humanKey, grant } = await ensurePodKey(pod.podUrl, opts, pod.podId, wanted);
 
-  const outcome = await connectAgentsStep(pod.podUrl, humanKey, opts, agents);
+  // Connected just now: the person already chose the agents on the approval
+  // page, so connect exactly those (plus OpenClaw, which uses the computer's key).
+  const picked = grant
+    ? ([
+        ...grant.agents.map((a) => a.agentType).filter((t): t is DetectableAgent => (AGENT_CHOICES as readonly string[]).includes(t)),
+        ...(wanted.includes("openclaw") ? (["openclaw"] as const) : []),
+      ] as DetectableAgent[])
+    : agents;
+  const outcome = await connectAgentsStep(pod.podUrl, humanKey, opts, picked);
   const pairLink = await pairPhoneStep(pod.podUrl);
   printClosing(outcome.connectedLabels);
   return {
@@ -292,12 +307,22 @@ async function createPodStep(): Promise<{ podUrl: string }> {
 }
 
 /**
- * The person's own key for this pod — the one `/setup/agent` accepts to mint
- * each agent's key. Reuses a saved profile for this pod; otherwise mints one
- * (CP login when available, else a pasted key).
+ * This computer's key for this pod — the one `/setup/agent` accepts to mint an
+ * agent's key, and the CLI's own identity there. Reuses a saved profile for
+ * this pod while it works and is not about to expire; otherwise connects this
+ * computer through the pod's device flow (never without a person at the
+ * terminal: unattended runs pass --api-key).
+ *
+ * `grant` is set when the device flow ran now: its agents were approved with
+ * the computer, and their keys are already saved for their installers.
  */
-async function ensurePodKey(podUrl: string, opts: InitOptions, podId?: string): Promise<string> {
-  if (opts.apiKey) return opts.apiKey;
+async function ensurePodKey(
+  podUrl: string,
+  opts: InitOptions,
+  podId?: string,
+  agents: readonly DetectableAgent[] = []
+): Promise<{ key: string; grant: DeviceGrant | null }> {
+  if (opts.apiKey) return { key: opts.apiKey, grant: null };
 
   const norm = (u: string) => u.replace(/\/+$/, "");
   const saved = listPodProfiles().find((p) => norm(p.config.podUrl) === norm(podUrl));
@@ -306,12 +331,18 @@ async function ensurePodKey(podUrl: string, opts: InitOptions, podId?: string): 
       headers: { Authorization: `Bearer ${saved.config.hubApiKey}` },
       signal: AbortSignal.timeout(15_000),
     }).catch(() => null);
-    if (res?.ok) {
+    const renew = computerKeyNeedsRenewal(saved.config);
+    if (res?.ok && (!renew || opts.unattended)) {
+      if (renew) {
+        log.warn(`This computer's key for this pod expires ${saved.config.keyExpiresAt}. Renew it: ${chalk.cyan("synap login")}`);
+      }
       if (!saved.active) setActivePod(saved.name);
-      return saved.config.hubApiKey;
+      return { key: saved.config.hubApiKey, grant: null };
     }
-    if (res && (res.status === 401 || res.status === 403)) {
-      log.warn("Your saved key for this pod no longer works. Issuing a new one.");
+    if (res?.ok) {
+      log.info(`This computer's key for this pod expires ${saved.config.keyExpiresAt}. Renewing it.`);
+    } else if (res && (res.status === 401 || res.status === 403)) {
+      log.warn("Your saved key for this pod no longer works. Connecting this computer again.");
     } else {
       throw new InitExit(
         INIT_EXIT.noKey,
@@ -320,36 +351,28 @@ async function ensurePodKey(podUrl: string, opts: InitOptions, podId?: string): 
     }
   }
 
-  // A synap.live pod needs a CP login to mint the key; sign in now rather than
-  // falling through to the self-host PROVISIONING_TOKEN prompt. Without a
-  // terminal nobody is there to finish a browser sign-in.
-  const creds = getStoredToken();
-  const loggedIn = creds && new Date(creds.expiresAt) > new Date();
-  if (!loggedIn && isManagedPod(podUrl) && process.stdin.isTTY) {
-    log.info("Sign in to Synap to issue your key for this pod.");
-    const fresh = await login();
-    if (fresh) log.success(`Signed in as ${fresh.email}`);
-    else log.error("Sign-in timed out.");
-  }
-
-  const key = await connectStep(podUrl, opts, false, podId, "cli");
-  if (key) return key;
+  const { key, grant } = await connectStep(podUrl, opts, false, podId, "cli", agents);
+  if (key) return { key, grant };
   throw new InitExit(
     INIT_EXIT.noKey,
     opts.unattended
-      ? "Could not issue your key for this pod. Pass --api-key <key>."
+      ? "No key for this pod. Pass --api-key <key>: without a person at the terminal, nobody can approve this computer."
       : "No key for this pod, so no agent can connect yet."
   );
 }
 
-/** Save the pod as a named profile (host name) and make it active. Never overwrite another pod's profile. */
-function rememberPod(config: LocalPodConfig): void {
-  let name: string;
+/** A pod's profile name: its host name. Never another pod's profile. */
+function podProfileName(podUrl: string): string {
   try {
-    name = new URL(config.podUrl).hostname;
+    return new URL(podUrl).hostname;
   } catch {
-    name = "default";
+    return "default";
   }
+}
+
+/** Save the pod as a named profile (host name) and make it active. */
+function rememberPod(config: LocalPodConfig): void {
+  const name = podProfileName(config.podUrl);
   addPodProfile(name, config);
   setActivePod(name);
 }
@@ -478,7 +501,7 @@ async function pathA(
   if (!podUrl) return;
 
   // ── Connect ─────────────────────────────────────────────────────────────
-  const apiKey = await connectStep(podUrl, opts, true);
+  const { key: apiKey } = await connectStep(podUrl, opts, true);
   if (!apiKey) return;
 
   // ── Skill ───────────────────────────────────────────────────────────────
@@ -521,7 +544,7 @@ async function pathBExisting(opts: InitOptions, detectedUrl: string): Promise<vo
   spinner.succeed(`Pod healthy${health.version ? ` (v${health.version})` : ""}`);
 
   // Connect (generate Hub API key)
-  const apiKey = await connectStep(podUrl, opts, false);
+  const { key: apiKey } = await connectStep(podUrl, opts, false);
   if (!apiKey) return;
 
   // OpenClaw — always Docker on a server with an existing compose stack
@@ -731,126 +754,83 @@ async function connectStep(
   opts: InitOptions,
   openclawFound: boolean,
   podId?: string,
-  // "cli" = the person's own key for this pod (desktop init: it mints each
+  // "cli" = this computer's own key for this pod (desktop init: it mints each
   // agent's key and is saved as a named profile). "openclaw" = the server paths.
-  integration: "cli" | "openclaw" = "openclaw"
-): Promise<string | null> {
+  integration: "cli" | "openclaw" = "openclaw",
+  /** Agents to ask the pod for along with this computer (desktop init). */
+  agents: readonly string[] = []
+): Promise<{ key: string | null; grant: DeviceGrant | null }> {
   // The desktop flow already opened with "Your pod".
   if (integration !== "cli") log.heading("Connect to Pod");
 
   let apiKey = opts.apiKey;
   let keySaved = false;
+  let grant: DeviceGrant | null = null;
 
-  // User is logged in to Synap: the pod trusts that session to issue a key.
-  // Returns whether a signed-in session was there to try with.
-  const autoMint = async (): Promise<boolean> => {
-    const creds = getStoredToken();
-    if (!creds || new Date(creds.expiresAt) <= new Date()) return false;
-    const spinner = ora(
-      integration === "cli" ? "Issuing your key for this pod..." : "Generating API key for OpenClaw agent..."
-    ).start();
+  // Nobody at the terminal to approve a code or paste a key.
+  if (!apiKey && opts.unattended) return { key: null, grant: null };
+
+  // The pod's device flow: a code the person approves on any device. This
+  // computer gets its own key; the agents asked for get theirs in the same step.
+  let deviceTried = false;
+  let deviceAvailable = true;
+  const connectComputer = async (): Promise<void> => {
+    deviceTried = true;
+    let outcome;
     try {
-      // Provision the user on the pod (creates Kratos identity + pod user
-      // account) AND capture the Kratos session the handshake mints. This is
-      // idempotent — safe to call on every init.
-      let sessionToken: string | null = null;
-      try {
-        ({ sessionToken } = await provisionUserOnPod(podUrl, creds.token));
-      } catch (err) {
-        // Non-fatal here — the missing-session guard below decides what to do.
-        // Only a 401/403 means "no access"; anything else is the pod failing.
-        mintFailure = err instanceof PodExchangeError && (err.status === 401 || err.status === 403) ? "no-access" : "pod-error";
-        log.warn(`Could not provision user on pod: ${err instanceof Error ? err.message : String(err)}`);
-      }
-
-      if (!sessionToken) {
-        throw new Error("Could not establish a pod session to issue an agent key.");
-      }
-
-      // Canonical key issuance: mint a scoped Hub Protocol key via the pod's
-      // apiKeys.connectIntegration tRPC procedure — the same path the pod-admin
-      // /connect page and the browser use (replaces the removed CP relay).
-      const result = await setupAgentViaPod(podUrl, sessionToken, integration);
-      apiKey = result.hubApiKey;
-      opts.apiKey = apiKey;
-      spinner.succeed(integration === "cli" ? "Key issued" : "API key generated");
-      const podConfig: LocalPodConfig = {
+      outcome = await deviceConnect(podUrl, { agents });
+    } catch (err) {
+      if (err instanceof DeviceStartError && err.status === 404) deviceAvailable = false;
+      log.error(err instanceof Error ? err.message : String(err));
+      return;
+    }
+    if (outcome.status !== "approved") {
+      log.error(outcome.message);
+      return;
+    }
+    grant = outcome.grant;
+    apiKey = grant.computer.apiKey;
+    opts.apiKey = apiKey;
+    if (integration === "cli") {
+      await saveDeviceGrant(podUrl, grant, { name: podProfileName(podUrl), podId });
+      setActivePod(podProfileName(podUrl));
+    } else {
+      saveLocalPodConfig({
         podUrl,
         podId: podId ?? undefined,
-        workspaceId: result.workspaceId,
-        agentUserId: result.agentUserId,
-        hubApiKey: result.hubApiKey,
+        workspaceId: "",
+        agentUserId: grant.computer.id,
+        hubApiKey: grant.computer.apiKey,
+        credential: "computer",
+        computerName: grant.computer.name,
+        ...(grant.computer.expiresAt ? { keyExpiresAt: grant.computer.expiresAt } : {}),
         savedAt: new Date().toISOString(),
-      };
-      if (integration === "cli") {
-        rememberPod(podConfig);
-      } else {
-        if (result.agentUserId) {
-          log.dim(`Agent user: ${result.agentUserId}`);
-        }
-        log.dim(`Workspace: ${result.workspaceId}`);
-        log.blank();
-        log.info("This key lets OpenClaw read/write your knowledge graph.");
-        log.info("It's scoped to Hub Protocol operations only.");
-
-        // Always save to ~/.synap/pod-config.json (works even without OpenClaw)
-        saveLocalPodConfig(podConfig);
-      }
-      keySaved = true;
-
+      });
       if (openclawFound) {
         const config = readOpenClawConfig() ?? {};
         setConfigValue(config, "synap.podUrl", podUrl);
-        setConfigValue(config, "synap.workspaceId", result.workspaceId);
-        setConfigValue(config, "synap.agentUserId", result.agentUserId);
+        setConfigValue(config, "synap.agentUserId", grant.computer.id);
         writeOpenClawConfig(config);
       }
-    } catch (err) {
-      mintFailure ??= "pod-error";
-      const msg = err instanceof Error ? err.message : String(err);
-      spinner.fail(
-        integration === "cli" ? `Couldn't issue your key for this pod: ${msg}` : `Auto-generation failed: ${msg}`
-      );
     }
-    return true;
+    keySaved = true;
+    log.success(`${grant.computer.name} connected`);
   };
 
-  let mintFailure: "no-access" | "pod-error" | undefined;
-  let signInTried = false;
-  if (!apiKey) signInTried = await autoMint();
+  if (!apiKey) await connectComputer();
 
-  // Nobody at the terminal to paste a key or sign in again.
-  if (!apiKey && integration === "cli" && opts.unattended) return null;
-
-  // No key yet: sign-in first (any pod linked to the person's Synap account),
-  // the advanced ways after it.
+  // No key yet: connecting this computer again first, the advanced ways after.
   const managed = isManagedPod(podUrl);
   while (!apiKey) {
-    if (signInTried) {
-      log.warn(
-        mintFailure === "pod-error"
-          ? "Signed in, but the pod failed to issue a key (see the error above). This is a pod problem, not your access."
-          : managed
-            ? "Signed in, but your Synap account has no access to this pod."
-            : "Signed in, but your Synap account has no access to this pod. It may be self-hosted and not linked to your account."
-      );
-    }
     const { keyChoice } = (await prompts({
       type: "select",
       name: "keyChoice",
       message: "How do you want to connect to this pod?",
-      choices: keyChoices({ managed, signInTried }),
+      choices: keyChoices({ managed, deviceTried, deviceAvailable }),
     })) as { keyChoice?: KeyChoice };
 
-    if (keyChoice === "signin") {
-      // No spinner: login() prints the link + code, a spinner would draw over them.
-      const fresh = await login();
-      if (fresh) {
-        log.success(`Signed in as ${fresh.email}`);
-        signInTried = await autoMint();
-      } else {
-        log.error("Sign-in timed out.");
-      }
+    if (keyChoice === "device") {
+      await connectComputer();
     } else if (keyChoice === "paste") {
       apiKey = await pasteKey(podUrl, podId, integration);
       break;
@@ -903,7 +883,7 @@ async function connectStep(
           }
         } catch (err) {
           spinner.fail(err instanceof Error ? err.message : String(err));
-          return null;
+          return { key: null, grant: null };
         }
       }
       break;
@@ -917,7 +897,7 @@ async function connectStep(
     log.success(`API key …${apiKey.slice(-4)} saved to your Synap config (~/.synap).`);
   }
 
-  return apiKey ?? null;
+  return { key: apiKey ?? null, grant };
 }
 
 /** Ask for a key the person copies from their pod; the desktop flow saves it as this pod's profile. */
@@ -1210,7 +1190,10 @@ export async function signInAndSavePod(): Promise<string | null> {
   try {
     const pod = await loginAndSelectPod();
     if (!pod) return null;
-    await ensurePodKey(pod.url, {}, pod.podId || undefined);
+    const wanted = detectAgents().filter((r) => r.found).map((r) => r.target);
+    const { key, grant } = await ensurePodKey(pod.url, {}, pod.podId || undefined, wanted);
+    // Approved with the computer: write each agent's own key into its config.
+    if (grant) await wireApprovedAgents(pod.url, key, grant);
     return pod.url;
   } catch (err) {
     if (!(err instanceof InitExit)) throw err;

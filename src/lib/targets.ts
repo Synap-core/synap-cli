@@ -801,17 +801,24 @@ export async function writeClaudeCodeEnv(
   const me = await meRes.json() as { id?: string; scopes?: string[] };
   if (!me.id) throw new Error("/api/hub/users/me returned no user ID — is the pod running?");
 
-  const agentSetupRes = await fetch(`${podBase}/api/hub/setup/agent`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${cfg.apiKey}` },
-    body: JSON.stringify({ agentType: "claude-code", idempotent: true }),
-    signal: AbortSignal.timeout(30000),
-  });
-  if (!agentSetupRes.ok) {
-    const text = await agentSetupRes.text().catch(() => agentSetupRes.statusText);
-    throw new Error(credentialError("claude-code", agentSetupRes.status, text));
+  // Approved already — with this computer, in the device flow — so mint nothing.
+  const preApproved = takePreApprovedKey("claude-code");
+  let agentSetup: { hubApiKey?: string; agentUserId?: string; alreadyValid?: boolean };
+  if (preApproved) {
+    agentSetup = { hubApiKey: preApproved.hubApiKey, agentUserId: preApproved.agentUserId };
+  } else {
+    const agentSetupRes = await fetch(`${podBase}/api/hub/setup/agent`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${cfg.apiKey}` },
+      body: JSON.stringify({ agentType: "claude-code", idempotent: true }),
+      signal: AbortSignal.timeout(30000),
+    });
+    if (!agentSetupRes.ok) {
+      const text = await agentSetupRes.text().catch(() => agentSetupRes.statusText);
+      throw new Error(credentialError("claude-code", agentSetupRes.status, text));
+    }
+    agentSetup = await agentSetupRes.json() as { hubApiKey?: string; agentUserId?: string; alreadyValid?: boolean };
   }
-  const agentSetup = await agentSetupRes.json() as { hubApiKey?: string; agentUserId?: string; alreadyValid?: boolean };
   if (agentSetup.alreadyValid) {
     // Idempotent path — pod says the agent key is still valid but doesn't re-transmit it.
     // Resolution priority: stored agentKey config > settings.json env var.

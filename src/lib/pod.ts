@@ -22,6 +22,16 @@ export interface LocalPodConfig {
   hubApiKey: string;
   label?: string;
   savedAt: string;
+  /**
+   * "computer" = `hubApiKey` is THIS machine's own key on the pod, from the
+   * device flow (`device-connect.ts`); `agentUserId` is then the computer's id.
+   * Absent = a pasted key or an older operator key.
+   */
+  credential?: "computer";
+  /** When `hubApiKey` stops working (ISO), if the pod said. `synap login`/`init` renew it 7 days before. */
+  keyExpiresAt?: string;
+  /** The computer's name on the pod ("devbox"). */
+  computerName?: string;
 }
 
 /** SSOT for every connect/surface agent identity. The type is derived from this
