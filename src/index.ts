@@ -459,8 +459,23 @@ program
     }
     console.log();
 
+    // A computer key (device flow) that expires within 7 days, or has: connect
+    // this computer again now — the pod offers the same computer, so its
+    // agents, history and rules are kept. Never without a person to approve.
+    const { computerKeyNeedsRenewal, connectThisComputer } = await import("./lib/device-connect.js");
+    const renewed = new Set<string>();
+    for (const p of checks.filter((c) => c.healthy && computerKeyNeedsRenewal(c.config))) {
+      const when = `this computer's key ${p.keyValid ? "expires" : "expired"} ${p.config.keyExpiresAt}`;
+      if (!process.stdin.isTTY) {
+        console.log(chalk.yellow(`  ${p.name}: ${when}. Run synap login in a terminal to renew it.`));
+        continue;
+      }
+      console.log(chalk.yellow(`  ${p.name}: ${when}. Renewing it.`));
+      if (await connectThisComputer(p.config.podUrl, { name: p.name })) renewed.add(p.name);
+    }
+
     // Anything that won't authenticate — unreachable OR a revoked/expired key.
-    const needsReconnect = checks.filter((p) => !p.healthy || !p.keyValid);
+    const needsReconnect = checks.filter((p) => !renewed.has(p.name) && (!p.healthy || !p.keyValid));
     if (needsReconnect.length > 0) {
       console.log(chalk.yellow(`  ${needsReconnect.length} pod(s) need re-authentication. Refresh credentials:`));
       for (const p of needsReconnect) {
