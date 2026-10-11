@@ -107,6 +107,33 @@ export async function fetchPublicBrowseRows(
   return data.packages ?? [];
 }
 
+/**
+ * The workspace-template slugs the CP marks RETIRED (template lifecycle). The
+ * default browse route hides tombstones, so a stale bundled copy of a retired
+ * template (the npm `@synap-core/workspace-templates` this CLI ships) would
+ * otherwise survive the merge and be offered or suggested. Asks once with
+ * `includeRetired=true`.
+ * - An older CP refuses the param (400): it cannot retire anything → empty set.
+ * - Any other failure → `null` (unknown): the caller keeps today's behaviour
+ *   rather than guessing which templates are retired.
+ */
+export async function fetchRetiredWorkspaceSlugs(): Promise<Set<string> | null> {
+  try {
+    const qs = new URLSearchParams({ category: "workspace", includeRetired: "true", limit: "100" });
+    const res = await fetch(`${packagesBase()}?${qs}`, {
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    });
+    if (res.status === 400) return new Set();
+    if (!res.ok) return null;
+    const data = (await res.json()) as { packages?: Array<{ slug?: string; retired?: unknown }> };
+    const out = new Set<string>();
+    for (const r of data.packages ?? []) if (r.slug && r.retired) out.add(r.slug);
+    return out;
+  } catch {
+    return null;
+  }
+}
+
 /** GET /api/packages — public workspace templates as `RemoteEntry`. No auth. */
 export async function fetchPublicPackages(
   filters?: PackageFilters,

@@ -55,6 +55,7 @@ import {
   fetchPublicBrowseRows,
   fetchMyRows,
   fetchAvailableSlugs,
+  fetchRetiredWorkspaceSlugs,
   fetchPackageDefinition,
   fetchPackageRecord,
   hydrateMineCategories,
@@ -111,6 +112,15 @@ export interface MarketCatalog {
   remoteVersionBySlug: Map<string, string>;
 }
 
+/** Drop workspace entries whose slug the CP retired. `null` (unknown) keeps every entry. */
+export function dropRetiredWorkspaces(
+  entries: CatalogEntry[],
+  retiredSlugs: Set<string> | null,
+): CatalogEntry[] {
+  if (!retiredSlugs || retiredSlugs.size === 0) return entries;
+  return entries.filter((e) => !(typeOf(e) === "workspace" && retiredSlugs.has(e.slug)));
+}
+
 /**
  * Assemble the market catalog: bundled workspace templates ∪ public CP browse
  * (all types) ∪ the caller's own packages (when logged in), through the shared
@@ -123,7 +133,7 @@ export async function buildMarketCatalog(filters?: PackageFilters): Promise<Mark
   const loggedIn = !!creds && !isTokenLocallyExpired(creds);
 
   let reachedCp = true;
-  const [publicRows, rawMineRows, availableSlugs, installed] = await Promise.all([
+  const [publicRows, rawMineRows, availableSlugs, installed, retiredSlugs] = await Promise.all([
     fetchPublicBrowseRows(filters).catch(() => {
       reachedCp = false;
       return [] as CpBrowseRow[];
@@ -135,6 +145,7 @@ export async function buildMarketCatalog(filters?: PackageFilters): Promise<Mark
       ? fetchAvailableSlugs(creds.token, filters).catch(() => null)
       : Promise.resolve(null),
     fetchInstalledSlugs(),
+    fetchRetiredWorkspaceSlugs(),
   ]);
 
   // The `/mine` LIST PROJECTION omits `category` (CP `routes/packages.ts`), so
@@ -196,7 +207,9 @@ export async function buildMarketCatalog(filters?: PackageFilters): Promise<Mark
   for (const r of mineRows) if (r.version) remoteVersionBySlug.set(r.slug, r.version);
 
   return {
-    entries: merged.entries,
+    // A template the CP retired is never offered, listed as installable or
+    // suggested — even when the bundled copy this CLI ships still carries it.
+    entries: dropRetiredWorkspaces(merged.entries, retiredSlugs),
     tierBySlug,
     lockedSlugs,
     installed,
