@@ -200,7 +200,7 @@ export async function startTrack(
       printProposed(r, "Starting this track");
     } else {
       const t = r.track as TrackRow;
-      if (r.status === "exists") log.info(`This method already runs on the project: ${t.name}`);
+      if (r.status === "exists") log.info(`A live track of this method already has this name: ${t.name} (pass --name to run it again)`);
       else log.success(`Track started: ${chalk.bold(t.name)}`);
       console.log(`  ID: ${chalk.bold(t.id)}`);
     }
