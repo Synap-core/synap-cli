@@ -29,6 +29,7 @@ import {
   checkPodHealth,
   setupAgentViaPod,
   provisionUserOnPod,
+  PodExchangeError,
   installSynapSkill,
   saveLocalPodConfig,
   checkServerResources,
@@ -757,6 +758,8 @@ async function connectStep(
         ({ sessionToken } = await provisionUserOnPod(podUrl, creds.token));
       } catch (err) {
         // Non-fatal here — the missing-session guard below decides what to do.
+        // Only a 401/403 means "no access"; anything else is the pod failing.
+        mintFailure = err instanceof PodExchangeError && (err.status === 401 || err.status === 403) ? "no-access" : "pod-error";
         log.warn(`Could not provision user on pod: ${err instanceof Error ? err.message : String(err)}`);
       }
 
@@ -803,6 +806,7 @@ async function connectStep(
         writeOpenClawConfig(config);
       }
     } catch (err) {
+      mintFailure ??= "pod-error";
       const msg = err instanceof Error ? err.message : String(err);
       spinner.fail(
         integration === "cli" ? `Couldn't issue your key for this pod: ${msg}` : `Auto-generation failed: ${msg}`
@@ -811,6 +815,7 @@ async function connectStep(
     return true;
   };
 
+  let mintFailure: "no-access" | "pod-error" | undefined;
   let signInTried = false;
   if (!apiKey) signInTried = await autoMint();
 
@@ -823,9 +828,11 @@ async function connectStep(
   while (!apiKey) {
     if (signInTried) {
       log.warn(
-        managed
-          ? "Signed in, but no key came back for this pod. Your account may not have access to it."
-          : "Signed in, but your Synap account has no access to this pod. It may be self-hosted and not linked to your account."
+        mintFailure === "pod-error"
+          ? "Signed in, but the pod failed to issue a key (see the error above). This is a pod problem, not your access."
+          : managed
+            ? "Signed in, but your Synap account has no access to this pod."
+            : "Signed in, but your Synap account has no access to this pod. It may be self-hosted and not linked to your account."
       );
     }
     const { keyChoice } = (await prompts({

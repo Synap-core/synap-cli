@@ -614,6 +614,19 @@ export function startSelfHostedPod(): void {
  * `apiKeys.connectIntegration`) as the pod user, via the X-Session-Token header.
  * `sessionToken` is null only if the pod handshake returned no token (e.g. 409).
  */
+/**
+ * The pod refused or failed the CP→pod sign-in exchange. `status` lets a caller
+ * tell "this account has no access" (401/403) from "the pod is broken" (5xx) —
+ * the two need different words, and folding them is how a pod outage once read
+ * as "your account may not have access".
+ */
+export class PodExchangeError extends Error {
+  constructor(readonly status: number, message: string) {
+    super(message);
+    this.name = "PodExchangeError";
+  }
+}
+
 export async function provisionUserOnPod(
   podUrl: string,
   cpToken: string
@@ -652,7 +665,8 @@ export async function provisionUserOnPod(
 
   if (!exchangeRes.ok) {
     const body = await exchangeRes.text().catch(() => "");
-    throw new Error(
+    throw new PodExchangeError(
+      exchangeRes.status,
       `Pod issuer assertion exchange failed (HTTP ${exchangeRes.status}): ${body.slice(0, 200)}`,
     );
   }
