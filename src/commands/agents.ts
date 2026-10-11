@@ -32,6 +32,7 @@ import {
   planAgentAdd,
   resolveAgentPod,
 } from "../lib/agent-door.js";
+import { provisionAgentKey } from "../lib/targets.js";
 
 function maskKey(key: string): string {
   if (key.length <= 12) return key.slice(0, 4) + "...";
@@ -539,23 +540,26 @@ export async function agentsRotateKey(nameOrId: string): Promise<void> {
     }
 
     if (!activeKeyId) {
-      spinner.warn("Could not find an active key record — will create a fresh key instead.");
-
-      // Create a new key directly
-      const newKeyResult = await trpcMutation<{ id: string; key: string; keyPrefix: string }>(
+      // Re-mint through the agent door: the key belongs to the AGENT and
+      // carries its own access, never a key of yours relabelled as the agent's.
+      const agentType = profile.agentUserId
+        ? unwrapList<PodAgentRow>(await hubGet("/agent-users?mine=1", {}, cfg)).find(
+            (row) => row.id === profile.agentUserId
+          )?.agentType
+        : undefined;
+      if (!agentType) {
+        spinner.fail("Could not find this agent on the pod.");
+        log.dim(`Add it again: synap agents add --name "${profile.label ?? name}"`);
+        return;
+      }
+      spinner.warn("Could not find an active key record — minting a fresh agent key instead.");
+      const { hubApiKey } = await provisionAgentKey(
         podProfile.config.podUrl,
         cfg.apiKey,
-        "apiKeys.create",
-        {
-          keyName: `${profile.label ?? name} — CLI (rotated ${new Date().toISOString().slice(0, 10)})`,
-          scope: ["hub-protocol.read", "hub-protocol.write"],
-          workspaceId: profile.workspaceId,
-        }
+        agentType
       );
-
-      spinner.succeed("New key minted.");
-      displayNewKey(newKeyResult.key);
-      updateLocalKey(name, profile, newKeyResult.key);
+      displayNewKey(hubApiKey);
+      updateLocalKey(name, profile, hubApiKey);
       return;
     }
 
