@@ -18,10 +18,7 @@ import {
   setActivePod,
   addPodProfile,
   listPodProfiles,
-  provisionUserOnPod,
-  setupAgentViaPod,
 } from "../lib/pod.js";
-import { getStoredToken } from "../lib/auth.js";
 import {
   resolveProjectRef,
   sessionScopeRefusal,
@@ -257,7 +254,8 @@ async function useProjectOnActivePod(
 /**
  * Directory-resolved path: the project may live on ANOTHER pod. Switch
  * activePod AND the project together; auto-provision the pod locally when it
- * isn't in ~/.synap yet (existing doors: provisionUserOnPod + setupAgentViaPod).
+ * isn't in ~/.synap yet — through the pod's device flow (`connectThisComputer`),
+ * the same door `synap init`, `synap login` and `synap pods add` use.
  */
 async function useCrossPodProject(
   ref: string,
@@ -296,40 +294,21 @@ async function useCrossPodProject(
     }
   })();
 
-  // ── Pod not saved locally → auto-provision via the existing doors.
+  // ── Pod not saved locally → connect this computer to it (device flow).
   if (!target) {
-    const creds = getStoredToken();
-    if (!creds?.token) {
-      // resolveProjectRef required a login, so this only happens if the creds
-      // file vanished mid-command — same remedy either way.
-      log.error("Not logged in — run: synap login");
-      process.exit(1);
-    }
-    log.dim(`Pod ${podHost} isn't configured locally — provisioning access…`);
-    try {
-      const { sessionToken } = await provisionUserOnPod(project.podUrl, creds.token);
-      if (!sessionToken) {
-        throw new Error("the pod returned no session from the federation handshake");
-      }
-      const agent = await setupAgentViaPod(project.podUrl, sessionToken, "cli");
-      const name = refPod && !profiles.some((p) => p.name === refPod) ? refPod : podHost;
-      const config = {
-        podUrl: project.podUrl,
-        podId: project.podId,
-        workspaceId: agent.workspaceId,
-        agentUserId: agent.agentUserId,
-        hubApiKey: agent.hubApiKey,
-        label: `added by synap project use ${ref}`,
-        savedAt: new Date().toISOString(),
-      };
-      addPodProfile(name, config);
-      target = { name, config, active: false };
-      log.success(`Pod saved: ${chalk.bold(name)} ${chalk.dim(`(${podHost})`)}`);
-    } catch (e) {
-      log.error(`Could not provision access on ${project.podUrl}: ${(e as Error).message}`);
+    log.dim(`Pod ${podHost} isn't configured locally — connecting this computer to it…`);
+    const name = refPod && !profiles.some((p) => p.name === refPod) ? refPod : podHost;
+    const { connectThisComputer } = await import("../lib/device-connect.js");
+    const saved = await connectThisComputer(project.podUrl, { name, podId: project.podId });
+    if (!saved) {
+      // connectThisComputer already printed why (denied, expired, unsupported).
       log.hint("Add the pod manually with: synap pods add — then re-run this command.");
       process.exit(1);
     }
+    const config = { ...saved, label: `added by synap project use ${ref}` };
+    addPodProfile(name, config);
+    target = { name, config, active: false };
+    log.success(`Pod saved: ${chalk.bold(name)} ${chalk.dim(`(${podHost})`)}`);
   }
 
   // ── Switch pod + project TOGETHER, and store the binding for drift warnings.

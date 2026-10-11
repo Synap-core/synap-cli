@@ -1,7 +1,8 @@
 /**
  * `synap init` gets this computer's key for a pod through the pod's device
  * flow (MACHINE-IDENTITY-PLAN W4) — on a synap.live pod too, where it used to
- * go CP sign-in → provisionUserOnPod → connectIntegration. And a saved
+ * go CP sign-in → the retired /api/federation/exchange (W6 deleted that door
+ * and `provisionUserOnPod`) → connectIntegration. And a saved
  * computer key is renewed through the same door 7 days before it expires.
  * Driven through the real `init()`, with the pod stubbed at `fetch`.
  */
@@ -36,11 +37,9 @@ vi.mock("../src/lib/auth.js", async (orig) => ({
 vi.mock("../src/lib/agent-detect.js", () => ({
   detectAgents: () => [{ target: "claude-code", label: "Claude Code", found: false }],
 }));
-const provisionUserOnPod = vi.fn(async () => ({ sessionToken: "s" }));
-vi.mock("../src/lib/pod.js", async (orig) => ({
-  ...(await orig<typeof import("../src/lib/pod.js")>()),
-  provisionUserOnPod,
-}));
+/** Any request to the retired CP→pod handshake (assertion or exchange). */
+const retiredHandshake = () =>
+  hits.filter((h) => h.includes("/federation/exchange") || h.includes("/federation/assertion"));
 // Collapse the pod's 5 s interval: the stub answers at once anyway.
 vi.mock("../src/lib/approval-poll.js", async (orig) => {
   const real = await orig<typeof import("../src/lib/approval-poll.js")>();
@@ -98,7 +97,6 @@ beforeEach(() => {
   hits.length = 0;
   asked.length = 0;
   authStatus = 200;
-  provisionUserOnPod.mockClear();
   fs.rmSync(path.join(home, ".synap"), { recursive: true, force: true });
 });
 
@@ -123,14 +121,14 @@ async function saveProfile(keyExpiresAt: string) {
 const inDays = (d: number) => new Date(Date.now() + d * 86_400_000).toISOString();
 
 describe("synap init on a managed pod", () => {
-  it("connects this computer through the pod's device flow — not provisionUserOnPod — and saves its key", async () => {
+  it("connects this computer through the pod's device flow — not the retired exchange — and saves its key", async () => {
     tokenAnswer = { status: 200, body: GRANT };
     const { init } = await import("../src/commands/init.js");
     await init({ podUrl: MANAGED });
 
     expect(hits).toContain("POST /api/hub/setup/device");
     expect(hits).toContain("POST /api/hub/setup/device/token");
-    expect(provisionUserOnPod).not.toHaveBeenCalled();
+    expect(retiredHandshake()).toEqual([]);
     expect(await savedProfile()).toMatchObject({
       hubApiKey: "computer-key",
       credential: "computer",
@@ -145,7 +143,7 @@ describe("synap init on a managed pod", () => {
     await init({ podUrl: MANAGED });
     expect(hits).toContain("POST /api/hub/setup/device/token");
     expect(await savedProfile()).toBeUndefined();
-    expect(provisionUserOnPod).not.toHaveBeenCalled();
+    expect(retiredHandshake()).toEqual([]);
     const menu = asked.find((q) => q.message === "How do you want to connect to this pod?");
     expect(menu?.choices?.map((c) => c.value)).toEqual(["device", "paste"]);
     expect(menu?.choices?.[0]?.title).toMatch(/again/);

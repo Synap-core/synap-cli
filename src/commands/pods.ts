@@ -35,7 +35,6 @@ import {
   provisionAgentKey,
   configureAgentContext,
 } from "../lib/targets.js";
-import { runBrowserAuth } from "../lib/browser-auth.js";
 import { renderNextSteps, FLOW } from "../lib/next-steps.js";
 
 
@@ -666,10 +665,9 @@ export async function podsUpdate(
   spinner.succeed(`Pod healthy at ${newUrl}${health.version ? `  (v${health.version})` : ""}`);
 
   // 2) Does the EXISTING key still authenticate against the (possibly new) host?
-  let apiKey = profile.config.hubApiKey;
-  let workspaceId: string | undefined;
+  let config = profile.config;
   const keySpinner = ora("Verifying existing API key…").start();
-  const verdict = await verifyKeyAgainstPod(newUrl, apiKey);
+  const verdict = await verifyKeyAgainstPod(newUrl, config.hubApiKey);
 
   if (verdict === "valid") {
     keySpinner.succeed("Existing key still valid — no recreate needed.");
@@ -687,42 +685,30 @@ export async function podsUpdate(
     const { recreate } = await prompts({
       type: "confirm",
       name: "recreate",
-      message: "Recreate the key now via browser sign-in?",
+      message: "Connect this computer to the pod again now?",
       initial: true,
     });
     if (!recreate) {
       log.warn(`URL not updated (old profile kept). Re-run when ready, or: synap pods reconnect ${name}`);
       return;
     }
-    const browserSpinner = ora("Opening browser to approve new credentials…").start();
-    try {
-      const result = await runBrowserAuth({
-        podUrl: newUrl,
-        integration: "cli",
-        onUrlReady: (authUrl) => {
-          browserSpinner.stop();
-          log.info(`Opening ${chalk.cyan(authUrl)}`);
-          log.dim("Sign in and click Generate & connect.");
-        },
-      });
-      apiKey = result.apiKey;
-      workspaceId = result.workspaceId;
-      log.success("New key issued.");
-    } catch (err) {
-      browserSpinner.stop();
-      log.error(err instanceof Error ? err.message : "Browser flow failed");
+    // The pod's device flow — the same door as `synap pods reconnect`. It saves
+    // the computer's new key under this profile (at the new URL) itself.
+    const { connectThisComputer } = await import("../lib/device-connect.js");
+    const saved = await connectThisComputer(newUrl, { name });
+    if (!saved) {
       log.warn("URL not updated (old profile kept). Re-run when ready.");
       return;
     }
+    config = saved;
+    log.success("New key issued.");
   }
 
-  // 3) Persist in place — preserve everything except the URL (and key/workspace
-  //    if it was recreated).
+  // 3) Persist in place — preserve everything except the URL (and the
+  //    credential, when it was recreated).
   addPodProfile(name, {
-    ...profile.config,
+    ...config,
     podUrl: newUrl,
-    hubApiKey: apiKey,
-    ...(workspaceId ? { workspaceId } : {}),
     savedAt: new Date().toISOString(),
   });
   log.success(`Pod '${name}' updated → ${newUrl}`);
