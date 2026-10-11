@@ -68,6 +68,17 @@ import { isSuite } from "../lib/suite.js";
 import { capabilityAdd } from "./capability.js";
 import { bundledTemplatesVersion } from "../lib/bundle-version.js";
 import { HubNetworkError } from "../lib/hub-client.js";
+import {
+  parseDataChanges,
+  dataChangesFromRefusal,
+  printDataChanges,
+  parseAcceptList,
+  decideConsent,
+  consentRerunCommand,
+  lifecycleNotice,
+  type DataChange,
+  type LifecycleInfo,
+} from "../lib/template-lifecycle.js";
 
 // Same longer budget launch uses — an apply writes profiles/views/entities.
 const APPLY_TIMEOUT_MS = 120_000;
@@ -1599,7 +1610,13 @@ async function applyOnePackage(
   cat: MarketCatalog,
   cfg: HubConfig,
   opts: { json?: boolean },
-  applyTimeoutMs: number = APPLY_TIMEOUT_MS
+  applyTimeoutMs: number = APPLY_TIMEOUT_MS,
+  extra: {
+    /** Already-resolved payload (the preview resolved it) — saves a second CP fetch. */
+    payload?: InstallPayload | null;
+    /** opKeys the person agreed to. Sent only when non-empty; never more than were agreed. */
+    acceptDataChanges?: string[];
+  } = {}
 ): Promise<{
   slug: string;
   outcome: string;
@@ -1609,6 +1626,8 @@ async function applyOnePackage(
   error?: string;
   dependencies?: ResolvedDependencyLike[];
   seedSummary?: SeedSummary;
+  /** Set when the pod refused for lack of consent — the changes it still needs agreement on. */
+  pendingDataChanges?: DataChange[];
 }> {
   if (cat.lockedSlugs.has(entry.slug)) {
     const tier = cat.tierBySlug.get(entry.slug)?.requiredTier;
@@ -1619,7 +1638,8 @@ async function applyOnePackage(
 
   const cpToken = getStoredToken()?.token;
   // Same honest payload as `marketInstall` (see `resolveInstallPayload`).
-  const payload = await resolveInstallPayload(entry.slug, cat, cpToken);
+  const payload =
+    extra.payload !== undefined ? extra.payload : await resolveInstallPayload(entry.slug, cat, cpToken);
   if (!payload) {
     if (!opts.json) {
       log.error(`Couldn't fetch "${entry.name}"'s definition from the control plane.`);
@@ -1627,7 +1647,10 @@ async function applyOnePackage(
     }
     return { slug: entry.slug, outcome: "fetch-failed", status: "fetch-failed", warnings: [] };
   }
-  const pkg = payload.pkg;
+  const pkg =
+    extra.acceptDataChanges && extra.acceptDataChanges.length > 0
+      ? { ...payload.pkg, acceptDataChanges: extra.acceptDataChanges }
+      : payload.pkg;
 
   const s = opts.json ? null : ora(`Updating ${entry.name}…`).start();
   try {
@@ -1670,6 +1693,23 @@ async function applyOnePackage(
     };
   } catch (e) {
     s?.stop();
+    // The pod refused: data changes are owed that the person has not agreed to.
+    // Nothing was written. Show the list and the exact command that agrees.
+    const owed = dataChangesFromRefusal(e);
+    if (owed) {
+      if (!opts.json) {
+        log.warn(`${entry.name} was not updated: it carries data changes you have not agreed to. Nothing was written.`);
+        printDataChanges(entry.slug, owed);
+        if (owed.length > 0) log.hint(`To agree and update: ${consentRerunCommand(entry.slug, owed)}`);
+      }
+      return {
+        slug: entry.slug,
+        outcome: "needs-consent",
+        status: "needs-consent",
+        warnings: [],
+        pendingDataChanges: owed,
+      };
+    }
     const timedOut = e instanceof HubNetworkError && e.code === "TIMEOUT";
     if (!opts.json) {
       log.error(`${entry.name} update failed`);
@@ -1685,10 +1725,45 @@ async function applyOnePackage(
   }
 }
 
+/** What the pod's write-free preview says an update would do to existing data. */
+interface DataChangePreview {
+  /** The resolved install payload — reused by the apply so the CP is read once. `null` = not fetched. */
+  payload: InstallPayload | null;
+  /** `undefined` = the pod sent no `dataChanges` (an older pod): behave exactly as before. */
+  changes?: DataChange[];
+  /** The preview could not be read. Never folded into "no data changes". */
+  error?: string;
+}
+
+/**
+ * Ask the pod's write-free preview door (`POST /packages/preflight`, the same
+ * body `/packages/apply` takes) which data changes an update would run.
+ */
+async function previewDataChanges(
+  entry: CatalogEntry,
+  cat: MarketCatalog,
+  cfg: HubConfig
+): Promise<DataChangePreview> {
+  const payload = await resolveInstallPayload(entry.slug, cat, getStoredToken()?.token).catch(() => null);
+  if (!payload) return { payload: null, error: "its definition couldn't be fetched" };
+  try {
+    const res = await hubPost("/packages/preflight", payload.pkg, cfg);
+    return { payload, changes: parseDataChanges(res) };
+  } catch (e) {
+    const status = e instanceof HubError ? `HTTP ${e.status}` : e instanceof Error ? e.message : String(e);
+    return { payload, error: `the pod's preview failed: ${status}` };
+  }
+}
+
 export async function marketUpdate(
   slugsArg: string[] | undefined,
   opts: {
+    /** The literal `--yes` flag: apply every update AND agree to every data change listed. */
     yes?: boolean;
+    /** `update all`: apply every update — data changes still need agreement (asked, or flagged). */
+    all?: boolean;
+    /** `--accept-data-changes a,b`: agree to exactly these opKeys. */
+    acceptDataChanges?: string;
     dryRun?: boolean;
     json?: boolean;
     podUrl?: string;
@@ -1771,7 +1846,26 @@ export async function marketUpdate(
     checks = checks.filter((c) => validSlugs.includes(c.slug));
   }
 
-  const withUpdates = checks.filter((c) => c.updateAvailable);
+  // ── Template lifecycle (retired / unlisted / unknown) ──
+  // Read from the pod's template health (Hub `/workspaces`). A FAILED read is
+  // said out loud and never folded into "every template is current".
+  const lifecycleBySlug = new Map<string, LifecycleInfo>();
+  let lifecycleReadFailed = false;
+  try {
+    for (const a of await fetchWorkspaceAttachmentsStrict(await resolveHubConfig(opts))) {
+      if (a.packageSlug && a.lifecycle && !lifecycleBySlug.has(a.packageSlug))
+        lifecycleBySlug.set(a.packageSlug, a.lifecycle);
+    }
+  } catch {
+    lifecycleReadFailed = true;
+  }
+  const leaving = checks
+    .map((c) => ({ slug: c.slug, info: lifecycleBySlug.get(c.slug) }))
+    .filter((r): r is { slug: string; info: LifecycleInfo } => !!r.info && r.info.lifecycle !== "current");
+  const retiredSlugs = new Set(leaving.filter((r) => r.info.lifecycle === "retired").map((r) => r.slug));
+
+  // A retired template is never re-applied: its data moves to the replacement instead.
+  const withUpdates = checks.filter((c) => c.updateAvailable && !retiredSlugs.has(c.slug));
   const noVersionInfo = checks.filter((c) => c.noVersionInfo);
 
   // Private templates resolve only via the authed CP path — an update check
@@ -1783,10 +1877,56 @@ export async function marketUpdate(
   }
 
   // --dry-run is a NAMED alias for the "no --yes" preview path — forces the
-  // preview even when --yes or explicit slugs would otherwise trigger apply.
-  const shouldApply = !opts.dryRun && (explicitSlugs || opts.yes);
+  // preview even when --yes / `all` or explicit slugs would otherwise trigger apply.
+  const shouldApply = !opts.dryRun && (explicitSlugs || opts.yes || opts.all);
+
+  // ── Data changes each update would run (contract C) ──
+  // Asked of the pod's write-free preview door BEFORE anything is shown, so the
+  // person reads what will happen to their data before the template diff.
+  let cfg: HubConfig | undefined;
+  const previews = new Map<string, DataChangePreview>();
+  if (withUpdates.length > 0) {
+    try {
+      cfg = await resolveHubConfig(opts);
+    } catch (e) {
+      renderHubError(e);
+      process.exit(1);
+    }
+    for (const c of withUpdates) {
+      const entry = entryBySlug.get(c.slug);
+      if (entry) previews.set(c.slug, await previewDataChanges(entry, cat, cfg));
+    }
+  }
 
   if (!opts.json) {
+    const withChanges = withUpdates.filter((c) => (previews.get(c.slug)?.changes?.length ?? 0) > 0);
+    if (withChanges.length > 0) {
+      log.heading("  Data changes");
+      log.blank();
+      for (const c of withChanges) printDataChanges(c.slug, previews.get(c.slug)!.changes!);
+      log.blank();
+    }
+    const unread = withUpdates.filter((c) => previews.get(c.slug)?.error);
+    for (const c of unread) {
+      log.warn(`Couldn't check ${c.slug} for data changes (${previews.get(c.slug)!.error}). The pod still refuses an update whose data changes you have not agreed to.`);
+    }
+
+    if (leaving.length > 0) {
+      log.heading("  Catalog status");
+      log.blank();
+      for (const r of leaving) {
+        const n = lifecycleNotice(r.slug, r.info)!;
+        const tone = r.info.lifecycle === "unknown" ? chalk.dim : chalk.yellow;
+        console.log("    " + tone(`⚠ ${n.label}`));
+        if (r.info.retiredReason) console.log("      " + chalk.dim(r.info.retiredReason));
+        if (n.action) console.log("      " + chalk.dim(`Move its data: ${n.action}`));
+      }
+      log.blank();
+    }
+    if (lifecycleReadFailed) {
+      log.dim("Couldn't read which templates are retired from the pod — retired templates are not flagged above.");
+    }
+
     log.heading("  Installed packages");
     log.blank();
     for (const c of checks) {
@@ -1795,11 +1935,14 @@ export async function marketUpdate(
       // branch (so a pod with no catalog version to compare against printed a
       // green "up to date" nothing had verified) and no hash-version branch (so
       // a content change read as "update available").
-      const label = installedStatusLabel(
-        c,
-        entryBySlug.get(c.slug)?.isPrivate ?? false,
-        cat.loggedIn
-      );
+      // A retired template is not "behind": its next step is the move, said above.
+      const label = retiredSlugs.has(c.slug)
+        ? chalk.yellow("retired") + chalk.dim(` · synap templates retire ${c.slug}`)
+        : installedStatusLabel(
+            c,
+            entryBySlug.get(c.slug)?.isPrivate ?? false,
+            cat.loggedIn
+          );
       console.log("    " + chalk.cyan(c.slug.padEnd(28)) + label);
     }
     log.blank();
@@ -1810,6 +1953,13 @@ export async function marketUpdate(
     }
     if (degradedNote) log.dim(degradedNote);
   }
+
+  // What the JSON carries for the new facts: per slug, the pod's data changes
+  // (`null` = this pod sent none: an older pod) and the template lifecycle.
+  const dataChangesJson = Object.fromEntries(
+    [...previews].map(([slug, pv]) => [slug, pv.error ? { error: pv.error } : pv.changes ?? null])
+  );
+  const lifecycleJson = Object.fromEntries(leaving.map((r) => [r.slug, r.info]));
 
   if (withUpdates.length === 0) {
     // "Nothing to update" is only honest when every installed row was
@@ -1826,6 +1976,7 @@ export async function marketUpdate(
             applied: [],
             status: noVersionInfo.length > 0 ? "partial" : "clean",
             uncheckable: noVersionInfo.map((c) => c.slug),
+            templateLifecycle: lifecycleJson,
           },
           null,
           2
@@ -1842,6 +1993,8 @@ export async function marketUpdate(
       log.hint(
         "Run 'synap market installed' for why — unstamped install (reinstall to fix) or a private template while logged out (synap login)."
       );
+    } else if (leaving.length > 0) {
+      log.info("No updates to apply.");
     } else {
       log.success("Nothing to update.");
       // `market update` only checks TEMPLATE-ATTACHED workspaces — a hand-built
@@ -1857,23 +2010,31 @@ export async function marketUpdate(
     const steps = FLOW.afterMarketUpdateCheck(withUpdates.map((c) => c.slug));
     if (opts.json) {
       console.log(
-        JSON.stringify({ checks, loggedIn: cat.loggedIn, unknownSlugs, applied: [], nextSteps: steps }, null, 2)
+        JSON.stringify(
+          {
+            checks,
+            loggedIn: cat.loggedIn,
+            unknownSlugs,
+            applied: [],
+            nextSteps: steps,
+            dataChanges: dataChangesJson,
+            templateLifecycle: lifecycleJson,
+          },
+          null,
+          2
+        )
       );
       return;
     }
     log.info(`${withUpdates.length} package${withUpdates.length === 1 ? "" : "s"} have updates.`);
+    if ([...previews.values()].some((pv) => (pv.changes?.length ?? 0) > 0)) {
+      log.hint("Updates with data changes ask before they run. To agree up front: --accept-data-changes <opKey,…>  (or --yes for all listed)");
+    }
     renderNextSteps(steps);
     return;
   }
 
-  let cfg: HubConfig;
-  try {
-    cfg = await resolveHubConfig(opts);
-  } catch (e) {
-    renderHubError(e);
-    process.exit(1);
-  }
-
+  const acceptList = parseAcceptList(opts.acceptDataChanges);
   const results: Array<{
     slug: string;
     outcome: string;
@@ -1882,23 +2043,69 @@ export async function marketUpdate(
     error?: string;
     dependencies?: ResolvedDependencyLike[];
     seedSummary?: SeedSummary;
+    pendingDataChanges?: DataChange[];
   }> = [];
   for (const c of withUpdates) {
-    const entry = cat.entries.find((e) => e.slug === c.slug);
+    const entry = entryBySlug.get(c.slug);
     if (!entry) {
-      if (!opts.json) log.warn(`"${c.slug}" is no longer in the catalog — skipping.`);
+      // Absent from the catalog THIS CLI read — not proof it left the catalog
+      // (that is the pod's `unlisted`, shown above, and only after a complete sync).
+      if (!opts.json) log.warn(`Couldn't find "${c.slug}" in the catalog read just now — skipping.`);
       results.push({ slug: c.slug, outcome: "not-in-catalog", status: "not-in-catalog", warnings: [] });
       continue;
     }
-    results.push(await applyOnePackage(entry, cat, cfg, { json: opts.json }, applyTimeoutMs));
+    const pv = previews.get(c.slug);
+    const pending = pv?.changes ?? [];
+    let accepted: string[] = [];
+    if (pending.length > 0) {
+      const decision = decideConsent(pending, { yes: opts.yes, acceptList });
+      accepted = decision.accepted;
+      let missing = decision.missing;
+      if (missing.length > 0 && !opts.json && process.stdin.isTTY) {
+        const answer = await prompts({
+          type: "confirm",
+          name: "ok",
+          message: `Run ${missing.length === 1 ? "this data change" : `these ${missing.length} data changes`} with the ${c.slug} update? (${missing.map((d) => d.opKey).join(", ")})`,
+          initial: false,
+        });
+        if (answer.ok === true) {
+          accepted = [...accepted, ...missing.map((d) => d.opKey)];
+          missing = [];
+        }
+      }
+      if (missing.length > 0) {
+        if (!opts.json) {
+          log.warn(`${entry.name} not updated: you have not agreed to its data changes. Nothing was written.`);
+          log.hint(`To agree and update: ${consentRerunCommand(c.slug, missing)}`);
+        }
+        results.push({ slug: c.slug, outcome: "needs-consent", status: "needs-consent", warnings: [], pendingDataChanges: missing });
+        continue;
+      }
+    }
+    results.push(
+      await applyOnePackage(entry, cat, cfg!, { json: opts.json }, applyTimeoutMs, {
+        payload: pv?.payload,
+        acceptDataChanges: accepted,
+      })
+    );
   }
+  if (results.some((r) => r.status === "needs-consent")) process.exitCode = 1;
 
   const summary = summarizeApplyResults(results);
   const steps = FLOW.afterMarketUpdateApply();
   if (opts.json) {
     console.log(
       JSON.stringify(
-        { checks, loggedIn: cat.loggedIn, unknownSlugs, applied: results, summary, nextSteps: steps },
+        {
+          checks,
+          loggedIn: cat.loggedIn,
+          unknownSlugs,
+          applied: results,
+          summary,
+          nextSteps: steps,
+          dataChanges: dataChangesJson,
+          templateLifecycle: lifecycleJson,
+        },
         null,
         2
       )
@@ -1924,13 +2131,14 @@ export async function marketUpdate(
  */
 export function summarizeApplyResults(
   results: Array<{ slug: string; status: string }>
-): { updated: number; unchanged: number; withFailures: number; failed: number; timedOut: number; proposed: number; line: string } {
+): { updated: number; unchanged: number; withFailures: number; failed: number; timedOut: number; proposed: number; needsConsent: number; line: string } {
   let updated = 0;
   let unchanged = 0;
   let withFailures = 0;
   let timedOut = 0;
   let failed = 0;
   let proposed = 0;
+  let needsConsent = 0;
   for (const r of results) {
     switch (r.status) {
       case "installed":
@@ -1957,6 +2165,11 @@ export function summarizeApplyResults(
       case "timed-out":
         timedOut++;
         break;
+      // Held back on purpose: data changes the person has not agreed to.
+      // Not a failure of the pod, not a success either.
+      case "needs-consent":
+        needsConsent++;
+        break;
       default:
         failed++;
     }
@@ -1966,7 +2179,8 @@ export function summarizeApplyResults(
   if (withFailures > 0) parts.push(`${withFailures} completed with failures`);
   if (failed > 0) parts.push(`${failed} failed`);
   if (timedOut > 0) parts.push(`${timedOut} timed out`);
-  const clean = withFailures === 0 && failed === 0 && timedOut === 0;
+  if (needsConsent > 0) parts.push(`${needsConsent} waiting for your agreement to data changes`);
+  const clean = withFailures === 0 && failed === 0 && timedOut === 0 && needsConsent === 0;
   // Proposed isn't a failure (never ⚠) but isn't live yet (not a bare ✓) —
   // a distinct "→ awaiting review" marker keeps the summary honest.
   const marker = !clean ? "⚠" : proposed > 0 ? "→" : "✓";
@@ -1978,6 +2192,7 @@ export function summarizeApplyResults(
     failed,
     timedOut,
     proposed,
+    needsConsent,
     line: color(`${marker} ${parts.join(" · ")}`),
   };
 }
@@ -3139,6 +3354,8 @@ interface TemplateRow {
   group: TemplateRowGroup;
   /** The exact next command for this row — null for a row with no action (current, or unlinked with no confident match). */
   action: string | null;
+  /** The template is not `current` on the pod (retired / unlisted / catalog not fully synced) — null when current or on an older pod. */
+  lifecycleNotice: { label: string; action: string | null } | null;
 }
 
 /** Sort one workspace into the action-ranked home: drifted / unstamped / (unattached-with-suggestion) → attention; current → ok; unattached-no-match → unlinked. */
@@ -3172,7 +3389,16 @@ export function classifyTemplateRow(
       }
       break;
   }
-  return { ws, status, suggestion, group, action };
+  // Lifecycle outranks drift: updating a retired template is the wrong move,
+  // moving its data into the replacement is the right one. `unknown` is only
+  // a note — an incomplete catalog read never claims the template is gone.
+  const notice =
+    ws.packageSlug && ws.lifecycle ? lifecycleNotice(ws.packageSlug, ws.lifecycle) : null;
+  if (notice && ws.lifecycle!.lifecycle !== "unknown") {
+    group = "attention";
+    action = notice.action;
+  }
+  return { ws, status, suggestion, group, action, lifecycleNotice: notice };
 }
 
 function templateRowToJson(r: TemplateRow) {
@@ -3188,6 +3414,9 @@ function templateRowToJson(r: TemplateRow) {
     updateAvailable: r.status.kind === "attached" ? r.status.updateAvailable : false,
     suggestedSlug: r.suggestion?.slug ?? null,
     action: r.action,
+    lifecycle: r.ws.lifecycle?.lifecycle ?? null,
+    replacedBy: r.ws.lifecycle?.replacedBy ?? null,
+    retiredReason: r.ws.lifecycle?.retiredReason ?? null,
   };
 }
 
@@ -3202,6 +3431,12 @@ function renderTemplateRow(r: TemplateRow): void {
       chalk.cyan(r.suggestion.slug);
   }
   console.log("    " + chalk.bold(name.padEnd(36)) + label);
+  if (r.lifecycleNotice) {
+    const tone = r.ws.lifecycle?.lifecycle === "unknown" ? chalk.dim : chalk.yellow;
+    console.log("    " + " ".repeat(36) + tone(`⚠ ${r.lifecycleNotice.label}`));
+    if (r.ws.lifecycle?.retiredReason)
+      console.log("    " + " ".repeat(36) + chalk.dim(r.ws.lifecycle.retiredReason));
+  }
   if (r.action) console.log("    " + " ".repeat(36) + chalk.dim(r.action));
 }
 

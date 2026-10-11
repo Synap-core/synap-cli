@@ -2513,7 +2513,8 @@ market
   .description(
     "Check installed packages for drift against the catalog, and re-apply the ones that are stale (all with --yes, specific ones with explicit slugs)"
   )
-  .option("--yes", "Apply every available update without prompting (no slugs required)")
+  .option("--yes", "Apply every available update without prompting (no slugs required), agreeing to every data change it lists")
+  .option("--accept-data-changes <opKeys>", "Agree to exactly these data changes (comma-separated opKeys from the preview)")
   .option("--dry-run", "Force the preview path — never apply, even with --yes")
   .option("--timeout <seconds>", "How long to wait for each package's apply to finish (default: 120)")
   .option("--json", "Output as JSON")
@@ -2606,7 +2607,8 @@ templates
   .command("update [slugs...]")
   .alias("updates")
   .description("Apply template updates — 'update all' (or --yes) for every drifted workspace, or name specific slugs. Bare 'update' previews what's available.")
-  .option("--yes", "Apply every available update without prompting (same as 'update all')")
+  .option("--yes", "Apply every available update without prompting, agreeing to every data change it lists")
+  .option("--accept-data-changes <opKeys>", "Agree to exactly these data changes (comma-separated opKeys from the preview)")
   .option("--dry-run", "Preview only — never apply")
   .option("--timeout <seconds>", "How long to wait for each apply (default: 120)")
   .option("--json", "Output as JSON")
@@ -2615,14 +2617,29 @@ templates
   .action(async (slugs: string[] | undefined, _opts, cmd) => {
     const opts = cmd.optsWithGlobals();
     // `update all` reads more naturally than `--yes` and is what people type —
-    // treat the literal word "all" as "apply every available update".
+    // treat the literal word "all" as "apply every available update". It is NOT
+    // `--yes`: data changes still need the person's agreement (asked, or flagged).
     const wantsAll = !!slugs?.some((s) => s.toLowerCase() === "all");
     const explicit = (slugs ?? []).filter((s) => s.toLowerCase() !== "all");
     const { marketUpdate } = await import("./commands/market.js");
     await marketUpdate(
       explicit.length > 0 ? explicit : undefined,
-      wantsAll ? { ...opts, yes: true } : opts
+      wantsAll ? { ...opts, all: true } : opts
     );
+  });
+
+templates
+  .command("retire <target>")
+  .description("Move a retired template's space into its replacement (by template slug, workspace name or id). Shows the plan, asks, then moves through the pod — never deletes.")
+  .option("--dry-run", "Show the plan only — move nothing")
+  .option("--yes", "Move without asking (for scripts)")
+  .option("--json", "Output as JSON")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (target: string, _opts, cmd) => {
+    const opts = cmd.optsWithGlobals();
+    const { templatesRetire } = await import("./commands/templates-retire.js");
+    await templatesRetire(target, opts);
   });
 
 // ── Authoring loop: scaffold → validate → publish → unpublish ────────────────

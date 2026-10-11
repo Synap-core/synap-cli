@@ -14,6 +14,7 @@
  */
 
 import { resolveHubConfig, hubGet, HubError, type HubConfig } from "./hub-client.js";
+import { parseLifecycle, type LifecycleInfo } from "./template-lifecycle.js";
 
 /** An installed workspace's package identity — slug plus (when the pod stamped one) its content version. */
 export interface InstalledTemplateInfo {
@@ -358,6 +359,8 @@ export interface WorkspaceAttachment {
   latestVersion?: string | null;
   /** Server-computed drift (Hub TemplateHealth) — the truthful "update available"; `undefined` on an older pod → client fallback. */
   drifted?: boolean;
+  /** Template lifecycle (Hub TemplateHealth): current / retired / unlisted / unknown. `undefined` on an older pod — show what was shown before. */
+  lifecycle?: LifecycleInfo;
 }
 
 /**
@@ -381,6 +384,9 @@ type HubWorkspaceAttachmentRow = {
   packageVersion?: string | null;
   latestVersion?: string | null;
   drifted?: boolean;
+  lifecycle?: string | null;
+  replacedBy?: string | null;
+  retiredReason?: string | null;
 };
 
 function mapWorkspaceAttachments(rows: HubWorkspaceAttachmentRow[]): WorkspaceAttachment[] {
@@ -392,6 +398,7 @@ function mapWorkspaceAttachments(rows: HubWorkspaceAttachmentRow[]): WorkspaceAt
     packageVersion: ws.packageVersion ?? null,
     latestVersion: ws.latestVersion ?? undefined,
     drifted: ws.drifted,
+    lifecycle: parseLifecycle(ws as Record<string, unknown>),
   }));
 }
 
