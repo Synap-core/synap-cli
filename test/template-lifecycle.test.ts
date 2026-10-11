@@ -82,12 +82,19 @@ describe("lifecycle", () => {
     expect(parseLifecycle({ lifecycle: "sunset" })!.lifecycle).toBe("unknown");
   });
   it("retired with a replacement offers the retire command", () => {
-    const n = lifecycleNotice("radar", { lifecycle: "retired", replacedBy: "ecosystem", retiredReason: null })!;
+    const n = lifecycleNotice("radar", { lifecycle: "retired", replacedBy: "ecosystem", retiredReason: null, warning: null })!;
     expect(n.label).toContain("replaced by ecosystem");
     expect(n.action).toBe("synap templates retire radar");
   });
+  it("the pod's own warning wins over the CLI's fallback wording", () => {
+    const n = lifecycleNotice("radar", { lifecycle: "unlisted", replacedBy: null, retiredReason: null, warning: "Pod says so." })!;
+    expect(n.label).toBe("Pod says so.");
+  });
+  it("an unattached workspace (lifecycle null) carries no lifecycle", () => {
+    expect(parseLifecycle({ lifecycle: null })).toBeUndefined();
+  });
   it("unknown never claims the template is gone", () => {
-    const n = lifecycleNotice("radar", { lifecycle: "unknown", replacedBy: null, retiredReason: null })!;
+    const n = lifecycleNotice("radar", { lifecycle: "unknown", replacedBy: null, retiredReason: null, warning: null })!;
     expect(n.label).toMatch(/not fully synced/);
     expect(n.label).not.toMatch(/no longer|retired/);
   });
@@ -108,7 +115,7 @@ const check = { slug: "radar", installedVersion: "v1", latestVersion: "v2", upda
 describe("classifyTemplateRow — lifecycle outranks drift", () => {
   it("a retired template points at retire, not update", () => {
     const r = classifyTemplateRow(
-      ws({ lifecycle: { lifecycle: "retired", replacedBy: "ecosystem", retiredReason: null } }),
+      ws({ lifecycle: { lifecycle: "retired", replacedBy: "ecosystem", retiredReason: null, warning: null } }),
       check,
       []
     );
@@ -117,7 +124,7 @@ describe("classifyTemplateRow — lifecycle outranks drift", () => {
   });
   it("an unlisted template needs attention", () => {
     const r = classifyTemplateRow(
-      ws({ drifted: false, lifecycle: { lifecycle: "unlisted", replacedBy: null, retiredReason: null } }),
+      ws({ drifted: false, lifecycle: { lifecycle: "unlisted", replacedBy: null, retiredReason: null, warning: null } }),
       { ...check, updateAvailable: false },
       []
     );
@@ -126,7 +133,7 @@ describe("classifyTemplateRow — lifecycle outranks drift", () => {
   });
   it("unknown is a note only — the row is not moved", () => {
     const r = classifyTemplateRow(
-      ws({ lifecycle: { lifecycle: "unknown", replacedBy: null, retiredReason: null } }),
+      ws({ lifecycle: { lifecycle: "unknown", replacedBy: null, retiredReason: null, warning: null } }),
       check,
       []
     );
@@ -194,13 +201,26 @@ describe("fetchWorkspaceAttachmentsStrict carries lifecycle from the wire", () =
   it("maps lifecycle / replacedBy / retiredReason", async () => {
     hubGet.mockResolvedValue({
       workspaces: [
-        { id: "w1", name: "Radar", packageSlug: "radar", lifecycle: "retired", replacedBy: "ecosystem", retiredReason: "Folded." },
+        {
+          id: "w1",
+          name: "Radar",
+          packageSlug: "radar",
+          lifecycle: "retired",
+          replacedBy: "ecosystem",
+          retiredReason: "Folded.",
+          lifecycleWarning: 'The "radar" template was retired. Folded.',
+        },
         { id: "w2", name: "Old pod row", packageSlug: "crm" },
       ],
     });
     const { fetchWorkspaceAttachmentsStrict } = await import("../src/lib/installed.js");
     const rows = await fetchWorkspaceAttachmentsStrict({ podUrl: "https://p", apiKey: "k" } as never);
-    expect(rows[0]!.lifecycle).toEqual({ lifecycle: "retired", replacedBy: "ecosystem", retiredReason: "Folded." });
+    expect(rows[0]!.lifecycle).toEqual({
+      lifecycle: "retired",
+      replacedBy: "ecosystem",
+      retiredReason: "Folded.",
+      warning: 'The "radar" template was retired. Folded.',
+    });
     expect(rows[1]!.lifecycle).toBeUndefined();
   });
 });

@@ -235,7 +235,7 @@ describe("templates update — retired templates", () => {
         packageSlug: SLUG,
         packageVersion: "v1",
         drifted: true,
-        lifecycle: { lifecycle: "retired", replacedBy: "ecosystem", retiredReason: "Folded into Ecosystem." },
+        lifecycle: { lifecycle: "retired", replacedBy: "ecosystem", retiredReason: "Folded into Ecosystem.", warning: null },
       },
     ]);
     previewReturns({ ok: true });
@@ -246,6 +246,7 @@ describe("templates update — retired templates", () => {
       lifecycle: "retired",
       replacedBy: "ecosystem",
       retiredReason: "Folded into Ecosystem.",
+      warning: null,
     });
   });
 });

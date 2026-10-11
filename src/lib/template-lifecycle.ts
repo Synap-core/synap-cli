@@ -178,6 +178,8 @@ export interface LifecycleInfo {
   lifecycle: TemplateLifecycle;
   replacedBy: string | null;
   retiredReason: string | null;
+  /** The pod's own plain sentence (`lifecycleWarning`) — preferred over the CLI's fallback wording. */
+  warning: string | null;
 }
 
 const LIFECYCLES: ReadonlySet<string> = new Set(["current", "retired", "unlisted", "unknown"]);
@@ -193,7 +195,12 @@ export function parseLifecycle(row: Record<string, unknown>): LifecycleInfo | un
   const lifecycle: TemplateLifecycle =
     typeof raw === "string" && LIFECYCLES.has(raw) ? (raw as TemplateLifecycle) : "unknown";
   const str = (v: unknown) => (typeof v === "string" && v.trim() ? v.trim() : null);
-  return { lifecycle, replacedBy: str(row.replacedBy), retiredReason: str(row.retiredReason) };
+  return {
+    lifecycle,
+    replacedBy: str(row.replacedBy),
+    retiredReason: str(row.retiredReason),
+    warning: str(row.lifecycleWarning),
+  };
 }
 
 /**
@@ -209,14 +216,16 @@ export function lifecycleNotice(
       return null;
     case "retired":
       return {
-        label: info.replacedBy
-          ? `Retired: ${slug} is replaced by ${info.replacedBy}`
-          : `Retired: ${slug} has no replacement`,
+        label:
+          info.warning ??
+          (info.replacedBy
+            ? `Retired: ${slug} is replaced by ${info.replacedBy}`
+            : `Retired: ${slug} has no replacement`),
         // Retire-into needs a target; with none there is nothing to move into.
         action: info.replacedBy ? `synap templates retire ${slug}` : null,
       };
     case "unlisted":
-      return { label: `No longer in the catalog: ${slug}`, action: null };
+      return { label: info.warning ?? `No longer in the catalog: ${slug}`, action: null };
     case "unknown":
       return {
         label: `Catalog not fully synced: the pod can't say yet whether ${slug} is still offered`,

@@ -1919,7 +1919,8 @@ export async function marketUpdate(
         const n = lifecycleNotice(r.slug, r.info)!;
         const tone = r.info.lifecycle === "unknown" ? chalk.dim : chalk.yellow;
         console.log("    " + tone(`⚠ ${n.label}`));
-        if (r.info.retiredReason) console.log("      " + chalk.dim(r.info.retiredReason));
+        // The pod's warning already carries the reason; print it only on the fallback wording.
+        if (r.info.retiredReason && !r.info.warning) console.log("      " + chalk.dim(r.info.retiredReason));
         if (n.action) console.log("      " + chalk.dim(`Move its data: ${n.action}`));
       }
       log.blank();
@@ -3438,7 +3439,7 @@ function renderTemplateRow(r: TemplateRow): void {
   if (r.lifecycleNotice) {
     const tone = r.ws.lifecycle?.lifecycle === "unknown" ? chalk.dim : chalk.yellow;
     console.log("    " + " ".repeat(36) + tone(`⚠ ${r.lifecycleNotice.label}`));
-    if (r.ws.lifecycle?.retiredReason)
+    if (r.ws.lifecycle?.retiredReason && !r.ws.lifecycle.warning)
       console.log("    " + " ".repeat(36) + chalk.dim(r.ws.lifecycle.retiredReason));
   }
   if (r.action) console.log("    " + " ".repeat(36) + chalk.dim(r.action));
