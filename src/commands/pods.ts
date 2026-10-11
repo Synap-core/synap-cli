@@ -96,6 +96,43 @@ export async function podsList(): Promise<void> {
   log.dim("synap pods update <name> <url> — change a pod's URL (e.g. after a domain move)");
 }
 
+// ─── first login ──────────────────────────────────────────────────────────────
+
+/**
+ * `synap login` with no pod saved. Signing in to the Synap account finds the
+ * person's pods; adding one by URL stays as the manual way.
+ */
+export async function podsFirstLogin(): Promise<void> {
+  log.info("No pod saved yet.");
+  const { how } = await prompts({
+    type: "select",
+    name: "how",
+    message: "Connect your pod:",
+    choices: [
+      { title: "Sign in to Synap (recommended)", description: "Finds your pods for you", value: "signin" },
+      { title: "Add a pod by URL instead", description: "Self-hosted, or not on your account", value: "url" },
+    ],
+  });
+  if (!how) return;
+
+  if (how === "signin") {
+    const { signInAndSavePod } = await import("./init.js");
+    const podUrl = await signInAndSavePod();
+    if (podUrl) {
+      log.success(`Pod saved: ${podUrl}`);
+      return;
+    }
+    const { byUrl } = await prompts({
+      type: "confirm",
+      name: "byUrl",
+      message: "Add a pod by URL instead?",
+      initial: true,
+    });
+    if (!byUrl) return;
+  }
+  await podsAdd();
+}
+
 // ─── add ──────────────────────────────────────────────────────────────────────
 
 export async function podsAdd(name?: string, podUrlArg?: string): Promise<void> {

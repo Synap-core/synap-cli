@@ -411,11 +411,9 @@ program
     const profiles = listPodProfiles();
 
     if (profiles.length === 0) {
-      // No pod saved — guide to pods add
-      console.log(chalk.dim("  No pod configured yet."));
-      console.log(chalk.blue("  Adding a new pod...\n"));
-      const { podsAdd } = await import("./commands/pods.js");
-      await podsAdd();
+      // No pod saved: sign in to the account first, it finds the pods.
+      const { podsFirstLogin } = await import("./commands/pods.js");
+      await podsFirstLogin();
       return;
     }
 
