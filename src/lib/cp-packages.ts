@@ -462,6 +462,11 @@ export interface PublishResult {
    * `synap vendor create`, because the CP never back-fills attribution later.
    */
   vendorAttached: boolean;
+  /**
+   * True when the caller's vendor is `synap-official` and it was therefore NOT
+   * attached: a file publish is never an official write.
+   */
+  officialVendorWithheld: boolean;
 }
 
 /**
@@ -540,14 +545,37 @@ export async function fetchMyVendorId(
   token: string,
   fetchImpl: typeof fetch = fetch,
 ): Promise<string | null> {
+  return (await fetchMyVendorRef(base, token, fetchImpl))?.id ?? null;
+}
+
+/**
+ * The official publisher's vendor slug. Official content has ONE door — the
+ * catalog (`synap catalog publish --official`, which validates the process
+ * contract, the lifecycle ratchet and the goal grammar first). A file publish
+ * must never carry this vendor, or `synap market publish x.yaml` run from the
+ * founder's login becomes an unvalidated official write.
+ */
+export const OFFICIAL_VENDOR_SLUG = "synap-official";
+
+/** The one line shown when a file publish withholds the official vendor. */
+export const OFFICIAL_USE_CATALOG_HINT =
+  "Official templates are published from the catalog: synap catalog publish --official";
+
+/** Same best-effort lookup as `fetchMyVendorId`, keeping the slug too. */
+async function fetchMyVendorRef(
+  base: string,
+  token: string,
+  fetchImpl: typeof fetch,
+): Promise<{ id: string; slug?: string } | null> {
   try {
     const res = await fetchImpl(`${base}/api/vendors/mine`, {
       headers: { Authorization: `Bearer ${token}` },
       signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
     });
     if (!res.ok) return null;
-    const json = (await res.json()) as { vendor?: { id?: string } | null };
-    return json?.vendor?.id ?? null;
+    const json = (await res.json()) as { vendor?: { id?: string; slug?: string } | null };
+    const id = json?.vendor?.id;
+    return id ? { id, slug: json?.vendor?.slug } : null;
   } catch {
     return null;
   }
@@ -682,7 +710,11 @@ export async function publishPackage(
   // Best-effort: a package published without it is orphaned from its author's
   // publisher profile forever (the CP has no auto-create and no back-fill).
   // A failure here must never block a publish, so this resolves to null.
-  const vendorId = await fetchMyVendorId(base, token, fetchImpl);
+  // The official vendor is NEVER attached here: official content goes through
+  // the catalog door only (see OFFICIAL_VENDOR_SLUG).
+  const vendor = await fetchMyVendorRef(base, token, fetchImpl);
+  const officialVendorWithheld = vendor?.slug === OFFICIAL_VENDOR_SLUG;
+  const vendorId = officialVendorWithheld ? null : (vendor?.id ?? null);
 
   const res = await fetchImpl(`${base}/api/packages`, {
     method: "POST",
@@ -732,6 +764,7 @@ export async function publishPackage(
     version,
     isPublic: data.package?.isPublic ?? opts.isPublic,
     vendorAttached: !!vendorId,
+    officialVendorWithheld,
   };
 }
 

@@ -97,3 +97,45 @@ describe("publishPackage sends vendorId on the wire", () => {
     expect(Object.hasOwn(bodies.at(-1)!, "vendorId")).toBe(false);
   });
 });
+
+/**
+ * A file publish is never an official write: official content has ONE door,
+ * `synap catalog publish --official` (validated catalog). Run from the founder's
+ * login, `synap market publish x.yaml` used to auto-attach `synap-official`.
+ */
+describe("publishPackage never attaches the synap-official vendor", () => {
+  function harness(vendor: unknown) {
+    const bodies: Record<string, unknown>[] = [];
+    const fetchImpl = (async (url: string, init?: RequestInit) => {
+      if (String(url).endsWith("/api/vendors/mine")) return OK({ vendor });
+      if (init?.method === "POST") bodies.push(JSON.parse(String(init.body ?? "{}")));
+      return OK({ package: { slug: "s", version: "v" } });
+    }) as unknown as typeof fetch;
+    return { bodies, fetchImpl };
+  }
+
+  it("omits vendorId and reports it withheld when the caller is synap-official", async () => {
+    const { bodies, fetchImpl } = harness({ id: "official-vendor-id", slug: "synap-official" });
+    const r = await publishPackage(
+      { _meta: { slug: "probe" }, workspaceName: "Probe" } as never,
+      { isPublic: false },
+      { fetchImpl, token: "tok", cpUrl: "https://cp.test" } as never,
+    );
+    expect(bodies).toHaveLength(1);
+    expect(Object.hasOwn(bodies[0]!, "vendorId")).toBe(false);
+    expect(JSON.stringify(bodies[0])).not.toContain("official-vendor-id");
+    expect(r.officialVendorWithheld).toBe(true);
+    expect(r.vendorAttached).toBe(false);
+  });
+
+  it("still attaches any other vendor", async () => {
+    const { bodies, fetchImpl } = harness({ id: "vendor-123", slug: "antoine" });
+    const r = await publishPackage(
+      { _meta: { slug: "probe" }, workspaceName: "Probe" } as never,
+      { isPublic: false },
+      { fetchImpl, token: "tok", cpUrl: "https://cp.test" } as never,
+    );
+    expect(bodies[0]!.vendorId).toBe("vendor-123");
+    expect(r.officialVendorWithheld).toBe(false);
+  });
+});

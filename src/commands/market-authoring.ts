@@ -35,6 +35,7 @@ import {
 import {
   publishPackage,
   unpublishPackage,
+  OFFICIAL_USE_CATALOG_HINT,
   CpWriteError,
 } from "../lib/cp-packages.js";
 import { resolveHubConfig, hubPost, renderHubError } from "../lib/hub-client.js";
@@ -305,7 +306,9 @@ function reportPublish(
   // else, and no back-fill. Silence here is how every CLI-published package
   // ended up orphaned from its author — the publish looked like a full success
   // because, apart from the author page, it was.
-  if (!r.vendorAttached) {
+  if (r.officialVendorWithheld) {
+    log.hint(OFFICIAL_USE_CATALOG_HINT);
+  } else if (!r.vendorAttached) {
     log.warn("Published without a publisher profile — attributed to nobody.");
     log.hint(`Create one (synap vendor create <slug>), then publish again.`);
   }

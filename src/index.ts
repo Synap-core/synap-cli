@@ -112,7 +112,7 @@ program
 
 // Hidden: one-shot Proton Mail↔Synap bridge provisioning (dogfood/dev convenience).
 // Fork of bridge-setup for the sovereign self-host Proton Bridge path — see
-// synap-control-plane-api/src/seeds/capability-templates/proton.capability.json.
+// the catalog capability synap-app/packages/workspace-templates/capabilities/proton.capability.json.
 program
   .command("proton-setup", { hidden: true })
   .description("(hidden) One-shot Proton Mail↔Synap bridge provisioning")
@@ -2666,7 +2666,7 @@ market
 
 market
   .command("publish [targets...]")
-  .description("Validate then publish a template (or a standalone cell/view package) to the marketplace (private by default) — pass a file, --from-workspace <id>, or --from-project <id>. Founder: --official [slug...] publishes the official catalog from the monorepo checkout (alias of `synap catalog publish --official --kind workspace`)")
+  .description("Validate then publish a template (or a standalone cell/view package) to the marketplace (private by default) — pass a file, --from-workspace <id>, or --from-project <id>. Non-official publish never uses the synap-official vendor. Founder: --official [slug...] publishes the official catalog from the monorepo checkout (alias of `synap catalog publish --official --kind workspace`)")
   .option("--official", "Publish the OFFICIAL Synap catalog (all templates, or the named slugs) from the monorepo checkout — requires a `synap login` session that owns the synap-official vendor; previews and asks first")
   .option("--templates-dir <dir>", "With --official: path to the catalog package — synap-app/packages/catalog or workspace-templates (default: found by walking up from cwd)")
   .option("--dry-run", "With --official: preview what would change against the live catalog, publish nothing")

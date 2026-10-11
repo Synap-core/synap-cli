@@ -5,8 +5,8 @@
  * `bridge-setup` (the Discord bridge) for the SOVEREIGN self-host Proton path:
  * a locally-run, headless Proton Bridge decrypts Proton's end-to-end-encrypted
  * mail and exposes it as plain IMAP/SMTP on localhost; this command wires that
- * bridge up to a Synap pod. See `synap-control-plane-api/src/seeds/
- * capability-templates/proton.capability.json` for the CP-side template
+ * bridge up to a Synap pod. See the catalog's `synap-app/packages/
+ * workspace-templates/capabilities/proton.capability.json` for the template
  * (vault ref `proton-account`, tool `proton`) and its documented
  * MUTUAL-EXCLUSIVITY rule against the `mailgun` template's Proton-forward path
  * — do not run both for the same mailbox (double-ingest).
