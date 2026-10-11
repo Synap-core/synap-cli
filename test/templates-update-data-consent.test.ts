@@ -78,7 +78,14 @@ vi.mock("../src/lib/auth.js", async (orig) => {
 });
 
 const W12 = { opKey: "w12-deal-stage", description: "Deals move their stage to the commercial stage", affected: 12, destructive: false };
-const W13 = { opKey: "w13-lead-stage", description: "Leads move their stage to the lead stage", affected: 3, destructive: true };
+const W13 = { opKey: "w13-lead-stage", description: "Leads move their stage to the lead stage", affected: 3, destructive: false };
+const W14 = {
+  opKey: "w14-retire-old-kind",
+  description: "The old radar kind is retired",
+  affected: 5,
+  destructive: true,
+  operatorCommand: "pnpm --filter @synap/database conversions --only w14-retire-old-kind",
+};
 
 // The command module is heavy (the template bundle); load it once, outside any test's budget.
 beforeAll(async () => {
@@ -159,6 +166,21 @@ describe("templates update — data changes need agreement", () => {
     const { marketUpdate } = await import("../src/commands/market.js");
     await marketUpdate([SLUG], { json: true, yes: true });
     expect(applyCalls()[0]![1].acceptDataChanges).toEqual([W12.opKey, W13.opKey]);
+  });
+
+  it("--yes never sends a destructive change (an operator step)", async () => {
+    previewReturns({ ok: true, dataChanges: [W12, W14] });
+    const { marketUpdate } = await import("../src/commands/market.js");
+    await marketUpdate([SLUG], { json: true, yes: true });
+    expect(applyCalls()[0]![1].acceptDataChanges).toEqual([W12.opKey]);
+  });
+
+  it("naming a destructive change in --accept-data-changes does not send it", async () => {
+    previewReturns({ ok: true, dataChanges: [W14] });
+    const { marketUpdate } = await import("../src/commands/market.js");
+    await marketUpdate([SLUG], { json: true, acceptDataChanges: W14.opKey });
+    expect(applyCalls()).toHaveLength(1);
+    expect("acceptDataChanges" in applyCalls()[0]![1]).toBe(false);
   });
 
   it("an older pod (no dataChanges field) applies exactly as before — no consent field sent", async () => {

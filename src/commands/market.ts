@@ -1700,7 +1700,8 @@ async function applyOnePackage(
       if (!opts.json) {
         log.warn(`${entry.name} was not updated: it carries data changes you have not agreed to. Nothing was written.`);
         printDataChanges(entry.slug, owed);
-        if (owed.length > 0) log.hint(`To agree and update: ${consentRerunCommand(entry.slug, owed)}`);
+        if (owed.some((d) => !d.destructive))
+          log.hint(`To agree and update: ${consentRerunCommand(entry.slug, owed)}`);
       }
       return {
         slug: entry.slug,
@@ -2061,6 +2062,9 @@ export async function marketUpdate(
       const decision = decideConsent(pending, { yes: opts.yes, acceptList });
       accepted = decision.accepted;
       let missing = decision.missing;
+      if (decision.refusedOperatorSteps.length > 0 && !opts.json) {
+        log.warn(`Not agreed here: ${decision.refusedOperatorSteps.join(", ")} retire${decision.refusedOperatorSteps.length === 1 ? "s" : ""} old data, so an operator runs ${decision.refusedOperatorSteps.length === 1 ? "it" : "them"} (see Operator steps above).`);
+      }
       if (missing.length > 0 && !opts.json && process.stdin.isTTY) {
         const answer = await prompts({
           type: "confirm",

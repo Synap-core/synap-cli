@@ -27,6 +27,12 @@ describe("parseDataChanges — absent and empty are different facts", () => {
   it("drops entries with no opKey (they cannot be agreed to)", () => {
     expect(parseDataChanges({ dataChanges: [{ description: "x" }, W12] })).toEqual([W12]);
   });
+  it("carries the pod's count error and operator command", () => {
+    const [d] = parseDataChanges({
+      dataChanges: [{ opKey: "a", affected: null, error: "dry run failed", destructive: true, operatorCommand: "pnpm x" }],
+    })!;
+    expect(d).toMatchObject({ affected: null, error: "dry run failed", destructive: true, operatorCommand: "pnpm x" });
+  });
   it("an uncounted change says so instead of inventing 0", () => {
     expect(parseDataChanges({ dataChanges: [{ opKey: "a" }] })![0]!.affected).toBeNull();
   });
@@ -35,7 +41,13 @@ describe("parseDataChanges — absent and empty are different facts", () => {
 describe("decideConsent", () => {
   const pending = [W12, { ...W12, opKey: "w13" }];
   it("nothing agreed → every change missing", () => {
-    expect(decideConsent(pending, {})).toEqual({ accepted: [], missing: pending });
+    expect(decideConsent(pending, {})).toEqual({ accepted: [], missing: pending, refusedOperatorSteps: [] });
+  });
+  it("a destructive change is never agreed here, not even by --yes", () => {
+    const op = { ...W12, opKey: "w14", destructive: true };
+    expect(decideConsent([...pending, op], { yes: true }).accepted).toEqual(["w12", "w13"]);
+    const named = decideConsent([op], { acceptList: ["w14"] });
+    expect(named).toEqual({ accepted: [], missing: [], refusedOperatorSteps: ["w14"] });
   });
   it("only named opKeys count; an unlisted name is never sent", () => {
     const d = decideConsent(pending, { acceptList: ["w13", "ghost"] });

@@ -28,10 +28,17 @@ export interface DataChange {
   opKey: string;
   /** One plain sentence from the pod, e.g. "Deals move their stage to the commercial stage". */
   description: string;
-  /** Records the engine's own dry run says the op touches. `null` = the pod did not count them. */
+  /** Records the engine's own dry run says the op changes, pod-wide. `null` = not counted (see `error`). */
   affected: number | null;
-  /** The op carries a destructive tail. The tail is NEVER run by an update — it stays an operator step. */
+  /**
+   * The op retires data. It is NEVER run by an update and cannot be agreed to
+   * here: it is an operator step (`operatorCommand`). The CLI never sends its key.
+   */
   destructive: boolean;
+  /** Why the count failed, when `affected` is null. */
+  error?: string;
+  /** Destructive only: the command an operator runs (dry run first). */
+  operatorCommand?: string;
 }
 
 export const DATA_CHANGES_CONSENT_CODE = "DATA_CHANGES_NEED_CONSENT";
@@ -63,6 +70,10 @@ export function parseDataChanges(raw: unknown): DataChange[] | undefined {
           : opKey,
       affected,
       destructive: r.destructive === true,
+      ...(typeof r.error === "string" && r.error.trim() ? { error: r.error.trim() } : {}),
+      ...(typeof r.operatorCommand === "string" && r.operatorCommand.trim()
+        ? { operatorCommand: r.operatorCommand.trim() }
+        : {}),
     });
   }
   return out;
@@ -85,8 +96,12 @@ function countPhrase(n: number | null): string {
 /** One line per data change: the pod's own sentence, then its count. */
 export function formatDataChange(dc: DataChange): string {
   let line = `${dc.description} ${chalk.dim(`(${countPhrase(dc.affected)} · ${dc.opKey})`)}`;
+  if (dc.affected === null && dc.error) {
+    line += "\n      " + chalk.yellow(`The pod couldn't count it: ${dc.error}`);
+  }
   if (dc.destructive) {
-    line += "\n      " + chalk.dim("Its cleanup step deletes old data. It is NOT run here; an operator runs it separately.");
+    line += "\n      " + chalk.dim("It retires old data, so it never runs with an update. An operator runs it:");
+    if (dc.operatorCommand) line += "\n      " + chalk.dim(dc.operatorCommand);
   }
   return line;
 }
@@ -95,7 +110,12 @@ export function formatDataChange(dc: DataChange): string {
 export function printDataChanges(slug: string, changes: DataChange[]): void {
   if (changes.length === 0) return;
   console.log("  " + chalk.bold(`Data changes for ${slug}`) + chalk.dim(" (they run with the update, once you agree)"));
-  for (const dc of changes) console.log("    • " + formatDataChange(dc));
+  for (const dc of changes.filter((d) => !d.destructive)) console.log("    • " + formatDataChange(dc));
+  const operator = changes.filter((d) => d.destructive);
+  if (operator.length > 0) {
+    console.log("  " + chalk.bold(`Operator steps for ${slug}`) + chalk.dim(" (never run by an update)"));
+    for (const dc of operator) console.log("    • " + formatDataChange(dc));
+  }
 }
 
 /** `--accept-data-changes a,b c` → ["a","b","c"]. Commander hands a string (or undefined). */
@@ -111,34 +131,43 @@ export function parseAcceptList(raw: string | string[] | undefined): string[] {
 export interface ConsentDecision {
   /** opKeys the person agreed to, in the pod's order. Only these are ever sent. */
   accepted: string[];
-  /** Pending changes the person has NOT agreed to. Non-empty ⇒ the update must not be applied. */
+  /** Agreeable changes the person has NOT agreed to. Non-empty ⇒ the update must not be applied. */
   missing: DataChange[];
+  /** Destructive changes the person named: an operator step, so never sent. */
+  refusedOperatorSteps: string[];
 }
 
 /**
- * Decide consent WITHOUT prompting. `yes` agrees to every listed change (the
+ * Decide consent WITHOUT prompting. Only NON-destructive changes can be agreed
+ * to here; a destructive one is an operator step, never sent (the pod refuses
+ * an accepted destructive key). `yes` agrees to every agreeable change (the
  * person typed `--yes` on a command that has just printed them); otherwise only
- * the opKeys named in `acceptList` count. An opKey named but not pending is
- * simply not sent — consenting to a change the pod did not list means nothing.
+ * the opKeys named in `acceptList` count. A name that is not pending is simply
+ * not sent — agreeing to a change the pod did not list means nothing.
  */
 export function decideConsent(
   pending: DataChange[],
   input: { yes?: boolean; acceptList?: string[] }
 ): ConsentDecision {
-  if (input.yes) return { accepted: pending.map((d) => d.opKey), missing: [] };
   const named = new Set(input.acceptList ?? []);
   const accepted: string[] = [];
   const missing: DataChange[] = [];
+  const refusedOperatorSteps: string[] = [];
   for (const d of pending) {
-    if (named.has(d.opKey)) accepted.push(d.opKey);
+    if (d.destructive) {
+      if (named.has(d.opKey)) refusedOperatorSteps.push(d.opKey);
+      continue;
+    }
+    if (input.yes || named.has(d.opKey)) accepted.push(d.opKey);
     else missing.push(d);
   }
-  return { accepted, missing };
+  return { accepted, missing, refusedOperatorSteps };
 }
 
 /** The exact command that re-runs an update with consent to these changes. */
 export function consentRerunCommand(slug: string, changes: DataChange[]): string {
-  return `synap templates update ${slug} --accept-data-changes ${changes.map((d) => d.opKey).join(",")}`;
+  const keys = changes.filter((d) => !d.destructive).map((d) => d.opKey);
+  return `synap templates update ${slug} --accept-data-changes ${keys.join(",")}`;
 }
 
 // ── Template lifecycle (retired / unlisted / unknown) ───────────────────────
