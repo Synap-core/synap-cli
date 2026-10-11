@@ -1,9 +1,11 @@
 /**
- * `synap track` — a METHOD running inside a project (Hub `/api/hub/tracks`).
+ * `synap track` — a LASTING goal inside a project (Hub `/api/hub/tracks`).
+ * Work in it = `synap session start --track <id>`. A legacy track also runs a
+ * method (a project-scoped playbook) with steps; a new one needs none.
  *
  *   list        a project's tracks (defaults to the active project lens)
  *   show        one track, its steps and where it stands
- *   start       start a method (a project-scoped playbook) on a project
+ *   start       start a track on a project (--name; --playbook is legacy)
  *   advance     move a track to a step — returns the step's session OFFER
  *   status      pause / resume / complete / archive
  *   params      answer the method's params (merged; `key=null` clears)
@@ -170,9 +172,10 @@ export async function showTrack(id: string, opts: BaseOpts): Promise<void> {
 
 export async function startTrack(
   opts: BaseOpts & {
-    playbook: string;
+    playbook?: string;
     project?: string;
     name?: string;
+    direction?: string;
     param?: string[];
     reason?: string;
   }
@@ -187,8 +190,17 @@ export async function startTrack(
       process.exit(1);
       return;
     }
-    const body: Json = { projectId, playbookId: opts.playbook };
+    if (!opts.playbook && !opts.name) {
+      console.error(
+        chalk.red("Error: name the track — pass --name \"Grow the newsletter\" (a track needs no --playbook)")
+      );
+      process.exit(1);
+      return;
+    }
+    const body: Json = { projectId };
+    if (opts.playbook) body.playbookId = opts.playbook;
     if (opts.name) body.name = opts.name;
+    if (opts.direction) body.direction = opts.direction;
     if (opts.param?.length) body.params = parseParamPairs(opts.param);
     if (opts.reason) body.reasoning = opts.reason;
     const r = (await hubPost("/tracks", body, cfg)) as Json;
@@ -200,9 +212,10 @@ export async function startTrack(
       printProposed(r, "Starting this track");
     } else {
       const t = r.track as TrackRow;
-      if (r.status === "exists") log.info(`A live track of this method already has this name: ${t.name} (pass --name to run it again)`);
+      if (r.status === "exists") log.info(`A live track already has this name: ${t.name}`);
       else log.success(`Track started: ${chalk.bold(t.name)}`);
       console.log(`  ID: ${chalk.bold(t.id)}`);
+      log.dim(`Work in it: synap session start --track ${t.id} "<goal>"`);
     }
     printDomainNote(r);
   });

@@ -68,6 +68,34 @@ describe("synap track start", () => {
   });
 });
 
+describe("synap track start — a lasting track needs no method (W1)", () => {
+  it("sends a named start with NO playbookId, and points at the session door", async () => {
+    hubPost.mockResolvedValueOnce({
+      status: "started",
+      track: { id: "t-9", name: "Grow the newsletter" },
+    });
+    const { startTrack } = await import("../src/commands/tracks.js");
+    await startTrack({ name: "Grow the newsletter", direction: "Forwarded weekly" });
+    const [path, body] = hubPost.mock.calls[0] as [string, Record<string, unknown>];
+    expect(path).toBe("/tracks");
+    expect(body).toEqual({
+      projectId: "proj-lens",
+      name: "Grow the newsletter",
+      direction: "Forwarded weekly",
+    });
+    expect(printed()).toContain("Track started");
+    expect(printed()).toContain("synap session start --track t-9");
+  });
+
+  it("refuses a start with neither a name nor a playbook, sending nothing", async () => {
+    const exit = vi.spyOn(process, "exit").mockImplementation((() => undefined) as never);
+    const { startTrack } = await import("../src/commands/tracks.js");
+    await startTrack({});
+    expect(exit).toHaveBeenCalledWith(1);
+    expect(hubPost).not.toHaveBeenCalled();
+  });
+});
+
 describe("synap track start-step", () => {
   it("resolves the current step, then prints the pod's domain fallback", async () => {
     hubGet.mockResolvedValueOnce({ id: "t-1", name: "BM", currentStage: "scan", status: "active" });

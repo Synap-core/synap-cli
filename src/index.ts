@@ -1176,7 +1176,7 @@ session
   .option("--workspace <id>", "Workspace that owns the session")
   .option("--project <id>", "Project that owns the session (defaults to the active project lens; the pod accepts a workspace OR a project)")
   .option("--task-id <id>", "Link session to an existing task entity")
-  .option("--track <id>", "Born inside a track (a project's method) — implies its project; filed at the track's current step")
+  .option("--track <id>", "Born inside a track (a project's lasting goal) — implies its project")
   .option("--template <id>", "Start from a playbook (seeds currentStage from its stages)")
   .option("--no-template", "Opt out of auto-matching a playbook — start ad-hoc")
   .option("--parent <id>", "Push from another session — records session --spawned_from--> session (the parent stays open)")
@@ -1338,13 +1338,13 @@ session
   });
 
 // ─── track ────────────────────────────────────────────────────────────────────
-// A METHOD running inside a project (a project-scoped playbook): its steps,
-// where it stands, and the session each step offers. Writes are governed —
+// A LASTING goal inside a project, worked in sessions (`session start --track`).
+// Legacy tracks also run a method with steps. Writes are governed —
 // "queued for your review" is success.
 
 const track = program
   .command("track")
-  .description("Manage tracks — the methods a project runs, step by step");
+  .description("Manage tracks — the lasting goals a project pursues");
 
 track
   .command("list")
@@ -1372,10 +1372,11 @@ track
 
 track
   .command("start")
-  .description("Start a method (a project-scoped playbook) on a project")
-  .requiredOption("--playbook <id>", "The track template (project-scoped playbook) to run")
+  .description("Start a track — a lasting goal — on a project")
+  .option("--name <name>", "The track's name (required without --playbook)")
+  .option("--direction <text>", "Where it is heading, one line")
+  .option("--playbook <id>", "Legacy: a track template (project-scoped playbook with steps)")
   .option("--project <id>", "Project id (defaults to the active project lens)")
-  .option("--name <name>", "Display name (defaults to the method's name)")
   .option("--param <key=value>", "Answer a declared param (repeatable)", collect, [])
   .option("--reason <text>", "Why — shown to the reviewer")
   .option("--json", "Output as JSON")
@@ -1388,7 +1389,7 @@ track
 
 track
   .command("advance <id> <stage>")
-  .description("Move a track to a step (forward or back); prints the session that step offers")
+  .description("Legacy (tracks with steps): move a track to a step; prints the session that step offers")
   .option("--reason <text>", "Why — shown to the reviewer")
   .option("--json", "Output as JSON")
   .option("--pod-url <url>", "Pod URL override")
@@ -1400,7 +1401,7 @@ track
 
 track
   .command("status <id> <status>")
-  .description("Pause, resume, complete or archive a track (active|paused|completed|archived)")
+  .description("Pause, resume or archive a track (active|paused|archived)")
   .option("--reason <text>", "Why — shown to the reviewer")
   .option("--json", "Output as JSON")
   .option("--pod-url <url>", "Pod URL override")
@@ -1424,7 +1425,7 @@ track
 
 track
   .command("start-step <id>")
-  .description("Start the work session of one step (defaults to the track's current step)")
+  .description("Legacy (tracks with steps): start one step's session — on a track with no steps, use 'session start --track'")
   .option("--stage <key>", "Step key (defaults to the current step)")
   .option("--title <text>", "Session name (defaults to the step's name)")
   .option("--goal <text>", "Outcome (defaults to the step's goal)")
