@@ -9,6 +9,7 @@ import {
   lifecycleNotice,
   parseRetireResponse,
   formatRetirePlan,
+  parseOverlays,
 } from "../src/lib/template-lifecycle.js";
 import { HubError } from "../src/lib/hub-client.js";
 import { classifyTemplateRow } from "../src/commands/market.js";
@@ -224,6 +225,40 @@ describe("fetchWorkspaceAttachmentsStrict carries lifecycle from the wire", () =
     });
     expect(rows[1]!.lifecycle).toBeUndefined();
   });
+
+  it("maps overlays from the wire; an older pod row has none", async () => {
+    hubGet.mockResolvedValue({
+      workspaces: [
+        {
+          id: "w1",
+          name: "CRM",
+          packageSlug: "crm",
+          lifecycle: "current",
+          overlays: [
+            {
+              slug: "business-developer",
+              lifecycle: "retired",
+              replacedBy: "crm",
+              retiredReason: null,
+              lifecycleWarning: "nothing to move",
+              replacementHere: true,
+            },
+          ],
+        },
+        { id: "w2", name: "Old pod row", packageSlug: "crm" },
+      ],
+    });
+    const { fetchWorkspaceAttachmentsStrict } = await import("../src/lib/installed.js");
+    const rows = await fetchWorkspaceAttachmentsStrict({ podUrl: "https://p", apiKey: "k" } as never);
+    expect(rows[0]!.overlays).toEqual([
+      {
+        slug: "business-developer",
+        info: { lifecycle: "retired", replacedBy: "crm", retiredReason: null, warning: "nothing to move" },
+        replacementHere: true,
+      },
+    ]);
+    expect(rows[1]!.overlays).toBeUndefined();
+  });
 });
 
 describe("dataChangeRefusalMessage — the pod's other data-change refusals, in words", () => {
@@ -244,5 +279,72 @@ describe("dataChangeRefusalMessage — the pod's other data-change refusals, in 
     expect(dataChangeRefusalMessage(err(409, "DATA_CHANGES_NEED_CONSENT"))).toBeNull();
     expect(dataChangeRefusalMessage(err(403, "FORBIDDEN"))).toBeNull();
     expect(dataChangeRefusalMessage(new Error("boom"))).toBeNull();
+  });
+});
+
+describe("overlays — a pack composed onto a space shows under it", () => {
+  const BD_WARNING =
+    'The "business-developer" overlay on this space was retired. It is replaced by "crm", which this space already has. Its fields stay; there is nothing to move.';
+  const overlayRow = (over: Record<string, unknown>) => ({
+    slug: "business-developer",
+    installedVersion: "h-1",
+    latestVersion: null,
+    drifted: false,
+    lifecycle: "retired",
+    replacedBy: "crm",
+    retiredReason: null,
+    lifecycleWarning: BD_WARNING,
+    replacementHere: true,
+    ...over,
+  });
+  const current = { lifecycle: { lifecycle: "current" as const, replacedBy: null, retiredReason: null, warning: null } };
+  const noDrift = { ...check, updateAvailable: false };
+
+  it("parseOverlays: absent field (older pod) and empty list are different facts", () => {
+    expect(parseOverlays({})).toBeUndefined();
+    expect(parseOverlays({ overlays: [] })).toEqual([]);
+    expect(parseOverlays({ overlays: [{ lifecycle: "retired" }, overlayRow({})] })!.map((o) => o.slug)).toEqual([
+      "business-developer",
+    ]);
+  });
+
+  it("an overlay with no lifecycle reads as unknown, never current", () => {
+    expect(parseOverlays({ overlays: [{ slug: "x" }] })![0]!.info.lifecycle).toBe("unknown");
+  });
+
+  it("shows the pod's own sentence under the space; replacement already here is not attention", () => {
+    const overlays = parseOverlays({ overlays: [overlayRow({})] })!;
+    const r = classifyTemplateRow(ws({ drifted: false, ...current, overlays }), noDrift, []);
+    expect(r.overlayNotices).toEqual([{ slug: "business-developer", label: BD_WARNING, lifecycle: "retired" }]);
+    expect(r.group).toBe("ok");
+    expect(r.action).toBeNull();
+  });
+
+  it("a retired overlay whose replacement is NOT on the space needs attention, with no retire action", () => {
+    const overlays = parseOverlays({
+      overlays: [overlayRow({ slug: "grants", replacedBy: "finance", replacementHere: false, lifecycleWarning: null })],
+    })!;
+    const r = classifyTemplateRow(ws({ drifted: false, ...current, overlays }), noDrift, []);
+    expect(r.group).toBe("attention");
+    // An overlay is not a space: `synap templates retire grants` would move nothing.
+    expect(r.action).toBeNull();
+    // Same wording as a space's fallback when the pod sent no sentence.
+    expect(r.overlayNotices[0]!.label).toBe("Retired: grants is replaced by finance");
+  });
+
+  it("a current overlay is listed with no notice", () => {
+    const overlays = parseOverlays({
+      overlays: [overlayRow({ lifecycle: "current", replacedBy: null, lifecycleWarning: null, replacementHere: false })],
+    })!;
+    const r = classifyTemplateRow(ws({ drifted: false, ...current, overlays }), noDrift, []);
+    expect(r.overlayNotices).toEqual([{ slug: "business-developer", label: null, lifecycle: "current" }]);
+    expect(r.group).toBe("ok");
+  });
+
+  it("an older pod (no overlays field) renders exactly as before", () => {
+    const before = classifyTemplateRow(ws({}), check, []);
+    expect(before.overlayNotices).toEqual([]);
+    expect(before.group).toBe("attention");
+    expect(before.action).toBe("synap templates update radar");
   });
 });

@@ -256,6 +256,52 @@ export function lifecycleNotice(
   }
 }
 
+// ── Overlays (packs composed onto a space) ──────────────────────────────────
+
+export interface OverlayInfo {
+  slug: string;
+  info: LifecycleInfo;
+  /** Retired, and its replacement is already on this space: nothing to move. */
+  replacementHere: boolean;
+}
+
+/**
+ * Read `overlays` off a Hub `/workspaces` row. `undefined` = the pod sent no
+ * such field (an older pod): show exactly what was shown before. `[]` = the
+ * space has no overlays. An entry with no lifecycle reads as `unknown`.
+ */
+export function parseOverlays(row: Record<string, unknown>): OverlayInfo[] | undefined {
+  const raw = row.overlays;
+  if (!Array.isArray(raw)) return undefined;
+  const out: OverlayInfo[] = [];
+  for (const item of raw) {
+    const o = asObj(item);
+    const slug = o ? asStr(o.slug) : null;
+    if (!o || !slug) continue;
+    out.push({
+      slug,
+      info: parseLifecycle(o) ?? { lifecycle: "unknown", replacedBy: null, retiredReason: null, warning: null },
+      replacementHere: o.replacementHere === true,
+    });
+  }
+  return out;
+}
+
+/**
+ * The notice for an overlay: the SAME label `lifecycleNotice` gives a space
+ * (the pod's own sentence first), but never an action — an overlay is not a
+ * space, so `synap templates retire` has nothing to move for it.
+ */
+export function overlayNotice(o: OverlayInfo): { label: string; action: null } | null {
+  const n = lifecycleNotice(o.slug, o.info);
+  return n ? { label: n.label, action: null } : null;
+}
+
+/** An overlay that needs the person: retired, and its replacement is not on the space. */
+export function overlayNeedsAttention(o: OverlayInfo): boolean {
+  return o.info.lifecycle === "retired" && !o.replacementHere;
+}
+
 // ── Retire-into plan ────────────────────────────────────────────────────────
 
 export interface RetireMove {

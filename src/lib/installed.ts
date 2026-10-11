@@ -14,7 +14,7 @@
  */
 
 import { resolveHubConfig, hubGet, HubError, type HubConfig } from "./hub-client.js";
-import { parseLifecycle, type LifecycleInfo } from "./template-lifecycle.js";
+import { parseLifecycle, parseOverlays, type LifecycleInfo, type OverlayInfo } from "./template-lifecycle.js";
 
 /** An installed workspace's package identity — slug plus (when the pod stamped one) its content version. */
 export interface InstalledTemplateInfo {
@@ -361,6 +361,8 @@ export interface WorkspaceAttachment {
   drifted?: boolean;
   /** Template lifecycle (Hub TemplateHealth): current / retired / unlisted / unknown. `undefined` on an older pod — show what was shown before. */
   lifecycle?: LifecycleInfo;
+  /** Overlays composed onto this space, each with its own standing. `undefined` on an older pod — show what was shown before. */
+  overlays?: OverlayInfo[];
 }
 
 /**
@@ -387,6 +389,7 @@ type HubWorkspaceAttachmentRow = {
   lifecycle?: string | null;
   replacedBy?: string | null;
   retiredReason?: string | null;
+  overlays?: unknown;
 };
 
 function mapWorkspaceAttachments(rows: HubWorkspaceAttachmentRow[]): WorkspaceAttachment[] {
@@ -399,6 +402,7 @@ function mapWorkspaceAttachments(rows: HubWorkspaceAttachmentRow[]): WorkspaceAt
     latestVersion: ws.latestVersion ?? undefined,
     drifted: ws.drifted,
     lifecycle: parseLifecycle(ws as Record<string, unknown>),
+    overlays: parseOverlays(ws as Record<string, unknown>),
   }));
 }
 

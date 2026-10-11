@@ -78,6 +78,8 @@ import {
   decideConsent,
   consentRerunCommand,
   lifecycleNotice,
+  overlayNotice,
+  overlayNeedsAttention,
   type DataChange,
   type LifecycleInfo,
 } from "../lib/template-lifecycle.js";
@@ -3377,6 +3379,8 @@ interface TemplateRow {
   action: string | null;
   /** The template is not `current` on the pod (retired / unlisted / catalog not fully synced) — null when current or on an older pod. */
   lifecycleNotice: { label: string; action: string | null } | null;
+  /** One line per overlay on the space, with its notice when not `current`. Empty on an older pod. */
+  overlayNotices: Array<{ slug: string; label: string | null; lifecycle: string }>;
 }
 
 /** Sort one workspace into the action-ranked home: drifted / unstamped / (unattached-with-suggestion) → attention; current → ok; unattached-no-match → unlinked. */
@@ -3419,7 +3423,15 @@ export function classifyTemplateRow(
     group = "attention";
     action = notice.action;
   }
-  return { ws, status, suggestion, group, action, lifecycleNotice: notice };
+  // An overlay retired with its replacement absent from the space needs the
+  // person too; it never takes the row's action (an overlay is not a space).
+  if ((ws.overlays ?? []).some(overlayNeedsAttention)) group = "attention";
+  const overlayNotices = (ws.overlays ?? []).map((o) => ({
+    slug: o.slug,
+    label: overlayNotice(o)?.label ?? null,
+    lifecycle: o.info.lifecycle,
+  }));
+  return { ws, status, suggestion, group, action, lifecycleNotice: notice, overlayNotices };
 }
 
 function templateRowToJson(r: TemplateRow) {
@@ -3438,6 +3450,18 @@ function templateRowToJson(r: TemplateRow) {
     lifecycle: r.ws.lifecycle?.lifecycle ?? null,
     replacedBy: r.ws.lifecycle?.replacedBy ?? null,
     retiredReason: r.ws.lifecycle?.retiredReason ?? null,
+    ...(r.ws.overlays
+      ? {
+          overlays: r.ws.overlays.map((o) => ({
+            slug: o.slug,
+            lifecycle: o.info.lifecycle,
+            replacedBy: o.info.replacedBy,
+            retiredReason: o.info.retiredReason,
+            warning: o.info.warning,
+            replacementHere: o.replacementHere,
+          })),
+        }
+      : {}),
   };
 }
 
@@ -3459,6 +3483,13 @@ function renderTemplateRow(r: TemplateRow): void {
       console.log("    " + " ".repeat(36) + chalk.dim(r.ws.lifecycle.retiredReason));
   }
   if (r.action) console.log("    " + " ".repeat(36) + chalk.dim(r.action));
+  for (const o of r.overlayNotices) {
+    console.log("    " + " ".repeat(36) + chalk.dim(`↳ overlay ${o.slug}`));
+    if (o.label) {
+      const tone = o.lifecycle === "unknown" ? chalk.dim : chalk.yellow;
+      console.log("    " + " ".repeat(38) + tone(`⚠ ${o.label}`));
+    }
+  }
 }
 
 /**
