@@ -75,6 +75,10 @@ export interface CatalogProblem {
   message: string;
 }
 export interface CatalogDiffRow {
+  /** A tombstone row (the lib got `retired`): render with `formatRetirement`. */
+  action?: "retire";
+  replacedBy?: string | null;
+  reason?: string;
   kind: string;
   slug: string;
   status: "new" | "changed" | "unchanged";
@@ -93,11 +97,22 @@ export interface CatalogPublishResult {
   error?: string;
   [k: string]: unknown;
 }
+/** One `retired.yaml` tombstone, as the lib loads it (already validated against the corpus — its problems are load problems). */
+export interface CatalogTombstone {
+  slug: string;
+  kind: string;
+  replacedBy?: string;
+  reason: string;
+  since?: string;
+  category?: string;
+}
 export interface CatalogLoadResult {
   entries: CatalogEntry[];
   /** Every loaded entry — `entries` is validated AGAINST it (cross-kind refs, duplicates). */
   corpus?: CatalogEntry[];
   problems: CatalogProblem[];
+  /** `retired.yaml`. Absent on an older lib (then no tombstones are sent). Not filtered by `kinds` — the CLI filters. */
+  retired?: CatalogTombstone[];
 }
 export interface CatalogLoadOptions {
   root?: string;
@@ -113,7 +128,7 @@ export interface CatalogLib {
   ): Promise<CatalogProblem[]> | CatalogProblem[];
   diffCatalog(
     entries: CatalogEntry[],
-    opts: { cpUrl: string; token?: string; fetchImpl?: typeof fetch },
+    opts: { cpUrl: string; token?: string; fetchImpl?: typeof fetch; retired?: CatalogTombstone[] },
   ): Promise<CatalogDiffRow[]> | CatalogDiffRow[];
   publishCatalog(opts: {
     entries: CatalogEntry[];
@@ -126,6 +141,8 @@ export interface CatalogLib {
     fetchImpl?: typeof fetch;
     callerUserId?: string;
     log?: (line: string) => void;
+    /** Tombstones sent after the live publishes. Omitted → none sent. */
+    retired?: CatalogTombstone[];
   }): Promise<CatalogPublishResult[]> | CatalogPublishResult[];
   // ── Optional (used when present; NOT part of the shape check) ──
   /**
@@ -134,6 +151,15 @@ export interface CatalogLib {
    * lib's own preflight inside `publishCatalog` still refuses, only later.
    */
   checkPublisher?: (opts: { cpUrl: string; token: string | undefined; fetchImpl?: typeof fetch }) => Promise<CatalogPublisherCheck>;
+  /** The lines one tombstone row prints (`retire radar → ecosystem` + reason). Absent on an older lib. */
+  formatRetirement?: (r: {
+    kind?: string;
+    slug: string;
+    replacedBy?: string | null;
+    reason: string;
+    status: string;
+    warnings?: string[];
+  }) => string[];
 }
 
 export type CatalogPublisherCheck =
@@ -355,7 +381,36 @@ function shortValue(v: unknown): string {
   return text.length > 70 ? `${text.slice(0, 69)}…` : text;
 }
 
-export function formatDiff(rows: CatalogDiffRow[]): string {
+/** Fallback for an older lib without `formatRetirement` — same facts, one line + reason. */
+function fallbackRetirementLines(r: CatalogDiffRow): string[] {
+  const target = r.replacedBy ? ` → ${r.replacedBy}` : " (no replacement)";
+  return [
+    `  ${STATUS_LABEL[r.status] ?? r.status} retire ${r.kind}/${r.slug}${target}`,
+    ...(r.reason ? [`      reason: ${r.reason}`] : []),
+    ...(Array.isArray(r.warnings) ? r.warnings.map((w) => `      ! ${w}`) : []),
+  ];
+}
+
+/**
+ * Tombstones the selection publishes: `--kind` and named slugs filter them the
+ * same way they filter live entries (the lib's `loadCatalog` does not filter
+ * `retired` by kind).
+ */
+export function selectTombstones(
+  retired: CatalogTombstone[] | undefined,
+  sel: { kind?: string; slugs: string[] },
+): CatalogTombstone[] {
+  return (retired ?? []).filter(
+    (t) => (!sel.kind || t.kind === sel.kind) && (sel.slugs.length === 0 || sel.slugs.includes(t.slug)),
+  );
+}
+
+export function formatDiff(
+  allRows: CatalogDiffRow[],
+  formatRetirement?: CatalogLib["formatRetirement"],
+): string {
+  const rows = allRows.filter((r) => r.action !== "retire");
+  const retirements = allRows.filter((r) => r.action === "retire");
   const lines = rows.map((r) => {
     const hashes = r.status === "changed" ? `  ${r.hashBefore ?? "?"} → ${r.hashAfter ?? "?"}` : "";
     const head = `  ${STATUS_LABEL[r.status] ?? r.status} ${r.kind}/${r.slug}${hashes}`;
@@ -370,7 +425,25 @@ export function formatDiff(rows: CatalogDiffRow[]): string {
     return [head, ...detail, ...warn].join("\n");
   });
   const count = (s: CatalogDiffRow["status"]) => rows.filter((r) => r.status === s).length;
+  for (const r of retirements) {
+    lines.push(
+      ...(formatRetirement
+        ? formatRetirement({
+            kind: r.kind,
+            slug: r.slug,
+            replacedBy: r.replacedBy ?? null,
+            reason: r.reason ?? "",
+            status: r.status,
+            warnings: r.warnings,
+          })
+        : fallbackRetirementLines(r)),
+    );
+  }
   lines.push(`\n  ${count("new")} new · ${count("changed")} changed · ${count("unchanged")} unchanged`);
+  if (retirements.length > 0) {
+    const toSend = retirements.filter((r) => r.status !== "unchanged").length;
+    lines.push(`  ${retirements.length} retired: ${toSend} to send · ${retirements.length - toSend} unchanged`);
+  }
   return lines.join("\n");
 }
 
@@ -460,7 +533,9 @@ export async function runCatalog(
     // compose/require deps are other entries, which a slug filter would drop.
     const corpus = Array.isArray(loaded.corpus) ? loaded.corpus : loaded.entries;
     const entries = slugs.length ? corpus.filter((e) => slugs.includes(e.slug)) : loaded.entries;
-    const missing = slugs.filter((s) => !entries.some((e) => e.slug === s));
+    const retired = selectTombstones(loaded.retired, { kind: opts.kind, slugs });
+    // A named slug that is only a tombstone is a valid selection (retire just it).
+    const missing = slugs.filter((s) => !entries.some((e) => e.slug === s) && !retired.some((t) => t.slug === s));
     const validated = await libCall("validate", () => lib.validateCatalog(entries, { corpus }));
     if (!Array.isArray(validated)) {
       return fail("lib-shape", `validateCatalog in ${join(catalogDir, CATALOG_LIB_PATH)} did not return Problem[].`);
@@ -514,12 +589,12 @@ export async function runCatalog(
 
     // 3. Diff against the live catalog (diff + publish).
     const rows = await libCall("diff", () =>
-      lib.diffCatalog(entries, { cpUrl, token, fetchImpl: deps.fetchImpl }),
+      lib.diffCatalog(entries, { cpUrl, token, fetchImpl: deps.fetchImpl, retired }),
     );
     if (!Array.isArray(rows)) {
       return fail("lib-shape", `diffCatalog in ${join(catalogDir, CATALOG_LIB_PATH)} did not return a row array.`);
     }
-    if (!opts.json) out(formatDiff(rows));
+    if (!opts.json) out(formatDiff(rows, lib.formatRetirement));
     if (verb === "diff" || opts.dryRun) {
       if (opts.json) {
         const publishable = publisherWarning
@@ -534,7 +609,7 @@ export async function runCatalog(
     // 4. Confirm, then the ONE write door.
     if (!opts.yes) {
       const ok = await (deps.confirm ?? readlineConfirm)(
-        `\n  Publish ${entries.length} catalog entr${entries.length === 1 ? "y" : "ies"} (${scope}) to ${cpUrl} as synap-official? [y/N] `,
+        `\n  Publish ${entries.length} catalog entr${entries.length === 1 ? "y" : "ies"}${retired.length ? ` and ${retired.length} retirement${retired.length === 1 ? "" : "s"}` : ""} (${scope}) to ${cpUrl} as synap-official? [y/N] `,
       );
       if (!ok) {
         log.info("Cancelled — nothing was published.");
@@ -554,6 +629,7 @@ export async function runCatalog(
         fetchImpl: deps.fetchImpl,
         callerUserId: creds!.userId,
         log: opts.json ? () => {} : out,
+        retired,
       }),
     );
     if (!Array.isArray(results)) {
