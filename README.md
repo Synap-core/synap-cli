@@ -38,15 +38,16 @@ Detailed environment setup: [docs/INSTALL.md](docs/INSTALL.md)
 
 ### `synap init`
 
-Detects your environment and picks one of three paths:
+Detects your environment and picks one of two flows:
 
-| Path | When |
+| Flow | When |
 |---|---|
-| **A** — Existing OpenClaw | OpenClaw is already running locally |
-| **B** — Fresh server | No OpenClaw — starts pod + OpenClaw via Docker |
-| **C** — Desktop / managed pod | Connects to a Synap-hosted pod |
+| **Server** | A pod is already running on this machine. OpenClaw beside it: wired up. No OpenClaw: connects to the existing pod |
+| **Desktop / workstation** | Any other machine (Mac, Linux workstation, fresh VPS with Docker). Asks "Where should your Synap pod run?": log in to an existing pod, **This machine** (docker-compose, installs the pod here), managed by Synap, or self-host instructions |
 
-On a fresh server, OpenClaw's first boot takes a few minutes (image pull + init). Run `synap finish` once it's up.
+For the first key, "Sign in to Synap" is the recommended option; "Advanced: paste an API key" and "Advanced: use the PROVISIONING_TOKEN" (self-hosted only) come last.
+
+To set up OpenClaw on a fresh server, run `synap init` twice: the first run installs the pod ("This machine"); the second finds the pod local and wires OpenClaw. OpenClaw's first boot takes a few minutes (image pull + init). Run `synap finish` once it's up.
 
 ### `synap finish`
 
