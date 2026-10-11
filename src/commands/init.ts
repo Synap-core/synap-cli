@@ -43,7 +43,7 @@ import {
 } from "../lib/pod.js";
 import { provisionAgentKey, configureAgentContext } from "../lib/targets.js";
 import { seedAgentEntities } from "../lib/seed.js";
-import { login, isLoggedIn, listPods, getStoredToken, waitForPodCallback } from "../lib/auth.js";
+import { login, isLoggedIn, listPods, podUrlOf, getStoredToken, waitForPodCallback } from "../lib/auth.js";
 import { detectAgents, type DetectableAgent } from "../lib/agent-detect.js";
 import { createPodInBrowser } from "../lib/init-pod.js";
 import { buildPairLink, renderTerminalQr } from "../lib/pair-link.js";
@@ -1024,9 +1024,7 @@ export async function isStep(
       const cpUrl = process.env.SYNAP_CP_URL ?? "https://api.synap.live";
       try {
         const pods = await listPods(creds.token);
-        const matchingPod = pods.find((p: { podUrl?: string; url?: string }) =>
-          (p.podUrl ?? p.url ?? "").replace(/\/+$/, "") === podUrl.replace(/\/+$/, "")
-        );
+        const matchingPod = pods.find((p) => podUrlOf(p) === podUrl.replace(/\/+$/, ""));
 
         if (matchingPod) {
           const podId = (matchingPod as { id: string }).id;
@@ -1300,7 +1298,7 @@ async function loginAndSelectPod(): Promise<{ url: string; podId: string } | nul
 
     if (pods.length === 1) {
       const pod = pods[0];
-      const podUrl = pod.url || `https://${pod.subdomain}.synap.live`;
+      const podUrl = podUrlOf(pod);
       log.dim(`  • ${podUrl} (${pod.status})`);
 
       const { connect } = await prompts({
@@ -1328,10 +1326,9 @@ async function loginAndSelectPod(): Promise<{ url: string; podId: string } | nul
       name: "selectedPodUrl",
       message: "Which pod do you want to connect to?",
       choices: pods.map((pod) => {
-        const podUrl = pod.url || `https://${pod.subdomain}.synap.live`;
+        const podUrl = podUrlOf(pod);
         return {
-          title: `${pod.subdomain} (${pod.status}), ${pod.region}`,
-          description: podUrl,
+          title: `${pod.subdomain} · ${new URL(podUrl).host} (${pod.status})`,
           value: podUrl,
         };
       }),
@@ -1339,7 +1336,7 @@ async function loginAndSelectPod(): Promise<{ url: string; podId: string } | nul
 
     if (!selectedPodUrl) return null;
 
-    const selectedPod = pods.find((p) => (p.url || `https://${p.subdomain}.synap.live`) === selectedPodUrl);
+    const selectedPod = pods.find((p) => podUrlOf(p) === selectedPodUrl);
 
     const healthSpinner = ora("Checking pod health...").start();
     const status = await checkPodHealth(selectedPodUrl);

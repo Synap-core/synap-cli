@@ -385,13 +385,24 @@ export function getCpUrl(): string {
   return CP_URL;
 }
 
+/** One pod as the CP's `GET /pods` lists it (routes/pods.ts, `podUrl(pod)`). */
 export interface Pod {
   id: string;
   subdomain: string;
   customDomain: string | null;
   status: string;
-  region: string;
-  url: string;
+  podUrl?: string;
+}
+
+/**
+ * The pod's public URL. The CP sends it as `podUrl`; when absent, derive it the
+ * way the CP does (lib/pod-public-url.ts): the custom domain wins over
+ * `<subdomain>.synap.live`. Reading a non-existent `url` field here once sent
+ * a custom-domain pod (pod.antoinesrvt.synap.live) to perso.synap.live.
+ */
+export function podUrlOf(pod: Pick<Pod, "podUrl" | "customDomain" | "subdomain">): string {
+  if (pod.podUrl) return pod.podUrl.replace(/\/+$/, "");
+  return pod.customDomain ? `https://${pod.customDomain}` : `https://${pod.subdomain}.synap.live`;
 }
 
 export async function listPods(token: string): Promise<Pod[]> {
