@@ -24,6 +24,14 @@ const CP_URL =
 const LANDING_URL =
   process.env.SYNAP_LANDING_URL || "https://synap.live";
 
+/**
+ * How long a CLI login request lives on the CP (CLI_AUTH_TTL_SECONDS in
+ * synap-control-plane-api/src/lib/cli-auth.ts). Used only when the CP does not
+ * send `expiresAt`. Sign-in may happen on another device (a box over SSH), so
+ * the CLI waits as long as the request lives, not a couple of minutes.
+ */
+const CLI_LOGIN_REQUEST_TTL_MS = 15 * 60_000;
+
 const CREDENTIALS_DIR = path.join(os.homedir(), ".synap");
 const CREDENTIALS_FILE = path.join(CREDENTIALS_DIR, "credentials.json");
 
@@ -150,36 +158,31 @@ export async function loginWithToken(token: string): Promise<StoredCredentials |
 
 // ─── Browser Login Flow ────────────────────────────────────────────────────
 
-function openBrowser(url: string): void {
+/**
+ * Best effort: try to open a browser on THIS machine. Never throws, never
+ * blocks long. Callers print the URL first, so a box with no browser (SSH,
+ * a server) still has the one instruction it needs.
+ */
+export function openBrowser(url: string): boolean {
+  // Linux with no display: xdg-open fails, or starts a text browser that takes
+  // over the terminal. Don't try.
+  if (process.platform === "linux" && !process.env.DISPLAY && !process.env.WAYLAND_DISPLAY) {
+    return false;
+  }
+  const cmd =
+    process.platform === "darwin"
+      ? `open "${url}"`
+      : process.platform === "linux"
+        ? `xdg-open "${url}"`
+        : process.platform === "win32"
+          ? `start "" "${url}"`
+          : null;
+  if (!cmd) return false;
   try {
-    switch (process.platform) {
-      case "darwin":
-        execSync(`open "${url}"`);
-        break;
-      case "linux":
-        execSync(`xdg-open "${url}"`);
-        break;
-      case "win32":
-        execSync(`start "" "${url}"`);
-        break;
-      default:
-        // Can't open browser — caller handles fallback
-        throw new Error("Unsupported platform");
-    }
-  } catch (err) {
-    // On macOS, "open" can fail silently if no default browser is set or if the
-    // URL scheme isn't registered. Provide actionable feedback.
-    if (process.platform === "darwin") {
-      const msg = err instanceof Error ? err.message : String(err);
-      if (msg.includes("No application knows how to open") || msg.includes("LSOpenURLsWithRole")) {
-        throw new Error(
-          `Could not open browser: macOS has no default browser set.\n` +
-          `  Fix: Open System Settings → Desktop & Dock → Default web browser, or run:\n` +
-          `  open -a "Google Chrome" "${url}"`
-        );
-      }
-    }
-    throw new Error("Could not open browser");
+    execSync(cmd, { stdio: "ignore", timeout: 5000 });
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -206,7 +209,7 @@ export async function login(): Promise<StoredCredentials | null> {
   const { pollForApproval } = await import("./approval-poll.js");
 
   // 1. Create the login request on the CP (unauthenticated).
-  let created: { requestId: string; pollSecret: string; userCode: string };
+  let created: { requestId: string; pollSecret: string; userCode: string; expiresAt?: string };
   try {
     const res = await fetch(`${CP_URL}/auth/cli-request`, {
       method: "POST",
@@ -221,6 +224,11 @@ export async function login(): Promise<StoredCredentials | null> {
 
   const { requestId, pollSecret, userCode } = created;
   if (!requestId || !pollSecret || !userCode) return null;
+  const expiresAtMs = created.expiresAt ? Date.parse(created.expiresAt) : NaN;
+  const waitMs =
+    Number.isFinite(expiresAtMs) && expiresAtMs > Date.now()
+      ? expiresAtMs - Date.now()
+      : CLI_LOGIN_REQUEST_TTL_MS;
 
   // The CLI already owns its (self-hosted) pod locally — `synap login` is
   // ACCOUNT auth, not pod selection. Pass the active pod's host so the browser
@@ -243,20 +251,19 @@ export async function login(): Promise<StoredCredentials | null> {
   const approveUrl =
     `${LANDING_URL}/cli?request=${encodeURIComponent(requestId)}` +
     (podLabel ? `&pod=${encodeURIComponent(podLabel)}` : "");
-  console.log(`\n  Enter this code in your browser to authorize the login:\n`);
-  console.log(`      ${userCode}\n`);
-  try {
-    openBrowser(approveUrl);
-  } catch {
-    console.log(`  Open this URL in your browser:\n`);
-    console.log(`  ${approveUrl}\n`);
-  }
+  // The link + code are THE instruction (works from any device, e.g. over
+  // SSH); opening a browser here is only a shortcut.
+  console.log(`\n  Open this link on any device and enter the code:\n`);
+  console.log(`      ${approveUrl}`);
+  console.log(`      Code: ${userCode}\n`);
+  openBrowser(approveUrl);
 
   // 3. Poll for approval — the payload IS the StoredCredentials.
   try {
     const creds = await pollForApproval<StoredCredentials>({
       url: `${CP_URL}/auth/cli-request/${requestId}`,
       headers: { Authorization: `Bearer ${pollSecret}` },
+      timeoutMs: waitMs,
       isApproved: (d) => (d as { status?: string }).status === "approved",
       isRejected: (d) => {
         const s = (d as { status?: string }).status;
@@ -351,12 +358,9 @@ export async function waitForPodCallback(
       const callbackUrl = `http://localhost:${port}/callback`;
       const provisionUrl = `${LANDING_URL}/account/pod/provision?cli_callback=${encodeURIComponent(callbackUrl)}`;
 
-      try {
-        openBrowser(provisionUrl);
-      } catch {
-        console.log(`\n  Open this URL in your browser to provision your pod:\n`);
-        console.log(`  ${provisionUrl}\n`);
-      }
+      console.log(`\n  Open this link to create your pod:\n`);
+      console.log(`  ${provisionUrl}\n`);
+      openBrowser(provisionUrl);
     });
 
     const timeout = setTimeout(() => {
