@@ -109,13 +109,23 @@ function transcriptFromMeta(meta: Record<string, unknown>): string {
     .trim();
 }
 
-function titleFromTranscript(transcript: string, datetime?: string, id?: string): string {
-  const line = transcript.split(/\n/).map((l) => l.trim()).find(Boolean) ?? "";
-  if (line.length >= 8) {
-    return line.length > 80 ? `${line.slice(0, 79)}…` : line;
-  }
-  if (datetime) return `Voice note ${datetime}`;
-  return `Superwhisper ${id ?? "recording"}`;
+/**
+ * A voice note's title: its first spoken sentence when that is a complete,
+ * short phrase; otherwise "Voice note — <when>". Never the transcript cut at
+ * 80 characters + "…" — that left 158 voice notes on the founder's pod titled
+ * by the first words of a sentence (title audit 2026-10-12). Naming a long
+ * note by its content is the titler's job, not a slice's.
+ */
+export function titleFromTranscript(
+  transcript: string,
+  datetime?: string,
+  id?: string
+): string {
+  const line = transcript.replace(/\s+/g, " ").trim();
+  const sentence = line.match(/^(.+?[.!?])(?:\s|$)/)?.[1] ?? line;
+  if (sentence.length >= 8 && sentence.length <= 80) return sentence;
+  if (datetime) return `Voice note — ${datetime}`;
+  return `Voice note ${id ?? "recording"}`;
 }
 
 /** Expand a Superwhisper recordings root (or a single clip dir) into units. */
