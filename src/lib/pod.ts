@@ -131,6 +131,13 @@ export interface MultiPodConfig {
    * this map is the source of truth when a consumer knows which pod it is talking to.
    */
   agentKeysByPod?: Partial<Record<SurfaceName, Record<string, SurfaceAgentKey>>>;
+  /**
+   * Keys minted but NOT yet approved: surface → normalized podUrl → key. Never
+   * read for authentication. Kept so the next `connect` / `doctor --fix`
+   * resumes the SAME request instead of minting another (one approval, one key),
+   * and moved into `agentKeysByPod` only once the pod says it is live.
+   */
+  pendingAgentKeys?: Record<string, Record<string, PendingAgentKey>>;
   /** Workspace routing set by `synap connect` wizard — drives capture/recall defaults. */
   agentWorkspaceRouting?: AgentWorkspaceRouting;
 }
@@ -146,7 +153,7 @@ function readMultiConfig(): MultiPodConfig {
   try {
     if (fs.existsSync(CONFIG_FILE)) {
       const parsed = JSON.parse(fs.readFileSync(CONFIG_FILE, "utf-8")) as Partial<MultiPodConfig>;
-      if (parsed.pods) return { activePod: parsed.activePod ?? "", pods: parsed.pods, activeWorkspaceId: parsed.activeWorkspaceId, activeWorkspace: parsed.activeWorkspace, activeProjectId: parsed.activeProjectId, activeProject: parsed.activeProject, surfaces: parsed.surfaces, agentKeys: parsed.agentKeys, agentKeysByPod: parsed.agentKeysByPod, agentWorkspaceRouting: parsed.agentWorkspaceRouting };
+      if (parsed.pods) return { activePod: parsed.activePod ?? "", pods: parsed.pods, activeWorkspaceId: parsed.activeWorkspaceId, activeWorkspace: parsed.activeWorkspace, activeProjectId: parsed.activeProjectId, activeProject: parsed.activeProject, surfaces: parsed.surfaces, agentKeys: parsed.agentKeys, agentKeysByPod: parsed.agentKeysByPod, pendingAgentKeys: parsed.pendingAgentKeys, agentWorkspaceRouting: parsed.agentWorkspaceRouting };
       // File exists but has old/unrecognized shape — fall through to migration
     }
   } catch { /* fall through */ }
@@ -531,6 +538,44 @@ export function getSurfaceAgentKey(surface: SurfaceName, podUrl?: string): Surfa
     return null; // do not return wrong-pod key
   }
   return legacy;
+}
+
+/** A minted agent key waiting for its owner's approval (see `pendingAgentKeys`). */
+export interface PendingAgentKey {
+  hubApiKey: string;
+  agentUserId: string;
+  podUrl: string;
+  /** The key's id on the pod (the approval page names it). */
+  keyId: string;
+  approvalUrl: string;
+  /** This computer's instance label the key was minted with. */
+  instanceId?: string;
+  createdAt: string;
+}
+
+export function getPendingAgentKey(surface: string, podUrl: string): PendingAgentKey | null {
+  return readMultiConfig().pendingAgentKeys?.[surface]?.[normalizePodUrl(podUrl)] ?? null;
+}
+
+export function setPendingAgentKey(surface: string, key: PendingAgentKey): void {
+  const config = readMultiConfig();
+  config.pendingAgentKeys = config.pendingAgentKeys ?? {};
+  const bySurface = config.pendingAgentKeys[surface] ?? {};
+  bySurface[normalizePodUrl(key.podUrl)] = key;
+  config.pendingAgentKeys[surface] = bySurface;
+  writeMultiConfig(config);
+}
+
+export function clearPendingAgentKey(surface: string, podUrl: string): void {
+  const config = readMultiConfig();
+  const bySurface = config.pendingAgentKeys?.[surface];
+  if (!bySurface || !(normalizePodUrl(podUrl) in bySurface)) return;
+  delete bySurface[normalizePodUrl(podUrl)];
+  if (Object.keys(bySurface).length === 0) delete config.pendingAgentKeys![surface];
+  // writeMultiConfig MERGES over the file, so an emptied map must be written
+  // as an empty object, never dropped (a dropped key would keep the old value).
+  config.pendingAgentKeys = config.pendingAgentKeys ?? {};
+  writeMultiConfig(config);
 }
 
 export function setAgentWorkspaceRouting(routing: AgentWorkspaceRouting): void {

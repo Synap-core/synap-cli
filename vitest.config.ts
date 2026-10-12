@@ -10,6 +10,8 @@ import { defineConfig } from "vitest/config";
  */
 export default defineConfig({
   test: {
+    // A throwaway HOME for every test file — see test/setup/temp-home.ts.
+    setupFiles: ["./test/setup/temp-home.ts"],
     exclude: [
       "**/node_modules/**",
       "**/dist/**",

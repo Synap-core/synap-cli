@@ -19,6 +19,7 @@ import prompts from "prompts";
 import { log } from "../utils/logger.js";
 import { installSkills, getDeliverableSkills } from "./skills-installer.js";
 import { TARGET_KEY_MINT, takePreApprovedKey } from "./batch-approval.js";
+import { machineInstanceId } from "./machine-instance.js";
 import {
   resolveHubConfig,
   resolveUserId,
@@ -801,79 +802,24 @@ export async function writeClaudeCodeEnv(
   const me = await meRes.json() as { id?: string; scopes?: string[] };
   if (!me.id) throw new Error("/api/hub/users/me returned no user ID — is the pod running?");
 
-  // Approved already — with this computer, in the device flow — so mint nothing.
-  const preApproved = takePreApprovedKey("claude-code");
-  let agentSetup: { hubApiKey?: string; agentUserId?: string; alreadyValid?: boolean };
-  if (preApproved) {
-    agentSetup = { hubApiKey: preApproved.hubApiKey, agentUserId: preApproved.agentUserId };
-  } else {
-    const agentSetupRes = await fetch(`${podBase}/api/hub/setup/agent`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${cfg.apiKey}` },
-      body: JSON.stringify({ agentType: "claude-code", idempotent: true }),
-      signal: AbortSignal.timeout(30000),
-    });
-    if (!agentSetupRes.ok) {
-      const text = await agentSetupRes.text().catch(() => agentSetupRes.statusText);
-      throw new Error(credentialError("claude-code", agentSetupRes.status, text));
-    }
-    agentSetup = await agentSetupRes.json() as { hubApiKey?: string; agentUserId?: string; alreadyValid?: boolean };
-  }
-  if (agentSetup.alreadyValid) {
-    // Idempotent path — pod says the agent key is still valid but doesn't re-transmit it.
-    // Resolution priority: stored agentKey config > settings.json env var.
-    // Self-heal: verify the candidate resolves to the expected agent user, not the human user.
-    const { getSurfaceAgentKey: readSurfaceKey } = await import("./pod.js");
-    const storedKey = readSurfaceKey("claude-code");
-    const candidate =
-      storedKey?.hubApiKey ??
-      (settings.env as Record<string, string>)?.["SYNAP_HUB_API_KEY"] ??
-      null;
+  // ONE door for the key: `provisionAgentKey` takes a key approved with this
+  // computer (device flow), resumes a request already filed from here, reuses
+  // the stored live key, or files a new request — with this computer's
+  // instance label — and WAITS for its approval. It never returns a pending
+  // key. (This function used to POST /setup/agent itself and wrote the still-
+  // pending key into every config — the 2026-10-12 incident.)
+  const provisioned = await provisionAgentKey(cfg.podUrl, cfg.apiKey, "claude-code", {
+    idempotent: true,
+    surfaceName: "claude-code",
+    fallbackCandidate: (settings.env as Record<string, string> | undefined)?.["SYNAP_HUB_API_KEY"],
+  });
+  effectiveApiKey = provisioned.hubApiKey;
+  const agentSetup = { agentUserId: provisioned.agentUserId, alreadyValid: provisioned.reused };
 
-    const expectedAgentUserId = agentSetup.agentUserId ?? storedKey?.agentUserId;
-    let candidateIsValid = false;
-
-    if (candidate && expectedAgentUserId) {
-      try {
-        // Use auth/status — it returns the key's actual owner userId.
-        // For agent keys this is the agent userId, not the human userId.
-        // users/me always returns the human owner regardless of key type.
-        const verifyRes = await fetch(`${podBase}/api/hub/auth/status`, {
-          headers: { Authorization: `Bearer ${candidate}` },
-          signal: AbortSignal.timeout(30000),
-        });
-        if (verifyRes.ok) {
-          const verifyStatus = await verifyRes.json() as { userId?: string };
-          candidateIsValid = verifyStatus.userId === expectedAgentUserId;
-        }
-      } catch { /* reprovision below */ }
-    }
-
-    if (candidateIsValid && candidate) {
-      effectiveApiKey = candidate;
-    } else {
-      // Self-heal: stored key is stale, wrong identity, or never persisted.
-      // Reprovision without idempotent flag to get a fresh agent key.
-      const reproRes = await fetch(`${podBase}/api/hub/setup/agent`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${cfg.apiKey}` },
-        body: JSON.stringify({ agentType: "claude-code" }),
-        signal: AbortSignal.timeout(30000),
-      });
-      if (reproRes.ok) {
-        const repro = await reproRes.json() as { hubApiKey?: string; agentUserId?: string; alreadyValid?: boolean };
-        effectiveApiKey = repro.hubApiKey ?? candidate ?? cfg.apiKey;
-        if (repro.agentUserId) agentSetup.agentUserId = repro.agentUserId;
-      } else {
-        // Reprovision failed — fall back to whatever we have, warn clearly
-        effectiveApiKey = candidate ?? cfg.apiKey;
-        log.warn("Could not reprovision agent key — using fallback. Run `synap connect --target=claude-code` to fix.");
-      }
-    }
-  } else {
-    if (!agentSetup.hubApiKey) throw new Error("setup/agent succeeded but returned no hubApiKey — check pod logs.");
-    effectiveApiKey = agentSetup.hubApiKey;
-  }
+  // The last gate before ANY file is written: the pod must not say this key is
+  // pending, revoked, expired or unknown. A refused key changes nothing here.
+  const { assertKeyWritable } = await import("./key-state.js");
+  await assertKeyWritable(cfg.podUrl, effectiveApiKey);
 
   // Persist the provisioned key to agentKeys["claude-code"] so SYNAP_AGENT=claude-code
   // works in CLI sessions outside of this env (e.g. terminal, not just inside Claude Code).
@@ -1011,27 +957,6 @@ export function openBrowserUrl(url: string): void {
   exec(cmd, () => { /* best-effort */ });
 }
 
-async function waitForKeyApproval(
-  podBase: string,
-  humanApiKey: string,
-  pendingToken: string,
-  agentType: string
-): Promise<void> {
-  // Shared poll loop (also backs CP `synap login`) — see lib/approval-poll.ts.
-  const { pollForApproval } = await import("./approval-poll.js");
-  await pollForApproval<void>({
-    url: `${podBase}/api/hub/setup/agent/pending/${pendingToken}`,
-    headers: { Authorization: `Bearer ${humanApiKey}` },
-    isApproved: (d) => (d as { status?: string }).status === "active",
-    isRejected: (d) => (d as { status?: string }).status === "rejected",
-    onApproved: () => undefined,
-    rejectedError: `Agent key for ${agentType} was rejected in the browser. Run connect again to re-request.`,
-    timeoutError:
-      `Timed out waiting for approval of ${agentType} agent key (120s). ` +
-      `Open the review URL manually or run connect again.`,
-  });
-}
-
 /** The pod answered a key mint with something unusable (e.g. no agent id). */
 export class AgentKeyMintError extends Error {
   constructor(
@@ -1064,6 +989,8 @@ export async function provisionAgentKey(
     idempotent = false,
     surfaceName,
     deferApproval = false,
+    instanceId,
+    fallbackCandidate,
   }: {
     requireApproval?: boolean;
     idempotent?: boolean;
@@ -1073,6 +1000,14 @@ export async function provisionAgentKey(
      * caller approves several at once (`batch-approval.ts`, V1 D5).
      */
     deferApproval?: boolean;
+    /**
+     * This computer's instance label (`machine-instance.ts`). Approving the
+     * key then replaces only THIS computer's earlier key, never another
+     * computer's. Defaults to the machine-derived label for the surface.
+     */
+    instanceId?: string;
+    /** Another place this surface's key may be stored (a client's own config), tried when the CLI config has none. */
+    fallbackCandidate?: string;
   } = {}
 ): Promise<{
   hubApiKey: string;
@@ -1087,12 +1022,49 @@ export async function provisionAgentKey(
     const pre = takePreApprovedKey(agentType);
     if (pre) return { ...pre, reused: false };
   }
+  const surface = surfaceName ?? agentType;
+  const instance = instanceId ?? machineInstanceId(surface);
+  const podBase = podUrl.replace(/\/$/, "");
+  const pod = await import("./pod.js");
+
+  // A request already filed from this computer is RESUMED, never filed again:
+  // one approval, one key (2026-10-12: three orphaned requests in one evening).
+  const recorded = pod.getPendingAgentKey(surface, podUrl);
+  if (recorded) {
+    const { classifyRecordedPending } = await import("./key-approval.js");
+    const now = await classifyRecordedPending(recorded);
+    if (now.kind === "active") {
+      pod.clearPendingAgentKey(surface, podUrl);
+      return { hubApiKey: recorded.hubApiKey, agentUserId: recorded.agentUserId, reused: true };
+    }
+    if (now.kind === "pending" || now.kind === "unknown") {
+      if (deferApproval) {
+        return {
+          hubApiKey: recorded.hubApiKey,
+          agentUserId: recorded.agentUserId,
+          reused: true,
+          pending: { pendingToken: recorded.keyId, reviewUrl: now.state.approvalUrl ?? recorded.approvalUrl },
+        };
+      }
+      await awaitApprovalOrThrow({
+        podUrl,
+        humanApiKey,
+        agentType,
+        surface,
+        hubApiKey: recorded.hubApiKey,
+        pendingToken: recorded.keyId,
+        approvalUrl: now.state.approvalUrl ?? recorded.approvalUrl,
+      });
+      return { hubApiKey: recorded.hubApiKey, agentUserId: recorded.agentUserId, reused: true };
+    }
+    pod.clearPendingAgentKey(surface, podUrl); // dead: file a fresh request below
+  }
+
   // `idempotent: true` reuses the pod's existing valid key for this agentType
   // instead of minting a fresh one + revoking the old — required by callers whose
   // running process holds a long-lived key (e.g. `bridge-setup`), so re-running
   // setup doesn't break a live bridge. Default false preserves the mint-fresh
   // behavior every other caller (connect / pods / init) already relied on.
-  const podBase = podUrl.replace(/\/$/, "");
   let res: Response;
   try {
     res = await fetch(`${podBase}/api/hub/setup/agent`, {
@@ -1101,7 +1073,7 @@ export async function provisionAgentKey(
         "Content-Type": "application/json",
         Authorization: `Bearer ${humanApiKey}`,
       },
-      body: JSON.stringify({ agentType, idempotent, requireApproval }),
+      body: JSON.stringify({ agentType, idempotent, requireApproval, instanceId: instance }),
       signal: AbortSignal.timeout(30000),
     });
   } catch (err) {
@@ -1134,13 +1106,11 @@ export async function provisionAgentKey(
   // no rotation, no redeploy. We mint fresh ONLY when no valid local key exists
   // (e.g. a brand-new machine). This generalizes the claude-code self-heal.
   if (!body.hubApiKey && body.alreadyValid && idempotent) {
-    const { getSurfaceAgentKey } = await import("./pod.js");
     // Use surfaceName for local storage lookup if provided; otherwise agentType.
     // This handles cases where pod agentType ≠ CLI surface (e.g. ChatGPT uses
     // "generic" but CLI surface is "chatgpt").
-    const lookupType = surfaceName ?? agentType;
-    const stored = getSurfaceAgentKey(lookupType as import("./pod.js").SurfaceName);
-    const candidate = stored?.hubApiKey;
+    const stored = pod.getSurfaceAgentKey(surface as import("./pod.js").SurfaceName);
+    const candidate = stored?.hubApiKey ?? fallbackCandidate;
     const expectedAgentUserId = body.agentUserId ?? stored?.agentUserId;
     if (candidate && expectedAgentUserId) {
       // auth/status returns the KEY's owner userId (the agent's, for agent keys).
@@ -1177,7 +1147,9 @@ export async function provisionAgentKey(
     return provisionAgentKey(podUrl, humanApiKey, agentType, {
       requireApproval,
       idempotent: false,
+      surfaceName,
       deferApproval,
+      instanceId: instance,
     });
   }
   if (!body.hubApiKey) {
@@ -1186,34 +1158,92 @@ export async function provisionAgentKey(
       `This is a server-side bug — check the pod logs.`
     );
   }
-  if (body.requiresApproval && body.pendingToken && body.reviewUrl && deferApproval) {
+  if (body.requiresApproval && body.pendingToken && body.reviewUrl) {
     // The pre-approved key is handed to an installer that enrolls and scopes
     // by this id: an empty one would connect an agent the pod cannot name.
     if (!body.agentUserId) {
       throw new AgentKeyMintError(agentType, `The pod minted a ${agentType} key but named no agent for it.`);
     }
-    return {
+    // Recorded BEFORE any wait: an interrupted or timed-out wait resumes this
+    // same request next time instead of filing another.
+    pod.setPendingAgentKey(surface, {
       hubApiKey: body.hubApiKey,
       agentUserId: body.agentUserId,
-      reused: false,
-      pending: { pendingToken: body.pendingToken, reviewUrl: body.reviewUrl },
-    };
-  }
-  if (body.requiresApproval && body.pendingToken && body.reviewUrl) {
-    log.info(`\n  Opening your pod to review this agent key request…`);
-    log.dim(`  ${body.reviewUrl}`);
-    openBrowserUrl(body.reviewUrl);
-    process.stdout.write(chalk.dim("  Waiting for approval"));
-    const ticker = setInterval(() => process.stdout.write(chalk.dim(".")), 2000);
-    try {
-      await waitForKeyApproval(podBase, humanApiKey, body.pendingToken, agentType);
-    } finally {
-      clearInterval(ticker);
-      process.stdout.write("\n");
+      podUrl,
+      keyId: body.pendingToken,
+      approvalUrl: body.reviewUrl,
+      instanceId: instance,
+      createdAt: new Date().toISOString(),
+    });
+    if (deferApproval) {
+      return {
+        hubApiKey: body.hubApiKey,
+        agentUserId: body.agentUserId,
+        reused: false,
+        pending: { pendingToken: body.pendingToken, reviewUrl: body.reviewUrl },
+      };
     }
+    await awaitApprovalOrThrow({
+      podUrl,
+      humanApiKey,
+      agentType,
+      surface,
+      hubApiKey: body.hubApiKey,
+      pendingToken: body.pendingToken,
+      approvalUrl: body.reviewUrl,
+    });
     log.success(`  Approved! Writing ${agentType} agent key.`);
+    return { hubApiKey: body.hubApiKey, agentUserId: body.agentUserId, reused: false };
+  }
+  // Minted live (no approval asked). Still never hand out a key the pod says
+  // is unusable — callers write what this returns into configs.
+  if (!deferApproval) {
+    const { assertKeyWritable } = await import("./key-state.js");
+    await assertKeyWritable(podUrl, body.hubApiKey);
   }
   return { hubApiKey: body.hubApiKey, agentUserId: body.agentUserId ?? "", reused: false };
+}
+
+/**
+ * Open the approval page and wait for THIS pending key to go live. Approved →
+ * the recorded request is cleared. Rejected → cleared, and a plain error.
+ * Timed out → the request stays recorded and `AgentKeyAwaitingApprovalError`
+ * names the link and the resume command: nothing is written anywhere.
+ */
+async function awaitApprovalOrThrow(args: {
+  podUrl: string;
+  humanApiKey: string;
+  agentType: string;
+  surface: string;
+  hubApiKey: string;
+  pendingToken: string;
+  approvalUrl: string;
+}): Promise<void> {
+  const { waitForKeyLive, openAndWait, AgentKeyAwaitingApprovalError } = await import("./key-approval.js");
+  const pod = await import("./pod.js");
+  const outcome = await openAndWait(
+    args.agentType,
+    args.approvalUrl,
+    () =>
+      waitForKeyLive({
+        podUrl: args.podUrl,
+        pendingKey: args.hubApiKey,
+        pendingToken: args.pendingToken,
+        humanApiKey: args.humanApiKey,
+      }),
+    openBrowserUrl
+  );
+  if (outcome === "approved") {
+    pod.clearPendingAgentKey(args.surface, args.podUrl);
+    return;
+  }
+  if (outcome === "rejected") {
+    pod.clearPendingAgentKey(args.surface, args.podUrl);
+    throw new Error(
+      `The ${args.agentType} connection was declined on the pod. Run connect again to ask again.`
+    );
+  }
+  throw new AgentKeyAwaitingApprovalError(args.agentType, args.approvalUrl);
 }
 
 /**

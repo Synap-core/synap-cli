@@ -30,9 +30,14 @@ import { resolveHubConfig, hubGet, HubError, type HubConfig } from "../lib/hub-c
 import { formatKeySource, resolveKeySource } from "../lib/key-source.js";
 import { resolveLensProvenance, type LensRung } from "../lib/describe-lens.js";
 import { samePodOrigin } from "../lib/project-ref.js";
+import { fetchKeyState } from "../lib/key-state.js";
+import { describeKeyState, type Diagnosis } from "../lib/key-diagnosis.js";
+import type { KeyHealthReport } from "../lib/key-doctor.js";
 
 interface DoctorOpts {
   json?: boolean;
+  /** Perform the one right action per key problem, then verify with a real MCP initialize. */
+  fix?: boolean;
 }
 
 interface CheckResult {
@@ -266,11 +271,13 @@ export async function doctor(opts: DoctorOpts = {}): Promise<void> {
       checks.push({ name: "API key authenticates", ok: true, detail: "key accepted" });
     } catch (err) {
       const is401 = err instanceof HubError ? err.status === 401 : false;
+      // Say WHY — awaiting approval, replaced, expired — never a guess.
+      const why = is401 && cfgResolved ? describeKeyState(await fetchKeyState(cfgResolved.podUrl, cfgResolved.apiKey)) : null;
       checks.push({
         name: "API key authenticates",
         ok: false,
-        detail: is401 ? "the pod rejected this key (expired or revoked)" : `could not verify (${err instanceof Error ? err.message : String(err)})`,
-        fix: `Run: synap login --reconnect ${activeName}`,
+        detail: is401 ? `the pod rejected this key: it ${why}` : `could not verify (${err instanceof Error ? err.message : String(err)})`,
+        fix: is401 ? "See the key health below — run: synap doctor --fix" : `Run: synap login --reconnect ${activeName}`,
       });
     }
   }
@@ -371,13 +378,32 @@ export async function doctor(opts: DoctorOpts = {}): Promise<void> {
     checks.push(brokerCheck(providers, diagnostics));
   }
 
+  // ── (f) Every key configured for this pod, and why each one fails ───────
+  let keyHealth: KeyHealthReport | undefined;
+  if (hostServed) {
+    const { checkKeyHealth, keyProblems } = await import("../lib/key-doctor.js");
+    keyHealth = await checkKeyHealth(cfgResolved?.podUrl ?? podUrl);
+    const problems = keyProblems(keyHealth);
+    const failing = problems.filter((d) => d.severity === "error");
+    checks.push({
+      name: "Keys on this computer",
+      ok: problems.length === 0,
+      unknown: problems.length > 0 && failing.length === 0 && problems.every((d) => d.code === "unverifiable"),
+      detail:
+        problems.length === 0
+          ? `${keyHealth.locations.length} configured cop${keyHealth.locations.length === 1 ? "y" : "ies"}, all working`
+          : `${problems.length} problem${problems.length === 1 ? "" : "s"} — see Key health below`,
+      fix: problems.length ? "Run: synap doctor --fix" : undefined,
+    });
+  }
+
   await finish(checks, opts, {
     // Prefer the pod resolveHubConfig actually hit — health-check URL can lag
     // the active profile when the shell is env-pinned to another pod.
     podUrl: cfgResolved?.podUrl ?? podUrl,
     workspaceId: cfgResolved?.workspaceId,
     projectId: cfgResolved?.projectId,
-  });
+  }, keyHealth);
 }
 
 /**
@@ -627,10 +653,26 @@ async function activeLensProvenance(podUrl?: string) {
   return resolveLensProvenance(rungs);
 }
 
+/** A diagnosis for JSON output — never a key's plaintext. */
+function publicDiagnosis(d: Diagnosis) {
+  return {
+    code: d.code,
+    severity: d.severity,
+    surface: d.surface,
+    title: d.title,
+    lines: d.lines,
+    command: d.command,
+    action: d.action,
+    approvalUrl: d.approvalUrl,
+    locations: d.locations.map((l) => l.label),
+  };
+}
+
 async function finish(
   checks: CheckResult[],
   opts: DoctorOpts,
-  lens: { podUrl?: string; workspaceId?: string; projectId?: string }
+  lens: { podUrl?: string; workspaceId?: string; projectId?: string },
+  keyHealth?: KeyHealthReport
 ): Promise<void> {
   // Green requires every check to have VERIFIED something. An undetermined
   // check suppresses green (it is not a pass) but does not fail the run — only
@@ -649,6 +691,7 @@ async function finish(
           ok: allOk,
           undetermined: anyUnknown,
           checks,
+          keyHealth: keyHealth ? keyHealth.diagnoses.map(publicDiagnosis) : null,
           lens: {
             pod: activeName,
             podUrl: lens.podUrl,
@@ -673,6 +716,26 @@ async function finish(
     console.log(`  ${mark} ${chalk.bold(c.name)}`);
     log.dim(`     ${c.detail}`);
     if (!c.ok && c.fix) log.dim(`     → ${c.fix}`);
+  }
+
+  if (keyHealth) {
+    log.blank();
+    log.heading("Key health");
+    const { printKeyHealth, fixKeyHealth, keyProblems } = await import("../lib/key-doctor.js");
+    printKeyHealth(keyHealth, { fixHint: !opts.fix });
+    if (opts.fix && keyProblems(keyHealth).length > 0) {
+      log.blank();
+      log.heading("Fixing");
+      const outcomes = await fixKeyHealth(keyHealth);
+      for (const o of outcomes) console.log(`  ${o.ok ? chalk.green("✓") : chalk.red("✗")} ${o.message}`);
+      // Every problem fixed AND verified live over MCP: the key row is green now.
+      const keyRow = checks.find((c) => c.name === "Keys on this computer");
+      if (keyRow && outcomes.length > 0 && outcomes.every((o) => o.ok)) {
+        keyRow.ok = true;
+        keyRow.unknown = false;
+        keyRow.detail = "fixed and verified (MCP initialize)";
+      }
+    }
   }
 
   log.blank();
@@ -722,10 +785,13 @@ async function finish(
     log.dim("  The env var wins over the ● active profile. Unset it (or open a fresh shell) for the profile to apply.");
   }
 
+  // Recomputed: a `--fix` above may have turned the key row green.
+  const finalOk = checks.every((c) => c.ok);
+  const finalFailed = checks.some((c) => !c.ok && !c.unknown);
   log.blank();
-  if (allOk) {
+  if (finalOk) {
     log.success("All checks passed.");
-  } else if (anyFailed) {
+  } else if (finalFailed) {
     log.warn("One or more checks failed — see the fixes above.");
     process.exitCode = 1;
   } else {

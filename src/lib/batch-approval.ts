@@ -92,9 +92,23 @@ export async function podSupportsBatchApproval(podUrl: string): Promise<boolean>
   return res !== null && res.status !== 404;
 }
 
+/** One pending key, as the wait sees it. */
+export interface PendingKeyWait {
+  podUrl: string;
+  pendingKey: string;
+  pendingToken: string;
+  humanApiKey: string;
+}
+
 export interface BatchApprovalDeps {
   provision?: typeof import("./targets.js").provisionAgentKey;
-  poll?: typeof import("./approval-poll.js").pollForApproval;
+  /**
+   * Wait for one pending key to go live. Default `waitForKeyLive`: it asks
+   * about the pending key WITH the pending key (`/auth/key-state`), so the
+   * wait still sees the approval when the person's own key is the one that
+   * approval just replaced (2026-10-12). Older pods: the per-key pending door.
+   */
+  wait?: (p: PendingKeyWait) => Promise<import("./key-approval.js").KeyWaitOutcome>;
   openUrl?: (url: string) => void;
   supportsBatch?: (podUrl: string) => Promise<boolean>;
 }
@@ -119,7 +133,7 @@ export async function approveAgentKeysAtOnce(
   deps: BatchApprovalDeps = {}
 ): Promise<BatchApprovalResult> {
   const provision = deps.provision ?? (await import("./targets.js")).provisionAgentKey;
-  const poll = deps.poll ?? (await import("./approval-poll.js")).pollForApproval;
+  const wait = deps.wait ?? (await import("./key-approval.js")).waitForKeyLive;
   const openUrl = deps.openUrl ?? (await import("./targets.js")).openBrowserUrl;
   const supportsBatch = deps.supportsBatch ?? podSupportsBatchApproval;
   const podBase = podUrl.replace(/\/$/, "");
@@ -179,25 +193,29 @@ export async function approveAgentKeysAtOnce(
   try {
     const outcomes = await Promise.allSettled(
       pending.map((p) =>
-        poll<void>({
-          url: `${podBase}/api/hub/setup/agent/pending/${p.pendingToken}`,
-          headers: { Authorization: `Bearer ${humanApiKey}` },
-          isApproved: (d) => (d as { status?: string }).status === "active",
-          isRejected: (d) => (d as { status?: string }).status === "rejected",
-          onApproved: () => undefined,
-          rejectedError: "It was declined on the pod.",
-          timeoutError: "Nobody approved it in time.",
-        })
+        wait({ podUrl: podBase, pendingKey: p.hubApiKey, pendingToken: p.pendingToken, humanApiKey })
       )
     );
     process.stdout.write("\n");
+    const { clearPendingAgentKey } = await import("./pod.js");
     outcomes.forEach((o, i) => {
       const p = pending[i]!;
-      if (o.status === "fulfilled") {
+      const outcome = o.status === "fulfilled" ? o.value : null;
+      if (outcome === "approved") {
+        // Live now: the recorded request is done; the installer writes the key.
+        clearPendingAgentKey(p.agentType, podUrl);
         ready.set(p.agentType, { hubApiKey: p.hubApiKey, agentUserId: p.agentUserId });
+        return;
+      }
+      notApproved.push(p.target);
+      if (outcome === "rejected") {
+        clearPendingAgentKey(p.agentType, podUrl);
+        reasons[p.target] = "It was declined on the pod.";
+      } else if (outcome === "timeout") {
+        // Still filed and recorded: the next connect resumes this request.
+        reasons[p.target] = `Nobody approved it in time — approve it at ${p.reviewUrl}, then run: synap doctor --fix`;
       } else {
-        notApproved.push(p.target);
-        reasons[p.target] = o.reason instanceof Error ? o.reason.message : String(o.reason);
+        reasons[p.target] = o.status === "rejected" && o.reason instanceof Error ? o.reason.message : String(o.status === "rejected" ? o.reason : "unknown");
       }
     });
   } finally {

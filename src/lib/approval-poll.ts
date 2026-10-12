@@ -4,8 +4,8 @@
  * The create→approve→poll shape used by both:
  *   - CP login (`login()` in auth.ts) — poll the CP for a session token + pod,
  *     gated by a pollSecret Bearer header.
- *   - Pod agent-key approval (`provisionAgentKey` in targets.ts) — poll the pod
- *     for key activation, gated by the human API key.
+ *   - (Pod agent-key approval no longer polls here: it waits on the pending
+ *     key's own `/auth/key-state` — `waitForKeyLive` in key-approval.ts.)
  *
  * No localhost server, no redirect back to the CLI — the browser only APPROVES
  * a pending record; the CLI holds a secret and polls for the outcome. Every

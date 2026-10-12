@@ -226,9 +226,10 @@ program
 
 program
   .command("doctor")
-  .description("Coherence preflight: pod host resolves, key authenticates, workspace/project exist on THIS pod — catches config drift in one call")
+  .description("Coherence preflight: pod host resolves, key authenticates, workspace/project exist on THIS pod, and why each configured key does or does not work — catches config drift in one call")
   .option("--json", "Output as JSON")
-  .action(async (opts: { json?: boolean }) => {
+  .option("--fix", "Fix key problems: finish a pending approval, give this computer its own key, or rewrite stale copies — then verify over MCP")
+  .action(async (opts: { json?: boolean; fix?: boolean }) => {
     const { doctor } = await import("./commands/doctor.js");
     await doctor(opts);
   });

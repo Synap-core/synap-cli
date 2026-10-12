@@ -29,6 +29,8 @@
  */
 
 import chalk from "chalk";
+import { fetchKeyState } from "../lib/key-state.js";
+import { describeKeyState } from "../lib/key-diagnosis.js";
 import { log, banner } from "../utils/logger.js";
 import { resolveHubConfig, HubError, type HubConfig } from "../lib/hub-client.js";
 import { getSurfaceAgentKey } from "../lib/pod.js";
@@ -249,6 +251,16 @@ export async function whoami(opts: { json?: boolean } = {}): Promise<void> {
           canApprove:
             winnerProbe.kind === "ok" ? classifyReviewer(winnerProbe.status) : "unknown",
           probe: winnerProbe.kind,
+          keyHealth: (await (await import("../lib/key-doctor.js")).checkKeyHealth(cfg.podUrl)).diagnoses.map((d) => ({
+            code: d.code,
+            severity: d.severity,
+            surface: d.surface,
+            title: d.title,
+            lines: d.lines,
+            command: d.command,
+            approvalUrl: d.approvalUrl,
+            locations: d.locations.map((l) => l.label),
+          })),
           divergence: diverges
             ? { winner, envKey: keyTail(envKey!), surfaceKey: keyTail(surfaceKey!.hubApiKey) }
             : null,
@@ -269,13 +281,21 @@ export async function whoami(opts: { json?: boolean } = {}): Promise<void> {
   if (winnerProbe.kind === "ok") {
     renderAuthStatus(winnerProbe.status, effective);
   } else if (winnerProbe.kind === "revoked") {
-    log.error("This key is revoked or expired — /auth/status returned 401.");
-    log.hint("Refresh it with: synap login --reconnect");
+    // Not "revoked or expired" by guess: ask the pod WHY (a key awaiting
+    // approval was once reported revoked here, and sent the fix the wrong way).
+    const why = describeKeyState(await fetchKeyState(cfg.podUrl, cfg.apiKey));
+    log.error(`The pod refuses this key: it ${why}.`);
+    log.hint("See Key health below — or run: synap doctor --fix");
   } else {
     log.warn(`Could not introspect key: ${winnerProbe.message}`);
   }
 
-  // 4. Divergence report — still the headline when env vs surface disagree.
+  // 4. Key health — the SAME diagnosis `synap doctor` prints, one per problem.
+  const { checkKeyHealth, printKeyHealth } = await import("../lib/key-doctor.js");
+  log.heading("Key health");
+  printKeyHealth(await checkKeyHealth(cfg.podUrl), { fixHint: true });
+
+  // 5. Divergence report — still the headline when env vs surface disagree.
   if (!diverges) {
     if (envKey && surfacePinnedHere) {
       log.dim("\nEnv key and claude-code surface key agree — no divergence.");
