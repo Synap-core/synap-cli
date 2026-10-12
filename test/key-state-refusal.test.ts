@@ -41,4 +41,9 @@ describe("fetchKeyState: refusal vs unreachable", () => {
     expect(s.state).toBe("inactive");
     expect(writeGate(s).allow).toBe(false);
   });
+
+  it("a pod with neither door (404 on both) cannot be asked — unreachable, not a refusal", async () => {
+    const s = await fetchKeyState(POD, "k", { fetch: answering(404) });
+    expect(s.state).toBe("unreachable");
+  });
 });

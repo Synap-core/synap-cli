@@ -60,11 +60,13 @@ export async function fetchKeyState(
     headers: { Authorization: `Bearer ${key}` },
     signal: AbortSignal.timeout(deps.timeoutMs ?? 15_000),
   });
+  const failure = (err: unknown) =>
+    (err as Error)?.name === "TimeoutError" ? `no answer in ${Math.round((deps.timeoutMs ?? 15_000) / 1000)}s` : (err as Error).message;
   let res: Response;
   try {
     res = await f(`${base}/api/hub/auth/key-state`, init());
   } catch (err) {
-    return { state: "unreachable", error: (err as Error).message };
+    return { state: "unreachable", error: failure(err) };
   }
   if (res.ok) {
     const body = (await res.json().catch(() => null)) as Record<string, unknown> | null;
@@ -78,7 +80,7 @@ export async function fetchKeyState(
   try {
     legacy = await f(`${base}/api/hub/auth/status`, init());
   } catch (err) {
-    return { state: "unreachable", error: (err as Error).message, legacy: true };
+    return { state: "unreachable", error: failure(err), legacy: true };
   }
   if (legacy.ok) {
     const s = (await legacy.json().catch(() => ({}))) as { keyId?: string; keyIdPrefix?: string; expiresAt?: string | null };
@@ -102,6 +104,8 @@ export async function fetchKeyState(
 function nonOkState(status: number, door: string): KeyState {
   if (status >= 500 || status === 408 || status === 429)
     return { state: "unreachable", error: `HTTP ${status} from ${door}` };
+  // A pod with neither door cannot be asked at all — no answer, not a "no".
+  if (status === 404) return { state: "unreachable", error: `this pod has no ${door} door` };
   return { state: "inactive", error: `HTTP ${status} from ${door}` };
 }
 

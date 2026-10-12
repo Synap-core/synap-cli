@@ -18,24 +18,35 @@ const c = (o: Partial<PodConnection>): PodConnection => ({
 });
 
 describe("connectionLines", () => {
-  it("one line per computer, with last use, marking this computer", () => {
+  it("one entry per computer — its name, this computer marked, last use; never the agent name again", () => {
     expect(
       connectionLines(
         [
-          c({ instanceId: "m-l", instanceLabel: "MacBook", displayName: "Claude Code on MacBook", lastUsedAt: "2026-10-12T11:55:00Z" }),
           c({ instanceId: "m-d", instanceLabel: "devbox", displayName: "Claude Code on devbox" }),
-          c({}),
+          c({ instanceId: "m-l", instanceLabel: "MacBook", displayName: "Claude Code on MacBook", lastUsedAt: "2026-10-12T11:55:00Z" }),
+          c({ lastUsedAt: "2026-10-11T19:00:00Z" }),
         ],
-        { thisInstanceId: "m-l", now: NOW }
+        { isThisComputer: (id) => id === "m-l", now: NOW }
       )
     ).toEqual([
-      "Claude Code on MacBook · last used 5 minutes ago (this computer)",
-      "Claude Code on devbox · never used",
-      `Claude Code — ${UNLABELLED_COMPUTER} · never used`,
+      "MacBook (this computer) · 5 minutes ago",
+      `${UNLABELLED_COMPUTER} · 17 hours ago`,
+      "devbox · never used",
     ]);
+    expect(UNLABELLED_COMPUTER).not.toMatch(/older CLI/);
   });
   it("an older pod (no list) is null — not an empty list", () => {
     expect(connectionLines(undefined)).toBeNull();
     expect(connectionLines([])).toEqual([]);
+  });
+});
+
+describe("this computer's id for a pod agentType (C4)", () => {
+  it("hashes the SURFACE the key was minted with — ChatGPT keys are `generic` agents minted as `chatgpt`", async () => {
+    const { thisComputerInstanceIds, agentTypeOfSurface } = await import("../src/lib/machine-instance.js");
+    const idFor = (s: string) => `id(${s})`;
+    expect(agentTypeOfSurface("chatgpt")).toBe("generic");
+    expect([...thisComputerInstanceIds("generic", idFor)].sort()).toEqual(["id(chatgpt)", "id(generic)"]);
+    expect([...thisComputerInstanceIds("claude-code", idFor)]).toEqual(["id(claude-code)"]);
   });
 });

@@ -4,17 +4,29 @@
  *
  * The fix never writes a key the pod has not confirmed live (`assertKeyWritable`),
  * and it ends with a real MCP `initialize` against `/mcp` using the key it
- * wrote: a fix is only reported ✓ when that call succeeds.
+ * wrote: a fix is only reported ✓ when that call succeeds AND every copy it had
+ * to rewrite was rewritten.
+ *
+ * A key is sent to this pod only when something ties it to this pod
+ * (`keysToProbe`); keys are asked about ONE AT A TIME. The pod resolves a key it
+ * does not know with a bcrypt scan of every key sharing its prefix (~12s on a
+ * 4-thread pool, measured 2026-10-12); asked all at once, four unknown keys
+ * starved each other past the timeout and read "no answer".
  */
 
-import { readJsonStrict, writeFileAtomic } from "./atomic-file.js";
+import fs from "node:fs";
 import os from "node:os";
+import path from "node:path";
 import chalk from "chalk";
 import { log } from "../utils/logger.js";
-import { collectKeyLocations, type KeyLocation } from "./key-locations.js";
+import { writeFileAtomic } from "./atomic-file.js";
+import { collectKeyInventory, keysToProbe, type ClientKeyFile, type KeyLocation, type UncheckedLocation } from "./key-locations.js";
 import { diagnoseKeys, type Diagnosis } from "./key-diagnosis.js";
 import { fetchKeyState, assertKeyWritable, type FetchLike, type KeyState } from "./key-state.js";
-import { machineInstanceId } from "./machine-instance.js";
+import { machineInstanceId, thisComputerInstanceIds } from "./machine-instance.js";
+
+/** Per-key wait for `/auth/key-state` — an unknown key costs the pod ~12s of bcrypt. */
+export const KEY_STATE_TIMEOUT_MS = 30_000;
 
 export interface KeyHealthReport {
   podUrl: string;
@@ -23,6 +35,10 @@ export interface KeyHealthReport {
   diagnoses: Diagnosis[];
   /** True when the pod answered the holder door for at least one key (vs an older pod). */
   podDescribesKeys: boolean;
+  /** Files the doctor could not read or parse — "not checked", never ✓. */
+  unchecked?: UncheckedLocation[];
+  /** Copies whose key nothing ties to this pod: listed, never sent to it. */
+  notSent?: KeyLocation[];
 }
 
 export interface KeyHealthDeps {
@@ -32,6 +48,9 @@ export interface KeyHealthDeps {
   fetch?: FetchLike;
   instanceIdFor?: (surface: string) => string;
   labelOf?: (surface: string) => string;
+  /** Client config files to read. Default: derived from `TARGETS` (`clientKeyFiles`). */
+  clients?: ClientKeyFile[];
+  timeoutMs?: number;
 }
 
 async function targetLabel(surface: string): Promise<string> {
@@ -44,29 +63,40 @@ async function targetLabel(surface: string): Promise<string> {
 }
 
 export async function checkKeyHealth(podUrl: string, deps: KeyHealthDeps = {}): Promise<KeyHealthReport> {
-  const locations = collectKeyLocations({
+  const clients = deps.clients ?? (await import("./targets.js")).clientKeyFiles();
+  const inventory = collectKeyInventory({
     home: deps.home ?? os.homedir(),
     podUrl,
     envKey: "envKey" in deps ? deps.envKey : process.env.SYNAP_HUB_API_KEY,
     envPodUrl: "envPodUrl" in deps ? deps.envPodUrl : process.env.SYNAP_POD_URL,
+    clients,
   });
-  const keys = [...new Set(locations.map((l) => l.key))];
-  const answers = await Promise.all(keys.map((k) => fetchKeyState(podUrl, k, { fetch: deps.fetch })));
-  const states = new Map(keys.map((k, i) => [k, answers[i]!]));
+  const keys = keysToProbe(inventory.locations);
+  const probed = new Set(keys);
+  const states = new Map<string, KeyState>();
+  // One at a time — see the module doc.
+  for (const k of keys) states.set(k, await fetchKeyState(podUrl, k, { fetch: deps.fetch, timeoutMs: deps.timeoutMs ?? KEY_STATE_TIMEOUT_MS }));
+  const locations = inventory.locations.filter((l) => probed.has(l.key));
+  const notSent = inventory.locations.filter((l) => !probed.has(l.key));
   const labels = new Map<string, string>();
-  for (const s of new Set(locations.map((l) => l.surface).filter((x): x is string => !!x)))
+  for (const s of new Set(inventory.locations.map((l) => l.surface).filter((x): x is string => !!x)))
     labels.set(s, deps.labelOf ? deps.labelOf(s) : await targetLabel(s));
   const envKey = locations.find((l) => l.kind === "process-env")?.key;
+  const idFor = deps.instanceIdFor ?? ((s: string) => machineInstanceId(s));
+  const answers = [...states.values()];
   return {
     podUrl,
     locations,
     states,
+    unchecked: inventory.unchecked,
+    notSent,
     podDescribesKeys: answers.some((a) => !a.legacy && a.state !== "unreachable"),
     diagnoses: diagnoseKeys({
       locations,
       states,
       envKey,
-      instanceIdFor: deps.instanceIdFor ?? ((s) => machineInstanceId(s)),
+      instanceIdFor: idFor,
+      instanceIdsForAgentType: (t) => thisComputerInstanceIds(t, idFor),
       labelOf: (s) => labels.get(s) ?? s,
     }),
   };
@@ -77,81 +107,124 @@ export function keyProblems(report: KeyHealthReport): Diagnosis[] {
   return report.diagnoses.filter((d) => d.code !== "ok");
 }
 
-export function printKeyHealth(report: KeyHealthReport, opts: { fixHint?: boolean } = {}): void {
+/** A problem `--fix` can act on (not merely tell you a command). */
+export function isFixable(d: Diagnosis): boolean {
+  return d.action !== "none" && d.action !== "login" && d.action !== "edit_shell_rc";
+}
+
+const plural = (n: number, one: string, many = one + "s") => `${n} ${n === 1 ? one : many}`;
+
+/**
+ * Print what is wrong, and what could not be checked. Working keys are one
+ * line (listed with `verbose`); an unverifiable key is "?", never ✓ or ✗.
+ */
+export function printKeyHealth(report: KeyHealthReport, opts: { fixHint?: boolean; verbose?: boolean; showOk?: boolean; indent?: string } = {}): void {
+  const ind = opts.indent ?? "  ";
+  const dim = (t: string) => console.log(chalk.dim(`${ind}${t}`));
   const problems = keyProblems(report);
   const ok = report.diagnoses.filter((d) => d.code === "ok");
-  for (const d of ok) console.log(`  ${chalk.green("✓")} ${d.title}`);
-  for (const d of problems) {
-    const mark = d.severity === "error" ? chalk.red("✗") : chalk.yellow("!");
-    console.log(`  ${mark} ${chalk.bold(d.title)}`);
-    for (const line of d.lines) log.dim(`     ${line}`);
-    if (d.command) log.dim(`     → ${d.command}`);
+  const unverifiable = problems.filter((d) => d.code === "unverifiable");
+  const broken = problems.filter((d) => d.code !== "unverifiable");
+  if (opts.showOk !== false && ok.length) {
+    if (opts.verbose) for (const d of ok) console.log(`${ind}${chalk.green("✓")} ${d.title}`);
+    else console.log(`${ind}${chalk.green("✓")} ${plural(ok.length, "agent key")} work${ok.length === 1 ? "s" : ""}: ${ok.map((d) => d.label ?? d.surface).join(", ")}`);
   }
-  if (report.locations.length === 0) log.dim("  No Synap key is configured for this pod on this computer.");
+  for (const d of broken) {
+    const mark = d.severity === "error" ? chalk.red("✗") : chalk.yellow("!");
+    console.log(`${ind}${mark} ${chalk.bold(d.title)}`);
+    for (const line of d.lines) dim(`    ${line}`);
+    if (d.command) dim(`    → ${d.command}`);
+  }
+  // Group the unverifiable by why — "no answer in 30s" four times is one line.
+  const byWhy = new Map<string, Diagnosis[]>();
+  for (const d of unverifiable) {
+    const why = (d.key && report.states.get(d.key)?.error) || "the pod did not answer";
+    byWhy.set(why, [...(byWhy.get(why) ?? []), d]);
+  }
+  for (const [why, ds] of byWhy) {
+    console.log(`${ind}${chalk.yellow("?")} ${plural(ds.length, "key")} not checked — ${why}: ${ds.map((d) => d.label ?? d.surface).join(", ")}`);
+    dim("    → run synap doctor again; if it repeats: synap agents list");
+  }
+  const notSent = report.notSent ?? [];
+  if (notSent.length) {
+    const keys = new Set(notSent.map((l) => l.key)).size;
+    console.log(`${ind}${chalk.yellow("?")} ${plural(keys, "key")} not checked — ${keys === 1 ? "it belongs" : "they belong"} to another pod or nothing says which${opts.verbose ? "" : " (details with -v)"}`);
+    if (opts.verbose) for (const l of notSent) dim(`    ${l.label}`);
+  }
+  for (const u of report.unchecked ?? []) console.log(`${ind}${chalk.yellow("?")} not checked: ${u.tool} — ${u.file} ${u.reason}`);
+  if (report.locations.length === 0 && notSent.length === 0) dim("No Synap key is configured for this pod on this computer.");
   if (!report.podDescribesKeys && report.locations.length > 0)
-    log.dim("  (This pod predates the key-state door: it can say a key fails, not why. Update the pod for precise reasons.)");
-  if (opts.fixHint && problems.some((d) => d.action !== "none" && d.action !== "login" && d.action !== "edit_shell_rc"))
-    log.dim(`  Fix it: ${chalk.cyan("synap doctor --fix")}`);
+    dim("(This pod predates the key-state door: it can say a key fails, not why. Update the pod for precise reasons.)");
+  if (opts.fixHint && problems.some(isFixable)) dim(`Fix it: ${chalk.cyan("synap doctor --fix")}`);
 }
 
 // ─── --fix ────────────────────────────────────────────────────────────────
 
 /**
- * Edit a JSON config in place: atomic (temp + fsync + rename), mode kept. An
- * unparsable file THROWS (`ConfigUnreadableError`) — it is never rewritten
- * from scratch. Returns false when the expected shape is not there.
+ * Replace `oldKey` with `newKey` in one file, atomically, mode kept. Works for
+ * every client format (JSON, JSONC with its comments, TOML, YAML) because a key
+ * is a unique opaque token: the edit touches exactly the copies of that key and
+ * nothing else. Throws when the file no longer holds the old key.
  */
-function editJson(file: string, edit: (j: Record<string, any>) => boolean): boolean {
-  const json = readJsonStrict<Record<string, any>>(file);
-  if (!json || !edit(json)) return false;
-  writeFileAtomic(file, JSON.stringify(json, null, 2) + "\n");
-  return true;
+function replaceKeyInFile(file: string, oldKey: string, newKey: string): void {
+  const text = fs.readFileSync(file, "utf8");
+  if (!text.includes(oldKey)) throw new Error("the old key is no longer in the file");
+  writeFileAtomic(file, text.split(oldKey).join(newKey));
+}
+
+export interface RewriteResult {
+  /** Every copy that now holds the live key (rewritten or already there). */
+  done: string[];
+  /** Copies that should hold it and could not be rewritten — with why. */
+  failed: string[];
+}
+
+/** The agent a key belongs to, from the pod's own status door. Throws when the pod does not say. */
+async function agentOfKey(podUrl: string, key: string, f: FetchLike): Promise<string> {
+  const res = await f(`${podUrl.replace(/\/+$/, "")}/api/hub/auth/status`, {
+    headers: { Authorization: `Bearer ${key}` },
+    signal: AbortSignal.timeout(15_000),
+  }).catch((err: unknown) => {
+    throw new Error(`could not ask the pod whose key this is (${(err as Error).message})`);
+  });
+  const userId = res.ok ? ((await res.json().catch(() => ({}))) as { userId?: string }).userId : undefined;
+  if (!userId) throw new Error(`could not ask the pod whose key this is (HTTP ${res.status} from /auth/status)`);
+  return userId;
 }
 
 /**
  * Write `key` into every rewritable copy of `surface` for this pod — ONLY after
- * the pod confirms it is live. Returns the labels rewritten.
+ * the pod confirms it is live. A copy that cannot be rewritten is reported in
+ * `failed`, never dropped.
  */
-/** Returns every copy that now holds the live key (rewritten or already there). */
 export async function rewriteSurfaceKey(
   report: KeyHealthReport,
   surface: string,
   key: string,
   agentUserId: string | undefined,
-  deps: { fetch?: FetchLike } = {}
-): Promise<string[]> {
+  deps: { fetch?: FetchLike; home?: string } = {}
+): Promise<RewriteResult> {
   await assertKeyWritable(report.podUrl, key, deps);
   const pod = await import("./pod.js");
-  let agentId = agentUserId;
-  if (!agentId) {
-    // The pod names the key's owner — the agent — on its own status door.
-    const res = await (deps.fetch ?? fetch)(`${report.podUrl.replace(/\/+$/, "")}/api/hub/auth/status`, {
-      headers: { Authorization: `Bearer ${key}` },
-      signal: AbortSignal.timeout(15_000),
-    }).catch(() => null);
-    if (res?.ok) agentId = ((await res.json().catch(() => ({}))) as { userId?: string }).userId;
-  }
-  const done: string[] = report.locations.filter((l) => l.surface === surface && l.key === key && l.kind !== "pending").map((l) => l.label);
-  pod.setSurfaceAgentKey(surface as import("./pod.js").SurfaceName, { hubApiKey: key, agentUserId: agentId ?? "", podUrl: report.podUrl });
+  // A blank agent id saved next to a key breaks every later lookup — ask, or stop.
+  const agentId = agentUserId || (await agentOfKey(report.podUrl, key, deps.fetch ?? fetch));
+  const configFile = path.join(deps.home ?? os.homedir(), ".synap", "config.json");
+  const mine = report.locations.filter((l) => l.surface === surface);
+  const done = mine.filter((l) => l.key === key && l.kind !== "pending").map((l) => l.label);
+  const failed: string[] = [];
+  pod.setSurfaceAgentKey(surface as import("./pod.js").SurfaceName, { hubApiKey: key, agentUserId: agentId, podUrl: report.podUrl });
   pod.clearPendingAgentKey(surface, report.podUrl);
-  if (!done.some((l) => l.includes(".synap/config.json"))) done.push("~/.synap/config.json → agentKeysByPod." + surface);
-  for (const loc of report.locations.filter((l) => l.surface === surface && l.rewritable && l.key !== key)) {
-    if (loc.kind === "claude-settings-env" && loc.file)
-      editJson(loc.file, (j) => {
-        if (!j.env || typeof j.env !== "object") return false;
-        j.env.SYNAP_HUB_API_KEY = key;
-        return true;
-      }) && done.push(loc.label);
-    if (loc.kind === "claude-mcp-header" && loc.file && loc.ref)
-      editJson(loc.file, (j) => {
-        const s = j.mcpServers?.[loc.ref!];
-        if (!s?.headers) return false;
-        s.headers.Authorization = `Bearer ${key}`;
-        delete s.headers.authorization;
-        return true;
-      }) && done.push(loc.label);
+  if (!mine.some((l) => l.file === configFile && l.key === key && l.kind !== "pending")) done.push(`~/.synap/config.json → agentKeysByPod.${surface}`);
+  // The CLI config is handled above; every other file gets a precise text edit.
+  for (const loc of mine.filter((l) => l.rewritable && l.key !== key && l.file && l.file !== configFile)) {
+    try {
+      replaceKeyInFile(loc.file!, loc.key, key);
+      done.push(loc.label);
+    } catch (err) {
+      failed.push(`${loc.label}: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
-  return [...new Set(done)];
+  return { done: [...new Set(done)], failed };
 }
 
 export interface FixDeps {
@@ -188,9 +261,11 @@ export async function fixKeyHealth(report: KeyHealthReport, deps: FixDeps = {}):
   const mintingKey = report.locations.find((l) => l.kind === "profile" && report.states.get(l.key)?.state === "active")?.key;
 
   const finish = async (d: Diagnosis, surface: string, key: string, agentUserId?: string): Promise<FixOutcome> => {
-    const rewritten = await rewriteSurfaceKey(report, surface, key, agentUserId, { fetch: deps.fetch });
-    const v = await verify(report.podUrl, key);
+    const { done: rewritten, failed } = await rewriteSurfaceKey(report, surface, key, agentUserId, { fetch: deps.fetch });
     const name = d.label ?? surface;
+    if (failed.length)
+      return { diagnosis: d, ok: false, message: `${name}: live key written to ${rewritten.join(", ")}, but NOT to: ${failed.join("; ")}` };
+    const v = await verify(report.podUrl, key);
     return v.ok
       ? { diagnosis: d, ok: true, message: `${name}: live key in ${rewritten.join(", ")} — MCP initialize OK${v.toolCount !== undefined ? ` (${v.toolCount} tools)` : ""}${rewritten.some((l) => l.includes(".claude")) ? ". Restart Claude Code to pick it up." : ""}` }
       : { diagnosis: d, ok: false, message: `${name}: key written, but MCP verification failed: ${v.error ?? "unknown error"}` };

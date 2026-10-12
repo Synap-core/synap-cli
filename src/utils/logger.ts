@@ -24,7 +24,7 @@ export const log = {
 export function banner() {
   console.log(chalk.cyan(`
   ╔═══════════════════════════════════════╗
-  ║         ${chalk.bold("Synap CLI")}                    ║
+  ║         ${chalk.bold("Synap CLI")}                     ║
   ║  Knowledge infrastructure for agents  ║
   ╚═══════════════════════════════════════╝
 `));

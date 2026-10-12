@@ -34,7 +34,7 @@ import {
 } from "../lib/agent-door.js";
 import { provisionAgentKey } from "../lib/targets.js";
 import { connectionLines, type PodConnection } from "../lib/agent-connections.js";
-import { machineInstanceId } from "../lib/machine-instance.js";
+import { thisComputerInstanceIds } from "../lib/machine-instance.js";
 
 function maskKey(key: string): string {
   if (key.length <= 12) return key.slice(0, 4) + "...";
@@ -177,9 +177,10 @@ export async function agentsList(
       `  ${chalk.bold(type)}  ${chalk.cyan(row.name ?? "—")}  id:${chalk.dim(id)}…${via}${focus}`
     );
     // One line per computer it is connected from (an older pod cannot say).
-    const lines = connectionLines(row.connections, {
-      thisInstanceId: row.agentType ? machineInstanceId(row.agentType) : undefined,
-    });
+    // Keys are minted with the SURFACE's hash; compare against every surface
+    // minting under this agentType, and only when the pod named the type.
+    const mine = row.agentType ? thisComputerInstanceIds(row.agentType) : null;
+    const lines = connectionLines(row.connections, { isThisComputer: (id) => !!mine?.has(id) });
     if (lines === null) continue;
     if (lines.length === 0) log.dim("      no live connection");
     for (const line of lines) log.dim(`      ${line}`);

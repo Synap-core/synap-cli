@@ -14,13 +14,14 @@ import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { openExternalUrl } from "./safe-open.js";
+import type { ClientKeyFile, KeyFileFormat } from "./key-locations.js";
 import chalk from "chalk";
 import ora from "ora";
 import prompts from "prompts";
 import { log } from "../utils/logger.js";
 import { installSkills, getDeliverableSkills } from "./skills-installer.js";
 import { TARGET_KEY_MINT, takePreApprovedKey } from "./batch-approval.js";
-import { machineInstanceId, machineInstanceLabel } from "./machine-instance.js";
+import { agentTypeOfSurface, machineInstanceId, machineInstanceLabel } from "./machine-instance.js";
 import {
   resolveHubConfig,
   resolveUserId,
@@ -214,6 +215,13 @@ export interface TargetInfo {
   supports: { skills: boolean; mcp: boolean };
   skillsDir?: () => string;
   mcpConfigPath?: () => string;
+  /**
+   * Where `synap connect` leaves this client's key on disk — what
+   * `synap doctor` reads (one parser per format, `key-locations.ts`) and
+   * `--fix` rewrites. REQUIRED, so a new target cannot ship without saying:
+   * either the file + format, or why no file holds a key.
+   */
+  keyStore: { format: KeyFileFormat; path: () => string | null } | { none: string };
 }
 
 const CLAUDE_DESKTOP_MACOS = path.join(
@@ -280,6 +288,7 @@ function raycastMcpConfigPath(): string | null {
 export const TARGETS: Record<TargetName, TargetInfo> = {
   "claude-code": {
     name: "claude-code",
+    keyStore: { format: "claude-code", path: () => path.join(os.homedir(), ".claude", "settings.json") },
     label: "Claude Code",
     supports: { skills: true, mcp: true },
     skillsDir: () => path.join(os.homedir(), ".claude", "skills"),
@@ -287,6 +296,7 @@ export const TARGETS: Record<TargetName, TargetInfo> = {
   },
   "claude-desktop": {
     name: "claude-desktop",
+    keyStore: { format: "json", path: () => path.join(claudeDesktopBaseDir(), "claude_desktop_config.json") },
     label: "Claude Desktop",
     // Claude Desktop reads Agent Skills from its app-support skills/ dir
     // (alongside claude_desktop_config.json). The "upload via claude.ai" path
@@ -300,29 +310,34 @@ export const TARGETS: Record<TargetName, TargetInfo> = {
   },
   cursor: {
     name: "cursor",
+    keyStore: { format: "json", path: () => path.join(os.homedir(), ".cursor", "mcp.json") },
     label: "Cursor",
     supports: { skills: false, mcp: true },
     mcpConfigPath: () => path.join(os.homedir(), ".cursor", "mcp.json"),
   },
   raycast: {
     name: "raycast",
+    keyStore: { format: "json", path: () => raycastMcpConfigPath() },
     label: "Raycast",
     description: "Native Synap extension (@synap) catalog — full MCP opt-in via --with-mcp",
     supports: { skills: false, mcp: true },
   },
   openclaw: {
     name: "openclaw",
+    keyStore: { none: "skills only — no Synap key is written to an OpenClaw file" },
     label: "OpenClaw",
     supports: { skills: true, mcp: false },
   },
   openwebui: {
     name: "openwebui",
+    keyStore: { none: "registered in Open WebUI through its API — no local file" },
     label: "Open WebUI",
     description: "Register Synap as a model source and tool server in Open WebUI",
     supports: { skills: false, mcp: true },
   },
   codex: {
     name: "codex",
+    keyStore: { format: "toml", path: () => path.join(os.homedir(), ".codex", "config.toml") },
     label: "OpenAI Codex",
     description: "OpenAI Codex CLI — MCP server + instructions",
     supports: { skills: true, mcp: true },
@@ -331,6 +346,7 @@ export const TARGETS: Record<TargetName, TargetInfo> = {
   },
   chatgpt: {
     name: "chatgpt",
+    keyStore: { none: "pasted into ChatGPT on the web — no local file" },
     label: "ChatGPT (API key)",
     description:
       "ChatGPT connector (web) — API-key auth to your pod's /mcp (provisions under generic surface)",
@@ -338,6 +354,7 @@ export const TARGETS: Record<TargetName, TargetInfo> = {
   },
   "chatgpt-oauth": {
     name: "chatgpt-oauth",
+    keyStore: { none: "OAuth through the control plane — no key" },
     label: "ChatGPT (OAuth, via Control Plane)",
     description:
       "ChatGPT connector via Synap Control Plane OAuth — multi-pod, no key to paste",
@@ -345,18 +362,21 @@ export const TARGETS: Record<TargetName, TargetInfo> = {
   },
   opencode: {
     name: "opencode",
+    keyStore: { format: "json", path: () => path.join(os.homedir(), ".config", "opencode", "opencode.json") },
     label: "opencode",
     description: "Synap IS as AI provider + Synap pod as MCP tools in ~/.config/opencode/opencode.json",
     supports: { skills: false, mcp: true },
   },
   aider: {
     name: "aider",
+    keyStore: { none: "aider gets the Intelligence Service provider, not a pod MCP key" },
     label: "aider",
     description: "Write Synap IS as the OpenAI-compatible provider in ~/.aider.conf.yml",
     supports: { skills: false, mcp: false },
   },
   windsurf: {
     name: "windsurf",
+    keyStore: { format: "json", path: () => path.join(os.homedir(), ".codeium", "windsurf", "mcp_config.json") },
     label: "Windsurf",
     description: "Codeium Windsurf editor — MCP config at ~/.codeium/windsurf/mcp_config.json",
     supports: { skills: false, mcp: true },
@@ -364,24 +384,28 @@ export const TARGETS: Record<TargetName, TargetInfo> = {
   },
   goose: {
     name: "goose",
+    keyStore: { format: "yaml-goose", path: () => path.join(os.homedir(), ".config", "goose", "config.yaml") },
     label: "Goose",
     description: "Block's AI agent — MCP extension in ~/.config/goose/config.yaml",
     supports: { skills: false, mcp: true },
   },
   zed: {
     name: "zed",
+    keyStore: { format: "jsonc", path: () => zedSettingsPath() },
     label: "Zed",
     description: "Zed editor — context_servers entry in Zed settings.json (via mcp-remote)",
     supports: { skills: false, mcp: true },
   },
   vscode: {
     name: "vscode",
+    keyStore: { format: "json", path: () => path.join(vsCodeUserDataDir(), "mcp.json") },
     label: "VS Code (Kilo Code / Cline / Continue / Copilot)",
     description: "VS Code native MCP — one config read by Kilo Code, Cline, Continue, and Copilot",
     supports: { skills: false, mcp: true },
   },
   grok: {
     name: "grok",
+    keyStore: { format: "toml", path: () => path.join(os.homedir(), ".grok", "config.toml") },
     label: "Grok (Grok Build TUI)",
     description:
       "xAI Grok Build — provisions an agent key and writes [mcp_servers.*] into ~/.grok/config.toml",
@@ -390,11 +414,27 @@ export const TARGETS: Record<TargetName, TargetInfo> = {
   },
   generic: {
     name: "generic",
+    keyStore: { none: "printed for you to paste — no file the CLI writes" },
     label: "Generic MCP Client",
     description: "Output MCP connection config for any MCP-compatible client",
     supports: { skills: false, mcp: true },
   },
 };
+
+/**
+ * Every client file that may hold a key, for `synap doctor` — DERIVED from
+ * `TARGETS[*].keyStore`, never a second hand list. The surface is the CLI's
+ * key slot name (`agentKeysByPod.<surface>`), which is the target name.
+ */
+export function clientKeyFiles(): ClientKeyFile[] {
+  const out: ClientKeyFile[] = [];
+  for (const t of Object.values(TARGETS)) {
+    if ("none" in t.keyStore) continue;
+    const file = t.keyStore.path();
+    if (file) out.push({ surface: t.name, tool: t.label, file, format: t.keyStore.format });
+  }
+  return out;
+}
 
 export function isTargetName(value: string): value is TargetName {
   return value in TARGETS;
@@ -1617,7 +1657,7 @@ async function installChatGpt(cfg: TargetConnectionConfig): Promise<boolean> {
   const { hubApiKey: effectiveApiKey, agentUserId } = await provisionAgentKey(
     cfg.podUrl,
     cfg.apiKey,
-    "generic",
+    agentTypeOfSurface("chatgpt"),
     { idempotent: true, surfaceName: "chatgpt" }
   );
   const { setSurfaceAgentKey } = await import("./pod.js");

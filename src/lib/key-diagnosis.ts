@@ -12,7 +12,7 @@
  * first one.
  */
 
-import type { KeyLocation } from "./key-locations.js";
+import { envKeySetBy, type KeyLocation } from "./key-locations.js";
 import type { KeyState } from "./key-state.js";
 
 export type DiagnosisCode =
@@ -64,6 +64,8 @@ export interface DiagnoseInput {
   envKey?: string;
   /** A surface's display name (the CLI's target label). Default: the surface id. */
   labelOf?: (surface: string) => string;
+  /** This computer's instance ids for a pod agentType (`thisComputerInstanceIds`). */
+  instanceIdsForAgentType?: (agentType: string) => Set<string>;
 }
 
 const day = (iso?: string | null) => (iso ? iso.replace("T", " ").slice(0, 16) + " UTC" : "an unknown time");
@@ -203,7 +205,25 @@ function agentDiagnosis(input: DiagnoseInput, surface: string, group: KeyLocatio
       ? { ...base, code: "refused", severity: "error", title: `${label}: key is refused (older pod — likely still awaiting approval)`, lines: [`Key ${tail(primaryLoc.key)} ${describeKeyState(s)}.`, "A request from this computer is recorded; finishing it is safer than filing another."], action: "approve_and_wait", key: recorded.key, agentUserId: recorded.agentUserId, command: "synap doctor --fix" }
       : { ...base, code: "refused", severity: "error", title: `${label}: key is refused`, lines: [`Key ${tail(primaryLoc.key)} ${describeKeyState(s)} (awaiting approval or revoked).`, `Copies: ${where.join(", ")}.`], action: "reprovision" };
   }
-  return { ...base, code: "unverifiable", severity: "warn", title: `${label}: could not check the key`, lines: [`Key ${tail(primaryLoc.key)} ${describeKeyState(s)}.`], action: "none", command: "synap doctor   (again, once the pod answers)" };
+  return { ...base, key: primaryLoc.key, code: "unverifiable", severity: "warn", title: `${label}: could not check the key`, lines: [`Key ${tail(primaryLoc.key)} ${describeKeyState(s)}.`], action: "none", command: "synap doctor   (again, once the pod answers)" };
+}
+
+/**
+ * Why the person's key was switched off by a replacing connection. "This
+ * computer" is decided only when the pod named the key's agentType: keys are
+ * minted with the SURFACE's hash (`thisComputerInstanceIds`), and hashing ""
+ * for a missing type would call every connection "another computer".
+ */
+function personKeyReplacedLine(input: DiagnoseInput, s: KeyState): string {
+  const other = s.replacedBy?.instanceId ?? null;
+  const name = s.replacedBy?.instanceLabel ?? other;
+  if (!other)
+    return "It was an agent key: approving a connection with no computer label switched off every key of that agent, this one included.";
+  if (!s.agentType) return `It was an agent key: approving another connection (${name}) switched it off.`;
+  const mine = (input.instanceIdsForAgentType ?? ((t: string) => new Set([input.instanceIdFor(t)])))(s.agentType);
+  return mine.has(other)
+    ? "It was an agent key: a newer connection from THIS computer replaced it."
+    : `It was an agent key: approving another computer's connection (${name}) switched it off.`;
 }
 
 /** Diagnose every key for one pod: the person's own key, each agent surface, the env var. */
@@ -220,13 +240,7 @@ export function diagnoseKeys(input: DiagnoseInput): Diagnosis[] {
       title: `Your CLI key for this pod ${describeKeyState(s)}`,
       lines: [
         `${loc.label} holds ${tail(loc.key)}. Agent keys cannot be re-made without it.`,
-        ...(s.state === "revoked" && s.replacedBy !== undefined
-          ? [
-              s.replacedBy?.instanceId && s.replacedBy.instanceId !== input.instanceIdFor(s.agentType ?? "")
-                ? `It was an agent key: approving another computer's connection (${s.replacedBy.instanceLabel ?? s.replacedBy.instanceId}) switched it off.`
-                : "It was an agent key: approving a connection with no computer label (made by an older CLI, likely on another computer) switched off every key of that agent, this one included.",
-            ]
-          : []),
+        ...(s.state === "revoked" && s.replacedBy !== undefined ? [personKeyReplacedLine(input, s)] : []),
       ],
       command: `synap login --reconnect${loc.ref ? ` ${loc.ref}` : ""}`,
       action: "login",
@@ -251,7 +265,7 @@ export function diagnoseKeys(input: DiagnoseInput): Diagnosis[] {
   //    when it is not the working key it is meant to be.
   if (input.envKey) {
     const envState = stateOf(input, input.envKey);
-    const setBy = input.locations.filter((l) => (l.kind === "claude-settings-env" || l.kind === "shell-rc") && l.key === input.envKey);
+    const setBy = envKeySetBy(input.locations, input.envKey);
     const liveAgentKeys = [...surfaceDiags.values()].filter((d) => d.code === "ok" || d.code === "stale_copies").map((d) => d.key);
     const profileKeys = input.locations.filter((l) => l.kind === "profile").map((l) => l.key);
     const designed = envState.state === "active" && (liveAgentKeys.includes(input.envKey) || profileKeys.includes(input.envKey));

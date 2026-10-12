@@ -24,7 +24,7 @@
  */
 
 import chalk from "chalk";
-import { log, banner } from "../utils/logger.js";
+import { log } from "../utils/logger.js";
 import { getActivePodConfig, getActiveWorkspaceId, getActiveProjectId, listPodProfiles, checkPodHealth } from "../lib/pod.js";
 import { resolveHubConfig, hubGet, HubError, type HubConfig } from "../lib/hub-client.js";
 import { formatKeySource, resolveKeySource } from "../lib/key-source.js";
@@ -32,41 +32,54 @@ import { resolveLensProvenance, type LensRung } from "../lib/describe-lens.js";
 import { samePodOrigin } from "../lib/project-ref.js";
 import { fetchKeyState } from "../lib/key-state.js";
 import { describeKeyState, type Diagnosis } from "../lib/key-diagnosis.js";
-import type { KeyHealthReport } from "../lib/key-doctor.js";
+import { isFixable, type KeyHealthReport } from "../lib/key-doctor.js";
 import { connectionLines, type PodConnection } from "../lib/agent-connections.js";
-import { machineInstanceId } from "../lib/machine-instance.js";
+import { thisComputerInstanceIds } from "../lib/machine-instance.js";
+import { tildify } from "../lib/key-locations.js";
+import os from "node:os";
+import path from "node:path";
 import { unwrapList } from "../lib/unwrapList.js";
 
 /**
- * Each of your agents and the computers it is connected from. A failed read
- * says so — never an empty list; an older pod that sends no connections is
- * "cannot tell".
+ * Each agent with a live connection, and the computers it is connected from —
+ * one line per agent. Agents with none are ONE summary line (OMIT, with the
+ * door to the full list). A failed read says so — never an empty list; an older
+ * pod that sends no connections is "cannot tell".
  */
 async function printAgentConnections(cfg: HubConfig): Promise<void> {
   let rows: Array<{ name: string | null; agentType: string | null; connections?: PodConnection[] }>;
   try {
     rows = unwrapList(await hubGet("/agent-users?mine=1", {}, cfg));
   } catch (err) {
-    log.dim(`  Could not read your agents' connections: ${err instanceof Error ? err.message : String(err)}`);
+    console.log(`  ${chalk.yellow("?")} Could not read your agents' connections: ${err instanceof Error ? err.message : String(err)}`);
     return;
   }
   if (rows.length === 0) {
-    log.dim("  No agents on this pod for you yet.");
+    log.dim("  No agents on this pod for you yet — connect one: synap connect");
     return;
   }
+  const live: Array<{ name: string; lines: string[] }> = [];
+  let idle = 0;
+  let olderPod = false;
   for (const row of rows) {
-    const lines = connectionLines(row.connections, {
-      thisInstanceId: row.agentType ? machineInstanceId(row.agentType) : undefined,
-    });
-    console.log(`  ${chalk.bold(row.name ?? row.agentType ?? "Agent")}`);
-    if (lines === null) log.dim("     (this pod predates per-computer connections)");
-    else if (lines.length === 0) log.dim("     no live connection");
-    else for (const line of lines) log.dim(`     ${line}`);
+    // Keys are minted with the SURFACE's hash: compare against every surface
+    // minting under this agentType, and only when the pod named the type.
+    const mine = row.agentType ? thisComputerInstanceIds(row.agentType) : null;
+    const lines = connectionLines(row.connections, { isThisComputer: (id) => !!mine?.has(id) });
+    if (lines === null) olderPod = true;
+    else if (lines.length === 0) idle++;
+    else live.push({ name: row.name ?? row.agentType ?? "Agent", lines });
   }
+  const width = Math.min(18, Math.max(0, ...live.map((r) => r.name.length)) + 2);
+  for (const r of live) console.log(`  ${r.name.padEnd(width)}${r.lines.join(chalk.dim("   ·   "))}`);
+  if (idle) console.log(chalk.dim(`  +${idle} agent${idle === 1 ? "" : "s"} with no live connection — synap agents list`));
+  if (olderPod) console.log(chalk.dim("  (this pod predates per-computer connections — update it to see them)"));
 }
 
 interface DoctorOpts {
   json?: boolean;
+  /** Every check with its details, ids and addresses. */
+  verbose?: boolean;
   /** Perform the one right action per key problem, then verify with a real MCP initialize. */
   fix?: boolean;
 }
@@ -264,7 +277,9 @@ export async function doctor(opts: DoctorOpts = {}): Promise<void> {
   }
 
   let hostServed = false;
+  const names: { workspace?: string; project?: string; podVersion?: string } = {};
   const health = await checkPodHealth(podUrl);
+  names.podVersion = health.version;
   if (health.healthy) {
     hostServed = true;
     checks.push({
@@ -335,6 +350,7 @@ export async function doctor(opts: DoctorOpts = {}): Promise<void> {
       if (cfgResolved.workspaceId) {
         const match = workspaces.find((w) => w.id === cfgResolved!.workspaceId);
         workspaceOk = Boolean(match);
+        names.workspace = match?.name;
         checks.push({
           name: "Configured workspace exists on this pod",
           ok: workspaceOk,
@@ -354,6 +370,7 @@ export async function doctor(opts: DoctorOpts = {}): Promise<void> {
       if (cfgResolved.projectId) {
         const match = projects.find((p) => p.id === cfgResolved!.projectId);
         projectOk = Boolean(match);
+        names.project = match?.name;
         checks.push({
           name: "Configured project exists on this pod",
           ok: projectOk,
@@ -416,6 +433,8 @@ export async function doctor(opts: DoctorOpts = {}): Promise<void> {
     keyHealth = await checkKeyHealth(cfgResolved?.podUrl ?? podUrl);
     const problems = keyProblems(keyHealth);
     const failing = problems.filter((d) => d.severity === "error");
+    const unverifiable = problems.filter((d) => d.code === "unverifiable");
+    const why = [...new Set(unverifiable.map((d) => (d.key && keyHealth!.states.get(d.key)?.error) || "no answer"))].join("; ");
     checks.push({
       name: "Keys on this computer",
       ok: problems.length === 0,
@@ -423,8 +442,11 @@ export async function doctor(opts: DoctorOpts = {}): Promise<void> {
       detail:
         problems.length === 0
           ? `${keyHealth.locations.length} configured cop${keyHealth.locations.length === 1 ? "y" : "ies"}, all working`
-          : `${problems.length} problem${problems.length === 1 ? "" : "s"} — see Key health below`,
-      fix: problems.length ? "Run: synap doctor --fix" : undefined,
+          : unverifiable.length === problems.length
+            ? `${unverifiable.length} key${unverifiable.length === 1 ? "" : "s"} could not be checked (${why})`
+            : `${problems.length} problem${problems.length === 1 ? "" : "s"}`,
+      // Only a problem --fix can act on earns the --fix hint.
+      fix: problems.some(isFixable) ? "Run: synap doctor --fix" : undefined,
     });
   }
 
@@ -434,6 +456,7 @@ export async function doctor(opts: DoctorOpts = {}): Promise<void> {
     podUrl: cfgResolved?.podUrl ?? podUrl,
     workspaceId: cfgResolved?.workspaceId,
     projectId: cfgResolved?.projectId,
+    ...names,
   }, keyHealth, cfgResolved);
 }
 
@@ -699,10 +722,56 @@ function publicDiagnosis(d: Diagnosis) {
   };
 }
 
+/** One word per check for the collapsed "✓ Pod · key · …" line. */
+const SHORT_NAME: Record<string, string> = {
+  "Pod URL configured": "pod URL",
+  "Pod host resolves": "Pod",
+  "API key authenticates": "key",
+  "Configured workspace exists on this pod": "workspace",
+  "Configured project exists on this pod": "project",
+  "Workspace + project exist on this pod": "workspace",
+  [IS_CHECK_NAME]: "intelligence",
+  [BROKER_CHECK_NAME]: "broker",
+  "Keys on this computer": "agent keys",
+};
+
+const UUID = /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi;
+const ISO = /\b(\d{4}-\d{2}-\d{2})T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:?\d{2})?/g;
+const INTERNAL_URL = /\s*(?:at\s+)?\bhttps?:\/\/(?:localhost|127\.\d+\.\d+\.\d+|10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|172\.(?:1[6-9]|2\d|3[01])\.\d+\.\d+|[a-z0-9-]+(?::\d+)?(?=[\s/)]|$))[^\s)]*/gi;
+
+/**
+ * Default output never shows internal addresses, ids or raw timestamps — they
+ * are noise to a person and stay one `-v` away. A parenthetical that only
+ * carried an id ("(checked as workspace <uuid>)") goes entirely.
+ */
+export function forDisplay(text: string, verbose = false): string {
+  if (verbose) return text;
+  return text
+    .replace(/\s*\([^()]*\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b[^()]*\)/gi, "")
+    .replace(UUID, "…")
+    .replace(INTERNAL_URL, "")
+    .replace(ISO, "$1")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}
+
+/** Where a lens field came from, short: "./.synap/lens.json", "SYNAP_WORKSPACE_ID", "this Claude session". */
+function lensOrigin(p?: { source: string; detail?: string }): string | undefined {
+  if (!p) return undefined;
+  if (p.source === "session") return "this Claude session";
+  if (p.source === "env") return p.detail ?? "environment";
+  if (p.source === "global") return "~/.synap/config.json";
+  if (p.detail) {
+    const rel = path.relative(process.cwd(), p.detail);
+    return rel && !rel.startsWith("..") && !path.isAbsolute(rel) ? `./${rel}` : tildify(p.detail, os.homedir());
+  }
+  return p.source;
+}
+
 async function finish(
   checks: CheckResult[],
   opts: DoctorOpts,
-  lens: { podUrl?: string; workspaceId?: string; projectId?: string },
+  lens: { podUrl?: string; workspaceId?: string; projectId?: string; workspace?: string; project?: string; podVersion?: string },
   keyHealth?: KeyHealthReport,
   hubCfg?: HubConfig
 ): Promise<void> {
@@ -724,6 +793,12 @@ async function finish(
           undetermined: anyUnknown,
           checks,
           keyHealth: keyHealth ? keyHealth.diagnoses.map(publicDiagnosis) : null,
+          keysNotChecked: keyHealth
+            ? {
+                unreadable: keyHealth.unchecked ?? [],
+                notSentToThisPod: (keyHealth.notSent ?? []).map((l) => l.label),
+              }
+            : null,
           lens: {
             pod: activeName,
             podUrl: lens.podUrl,
@@ -741,27 +816,59 @@ async function finish(
     return;
   }
 
-  banner();
-  log.heading("Coherence Preflight");
-  for (const c of checks) {
-    const mark = c.ok ? chalk.green("✓") : c.unknown ? chalk.yellow("?") : chalk.red("✗");
-    console.log(`  ${mark} ${chalk.bold(c.name)}`);
-    log.dim(`     ${c.detail}`);
-    if (!c.ok && c.fix) log.dim(`     → ${c.fix}`);
-  }
+  const v = !!opts.verbose;
+  const show = (t: string) => forDisplay(t, v);
 
+  // ── Header: which pod, which lens — names, not ids ──────────────────────
+  const lensPodName =
+    (lens.podUrl &&
+      listPodProfiles().find((p) => p.config.podUrl.replace(/\/$/, "") === lens.podUrl!.replace(/\/$/, ""))?.name) ||
+    activeName;
+  let host = lens.podUrl ?? "no pod";
+  try {
+    if (lens.podUrl) host = new URL(lens.podUrl).host;
+  } catch {
+    /* keep raw */
+  }
+  log.blank();
+  console.log(
+    `${chalk.bold("synap doctor")} ${chalk.dim("·")} ${lensPodName} ${chalk.dim("·")} ${host}${lens.podVersion ? chalk.dim(` (v${lens.podVersion})`) : ""}`
+  );
+  const wsName = lens.workspaceId ? lens.workspace ?? (v ? lens.workspaceId : "a workspace this pod does not list") : "pod-wide";
+  const lensText = lens.projectId ? `${wsName} › ${lens.project ?? (v ? lens.projectId : "a project this pod does not list")}` : wsName;
+  const origin = lensOrigin(provenance.project ?? provenance.workspace);
+  console.log(`${chalk.dim("Lens")}   ${lensText}${origin && (lens.workspaceId || lens.projectId) ? chalk.dim(`   (from ${origin})`) : ""}`);
+  if (v) {
+    console.log(`${chalk.dim("Key")}    ${formatKeySource(keySource)}`);
+    if (lens.podUrl) console.log(`${chalk.dim("URL")}    ${lens.podUrl}`);
+  }
+  log.blank();
+
+  // ── Checks: passes collapse to one line, failures/unknowns in full ───────
+  const keyRow = checks.find((c) => c.name === "Keys on this computer");
+  const printRow = (c: CheckResult) => {
+    const mark = c.ok ? chalk.green("✓") : c.unknown ? chalk.yellow("?") : chalk.red("✗");
+    console.log(`${mark} ${chalk.bold(c.name)} — ${show(c.detail)}`);
+    if (!c.ok && c.fix) console.log(chalk.dim(`    → ${show(c.fix)}`));
+  };
+  const passed = checks.filter((c) => c.ok);
+  if (v) for (const c of checks) printRow(c);
+  else if (passed.length) {
+    const words = [...new Set(passed.map((c) => SHORT_NAME[c.name] ?? c.name))];
+    console.log(`${chalk.green("✓")} ${words.join(" · ")}${chalk.dim("      (details with -v)")}`);
+  }
+  if (!v) for (const c of checks.filter((c) => !c.ok && c !== keyRow)) printRow(c);
+
+  // The key row's problems are the key-health lines themselves — no second copy.
   if (keyHealth) {
-    log.blank();
-    log.heading("Key health");
     const { printKeyHealth, fixKeyHealth, keyProblems } = await import("../lib/key-doctor.js");
-    printKeyHealth(keyHealth, { fixHint: !opts.fix });
-    if (opts.fix && keyProblems(keyHealth).length > 0) {
+    printKeyHealth(keyHealth, { fixHint: !opts.fix, verbose: v, showOk: v, indent: "" });
+    if (opts.fix && keyProblems(keyHealth).some(isFixable)) {
       log.blank();
-      log.heading("Fixing");
+      console.log(chalk.bold("Fixing"));
       const outcomes = await fixKeyHealth(keyHealth);
       for (const o of outcomes) console.log(`  ${o.ok ? chalk.green("✓") : chalk.red("✗")} ${o.message}`);
       // Every problem fixed AND verified live over MCP: the key row is green now.
-      const keyRow = checks.find((c) => c.name === "Keys on this computer");
       if (keyRow && outcomes.length > 0 && outcomes.every((o) => o.ok)) {
         keyRow.ok = true;
         keyRow.unknown = false;
@@ -770,46 +877,12 @@ async function finish(
     }
   }
 
-  // One agent, several computers: each agent's live connections, per computer.
+  // ── One agent, several computers ─────────────────────────────────────────
   if (hubCfg) {
     log.blank();
-    log.heading("Agent connections");
+    console.log(chalk.bold("Connected agents"));
     await printAgentConnections(hubCfg);
   }
-
-  log.blank();
-  log.heading("Active Lens");
-  // Prefer the pod we actually talked to (cfg / --pod), not only ● active profile.
-  const lensPodName =
-    (lens.podUrl &&
-      listPodProfiles().find(
-        (p) =>
-          p.config.podUrl.replace(/\/$/, "") === lens.podUrl!.replace(/\/$/, "")
-      )?.name) ||
-    activeName;
-  console.log(
-    `  Pod       : ${chalk.bold(lensPodName)}${lens.podUrl ? `  ${chalk.dim(lens.podUrl)}` : ""}`
-  );
-  console.log(`  Key       : ${formatKeySource(keySource)}`);
-  // Prefer resolved cfg ids (what writes use) over provenance of global config.
-  const resolvedWs = lens.workspaceId;
-  const resolvedProj = lens.projectId;
-  const ws = provenance.workspace;
-  const proj = provenance.project;
-  console.log(
-    `  Workspace : ${
-      resolvedWs
-        ? `${resolvedWs}${ws?.origin ? `  ${chalk.dim(`(${ws.origin})`)}` : ""}`
-        : chalk.dim("— (pod-wide)")
-    }`
-  );
-  console.log(
-    `  Project   : ${
-      resolvedProj
-        ? `${resolvedProj}${proj?.origin ? `  ${chalk.dim(`(${proj.origin})`)}` : ""}`
-        : chalk.dim("— none")
-    }`
-  );
 
   // Env pin beats the active profile in resolveHubConfig — same divergence
   // `synap pods list` already names. Surface it here so doctor alone is enough
@@ -824,19 +897,19 @@ async function finish(
     log.dim("  The env var wins over the ● active profile. Unset it (or open a fresh shell) for the profile to apply.");
   }
 
-  // Recomputed: a `--fix` above may have turned the key row green.
+  // ── Verdict: the last line. Recomputed: --fix may have turned keys green.
   const finalOk = checks.every((c) => c.ok);
   const finalFailed = checks.some((c) => !c.ok && !c.unknown);
   log.blank();
   if (finalOk) {
-    log.success("All checks passed.");
+    console.log(chalk.green("✓ All checks passed."));
   } else if (finalFailed) {
-    log.warn("One or more checks failed — see the fixes above.");
+    const n = checks.filter((c) => !c.ok && !c.unknown).length;
+    console.log(chalk.red(`✗ ${n} check${n === 1 ? "" : "s"} failed — the actions above fix ${n === 1 ? "it" : "them"}.`));
     process.exitCode = 1;
   } else {
     // Not green: something could not be determined. Saying "all clear" here is
     // the failure mode this command exists to avoid.
-    log.warn("Not all checks could be determined — see the '?' rows above.");
+    console.log(chalk.yellow("? Nothing failed, but not everything could be checked — see the ? lines."));
   }
-  log.blank();
 }

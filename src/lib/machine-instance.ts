@@ -125,3 +125,29 @@ export function deriveInstanceLabel(hostname: string, override?: string | null):
 export function machineInstanceLabel(): string | undefined {
   return deriveInstanceLabel(os.hostname(), process.env.SYNAP_COMPUTER_NAME);
 }
+
+/**
+ * The ONE surface → pod agentType mapping, for the surfaces whose keys are
+ * minted under ANOTHER agent type. Every other surface mints under its own
+ * name (surface === agentType). Keys are minted with
+ * `machineInstanceId(surface)`, but the pod lists connections by agentType —
+ * so "is this connection from this computer?" must hash the SURFACE(s), never
+ * the agentType alone (ChatGPT's keys are `generic` agents labelled with the
+ * `chatgpt` surface hash).
+ */
+export const SURFACE_AGENT_TYPE: Readonly<Record<string, string>> = { chatgpt: "generic" };
+
+/** The pod agentType a surface's keys are minted under. */
+export function agentTypeOfSurface(surface: string): string {
+  return SURFACE_AGENT_TYPE[surface] ?? surface;
+}
+
+/**
+ * This computer's instance ids for keys of `agentType`: one per surface that
+ * mints under it (the agentType itself included — a mint with no surface name
+ * hashes the agentType).
+ */
+export function thisComputerInstanceIds(agentType: string, idFor: (surface: string) => string = (s) => machineInstanceId(s)): Set<string> {
+  const surfaces = [agentType, ...Object.entries(SURFACE_AGENT_TYPE).filter(([, t]) => t === agentType).map(([s]) => s)];
+  return new Set(surfaces.map(idFor));
+}
