@@ -459,10 +459,14 @@ synap use <workspace-name-or-id>                       # focus a workspace (this
 synap create entity --profile=task --name="…" --props='{"status":"todo","priority":"high"}' --json
 synap set entity <id> --props='{"status":"done"}' --json  # merge-patch (only changed keys)
 synap ask "your question" --json                       # THE read verb — routes to the right store(s) + shows which answered
-synap create entity --profile=knowledge --name="…" --props='{"knowledgeForm":"insight|caution"}' --content="…" --json
+synap create entity --profile=knowledge --name="…" --props='{"knowledgeForm":"fact|caution|convention","ek_claim":"…"}' --content="…" --json
 synap capture --global --type=reference --claim="…" --json  # Global lane — pod-wide cross-cutting runbook (knowledge_keys)
 synap observe write "…" --json                          # User lane — durable user model (inferences proposed)
 ```
+
+**Titles:** ≤ 80 characters, the lasting thing, no status words, ids or "…"; the
+receipt's `titleLint` says what to rewrite. Rules + what counts as knowledge:
+`synap_load_skill("system/synap/writing-titles")`.
 
 **The canonical verbs:** `ask` (read) · `capture` (structured write — pick a lane:
 Work default / `--global` / `observe` for User) · `orient` (bootstrap). `note` exists
@@ -1114,6 +1118,11 @@ writes one entity with per-entity governance and REJECTS a name collision unless
 graph and DEDUP-MERGES instead of rejecting. Pick by whether you want a partial
 write to be possible, not by how structured your data feels.
 
+**Every title is linted.** Both doors return `titleLint` in the receipt when a
+title breaks the rubric (too long, cut off, status words, ids, a placeholder…);
+the title is stored as sent, so rewrite it. Over 200 characters the write is
+refused. Title rules and what counts as knowledge: `writing-titles.md`.
+
 ### Create an entity (one exact typed entity)
 
 Before this call, use `/discover?userId=…&profileSlugs=<kind>` to read the
@@ -1354,6 +1363,72 @@ GET  /api/hub/channels/personal?userId={userId}&workspaceId={workspaceId}
 POST /api/hub/threads/{threadId}/messages
        { "userId": "{userId}", "role": "user", "content": "…" }
 ```
+
+---
+
+## Writing titles and knowledge
+
+Every write receipt runs the title rubric and returns `titleLint` when a title
+breaks it. The title is stored as you sent it — **rewrite it** (update the
+title) instead of leaving it. The pod never shortens a title for you, and over
+200 characters it refuses the write.
+
+### Title rules (every kind, every pod)
+
+1. **One complete phrase, 80 characters at most** (aim for 40–70; a question
+   may take 110). If it does not fit, rewrite it — never cut it, never end it
+   with "…".
+2. **Name the lasting thing, not the event.** No SHIPPED, LIVE, FIXED, DONE,
+   VERIFIED, CORRECTION, no emoji. Status goes in a status property; the date
+   is already on the record.
+3. **No machinery in the title:** no hashes, ids, file paths, line numbers,
+   markdown, URLs. They go in the body as evidence.
+4. **Do not repeat the kind** ("Lesson:", "Decision:", "Caution:", "Finding:").
+   The kind and `knowledgeForm` already say it.
+5. **Plain words.** A code is allowed only when the pod's glossary has it;
+   plan codes (T1, D3, W4, Wave A) are replaced by words.
+6. **Same language as the body.**
+7. **Search before you create** (`synap_ask`) and keep a title stable on
+   update. A superseded decision gets a title that says what replaced it.
+8. **Never empty, never a placeholder** ("Untitled", "Test", a URL, the first
+   words of a transcript).
+
+| Kind | Title shape | Example |
+| --- | --- | --- |
+| Knowledge | The claim as a short sentence | Space skills are linked by the brief, not by a row |
+| Decision | What was decided, as a fact | Connection data lives in one package: @synap-core/integrations |
+| Question | A real question ending in ? | Should Grida replace or complement the tldraw whiteboard? |
+| Task | Verb + object (+ who/when) | Send signed agreement to Harbor Goods |
+| Research | Subject + what was assessed | Excalidraw evaluated as a Synap capability |
+| Issue | The problem as a statement | Capture reads the URL but never feeds it to the structurer |
+| Note | What it is about | Farm-to-Client Market — idea brief |
+| Work session | The outcome, short | Frontend package consolidation: 4 layer packages |
+| Run | Run name + instance | Daily client briefing — 12 Oct |
+| Report | Scope + period | Builder weekly report — week of 5 Oct |
+
+### What counts as knowledge
+
+Knowledge is something that will **still be true and useful in three months**,
+whenever it was learned. It takes one `knowledgeForm`:
+
+- `fact` — how something works.
+- `caution` — a pitfall and how to avoid it.
+- `convention` — how we do things here.
+
+The full sentence goes in `ek_claim`; the title is its short handle, never the
+claim cut off. Everything else goes elsewhere:
+
+| It is really… | File it as |
+| --- | --- |
+| progress, "shipped", "verified", "done" | the session's outcome or report — not a lasting entity |
+| a choice that was made | `decision` |
+| an open bug or problem | `issue` |
+| a plan, an idea, a hypothesis | `note` (or `question` if it is one) |
+| steps to follow | a skill |
+| a fact about an outside tool, vendor or market | `research` |
+
+When unsure, ask: "will this still help someone in three months, and is it a
+fact, a pitfall or a rule?" If not, it is not knowledge.
 
 ---
 
@@ -3039,3 +3114,70 @@ An agent call lands as a proposal (`status: "proposed"` is success). The
 playbook lives on this pod only; to make it an official template, a developer
 writes it into the catalog and publishes it with
 `synap catalog publish --official`.
+
+---
+
+# Remote MCP servers — how a pod registers, approves and governs them
+
+Load this before you suggest connecting an external MCP server to a pod, or when a server's tools do not
+show up. Every claim here is read from the code: the `mcp_servers` table
+(`packages/database/src/schema/mcp-servers.ts`), the settings door (`routers/mcp-servers.ts`), the
+capability installer (`services/capabilities/create-from-definition.ts`) and the IS adapter.
+
+### The row
+
+One row per server in `mcp_servers`, scoped to a space (`workspaceId`) or pod-wide (null). `slug` is
+lowercase `a-z0-9-`, unique per space; the IS names each tool `mcp_<slug>_<tool>`, so a space's server
+overrides a pod-wide one with the same slug.
+
+| Field        | Meaning                                                                                    |
+| ------------ | ------------------------------------------------------------------------------------------ |
+| `transport`  | `http` (needs `url`) or `stdio` (needs `command` + `args`, runs on the IS host)            |
+| `auth`       | http only: `{ credentialRef: "vault://<id>", header: "Authorization", prefix: "Bearer " }` |
+| `toolPolicy` | `{ default: "governed" or "inline", inline: ["tool_a", …] }`; absent = governed            |
+| `approved`   | false by default; the supply-chain gate                                                    |
+| `enabled`    | the owner's on/off switch                                                                  |
+
+### Secrets never sit on the row
+
+`auth.credentialRef` points at a vault secret. The pod resolves it server-side on every call (never
+cached), sends it to the IS as a header, and the agent never sees it. If it cannot be resolved for the
+acting user or agent, the server is skipped and its tools simply do not appear: check the vault grant
+before you blame the server.
+
+### Governed by default
+
+- A **governed** tool is never called directly: the IS routes it through the pod (`mcp://<slug>`),
+  where the capability gate runs it or files a proposal. For an agent, `proposed` is success.
+- An **inline** tool is called directly by the IS. Declare `default: "inline"` only for a server that
+  exposes nothing but reads; for a mixed server, list its read tools in `inline`.
+- No policy at all means governed. This is deliberate and fail-closed.
+
+### Approval, and when it resets
+
+- Tools reach an agent only when the server is **approved AND enabled** (and, in a channel that keeps
+  its own MCP list, only the servers that channel opted into). The list is cached for 30 seconds.
+- In the space settings, tab MCP Servers: a space **owner or admin** adds, edits or deletes a server; only the space
+  **owner** approves it; a pod-wide server needs a pod admin to add or edit.
+- Editing `url`, `command`, `args`, `env` or `transport` in the settings **resets approval** (compared by
+  value, so a rename or an enabled toggle does not). Re-approve after re-pointing a server.
+- A capability (catalog or `market.install`) may declare `mcpServers[]` with `auth` and `toolPolicy`;
+  this is the only door that sets those two today (the settings form does not). Its install is the trust
+  decision: it may ship `approved: true`. Re-applying it converges url, auth and policy to the
+  template and only ever promotes approval, never revokes it.
+
+### As an agent
+
+You have no tool that registers a server. Propose it: a capability that declares the server (installed
+through `market.install`, which files a proposal), or ask the person to add it in the space settings (MCP Servers). Never
+ask for the secret in chat; it goes in the vault.
+
+### Network: who must reach the URL
+
+The **IS** opens the connection, not your machine. A `url` must be reachable from where the pod's IS runs.
+
+**An unauthenticated dev MCP is never registered on a public URL.** Storybook's `/mcp`
+(`http://localhost:6006/mcp`) and similar dev servers have no auth: reach them only over a private
+network or a tunnel the IS is on (an SSH tunnel to a dev pod), keep them bound to loopback otherwise,
+and prefer a static artifact (Storybook's `/manifests/components.json`) for agents on a remote pod. If
+a server would need to be public to be reached, it needs `auth` first.
