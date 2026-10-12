@@ -659,6 +659,31 @@ export function classifyApplyResult(
   return { status: "no-workspace", warnings: [] };
 }
 
+/**
+ * An action button the template places on a record page, held back because the
+ * playbook (or automation) it launches is waiting on a proposal — the pod's
+ * `actionPlacements.deferred[]` on `/packages/apply`. The button appears on the
+ * next update once that proposal is approved.
+ */
+export interface DeferredPlacement {
+  kind?: string;
+  ref?: string;
+  label?: string;
+  proposalId?: string;
+}
+
+/** One plain line per deferred placement; `[]` when none (or an older pod). */
+export function deferredPlacementLines(res: Record<string, unknown>): string[] {
+  const deferred = (res.actionPlacements as { deferred?: unknown } | undefined)?.deferred;
+  if (!Array.isArray(deferred)) return [];
+  return (deferred as DeferredPlacement[])
+    .filter((d) => d && typeof d.proposalId === "string")
+    .map(
+      (d) =>
+        `The "${d.label ?? d.ref}" button appears once you approve proposal ${d.proposalId} (synap open proposal ${d.proposalId}), then run synap market update again.`
+    );
+}
+
 /** Render a `classifyApplyResult` verdict — the ONE honest-text door for both `marketInstall` and `applyOnePackage`. */
 export function printApplyVerdict(entry: CatalogEntry, verdict: ApplyVerdict): void {
   switch (verdict.status) {
@@ -1454,6 +1479,7 @@ export async function marketInstall(
     }
     printSeedOutcomes(dependencies, seedSummary);
     printLayerOutcomes(ws?.layers);
+    for (const line of deferredPlacementLines(res)) log.info(line);
     if (ws?.outcome || ws?.status === "composed" || ws?.status === "created") renderNextSteps(steps);
   } catch (e) {
     s?.stop();
@@ -1734,6 +1760,7 @@ async function applyOnePackage(
       printApplyVerdict(entry, verdict);
       printSeedOutcomes(dependencies, seedSummary);
       printLayerOutcomes(ws?.layers);
+      for (const line of deferredPlacementLines(res)) log.info(line);
     }
     return {
       slug: entry.slug,
