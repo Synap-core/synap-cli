@@ -344,6 +344,24 @@ mcp
   });
 
 mcp
+  .command("bridge")
+  .description("Stdio MCP server for Claude Code: forwards to the pod and names the conversation (spawned by Claude Code, not run by hand)")
+  .option("--url <url>", "The pod MCP URL to forward to")
+  .action(async (opts: { url?: string }) => {
+    const { mcpBridge } = await import("./commands/mcp.js");
+    await mcpBridge(opts);
+  });
+
+mcp
+  .command("use-bridge")
+  .description("Connect Claude Code through the stdio bridge, so work can be traced to and reopened in its conversation")
+  .option("--off", "Switch back to the direct http connection")
+  .action(async (opts: { off?: boolean }) => {
+    const { mcpUseBridge } = await import("./commands/mcp.js");
+    await mcpUseBridge(opts);
+  });
+
+mcp
   .command("connect [client]")
   .description("Write the MCP config for a file-configurable client (Claude Code, Cursor, Desktop, ChatGPT, …) — alias of `synap agents add <client>`")
   .option("--name <name>", "Pod profile to connect")

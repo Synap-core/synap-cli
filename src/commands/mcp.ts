@@ -480,3 +480,49 @@ export async function mcpUiSetup(
     process.exit(1);
   }
 }
+
+/**
+ * `synap mcp bridge` — the stdio MCP server Claude Code spawns when it is
+ * connected through the bridge (`synap mcp use-bridge`). Forwards every
+ * message to the pod's /mcp and names the Claude Code conversation it runs in,
+ * so the work it does can be reopened there. See lib/mcp-bridge.ts.
+ *
+ * stdout IS the protocol — nothing but JSON-RPC may be written to it.
+ */
+export async function mcpBridge(opts: { url?: string }): Promise<void> {
+  const { runMcpBridge } = await import("../lib/mcp-bridge.js");
+  const { conversationHeaders } = await import("../lib/conversation-headers.js");
+  const fromEnv = process.env.SYNAP_MCP_API_KEY || process.env.SYNAP_HUB_API_KEY;
+  const cfg = fromEnv && opts.url ? null : await resolveHubConfig();
+  const apiKey = fromEnv || cfg?.apiKey;
+  const url = opts.url || (cfg ? buildMcpUrl(cfg.podUrl) : undefined);
+  if (!apiKey || !url) {
+    process.stderr.write("[synap mcp bridge] no pod key or URL — run `synap init`\n");
+    process.exit(1);
+  }
+  // The spawn-time id (a stdio server's env), never a lens fallback.
+  await runMcpBridge({
+    url,
+    apiKey,
+    headers: conversationHeaders(process.env.CLAUDE_CODE_SESSION_ID),
+  });
+}
+
+/**
+ * `synap mcp use-bridge [--off]` — switch Claude Code's MCP connection to the
+ * stdio bridge (or back to direct http), re-using the key `synap init` stored.
+ */
+export async function mcpUseBridge(opts: { off?: boolean }): Promise<void> {
+  const { setClaudeCodeMcpTransport } = await import("../lib/targets.js");
+  const name = setClaudeCodeMcpTransport(opts.off ? "http" : "bridge");
+  if (!name) {
+    log.error("Claude Code is not connected to a pod yet — run `synap init` first.");
+    process.exitCode = 1;
+    return;
+  }
+  log.dim(
+    opts.off
+      ? "Claude Code talks to the pod directly again; conversations are no longer named on MCP calls."
+      : "Each Claude Code conversation is now named on its MCP calls, so its work can be reopened with `claude --resume <id>`."
+  );
+}

@@ -935,6 +935,7 @@ export async function writeClaudeCodeEnv(
  */
 function registerClaudeCodeMcp(mcpUrl: string, apiKey: string, serverName: string): void {
   const header = `Authorization: Bearer ${apiKey}`;
+  const bridge = claudeCodeMcpTransport() === "bridge";
   try {
     // Remove legacy single-name entry and any prior pod-derived name.
     for (const name of new Set(["synap", serverName])) {
@@ -946,11 +947,16 @@ function registerClaudeCodeMcp(mcpUrl: string, apiKey: string, serverName: strin
     }
     execFileSync(
       "claude",
-      ["mcp", "add", "--transport", "http", serverName, mcpUrl, "--header", header, "--scope", "user"],
+      bridge
+        ? // Stdio: Claude Code hands a stdio server its own session id, which
+          // the bridge forwards — see lib/mcp-bridge.ts. The key rides in the
+          // server's env, as the header does for http.
+          ["mcp", "add", "--scope", "user", "-e", `SYNAP_MCP_API_KEY=${apiKey}`, serverName, "--", ...synapBridgeCommand(mcpUrl)]
+        : ["mcp", "add", "--transport", "http", serverName, mcpUrl, "--header", header, "--scope", "user"],
       { stdio: "ignore" }
     );
     log.success(
-      `MCP server '${serverName}' registered with Claude Code (\`claude mcp add\`, user scope). Relaunch Claude Code to load the tools.`
+      `MCP server '${serverName}' registered with Claude Code (\`claude mcp add\`, user scope${bridge ? ", via the synap stdio bridge" : ""}). Relaunch Claude Code to load the tools.`
     );
     if (serverName !== "synap") {
       log.dim(
@@ -963,6 +969,69 @@ function registerClaudeCodeMcp(mcpUrl: string, apiKey: string, serverName: strin
     log.dim("Could not run `claude mcp add` (is the claude CLI on PATH?). Register it by hand:");
     log.dim(`  claude mcp add --transport http ${serverName} ${mcpUrl} --header "${header}" --scope user`);
   }
+}
+
+/**
+ * How Claude Code reaches the pod's MCP: `"http"` (direct) or `"bridge"` (the
+ * synap stdio bridge, which tells the pod which Claude Code conversation each
+ * call comes from, so work can be reopened in it). Stored in Claude Code's own
+ * settings env (`SYNAP_MCP_TRANSPORT`), which `writeClaudeCodeEnv` merges, so a
+ * re-connect or `synap pods use` keeps the choice. Default: http.
+ */
+export function claudeCodeMcpTransport(): "http" | "bridge" {
+  try {
+    const settings = JSON.parse(
+      fs.readFileSync(path.join(os.homedir(), ".claude", "settings.json"), "utf-8")
+    ) as { env?: Record<string, string> };
+    return settings.env?.["SYNAP_MCP_TRANSPORT"] === "bridge" ? "bridge" : "http";
+  } catch {
+    return "http";
+  }
+}
+
+/**
+ * Switch Claude Code's MCP transport and re-register the server with the key
+ * and pod `writeClaudeCodeEnv` already stored. Returns the server name, or
+ * null when Claude Code was never connected (nothing to switch).
+ */
+export function setClaudeCodeMcpTransport(transport: "http" | "bridge"): string | null {
+  const settingsPath = path.join(os.homedir(), ".claude", "settings.json");
+  let settings: Record<string, unknown>;
+  try {
+    settings = JSON.parse(fs.readFileSync(settingsPath, "utf-8")) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+  const env = (settings.env ?? {}) as Record<string, string>;
+  const podUrl = env["SYNAP_POD_URL"];
+  const apiKey = env["SYNAP_HUB_API_KEY"];
+  if (!podUrl || !apiKey) return null;
+  if (transport === "bridge") env["SYNAP_MCP_TRANSPORT"] = "bridge";
+  else delete env["SYNAP_MCP_TRANSPORT"];
+  settings.env = env;
+  fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + "\n", { mode: 0o600 });
+  const serverName = mcpServerNameFromPodUrl(podUrl);
+  registerClaudeCodeMcp(
+    buildMcpUrl(podUrl, env["SYNAP_WORKSPACE_ID"], env["SYNAP_PROJECT_ID"]),
+    apiKey,
+    serverName
+  );
+  return serverName;
+}
+
+/**
+ * The command Claude Code spawns for the bridge: THIS CLI by absolute path (the
+ * one running `use-bridge` is the one known to have the bridge — a `synap` on
+ * PATH may be an older install without it), unless this run is a throwaway
+ * `npx` copy, whose cache path can vanish; then the `synap` on PATH.
+ */
+function synapBridgeCommand(mcpUrl: string): string[] {
+  const args = ["mcp", "bridge", "--url", mcpUrl];
+  const self = process.argv[1];
+  if (self && !self.includes(`${path.sep}_npx${path.sep}`)) {
+    return [process.execPath, fs.realpathSync(self), ...args];
+  }
+  return ["synap", ...args];
 }
 
 // ─── Agent key provisioning helper ──────────────────────────────────────────
