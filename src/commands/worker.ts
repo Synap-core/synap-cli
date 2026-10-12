@@ -63,6 +63,8 @@ export interface RunRecord {
   claudeSessionId?: string;
   exitCode?: number | null;
   result?: string;
+  /** How many times a room follow-up resumed this Claude conversation. */
+  resumes?: number;
 }
 
 interface WorkerState {
@@ -203,6 +205,46 @@ export function workerVerdict(resultText: string | undefined): string | undefine
   return undefined;
 }
 
+export interface RoomMessage {
+  id?: string;
+  content?: string;
+  timestamp?: string;
+  authorType?: string;
+  routedTeammateId?: string | null;
+}
+
+/** At most this many follow-up resumes per session (a runaway-loop guard). */
+export const MAX_RESUMES = 20;
+
+/**
+ * Room messages posted after `since` by anyone but this agent — the follow-ups
+ * (an orchestrator's ANSWER, the person's reply) that should resume a finished
+ * run. The worker's own posts carry its agent id and never resume it.
+ */
+export function followUpsSince(messages: RoomMessage[], since: string, selfAgentId: string): RoomMessage[] {
+  const t0 = Date.parse(since);
+  return messages
+    .filter((m) => typeof m.timestamp === "string" && Date.parse(m.timestamp) > t0)
+    .filter((m) => m.routedTeammateId !== selfAgentId)
+    .filter((m) => typeof m.content === "string" && m.content.trim().length > 0)
+    .sort((a, b) => Date.parse(a.timestamp as string) - Date.parse(b.timestamp as string));
+}
+
+/** The prompt that resumes a finished run with the room's new messages. */
+export function buildFollowUpPrompt(messages: RoomMessage[]): string {
+  const lines = messages.map((m) => {
+    const who = m.authorType === "human" ? "the person" : m.routedTeammateId ? `agent ${m.routedTeammateId}` : "someone";
+    const text = (m.content ?? "").trim();
+    return `- ${who} (${m.timestamp}): ${text.length > 2000 ? `${text.slice(0, 2000)}…` : text}`;
+  });
+  return [
+    `New messages arrived in this session's room after your last run:`,
+    ...lines,
+    ``,
+    `Continue under the same protocol: re-read the room if needed, act on these messages, report in the room, record outcomes, and end with one line: WORKER-RESULT: done | blocked | failed — <one sentence>.`,
+  ].join("\n");
+}
+
 // ─── state ────────────────────────────────────────────────────────────────────
 
 function stateDir(agent: string): string {
@@ -284,13 +326,19 @@ export async function workerCommand(opts: WorkerOptions): Promise<void> {
 
   say(`agent ${agent} → ${cfg.podUrl} · MCP server "${mcpServer}" · cwd ${cwd} · every ${intervalMs / 1000}s · max ${maxParallel} parallel`);
 
-  const launch = (item: HandedItem) => {
-    const prompt = buildWorkerPrompt({ sessionId: item.id, goal: item.goal, agentName: agent, cwd, mcpServer: mcpServer as string });
+  const launch = (item: HandedItem, resume?: { claudeSessionId: string; prompt: string }) => {
+    const prompt =
+      resume?.prompt ??
+      buildWorkerPrompt({ sessionId: item.id, goal: item.goal, agentName: agent, cwd, mcpServer: mcpServer as string });
     const args = ["-p", prompt, "--output-format", "stream-json", "--verbose"];
+    if (resume) args.push("--resume", resume.claudeSessionId);
     if (opts.skipPermissions) args.push("--dangerously-skip-permissions");
     else args.push("--permission-mode", "acceptEdits", "--allowedTools", ...allowed);
 
-    const record: RunRecord = { sessionId: item.id, status: "running", startedAt: new Date().toISOString() };
+    const prior = state.runs[item.id];
+    const record: RunRecord = resume && prior
+      ? Object.assign(prior, { status: "running" as const, resumes: (prior.resumes ?? 0) + 1, exitCode: undefined })
+      : { sessionId: item.id, status: "running", startedAt: new Date().toISOString() };
     state.runs[item.id] = record;
     if (opts.dryRun) {
       record.status = "done";
@@ -307,7 +355,7 @@ export async function workerCommand(opts: WorkerOptions): Promise<void> {
     children.set(item.id, child);
     record.pid = child.pid;
     saveState(agent, state);
-    say(`launched session ${item.id} (pid ${child.pid})`);
+    say(`${resume ? `resumed (follow-up #${record.resumes})` : "launched"} session ${item.id} (pid ${child.pid})`);
 
     let buffered = "";
     let lastResult: string | undefined;
@@ -342,13 +390,36 @@ export async function workerCommand(opts: WorkerOptions): Promise<void> {
     });
   };
 
+  const selfAgentId = cfg.userId;
+  const roomFollowUps = async (sessionId: string, since: string): Promise<RoomMessage[]> => {
+    const s = await mcp.call("synap_get_session", { sessionId });
+    if (s.isError) throw new Error(`get_session ${sessionId} refused: ${s.text.slice(0, 160)}`);
+    const channelId = (findKey(JSON.parse(s.text), "channelId") as string | undefined) ?? null;
+    if (!channelId) return [];
+    const t = await mcp.call("synap_get_thread_context", { threadId: channelId });
+    if (t.isError) throw new Error(`thread ${channelId} refused: ${t.text.slice(0, 160)}`);
+    const messages = (JSON.parse(t.text) as { messages?: RoomMessage[] }).messages ?? [];
+    return followUpsSince(messages, since, selfAgentId);
+  };
+
   const tick = async () => {
     const res = await mcp.call("synap_orient", {});
     if (res.isError) throw new Error(`orient refused: ${res.text.slice(0, 200)}`);
     const items = parseHandedToYou(res.text);
     const fresh = pickNew(items, state, maxParallel - children.size);
     for (const item of fresh) launch(item);
-    return { handed: items.length, launched: fresh.length };
+    let resumed = 0;
+    for (const item of items) {
+      if (children.size >= maxParallel) break;
+      const rec = state.runs[item.id];
+      if (!rec || rec.status === "running" || !rec.claudeSessionId || !rec.finishedAt) continue;
+      if ((rec.resumes ?? 0) >= MAX_RESUMES) continue;
+      const follow = await roomFollowUps(item.id, rec.finishedAt);
+      if (!follow.length) continue;
+      launch(item, { claudeSessionId: rec.claudeSessionId, prompt: buildFollowUpPrompt(follow) });
+      resumed++;
+    }
+    return { handed: items.length, launched: fresh.length + resumed };
   };
 
   let failures = 0;

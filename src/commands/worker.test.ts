@@ -105,3 +105,32 @@ describe("lastJsonPayload", () => {
     expect(lastJsonPayload('{"plain":true}')).toBe('{"plain":true}');
   });
 });
+
+import { buildFollowUpPrompt, followUpsSince, MAX_RESUMES } from "./worker.js";
+
+describe("followUpsSince", () => {
+  const self = "agent-self";
+  const msgs = [
+    { id: "1", content: "my question", timestamp: "2026-10-12T10:00:00Z", routedTeammateId: self },
+    { id: "2", content: "ANSWER: yes", timestamp: "2026-10-12T10:05:00Z", routedTeammateId: "orchestrator" },
+    { id: "3", content: "old", timestamp: "2026-10-12T09:00:00Z", routedTeammateId: "orchestrator" },
+    { id: "4", content: "my report", timestamp: "2026-10-12T10:06:00Z", routedTeammateId: self },
+    { id: "5", content: "please also do X", timestamp: "2026-10-12T10:07:00Z", authorType: "human", routedTeammateId: null },
+    { id: "6", content: "   ", timestamp: "2026-10-12T10:08:00Z", routedTeammateId: "orchestrator" },
+  ];
+  it("keeps only others' non-empty messages after the run ended, oldest first", () => {
+    expect(followUpsSince(msgs, "2026-10-12T10:01:00Z", self).map((m) => m.id)).toEqual(["2", "5"]);
+  });
+  it("the worker's own posts never resume it", () => {
+    expect(followUpsSince(msgs, "2026-10-12T10:05:30Z", self).map((m) => m.id)).toEqual(["5"]);
+  });
+  it("nothing new → no resume", () => {
+    expect(followUpsSince(msgs, "2026-10-12T11:00:00Z", self)).toEqual([]);
+  });
+  it("the follow-up prompt carries the messages and the verdict rule", () => {
+    const p = buildFollowUpPrompt([{ content: "ANSWER: yes", timestamp: "t", routedTeammateId: "orch" }]);
+    expect(p).toContain("agent orch (t): ANSWER: yes");
+    expect(p).toContain("WORKER-RESULT:");
+    expect(MAX_RESUMES).toBeGreaterThan(0);
+  });
+});
