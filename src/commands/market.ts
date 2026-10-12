@@ -694,23 +694,14 @@ export function deferredPlacementLines(res: Record<string, unknown>): string[] {
 }
 
 /**
- * Why the pod did NOT record the template version — `templateApply` on the
- * `/packages/apply` response (synap-backend `finishTemplateApply`): the version
- * is written only once every layer landed. One plain line; `null` when the
- * version was recorded (or an older pod that does not say).
+ * Why the pod did NOT record the template version — the pod's ONE sentence
+ * (`templateApplyWarning` on the `/packages/apply` response, synap-backend
+ * `templateApplyWarning`): the same words `synap templates` keeps showing under
+ * the space. Printed verbatim; `null` when the version was recorded (or an
+ * older pod that does not say).
  */
-export function heldVersionLine(res: Record<string, unknown>, slug: string): string | null {
-  const t = res.templateApply as { state?: string; proposals?: unknown; failures?: unknown } | undefined;
-  if (!t || typeof t !== "object") return null;
-  const proposals = Array.isArray(t.proposals) ? (t.proposals as unknown[]).filter((p) => typeof p === "string") : [];
-  if (t.state === "awaiting-approval") {
-    const which = proposals.length ? ` (${proposals.join(", ")})` : "";
-    return `Not finished yet: part of ${slug} waits on your approval${which}. Approve it, then run synap templates update ${slug} to finish.`;
-  }
-  if (t.state === "partial") {
-    return `Not finished: part of ${slug} did not apply. Run synap templates update ${slug} to retry.`;
-  }
-  return `Not finished: run synap templates update ${slug} to apply the rest of ${slug}.`;
+export function heldVersionLine(res: Record<string, unknown>): string | null {
+  return typeof res.templateApplyWarning === "string" ? res.templateApplyWarning : null;
 }
 
 /** Render a `classifyApplyResult` verdict — the ONE honest-text door for both `marketInstall` and `applyOnePackage`. */
@@ -1510,7 +1501,7 @@ export async function marketInstall(
     printSeedOutcomes(dependencies, seedSummary);
     printLayerOutcomes(ws?.layers);
     for (const line of deferredPlacementLines(res)) log.info(line);
-    const held = heldVersionLine(res, slug);
+    const held = heldVersionLine(res);
     if (held) log.info(held);
     if (ws?.outcome || ws?.status === "composed" || ws?.status === "created") renderNextSteps(steps);
   } catch (e) {
@@ -1794,7 +1785,7 @@ async function applyOnePackage(
       printSeedOutcomes(dependencies, seedSummary);
       printLayerOutcomes(ws?.layers);
       for (const line of deferredPlacementLines(res)) log.info(line);
-      const held = heldVersionLine(res, entry.slug);
+      const held = heldVersionLine(res);
       if (held) log.info(held);
     }
     return {
@@ -3560,15 +3551,8 @@ interface TemplateRow {
   lifecycleNotice: { label: string; action: string | null } | null;
   /** One line per overlay on the space, with its notice when not `current`. Empty on an older pod. */
   overlayNotices: Array<{ slug: string; label: string | null; lifecycle: string }>;
-  /** "Waiting on your approval of N proposal(s): <ids> — then …" — null when nothing waits (read live by the pod). */
-  awaitingNotice: string | null;
-}
-
-/** The plain line for a space whose update waits on the person's approval, with the proposal ids. */
-export function awaitingApprovalNotice(slug: string, ids: string[]): string | null {
-  if (ids.length === 0) return null;
-  const n = ids.length;
-  return `Waiting on your approval of ${n} proposal${n === 1 ? "" : "s"} (${ids.join(", ")}), then run synap templates update ${slug}`;
+  /** The pod's sentence for why the last update did not finish (`applyWarning`) — null when there is nothing to say. */
+  applyNotice: string | null;
 }
 
 /** Sort one workspace into the action-ranked home: drifted / unstamped / (unattached-with-suggestion) → attention; current → ok; unattached-no-match → unlinked. */
@@ -3623,17 +3607,17 @@ export function classifyTemplateRow(
     label: overlayNotice(o)?.label ?? null,
     lifecycle: o.info.lifecycle,
   }));
-  // Waiting on the person's approval: the update cannot finish before it, so
-  // the next step is opening the proposal, not re-running the update.
-  const awaitingNotice = ws.packageSlug
-    ? awaitingApprovalNotice(ws.packageSlug, ws.awaitingApproval ?? [])
-    : null;
-  if (awaitingNotice) {
+  // Why the last update did not finish — the POD's sentence, printed as is.
+  // Waiting on the person's approval (live, by the pod): the update cannot
+  // finish before it, so the next step is opening the proposal.
+  const applyNotice = ws.applyWarning ?? null;
+  if (applyNotice) group = "attention";
+  const waiting = ws.awaitingApproval ?? [];
+  if (waiting.length > 0) {
     group = "attention";
-    const ids = ws.awaitingApproval!;
-    action = ids.length === 1 ? `synap open proposal ${ids[0]}` : null;
+    action = waiting.length === 1 ? `synap open proposal ${waiting[0]}` : null;
   }
-  return { ws, status, suggestion, group, action, lifecycleNotice: notice, overlayNotices, awaitingNotice };
+  return { ws, status, suggestion, group, action, lifecycleNotice: notice, overlayNotices, applyNotice };
 }
 
 function templateRowToJson(r: TemplateRow) {
@@ -3650,6 +3634,7 @@ function templateRowToJson(r: TemplateRow) {
     suggestedSlug: r.suggestion?.slug ?? null,
     action: r.action,
     awaitingApproval: r.ws.awaitingApproval ?? [],
+    applyWarning: r.ws.applyWarning ?? null,
     lifecycle: r.ws.lifecycle?.lifecycle ?? null,
     replacedBy: r.ws.lifecycle?.replacedBy ?? null,
     retiredReason: r.ws.lifecycle?.retiredReason ?? null,
@@ -3685,7 +3670,7 @@ function renderTemplateRow(r: TemplateRow): void {
     if (r.ws.lifecycle?.retiredReason && !r.ws.lifecycle.warning)
       console.log("    " + " ".repeat(36) + chalk.dim(r.ws.lifecycle.retiredReason));
   }
-  if (r.awaitingNotice) console.log("    " + " ".repeat(36) + chalk.yellow(`⏳ ${r.awaitingNotice}`));
+  if (r.applyNotice) console.log("    " + " ".repeat(36) + chalk.yellow(`⏳ ${r.applyNotice}`));
   if (r.action) console.log("    " + " ".repeat(36) + chalk.dim(r.action));
   for (const o of r.overlayNotices) {
     console.log("    " + " ".repeat(36) + chalk.dim(`↳ overlay ${o.slug}`));

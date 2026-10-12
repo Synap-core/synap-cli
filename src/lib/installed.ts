@@ -369,6 +369,12 @@ export interface WorkspaceAttachment {
    * gone from here. `[]`/absent = nothing waiting (or an older pod).
    */
   awaitingApproval?: string[];
+  /**
+   * The pod's ONE sentence for why this space's last template update did not
+   * finish (Hub `applyWarning`, synap-backend `templateApplyWarning`) — print
+   * it verbatim, never re-word it. `null`/absent = nothing to say.
+   */
+  applyWarning?: string | null;
 }
 
 /**
@@ -397,6 +403,7 @@ type HubWorkspaceAttachmentRow = {
   retiredReason?: string | null;
   overlays?: unknown;
   awaitingApproval?: unknown;
+  applyWarning?: unknown;
 };
 
 export function mapWorkspaceAttachments(rows: HubWorkspaceAttachmentRow[]): WorkspaceAttachment[] {
@@ -413,6 +420,7 @@ export function mapWorkspaceAttachments(rows: HubWorkspaceAttachmentRow[]): Work
     awaitingApproval: Array.isArray(ws.awaitingApproval)
       ? ws.awaitingApproval.filter((p): p is string => typeof p === "string")
       : undefined,
+    applyWarning: typeof ws.applyWarning === "string" ? ws.applyWarning : null,
   }));
 }
 

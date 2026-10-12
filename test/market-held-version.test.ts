@@ -1,7 +1,7 @@
 /**
  * The pod holds a template's version until every layer landed (synap-backend
  * `finishTemplateApply`, `templateApply` on the `/packages/apply` response).
- * The CLI must say so in plain words, must not read the held version as an
+ * The CLI must print the pod's sentence for it (one wording, served by the pod), must not read the held version as an
  * old pod that cannot stamp, and must list the space as "not finished" (with
  * the one command that finishes it) rather than "version unknown".
  */
@@ -18,16 +18,18 @@ const ENTRY = { slug: "crm", name: "CRM" } as Parameters<typeof classifyApplyRes
 const plain = (s: string) => s.replace(/\u001b\[[0-9;]*m/g, "");
 
 describe("held template version", () => {
-  it("names the proposal and the command that finishes the install", () => {
+  it("prints the POD's sentence verbatim — the CLI never words it", () => {
+    const sentence =
+      "Waiting on your approval of 1 proposal (p-1), then run `synap templates update crm`.";
     expect(
-      heldVersionLine({ templateApply: { state: "awaiting-approval", proposals: ["p-1"] } }, "crm")
-    ).toBe(
-      "Not finished yet: part of crm waits on your approval (p-1). Approve it, then run synap templates update crm to finish."
-    );
-    expect(heldVersionLine({ templateApply: { state: "partial" } }, "crm")).toContain(
-      "synap templates update crm"
-    );
-    expect(heldVersionLine({}, "crm")).toBeNull();
+      heldVersionLine({
+        templateApply: { state: "awaiting-approval", proposals: ["p-1"] },
+        templateApplyWarning: sentence,
+      })
+    ).toBe(sentence);
+    // The record alone (an older pod that sends no sentence) is not re-worded.
+    expect(heldVersionLine({ templateApply: { state: "partial" } })).toBeNull();
+    expect(heldVersionLine({})).toBeNull();
   });
 
   it("a version the pod HELD is not a stamp contradiction", () => {
