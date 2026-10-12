@@ -88,7 +88,7 @@ export function describeKeyState(s: KeyState): string {
     case "unknown":
       return "is not a key this pod issued";
     case "inactive":
-      return "is refused, and this pod is too old to say why";
+      return s.legacy ? "is refused, and this pod is too old to say why" : `is refused by this pod${s.error ? ` (${s.error})` : ""}`;
     case "unreachable":
       return `could not be checked (${s.error ?? "pod unreachable"})`;
   }

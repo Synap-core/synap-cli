@@ -69,6 +69,8 @@ export async function waitForKeyLive(opts: WaitForKeyLiveOpts): Promise<KeyWaitO
     const s = await fetchKeyState(opts.podUrl, opts.pendingKey, { fetch: f });
     if (s.state === "active") return "approved";
     if (s.state === "revoked" || s.state === "expired" || s.state === "unknown") return "rejected";
+    // A current pod refusing to even describe the key (403: a guest's key) is a no.
+    if (s.state === "inactive" && !s.legacy) return "rejected";
     if (s.legacy && s.state === "inactive" && opts.pendingToken && opts.humanApiKey) {
       // Older pod: it cannot describe the pending key — ask the pending door.
       const res = await f(`${base}/api/hub/setup/agent/pending/${opts.pendingToken}`, {
@@ -106,7 +108,8 @@ export async function classifyRecordedPending(
     case "inactive":
       // Older pod: inactive is either still pending or refused; resuming the
       // wait is safe (the pending door settles it), minting another is not.
-      return { kind: "pending", state };
+      // A current pod refusing the key outright: keep it recorded, mint nothing.
+      return { kind: state.legacy ? "pending" : "unknown", state };
     case "unreachable":
       return { kind: "unknown", state };
   }

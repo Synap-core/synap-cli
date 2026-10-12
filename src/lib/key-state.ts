@@ -40,7 +40,7 @@ export interface KeyState {
   replacedBy?: { createdAt: string; instanceId: string | null; instanceLabel?: string | null } | null;
   /** True when the answer came from the `/auth/status` fallback (older pod). */
   legacy?: boolean;
-  /** `unreachable` only. */
+  /** `unreachable`, or the HTTP refusal behind an `inactive`. */
   error?: string;
 }
 
@@ -71,7 +71,7 @@ export async function fetchKeyState(
     if (body && typeof body.state === "string" && STATES.has(body.state)) return body as unknown as KeyState;
     return { state: "unreachable", error: "the pod answered key-state with an unreadable body" };
   }
-  if (res.status !== 404) return { state: "unreachable", error: `HTTP ${res.status} from /auth/key-state` };
+  if (res.status !== 404) return nonOkState(res.status, "/auth/key-state");
 
   // Older pod: no key-state door. `/auth/status` says works / does not work.
   let legacy: Response;
@@ -89,7 +89,20 @@ export async function fetchKeyState(
     if (env.reason === "expired") return { state: "expired", legacy: true, keyIdPrefix: env.keyIdPrefix };
     return { state: "inactive", legacy: true, keyIdPrefix: env.keyIdPrefix };
   }
-  return { state: "unreachable", error: `HTTP ${legacy.status} from /auth/status`, legacy: true };
+  return { ...nonOkState(legacy.status, "/auth/status"), legacy: true };
+}
+
+/**
+ * A non-OK answer that is not the older-pod 404. Only a 5xx (or a rate-limit /
+ * request timeout, which says nothing about the key) is `unreachable`. Any
+ * other refusal — 401, 403 (a guest's key), 400… — is the pod saying NO to
+ * this key: `inactive`, which `writeGate` refuses. Reading a 403 as
+ * "unreachable" let the gate write a key the pod refuses.
+ */
+function nonOkState(status: number, door: string): KeyState {
+  if (status >= 500 || status === 408 || status === 429)
+    return { state: "unreachable", error: `HTTP ${status} from ${door}` };
+  return { state: "inactive", error: `HTTP ${status} from ${door}` };
 }
 
 export type WriteGate = { allow: true; warning?: string } | { allow: false; reason: string };
