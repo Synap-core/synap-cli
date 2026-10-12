@@ -14,7 +14,7 @@
  */
 
 import http from "node:http";
-import { execSync } from "node:child_process";
+import { openExternalUrl } from "./safe-open.js";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
@@ -164,26 +164,8 @@ export async function loginWithToken(token: string): Promise<StoredCredentials |
  * a server) still has the one instruction it needs.
  */
 export function openBrowser(url: string): boolean {
-  // Linux with no display: xdg-open fails, or starts a text browser that takes
-  // over the terminal. Don't try.
-  if (process.platform === "linux" && !process.env.DISPLAY && !process.env.WAYLAND_DISPLAY) {
-    return false;
-  }
-  const cmd =
-    process.platform === "darwin"
-      ? `open "${url}"`
-      : process.platform === "linux"
-        ? `xdg-open "${url}"`
-        : process.platform === "win32"
-          ? `start "" "${url}"`
-          : null;
-  if (!cmd) return false;
-  try {
-    execSync(cmd, { stdio: "ignore", timeout: 5000 });
-    return true;
-  } catch {
-    return false;
-  }
+  // argv only, http(s) only, no headless-Linux attempt — `safe-open.ts`.
+  return openExternalUrl(url);
 }
 
 /**

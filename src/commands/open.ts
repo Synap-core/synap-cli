@@ -12,7 +12,7 @@
  * cannot steal the click.
  */
 
-import { execFileSync, execSync } from "child_process";
+import { execFileSync } from "child_process";
 import { existsSync } from "fs";
 import { homedir } from "os";
 import { join } from "path";
@@ -110,7 +110,8 @@ export function openUrl(url: string): void {
     return;
   }
   if (platform === "win32") {
-    execSync(`start "" "${url}"`);
+    // argv only: `start "" "<url>"` went through cmd.exe, where `&` in a link runs a command.
+    execFileSync("rundll32", ["url.dll,FileProtocolHandler", url], { stdio: "pipe" });
     return;
   }
   throw new Error(`Unsupported platform: ${platform}`);

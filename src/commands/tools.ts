@@ -6,7 +6,7 @@
 
 import chalk from "chalk";
 import ora from "ora";
-import { exec } from "child_process";
+import { openExternalUrl } from "../lib/safe-open.js";
 import { mkdirSync, writeFileSync, existsSync } from "fs";
 import { resolveHubConfig, hubGet, hubPost, renderHubError } from "../lib/hub-client.js";
 import { capabilityList, capabilityConnect, capabilityDisconnect } from "./capability.js";
@@ -87,20 +87,8 @@ async function pollUntilConnected(
 }
 
 function openBrowser(url: string): void {
-  const platform = process.platform;
-  let cmd: string;
-  if (platform === "darwin") {
-    cmd = `open "${url}"`;
-  } else if (platform === "win32") {
-    cmd = `start "" "${url}"`;
-  } else {
-    cmd = `xdg-open "${url}"`;
-  }
-  try {
-    exec(cmd);
-  } catch {
-    // silently ignore — caller already prints the URL
-  }
+  // argv only, http(s) only — never a shell string (`safe-open.ts`).
+  openExternalUrl(url);
 }
 
 async function fetchProviders(cfg: HubCfg, workspaceId?: string): Promise<ConnectorProvider[]> {

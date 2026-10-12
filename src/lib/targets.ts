@@ -12,7 +12,8 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { exec, execFileSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
+import { openExternalUrl } from "./safe-open.js";
 import chalk from "chalk";
 import ora from "ora";
 import prompts from "prompts";
@@ -948,13 +949,9 @@ function credentialError(agentType: string, status: number, body: string): strin
   );
 }
 
+/** Open an http(s) URL in the browser — argv only, never a shell (`safe-open.ts`). */
 export function openBrowserUrl(url: string): void {
-  const safe = url.replace(/"/g, "%22");
-  const cmd =
-    process.platform === "darwin" ? `open "${safe}"` :
-    process.platform === "win32"  ? `start "" "${safe}"` :
-    `xdg-open "${safe}"`;
-  exec(cmd, () => { /* best-effort */ });
+  openExternalUrl(url);
 }
 
 /** The pod answered a key mint with something unusable (e.g. no agent id). */
@@ -1232,6 +1229,7 @@ async function awaitApprovalOrThrow(args: {
   const outcome = await openAndWait(
     args.agentType,
     args.approvalUrl,
+    args.podUrl,
     () =>
       waitForKeyLive({
         podUrl: args.podUrl,

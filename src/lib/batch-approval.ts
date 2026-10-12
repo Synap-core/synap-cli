@@ -21,6 +21,7 @@
 import chalk from "chalk";
 import type { TargetName } from "./targets.js";
 import { log } from "../utils/logger.js";
+import { openPodPage } from "./safe-open.js";
 
 /** How a target's installer mints its agent key — ONE table, read by both. */
 export interface KeyMintSpec {
@@ -186,7 +187,8 @@ export async function approveAgentKeysAtOnce(
   );
   for (const url of urls) {
     log.dim(url);
-    openUrl(url);
+    // A pod-supplied link: opened only on this pod's own / pod-admin origin.
+    openPodPage(url, podUrl, openUrl);
   }
   process.stdout.write(chalk.dim("  Waiting for approval"));
   const ticker = setInterval(() => process.stdout.write(chalk.dim(".")), 2000);

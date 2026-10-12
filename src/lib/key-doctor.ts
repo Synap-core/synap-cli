@@ -208,7 +208,7 @@ export async function fixKeyHealth(report: KeyHealthReport, deps: FixDeps = {}):
       if (d.action === "approve_and_wait" && d.surface && d.key) {
         const { openAndWait } = await import("./key-approval.js");
         const outcome = d.approvalUrl
-          ? await openAndWait(d.label ?? d.surface, d.approvalUrl, () => wait({ podUrl: report.podUrl, pendingKey: d.key! }), openUrl)
+          ? await openAndWait(d.label ?? d.surface, d.approvalUrl, report.podUrl, () => wait({ podUrl: report.podUrl, pendingKey: d.key! }), openUrl)
           : await wait({ podUrl: report.podUrl, pendingKey: d.key });
         if (outcome === "approved") outcomes.push(await finish(d, d.surface, d.key, d.agentUserId));
         else if (outcome === "rejected")

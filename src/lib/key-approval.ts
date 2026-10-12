@@ -16,6 +16,7 @@ import chalk from "chalk";
 import { log } from "../utils/logger.js";
 import { fetchKeyState, type FetchLike, type KeyState } from "./key-state.js";
 import type { PendingAgentKey } from "./pod.js";
+import { openPodPage } from "./safe-open.js";
 
 /** The approval did not land in time. The request stays filed and resumable. */
 export class AgentKeyAwaitingApprovalError extends Error {
@@ -111,16 +112,21 @@ export async function classifyRecordedPending(
   }
 }
 
-/** Print the approval link, open it, and wait — the one interactive wait. */
+/**
+ * Print the approval link, open it, and wait — the one interactive wait.
+ * The link came from the pod: it is opened only when it is on that pod's own
+ * origin or its pod-admin origin (`openPodPage`), never anywhere else.
+ */
 export async function openAndWait(
   agentType: string,
   approvalUrl: string,
+  podUrl: string,
   wait: () => Promise<KeyWaitOutcome>,
   openUrl: (url: string) => void
 ): Promise<KeyWaitOutcome> {
   log.info(`\n  Approve ${agentType} on your pod:`);
   log.dim(`  ${approvalUrl}`);
-  openUrl(approvalUrl);
+  openPodPage(approvalUrl, podUrl, openUrl);
   process.stdout.write(chalk.dim("  Waiting for approval"));
   const ticker = setInterval(() => process.stdout.write(chalk.dim(".")), 2000);
   try {

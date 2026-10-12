@@ -16,7 +16,7 @@
 import chalk from "chalk";
 import ora from "ora";
 import prompts from "prompts";
-import { exec } from "child_process";
+import { openExternalUrl } from "../lib/safe-open.js";
 import { readFileSync } from "node:fs";
 import { resolveHubConfig, hubGet, hubPost, hubDelete, HubError, renderHubError } from "../lib/hub-client.js";
 import { unwrapList } from "../lib/unwrapList.js";
@@ -552,18 +552,8 @@ export async function capabilityList(opts: CapListOpts): Promise<void> {
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 function openBrowser(url: string): void {
-  const platform = process.platform;
-  const cmd =
-    platform === "darwin"
-      ? `open "${url}"`
-      : platform === "win32"
-        ? `start "" "${url}"`
-        : `xdg-open "${url}"`;
-  try {
-    exec(cmd);
-  } catch {
-    // silently ignore — caller already prints the URL
-  }
+  // argv only, http(s) only — never a shell string (`safe-open.ts`).
+  openExternalUrl(url);
 }
 
 /** Short host label for a pod (for picker headers: "→ pod.perso…"). */
