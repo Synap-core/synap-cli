@@ -3226,11 +3226,14 @@ export async function marketInstalled(opts: {
 type AttachmentStatus =
   | { kind: "unattached" }
   | { kind: "no-version"; slug: string }
+  /** Attached, no version recorded, and the pod reads it drifted: its last install/update did not finish (the pod holds the version until it does). */
+  | { kind: "unfinished"; slug: string }
   | { kind: "attached"; slug: string; version: string; updateAvailable: boolean; latestVersion?: string };
 
 /** Classify one workspace's attachment, reusing `computeUpdates`' drift verdict for the stamped case. */
 function classifyAttachment(ws: WorkspaceAttachment, check: UpdateCheck | undefined): AttachmentStatus {
   if (!ws.packageSlug) return { kind: "unattached" };
+  if (!ws.packageVersion && ws.drifted === true) return { kind: "unfinished", slug: ws.packageSlug };
   if (!ws.packageVersion || check?.noVersionInfo) return { kind: "no-version", slug: ws.packageSlug };
   return {
     kind: "attached",
@@ -3246,6 +3249,8 @@ export function attachmentStatusLabel(s: AttachmentStatus): string {
   switch (s.kind) {
     case "unattached":
       return chalk.yellow("⚠ not attached to a template");
+    case "unfinished":
+      return chalk.yellow("⚠ ") + chalk.cyan(s.slug) + chalk.yellow(" · not finished");
     case "no-version":
       return (
         chalk.yellow("⚠ attached to ") +
@@ -3315,7 +3320,7 @@ export async function marketWorkspaces(opts: {
     status: classifyAttachment(ws, checkByWorkspace.get(ws.workspaceId)),
   }));
   if (opts.unattached) {
-    rows = rows.filter((r) => r.status.kind !== "attached");
+    rows = rows.filter((r) => r.status.kind !== "attached" && r.status.kind !== "unfinished");
   }
 
   if (opts.json) {
@@ -3365,7 +3370,7 @@ export async function marketWorkspaces(opts: {
   }
   log.blank();
 
-  const needsAttach = rows.filter((r) => r.status.kind !== "attached");
+  const needsAttach = rows.filter((r) => r.status.kind !== "attached" && r.status.kind !== "unfinished");
   if (needsAttach.length > 0) {
     log.hint(
       `Attach a template to a workspace: synap market attach <workspaceId> [--slug <slug>]`
@@ -3555,6 +3560,15 @@ interface TemplateRow {
   lifecycleNotice: { label: string; action: string | null } | null;
   /** One line per overlay on the space, with its notice when not `current`. Empty on an older pod. */
   overlayNotices: Array<{ slug: string; label: string | null; lifecycle: string }>;
+  /** "Waiting on your approval of N proposal(s): <ids> — then …" — null when nothing waits (read live by the pod). */
+  awaitingNotice: string | null;
+}
+
+/** The plain line for a space whose update waits on the person's approval, with the proposal ids. */
+export function awaitingApprovalNotice(slug: string, ids: string[]): string | null {
+  if (ids.length === 0) return null;
+  const n = ids.length;
+  return `Waiting on your approval of ${n} proposal${n === 1 ? "" : "s"} (${ids.join(", ")}), then run synap templates update ${slug}`;
 }
 
 /** Sort one workspace into the action-ranked home: drifted / unstamped / (unattached-with-suggestion) → attention; current → ok; unattached-no-match → unlinked. */
@@ -3573,6 +3587,10 @@ export function classifyTemplateRow(
         group = "attention";
         action = `synap templates update ${status.slug}`;
       }
+      break;
+    case "unfinished":
+      group = "attention";
+      action = `synap templates update ${status.slug}`;
       break;
     case "no-version":
       group = "attention";
@@ -3605,7 +3623,17 @@ export function classifyTemplateRow(
     label: overlayNotice(o)?.label ?? null,
     lifecycle: o.info.lifecycle,
   }));
-  return { ws, status, suggestion, group, action, lifecycleNotice: notice, overlayNotices };
+  // Waiting on the person's approval: the update cannot finish before it, so
+  // the next step is opening the proposal, not re-running the update.
+  const awaitingNotice = ws.packageSlug
+    ? awaitingApprovalNotice(ws.packageSlug, ws.awaitingApproval ?? [])
+    : null;
+  if (awaitingNotice) {
+    group = "attention";
+    const ids = ws.awaitingApproval!;
+    action = ids.length === 1 ? `synap open proposal ${ids[0]}` : null;
+  }
+  return { ws, status, suggestion, group, action, lifecycleNotice: notice, overlayNotices, awaitingNotice };
 }
 
 function templateRowToJson(r: TemplateRow) {
@@ -3621,6 +3649,7 @@ function templateRowToJson(r: TemplateRow) {
     updateAvailable: r.status.kind === "attached" ? r.status.updateAvailable : false,
     suggestedSlug: r.suggestion?.slug ?? null,
     action: r.action,
+    awaitingApproval: r.ws.awaitingApproval ?? [],
     lifecycle: r.ws.lifecycle?.lifecycle ?? null,
     replacedBy: r.ws.lifecycle?.replacedBy ?? null,
     retiredReason: r.ws.lifecycle?.retiredReason ?? null,
@@ -3656,6 +3685,7 @@ function renderTemplateRow(r: TemplateRow): void {
     if (r.ws.lifecycle?.retiredReason && !r.ws.lifecycle.warning)
       console.log("    " + " ".repeat(36) + chalk.dim(r.ws.lifecycle.retiredReason));
   }
+  if (r.awaitingNotice) console.log("    " + " ".repeat(36) + chalk.yellow(`⏳ ${r.awaitingNotice}`));
   if (r.action) console.log("    " + " ".repeat(36) + chalk.dim(r.action));
   for (const o of r.overlayNotices) {
     console.log("    " + " ".repeat(36) + chalk.dim(`↳ overlay ${o.slug}`));
@@ -3788,10 +3818,12 @@ export async function marketTemplates(opts: {
   // Footer — the one-glance "what can I do from here". Only surfaces verbs that
   // actually apply to the current state, so it's never a menu of dead options.
   const driftedCount = attention.filter(
-    (r) => r.status.kind === "attached" && r.status.updateAvailable
+    (r) =>
+      (r.status.kind === "attached" && r.status.updateAvailable) ||
+      r.status.kind === "unfinished"
   ).length;
   const attachableCount = attention.filter(
-    (r) => r.status.kind !== "attached"
+    (r) => r.status.kind !== "attached" && r.status.kind !== "unfinished"
   ).length;
   if (driftedCount > 0 || attachableCount > 0) {
     log.blank();

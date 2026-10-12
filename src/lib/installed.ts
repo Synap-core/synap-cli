@@ -363,6 +363,12 @@ export interface WorkspaceAttachment {
   lifecycle?: LifecycleInfo;
   /** Overlays composed onto this space, each with its own standing. `undefined` on an older pod — show what was shown before. */
   overlays?: OverlayInfo[];
+  /**
+   * The proposals this space's last template update is still waiting on — the
+   * pod reads them LIVE (Hub `awaitingApproval`), so a decided proposal is
+   * gone from here. `[]`/absent = nothing waiting (or an older pod).
+   */
+  awaitingApproval?: string[];
 }
 
 /**
@@ -390,9 +396,10 @@ type HubWorkspaceAttachmentRow = {
   replacedBy?: string | null;
   retiredReason?: string | null;
   overlays?: unknown;
+  awaitingApproval?: unknown;
 };
 
-function mapWorkspaceAttachments(rows: HubWorkspaceAttachmentRow[]): WorkspaceAttachment[] {
+export function mapWorkspaceAttachments(rows: HubWorkspaceAttachmentRow[]): WorkspaceAttachment[] {
   return rows.map((ws) => ({
     workspaceId: ws.id,
     workspaceName: ws.name,
@@ -403,6 +410,9 @@ function mapWorkspaceAttachments(rows: HubWorkspaceAttachmentRow[]): WorkspaceAt
     drifted: ws.drifted,
     lifecycle: parseLifecycle(ws as Record<string, unknown>),
     overlays: parseOverlays(ws as Record<string, unknown>),
+    awaitingApproval: Array.isArray(ws.awaitingApproval)
+      ? ws.awaitingApproval.filter((p): p is string => typeof p === "string")
+      : undefined,
   }));
 }
 
