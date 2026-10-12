@@ -8,7 +8,7 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { deriveInstanceId, readMachineId, machineInstanceId, type MachineIdSources } from "../src/lib/machine-instance.js";
+import { deriveInstanceId, deriveInstanceLabel, readMachineId, machineInstanceId, type MachineIdSources } from "../src/lib/machine-instance.js";
 
 const src = (over: Partial<MachineIdSources>): MachineIdSources => ({
   platform: "linux",
@@ -68,5 +68,18 @@ describe("the persisted fallback is stable across runs", () => {
   });
   it("this computer's real label is stable across calls", () => {
     expect(machineInstanceId("claude-code")).toBe(machineInstanceId("claude-code"));
+  });
+});
+
+describe("deriveInstanceLabel — the computer's NAME (display only)", () => {
+  it("is the hostname without its domain", () => {
+    expect(deriveInstanceLabel("MacBook-Pro.local")).toBe("MacBook-Pro");
+    expect(deriveInstanceLabel("devbox")).toBe("devbox");
+  });
+  it("SYNAP_COMPUTER_NAME renames it", () => {
+    expect(deriveInstanceLabel("ip-10-0-0-1.ec2.internal", "  build box ")).toBe("build box");
+  });
+  it("an empty hostname sends no name (the pod shows it unlabelled)", () => {
+    expect(deriveInstanceLabel("  ")).toBeUndefined();
   });
 });

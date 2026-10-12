@@ -33,6 +33,8 @@ import {
   resolveAgentPod,
 } from "../lib/agent-door.js";
 import { provisionAgentKey } from "../lib/targets.js";
+import { connectionLines, type PodConnection } from "../lib/agent-connections.js";
+import { machineInstanceId } from "../lib/machine-instance.js";
 
 function maskKey(key: string): string {
   if (key.length <= 12) return key.slice(0, 4) + "...";
@@ -50,6 +52,8 @@ function resolveGovernance(profile: AgentProfile): string {
 
 type PodAgentRow = {
   id: string;
+  /** Live connections, one per computer (absent from an older pod). */
+  connections?: PodConnection[];
   name: string | null;
   agentType: string | null;
   agentTemplate?: string | null;
@@ -172,6 +176,13 @@ export async function agentsList(
     console.log(
       `  ${chalk.bold(type)}  ${chalk.cyan(row.name ?? "—")}  id:${chalk.dim(id)}…${via}${focus}`
     );
+    // One line per computer it is connected from (an older pod cannot say).
+    const lines = connectionLines(row.connections, {
+      thisInstanceId: row.agentType ? machineInstanceId(row.agentType) : undefined,
+    });
+    if (lines === null) continue;
+    if (lines.length === 0) log.dim("      no live connection");
+    for (const line of lines) log.dim(`      ${line}`);
   }
 
   log.blank();

@@ -109,12 +109,15 @@ describe("writeClaudeCodeEnv refuses a pending key", () => {
 describe("provisionAgentKey: one request per computer, never a pending key handed out", () => {
   it("every mint carries this computer's instanceId", async () => {
     const { provisionAgentKey } = await import("../src/lib/targets.js");
-    const { machineInstanceId } = await import("../src/lib/machine-instance.js");
+    const { machineInstanceId, machineInstanceLabel } = await import("../src/lib/machine-instance.js");
     vi.stubGlobal("fetch", podStub({ setupAgent: () => ({ hubApiKey: "k", agentUserId: "agent-1" }), states: () => ({ state: "active" }) }));
     await provisionAgentKey(POD, "human-key", "codex");
     const mint = calls.find((c) => c.url.endsWith("/setup/agent"))!;
     expect(mint.body.instanceId).toBe(machineInstanceId("codex"));
     expect(mint.body.instanceId).toMatch(/^m-[0-9a-f]{16}$/);
+    // …and this computer's NAME, so the connection reads "Codex on <computer>".
+    expect(mint.body.instanceLabel).toEqual(expect.any(String));
+    expect(mint.body.instanceLabel).toBe(machineInstanceLabel());
   });
 
   it("a minted key the pod says is not live is refused, not returned", async () => {

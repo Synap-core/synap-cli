@@ -106,3 +106,22 @@ export function machineInstanceId(surface: string, src?: MachineIdSources): stri
   cache.set(surface, id);
   return id;
 }
+
+/**
+ * This computer's NAME for the person — sent as `instanceLabel` with every
+ * agent-key mint, so a connection reads "Claude Code on devbox" on the
+ * approval page and in `synap agents list`. Display only: the pod replaces by
+ * `instanceId`, never by this. `SYNAP_COMPUTER_NAME` renames it; otherwise the
+ * OS hostname without its domain ("MacBook-Pro.local" → "MacBook-Pro"). Pure.
+ */
+export function deriveInstanceLabel(hostname: string, override?: string | null): string | undefined {
+  const named = override?.trim();
+  if (named) return named.slice(0, 64);
+  const short = hostname.trim().split(".")[0]?.trim();
+  return short ? short.slice(0, 64) : undefined;
+}
+
+/** This computer's name (see {@link deriveInstanceLabel}). */
+export function machineInstanceLabel(): string | undefined {
+  return deriveInstanceLabel(os.hostname(), process.env.SYNAP_COMPUTER_NAME);
+}

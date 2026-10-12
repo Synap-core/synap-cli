@@ -30,12 +30,14 @@ export interface KeyState {
   keyId?: string;
   agentType?: string | null;
   instanceId?: string | null;
+  /** The computer's name this key was made on; null = unlabelled (older CLI). */
+  instanceLabel?: string | null;
   createdAt?: string;
   expiresAt?: string | null;
   approvalUrl?: string;
   revokedAt?: string | null;
   revokedReason?: string | null;
-  replacedBy?: { createdAt: string; instanceId: string | null } | null;
+  replacedBy?: { createdAt: string; instanceId: string | null; instanceLabel?: string | null } | null;
   /** True when the answer came from the `/auth/status` fallback (older pod). */
   legacy?: boolean;
   /** `unreachable` only. */

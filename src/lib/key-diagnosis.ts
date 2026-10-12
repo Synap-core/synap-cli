@@ -81,7 +81,7 @@ export function describeKeyState(s: KeyState): string {
       return "is waiting for your approval (it was never revoked)";
     case "revoked":
       return s.replacedBy
-        ? `was replaced on ${day(s.revokedAt)} by a connection created ${day(s.replacedBy.createdAt)}`
+        ? `was replaced on ${day(s.revokedAt)} by a connection created ${day(s.replacedBy.createdAt)}${s.replacedBy.instanceLabel ? ` on ${s.replacedBy.instanceLabel}` : ""}`
         : `was revoked on ${day(s.revokedAt)}${s.revokedReason ? ` (${s.revokedReason})` : ""}`;
     case "expired":
       return `expired${s.expiresAt ? ` on ${day(s.expiresAt)}` : ""}`;
@@ -184,7 +184,7 @@ function agentDiagnosis(input: DiagnoseInput, surface: string, group: KeyLocatio
       lines: [
         `Key ${tail(primaryLoc.key)} ${describeKeyState(s)}.`,
         otherInstance
-          ? `That connection belongs to another computer (${otherInstance}); approving it switched off every other ${label} key that shared its slot.`
+          ? `That connection belongs to another computer (${s.replacedBy?.instanceLabel ?? otherInstance}); approving it switched off every other ${label} key that shared its slot.`
           : `That connection carried no computer label (made by an older CLI), so approving it switched off EVERY ${label} key — this computer's included.`,
         `Give this computer its own connection: keys made now carry this computer's label (${input.instanceIdFor(surface)}), so approving one never switches another computer off.`,
       ],
@@ -223,7 +223,7 @@ export function diagnoseKeys(input: DiagnoseInput): Diagnosis[] {
         ...(s.state === "revoked" && s.replacedBy !== undefined
           ? [
               s.replacedBy?.instanceId && s.replacedBy.instanceId !== input.instanceIdFor(s.agentType ?? "")
-                ? `It was an agent key: approving another computer's connection (${s.replacedBy.instanceId}) switched it off.`
+                ? `It was an agent key: approving another computer's connection (${s.replacedBy.instanceLabel ?? s.replacedBy.instanceId}) switched it off.`
                 : "It was an agent key: approving a connection with no computer label (made by an older CLI, likely on another computer) switched off every key of that agent, this one included.",
             ]
           : []),

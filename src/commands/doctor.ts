@@ -33,6 +33,37 @@ import { samePodOrigin } from "../lib/project-ref.js";
 import { fetchKeyState } from "../lib/key-state.js";
 import { describeKeyState, type Diagnosis } from "../lib/key-diagnosis.js";
 import type { KeyHealthReport } from "../lib/key-doctor.js";
+import { connectionLines, type PodConnection } from "../lib/agent-connections.js";
+import { machineInstanceId } from "../lib/machine-instance.js";
+import { unwrapList } from "../lib/unwrapList.js";
+
+/**
+ * Each of your agents and the computers it is connected from. A failed read
+ * says so — never an empty list; an older pod that sends no connections is
+ * "cannot tell".
+ */
+async function printAgentConnections(cfg: HubConfig): Promise<void> {
+  let rows: Array<{ name: string | null; agentType: string | null; connections?: PodConnection[] }>;
+  try {
+    rows = unwrapList(await hubGet("/agent-users?mine=1", {}, cfg));
+  } catch (err) {
+    log.dim(`  Could not read your agents' connections: ${err instanceof Error ? err.message : String(err)}`);
+    return;
+  }
+  if (rows.length === 0) {
+    log.dim("  No agents on this pod for you yet.");
+    return;
+  }
+  for (const row of rows) {
+    const lines = connectionLines(row.connections, {
+      thisInstanceId: row.agentType ? machineInstanceId(row.agentType) : undefined,
+    });
+    console.log(`  ${chalk.bold(row.name ?? row.agentType ?? "Agent")}`);
+    if (lines === null) log.dim("     (this pod predates per-computer connections)");
+    else if (lines.length === 0) log.dim("     no live connection");
+    else for (const line of lines) log.dim(`     ${line}`);
+  }
+}
 
 interface DoctorOpts {
   json?: boolean;
@@ -403,7 +434,7 @@ export async function doctor(opts: DoctorOpts = {}): Promise<void> {
     podUrl: cfgResolved?.podUrl ?? podUrl,
     workspaceId: cfgResolved?.workspaceId,
     projectId: cfgResolved?.projectId,
-  }, keyHealth);
+  }, keyHealth, cfgResolved);
 }
 
 /**
@@ -672,7 +703,8 @@ async function finish(
   checks: CheckResult[],
   opts: DoctorOpts,
   lens: { podUrl?: string; workspaceId?: string; projectId?: string },
-  keyHealth?: KeyHealthReport
+  keyHealth?: KeyHealthReport,
+  hubCfg?: HubConfig
 ): Promise<void> {
   // Green requires every check to have VERIFIED something. An undetermined
   // check suppresses green (it is not a pass) but does not fail the run — only
@@ -736,6 +768,13 @@ async function finish(
         keyRow.detail = "fixed and verified (MCP initialize)";
       }
     }
+  }
+
+  // One agent, several computers: each agent's live connections, per computer.
+  if (hubCfg) {
+    log.blank();
+    log.heading("Agent connections");
+    await printAgentConnections(hubCfg);
   }
 
   log.blank();

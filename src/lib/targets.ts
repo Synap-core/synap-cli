@@ -19,7 +19,7 @@ import prompts from "prompts";
 import { log } from "../utils/logger.js";
 import { installSkills, getDeliverableSkills } from "./skills-installer.js";
 import { TARGET_KEY_MINT, takePreApprovedKey } from "./batch-approval.js";
-import { machineInstanceId } from "./machine-instance.js";
+import { machineInstanceId, machineInstanceLabel } from "./machine-instance.js";
 import {
   resolveHubConfig,
   resolveUserId,
@@ -1073,7 +1073,15 @@ export async function provisionAgentKey(
         "Content-Type": "application/json",
         Authorization: `Bearer ${humanApiKey}`,
       },
-      body: JSON.stringify({ agentType, idempotent, requireApproval, instanceId: instance }),
+      // instanceLabel: this computer's name, so the connection reads
+      // "Claude Code on <computer>" wherever the person decides about it.
+      body: JSON.stringify({
+        agentType,
+        idempotent,
+        requireApproval,
+        instanceId: instance,
+        instanceLabel: machineInstanceLabel(),
+      }),
       signal: AbortSignal.timeout(30000),
     });
   } catch (err) {
