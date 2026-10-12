@@ -699,6 +699,7 @@ program
   .description("Capture knowledge: smart `capture \"<free text>\"` (AI structures it). For canonical typed Knowledge, use `create entity --profile=knowledge --props='{\"knowledgeForm\":\"insight|caution\"}'`.")
   .option("--type <type>", "Legacy compatibility typed mode (gotcha|lesson|decision|reference); new automation should use knowledgeForm")
   .option("--claim <text>", "Typed mode: one-line assertion (required with --type)")
+  .option("--title <text>", "Typed mode: short name, 80 characters or less (default: the claim's first sentence, never cut)")
   .option("--content <markdown>", "Typed mode: full Markdown explanation, stored as the linked Knowledge note")
   .option("--why <text>", "Reasoning or context")
   .option("--evidence <text>", "Supporting file path, URL, or code snippet")

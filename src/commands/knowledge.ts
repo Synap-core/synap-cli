@@ -55,7 +55,7 @@ import {
   type ExecuteResult,
 } from "../lib/capture-structure.js";
 import { UUID_RE } from "../lib/id.js";
-import { knowledgeTitleFromClaim } from "../lib/knowledge-title.js";
+import { chooseKnowledgeTitle } from "../lib/knowledge-title.js";
 
 export type KnowledgeType = "gotcha" | "lesson" | "decision" | "reference";
 
@@ -119,6 +119,8 @@ export interface CaptureOpts {
   /** Typed mode: one of gotcha|lesson|decision|reference */
   type?: KnowledgeType;
   claim?: string;
+  /** Typed mode: the short name. Defaults to the claim's first sentence, never cut. */
+  title?: string;
   /** Typed mode: full Markdown explanation, stored through the canonical body door. */
   content?: string;
   why?: string;
@@ -685,8 +687,13 @@ export async function captureKnowledge(opts: CaptureOpts): Promise<void> {
       ? opts.tags.split(",").map((t) => t.trim()).filter(Boolean)
       : [];
 
-    // A title is a LABEL; the claim itself stays in `ek_claim` ("Summary").
-    const title = knowledgeTitleFromClaim(opts.claim);
+    // A title is a short NAME; the claim itself stays in `ek_claim`.
+    const chosen = chooseKnowledgeTitle(opts.claim, opts.title);
+    if (!chosen.ok) {
+      console.error(chalk.red(chosen.reason));
+      process.exit(1);
+    }
+    const title = chosen.title;
 
     // Every --type entry is a typed `knowledge` entity; ek_type discriminates the
     // kind. This is "one store, type tags" (the research-canonical pattern) — NOT a
@@ -717,6 +724,8 @@ export async function captureKnowledge(opts: CaptureOpts): Promise<void> {
     // Governance may queue the write as a proposal rather than creating
     // directly — read the real outcome via the ONE shared detector.
     const isProposed = writeGovernance(res) === "proposed";
+    // The pod's title rubric verdict (absent when the title is clean).
+    const titleLint = readTitleLint(res);
 
     // Declare which lane + workspace + governance this capture took, so the
     // caller always knows where its knowledge landed.
@@ -737,6 +746,8 @@ export async function captureKnowledge(opts: CaptureOpts): Promise<void> {
           proposalId: res.proposalId ?? res.id,
           reviewUrl: res.reviewUrl ?? null,
           message: "Write queued for approval — not yet stored.",
+          title,
+          ...(titleLint.length ? { titleLint } : {}),
           ...(projectId ? { requestedProjectId: projectId } : {}),
           ...laneJsonFields(report),
         }, null, 2));
@@ -744,6 +755,8 @@ export async function captureKnowledge(opts: CaptureOpts): Promise<void> {
         console.log(JSON.stringify({
           id: res.id,
           stored: true,
+          title,
+          ...(titleLint.length ? { titleLint } : {}),
           workspace: source,
           ...(projectId ? { requestedProjectId: projectId, linkedProjectId: writeReceipt?.projectId ?? null } : {}),
           ...laneJsonFields(report),
@@ -760,15 +773,37 @@ export async function captureKnowledge(opts: CaptureOpts): Promise<void> {
       console.log("  " + formatLaneLine(report));
       renderProjectReceipt(res, projectId, true);
     } else {
-      log.success(`[${opts.type}] ${opts.claim.slice(0, 80)}`);
+      log.success(`[${opts.type}] ${title}`);
       log.dim(`  workspace: ${source}  id: ${String(res.id ?? "")}`);
       console.log("  " + formatLaneLine(report));
       renderProjectReceipt(res, projectId, false);
     }
+    renderTitleLint(titleLint);
   } catch (e) {
     renderHubError(e);
     process.exit(1);
   }
+}
+
+type TitleLintIssue = { code: string; severity: string; message: string };
+
+/** `writeReceipt.titleLint` from a POST /entities response; [] when clean or absent. */
+export function readTitleLint(res: Record<string, unknown>): TitleLintIssue[] {
+  const receipt = res.writeReceipt as { titleLint?: unknown } | undefined;
+  const raw = Array.isArray(receipt?.titleLint) ? receipt.titleLint : [];
+  return raw.filter(
+    (i): i is TitleLintIssue =>
+      !!i && typeof i === "object" && typeof (i as TitleLintIssue).message === "string"
+  );
+}
+
+/** Tell the writer what to rewrite — the title was stored as sent. */
+function renderTitleLint(issues: TitleLintIssue[]): void {
+  const defects = issues.filter((i) => i.severity === "defect");
+  if (!defects.length) return;
+  log.warn("  Title stored as sent, but it should be rewritten:");
+  for (const i of defects) log.dim(`    - ${i.message}`);
+  log.dim(`  Rewrite it with the MCP tool synap_update_entity (title), and pass --title next time.`);
 }
 
 export async function provisionAgentWorkspace(
