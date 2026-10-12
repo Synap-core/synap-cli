@@ -625,14 +625,23 @@ export function classifyApplyResult(
   ws: WorkspaceApplyResult | undefined,
   dependencies: ResolvedDependencyLike[] | undefined,
   seedSummary: SeedSummary | undefined,
-  ctx: { remoteVersionSent?: string; wasUnstamped: boolean; stampVerified?: boolean | null }
+  ctx: {
+    remoteVersionSent?: string;
+    wasUnstamped: boolean;
+    stampVerified?: boolean | null;
+    /** The pod HELD the version on purpose (`templateApply` in the response): not a contradiction. */
+    stampHeld?: boolean;
+  }
 ): ApplyVerdict {
   // A post-workspace LAYER failure counts the same as a seed failure: the
   // workspace exists, but part of what the package promised did not land.
   const seedFailed =
     hasSeedFailure(dependencies, seedSummary) || hasLayerFailure(ws?.layers);
 
-  if (detectStampContradiction(ws, seedSummary, ctx.remoteVersionSent, ctx.wasUnstamped, ctx.stampVerified)) {
+  if (
+    !ctx.stampHeld &&
+    detectStampContradiction(ws, seedSummary, ctx.remoteVersionSent, ctx.wasUnstamped, ctx.stampVerified)
+  ) {
     return {
       status: "stamp-contradiction",
       warnings: [
@@ -682,6 +691,26 @@ export function deferredPlacementLines(res: Record<string, unknown>): string[] {
       (d) =>
         `The "${d.label ?? d.ref}" button appears once you approve proposal ${d.proposalId} (synap open proposal ${d.proposalId}), then run synap market update again.`
     );
+}
+
+/**
+ * Why the pod did NOT record the template version — `templateApply` on the
+ * `/packages/apply` response (synap-backend `finishTemplateApply`): the version
+ * is written only once every layer landed. One plain line; `null` when the
+ * version was recorded (or an older pod that does not say).
+ */
+export function heldVersionLine(res: Record<string, unknown>, slug: string): string | null {
+  const t = res.templateApply as { state?: string; proposals?: unknown; failures?: unknown } | undefined;
+  if (!t || typeof t !== "object") return null;
+  const proposals = Array.isArray(t.proposals) ? (t.proposals as unknown[]).filter((p) => typeof p === "string") : [];
+  if (t.state === "awaiting-approval") {
+    const which = proposals.length ? ` (${proposals.join(", ")})` : "";
+    return `Not finished yet: part of ${slug} waits on your approval${which}. Approve it, then run synap templates update ${slug} to finish.`;
+  }
+  if (t.state === "partial") {
+    return `Not finished: part of ${slug} did not apply. Run synap templates update ${slug} to retry.`;
+  }
+  return `Not finished: run synap templates update ${slug} to apply the rest of ${slug}.`;
 }
 
 /** Render a `classifyApplyResult` verdict — the ONE honest-text door for both `marketInstall` and `applyOnePackage`. */
@@ -1432,6 +1461,7 @@ export async function marketInstall(
       remoteVersionSent: remoteVersion,
       wasUnstamped,
       stampVerified,
+      stampHeld: !!res.templateApply,
     });
     if (opts.json) {
       console.log(
@@ -1480,6 +1510,8 @@ export async function marketInstall(
     printSeedOutcomes(dependencies, seedSummary);
     printLayerOutcomes(ws?.layers);
     for (const line of deferredPlacementLines(res)) log.info(line);
+    const held = heldVersionLine(res, slug);
+    if (held) log.info(held);
     if (ws?.outcome || ws?.status === "composed" || ws?.status === "created") renderNextSteps(steps);
   } catch (e) {
     s?.stop();
@@ -1755,12 +1787,15 @@ async function applyOnePackage(
     const verdict = classifyApplyResult(entry, ws, dependencies, seedSummary, {
       remoteVersionSent: payload.catalogVersion,
       wasUnstamped: false,
+      stampHeld: !!res.templateApply,
     });
     if (!opts.json) {
       printApplyVerdict(entry, verdict);
       printSeedOutcomes(dependencies, seedSummary);
       printLayerOutcomes(ws?.layers);
       for (const line of deferredPlacementLines(res)) log.info(line);
+      const held = heldVersionLine(res, entry.slug);
+      if (held) log.info(held);
     }
     return {
       slug: entry.slug,
@@ -2378,6 +2413,11 @@ function noVersionLabel(isPrivate: boolean, loggedIn: boolean): string {
  * ordering, just "changed") from semver drift ("update available").
  */
 export function installedStatusLabel(c: UpdateCheck, isPrivate: boolean, loggedIn: boolean): string {
+  // No version recorded BUT the pod says it drifted: the last install did not
+  // finish (it waits on an approval, or part of it failed) — the pod holds the
+  // version until it does. Not "version unknown": the fix is to finish it.
+  if (c.noVersionInfo && c.updateAvailable)
+    return chalk.yellow("not finished") + chalk.dim(` — run synap templates update ${c.slug}`);
   if (c.noVersionInfo) return noVersionLabel(isPrivate, loggedIn);
   if (!c.updateAvailable) {
     // Cache-cold honesty: stamped + no drift reported, but the catalog has no
