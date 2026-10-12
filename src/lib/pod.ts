@@ -2,6 +2,7 @@
  * Synap pod connection and management utilities.
  */
 
+import { readJsonStrict, writeFileAtomic } from "./atomic-file.js";
 import { execSync, spawnSync } from "child_process";
 import fs from "node:fs";
 import path from "node:path";
@@ -149,14 +150,16 @@ function ensureConfigDir(): void {
 }
 
 function readMultiConfig(): MultiPodConfig {
-  // Read new format
-  try {
-    if (fs.existsSync(CONFIG_FILE)) {
-      const parsed = JSON.parse(fs.readFileSync(CONFIG_FILE, "utf-8")) as Partial<MultiPodConfig>;
+  // Read new format. A file that exists but does not parse THROWS
+  // (`ConfigUnreadableError`): read as "no pods", the next write would have
+  // persisted that and wiped every profile.
+  {
+    const parsed = readJsonStrict<Partial<MultiPodConfig>>(CONFIG_FILE);
+    if (parsed) {
       if (parsed.pods) return { activePod: parsed.activePod ?? "", pods: parsed.pods, activeWorkspaceId: parsed.activeWorkspaceId, activeWorkspace: parsed.activeWorkspace, activeProjectId: parsed.activeProjectId, activeProject: parsed.activeProject, surfaces: parsed.surfaces, agentKeys: parsed.agentKeys, agentKeysByPod: parsed.agentKeysByPod, pendingAgentKeys: parsed.pendingAgentKeys, agentWorkspaceRouting: parsed.agentWorkspaceRouting };
       // File exists but has old/unrecognized shape — fall through to migration
     }
-  } catch { /* fall through */ }
+  }
 
   // Migrate from legacy flat format
   try {
@@ -177,13 +180,10 @@ function writeMultiConfig(config: MultiPodConfig): void {
   ensureConfigDir();
   // Merge with existing file so fields managed by other modules (e.g. `agents`)
   // are preserved when pod.ts only updates its own subset.
-  let existing: Record<string, unknown> = {};
-  try {
-    if (fs.existsSync(CONFIG_FILE)) {
-      existing = JSON.parse(fs.readFileSync(CONFIG_FILE, "utf-8")) as Record<string, unknown>;
-    }
-  } catch { /* start fresh */ }
-  fs.writeFileSync(CONFIG_FILE, JSON.stringify({ ...existing, ...config }, null, 2), { mode: 0o600 });
+  // An unreadable file throws here — never "start fresh" over someone's profiles.
+  const existing = readJsonStrict(CONFIG_FILE) ?? {};
+  // temp + fsync + rename: a crash mid-write never leaves a truncated config.
+  writeFileAtomic(CONFIG_FILE, JSON.stringify({ ...existing, ...config }, null, 2), { mode: 0o600 });
 }
 
 // ─── Public API ───────────────────────────────────────────────────────────────

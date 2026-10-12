@@ -1,4 +1,4 @@
-import fs from "node:fs";
+import { readJsonStrict, writeFileAtomic } from "./atomic-file.js";
 import path from "node:path";
 import os from "node:os";
 
@@ -26,17 +26,13 @@ interface ConfigWithAgents {
   agentKeys?: Record<string, { hubApiKey: string; agentUserId?: string }>;
 }
 
+/** Throws on an unreadable file — `{}` here would make the next write wipe every pod profile. */
 function readConfig(): ConfigWithAgents {
-  try {
-    if (fs.existsSync(CONFIG_FILE)) {
-      return JSON.parse(fs.readFileSync(CONFIG_FILE, "utf-8")) as ConfigWithAgents;
-    }
-  } catch { /* ignore */ }
-  return {};
+  return readJsonStrict<ConfigWithAgents>(CONFIG_FILE) ?? {};
 }
 
 function writeConfig(cfg: ConfigWithAgents): void {
-  fs.writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2), { mode: 0o600 });
+  writeFileAtomic(CONFIG_FILE, JSON.stringify(cfg, null, 2), { mode: 0o600 });
 }
 
 export function listAgents(): Array<{ name: string; profile: AgentProfile }> {

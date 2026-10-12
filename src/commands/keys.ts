@@ -4,6 +4,7 @@
  * Subcommands: rotate
  */
 
+import { writeFileAtomic } from "../lib/atomic-file.js";
 import chalk from "chalk";
 import ora from "ora";
 import fs from "node:fs";
@@ -38,7 +39,7 @@ function updateConfigKey(newApiKey: string): void {
     config.pods = pods;
   }
 
-  fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2), { mode: 0o600 });
+  writeFileAtomic(CONFIG_FILE, JSON.stringify(config, null, 2), { mode: 0o600 });
 }
 
 // ── Public: keysRotate ────────────────────────────────────────────────────────

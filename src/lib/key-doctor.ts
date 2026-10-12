@@ -7,7 +7,7 @@
  * wrote: a fix is only reported ✓ when that call succeeds.
  */
 
-import fs from "node:fs";
+import { readJsonStrict, writeFileAtomic } from "./atomic-file.js";
 import os from "node:os";
 import chalk from "chalk";
 import { log } from "../utils/logger.js";
@@ -96,22 +96,15 @@ export function printKeyHealth(report: KeyHealthReport, opts: { fixHint?: boolea
 
 // ─── --fix ────────────────────────────────────────────────────────────────
 
+/**
+ * Edit a JSON config in place: atomic (temp + fsync + rename), mode kept. An
+ * unparsable file THROWS (`ConfigUnreadableError`) — it is never rewritten
+ * from scratch. Returns false when the expected shape is not there.
+ */
 function editJson(file: string, edit: (j: Record<string, any>) => boolean): boolean {
-  let json: Record<string, any>;
-  try {
-    json = JSON.parse(fs.readFileSync(file, "utf8")) as Record<string, any>;
-  } catch {
-    return false;
-  }
-  if (!edit(json)) return false;
-  const mode = (() => {
-    try {
-      return fs.statSync(file).mode & 0o777;
-    } catch {
-      return 0o600;
-    }
-  })();
-  fs.writeFileSync(file, JSON.stringify(json, null, 2) + "\n", { mode });
+  const json = readJsonStrict<Record<string, any>>(file);
+  if (!json || !edit(json)) return false;
+  writeFileAtomic(file, JSON.stringify(json, null, 2) + "\n");
   return true;
 }
 
