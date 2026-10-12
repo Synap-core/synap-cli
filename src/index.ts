@@ -1195,6 +1195,29 @@ proposals
     await awaitProposalCommand(id, opts);
   });
 
+// ─── worker ───────────────────────────────────────────────────────────────────
+// Run Claude Code unattended on THIS machine for the sessions handed to an agent
+// (the session roster → orient handedToYou). See src/commands/worker.ts.
+
+program
+  .command("worker")
+  .description("Run Claude Code unattended here for the sessions handed to an agent")
+  .requiredOption("--agent <name>", "The named agent this machine works as (its key comes from ~/.synap)")
+  .option("--interval <dur>", "How often to check for handed sessions (e.g. 30s, 2m)", "30s")
+  .option("--once", "Check once, run what is handed, wait for it, exit")
+  .option("--cwd <dir>", "Where the launched Claude Code works (default ~/Documents/Code/synap)")
+  .option("--max-parallel <n>", "Runs at the same time", "1")
+  .option("--claude-bin <path>", "The claude binary", "claude")
+  .option("--claude-config-dir <dir>", "CLAUDE_CONFIG_DIR for launched runs — picks which Claude subscription they use")
+  .option("--mcp-server <name>", "Claude Code MCP server name for this pod (detected from ~/.claude.json by default)")
+  .option("--allowed-tools <list>", "Comma-separated Claude tools allowed without asking (the pod MCP server is always added)")
+  .option("--skip-permissions", "Launch with --dangerously-skip-permissions instead of an allow-list")
+  .option("--dry-run", "Claim and log what would launch, without launching Claude")
+  .action(async (opts: import("./commands/worker.js").WorkerOptions) => {
+    const { workerCommand } = await import("./commands/worker.js");
+    await workerCommand(opts);
+  });
+
 // ─── session ──────────────────────────────────────────────────────────────────
 // Focus sessions — goal-bound work rooms tracked on the pod.
 // AI agents: use start_session to begin, update_session to report progress,
