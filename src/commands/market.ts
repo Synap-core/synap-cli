@@ -1546,6 +1546,39 @@ export interface UpdateCheck extends TemplateUpdateCheck {
    * see `InstalledTemplateInfo.version`'s doc in `lib/installed.ts`.
    */
   noVersionInfo: boolean;
+  /** The installed row's kind (absent = `"workspace"`, the only kind an older pod reports). Picks the update door — see {@link updateDoorFor}. */
+  kind?: InstalledKind;
+}
+
+/**
+ * Which pod door UPDATES an installed package of this kind, or `null` when the
+ * pod has no per-package updater for it.
+ *
+ * ⚠️ Never default to `/packages/apply`. That is the WORKSPACE door: it mints a
+ * workspace for any body carrying a `_meta.slug`. On 2026-10-12 `market update`
+ * sent the `creative-director` SKILL through it and the pod created an empty
+ * "New Workspace" — the update-time twin of the 2026-09-05 install bug that
+ * {@link declaredCategoryOf} fixed.
+ *
+ *  - view / skill / automation converge through the source-linked 3-way-merge
+ *    reconcile (`POST /configs/reconcile`) — the SAME comparator whose dry run
+ *    marked the row drifted (`GET /installed?drift`). Re-running `market.install`
+ *    is not an update: the skill arm always creates (unique slug ⇒ fails), the
+ *    automation arm returns "reused".
+ *  - cell / capability have no per-package updater here: `null`.
+ */
+export type UpdateDoor = "packages-apply" | "configs-reconcile";
+export function updateDoorFor(kind: InstalledKind | undefined): UpdateDoor | null {
+  switch (kind ?? "workspace") {
+    case "workspace":
+      return "packages-apply";
+    case "view":
+    case "skill":
+    case "automation":
+      return "configs-reconcile";
+    default:
+      return null;
+  }
 }
 
 /**
@@ -1583,6 +1616,7 @@ export function computeUpdates(installedTemplates: InstalledTemplateInfo[], cat:
         latestVersion: t.latestVersion ?? undefined,
         updateAvailable: t.drifted,
         noVersionInfo: !t.version,
+        kind: t.kind,
       };
     }
     // ── Client fallback (older pod) ──
@@ -1593,6 +1627,7 @@ export function computeUpdates(installedTemplates: InstalledTemplateInfo[], cat:
         latestVersion: cat.remoteVersionBySlug.get(t.slug),
         updateAvailable: false,
         noVersionInfo: true,
+        kind: t.kind,
       };
     }
     const b = baseBySlug.get(t.slug)!;
@@ -1603,9 +1638,10 @@ export function computeUpdates(installedTemplates: InstalledTemplateInfo[], cat:
         latestVersion: remoteVersion,
         updateAvailable: remoteVersion !== t.version,
         noVersionInfo: false,
+        kind: t.kind,
       };
     }
-    return { ...b, noVersionInfo: false };
+    return { ...b, noVersionInfo: false, kind: t.kind };
   });
 }
 
@@ -1774,6 +1810,60 @@ async function previewDataChanges(
   }
 }
 
+/** `POST /configs/reconcile`'s report (pod `reconcile-standalone-configs-to-templates.ts`). */
+interface StandaloneReconcileReport {
+  updated?: Array<{ kind: string; packageSlug?: string; name: string; reason: string }>;
+  ownerOwnedSkipped?: Array<{ kind: string; packageSlug?: string; name: string; reason: string }>;
+  skipped?: Array<{ kind: string; packageSlug?: string; name: string; reason: string }>;
+  conflicts?: Array<{ kind: string; packageSlug?: string; name: string; reason: string }>;
+}
+
+/** One slug's outcome out of the shared pod-wide config reconcile. */
+async function reconcileOutcome(
+  c: UpdateCheck,
+  report: Promise<StandaloneReconcileReport>,
+  opts: { json?: boolean }
+): Promise<{ slug: string; outcome: string; status: string; warnings: string[]; error?: string }> {
+  let r: StandaloneReconcileReport;
+  try {
+    r = await report;
+  } catch (e) {
+    if (!opts.json) {
+      log.error(`${c.slug} update failed`);
+      renderHubError(e);
+    }
+    return { slug: c.slug, outcome: "failed", status: "failed", warnings: [], error: e instanceof Error ? e.message : String(e) };
+  }
+  // A report this CLI cannot read is a FAILED read — never "up to date".
+  const lists = [r?.updated, r?.ownerOwnedSkipped, r?.skipped, r?.conflicts];
+  if (!lists.some(Array.isArray) || lists.some((l) => l !== undefined && !Array.isArray(l))) {
+    const error = "the pod's reconcile answered with a report this CLI can't read — not assuming it updated";
+    if (!opts.json) log.error(`${c.slug} — ${error}`);
+    return { slug: c.slug, outcome: "failed", status: "failed", warnings: [], error };
+  }
+  const mine = (rows?: StandaloneReconcileReport["updated"]) => (rows ?? []).filter((e) => e.packageSlug === c.slug);
+  const conflicts = mine(r.conflicts);
+  const owned = mine(r.ownerOwnedSkipped);
+  const updated = mine(r.updated);
+  const warnings = owned.map((e) => `${e.name}: kept your edits — ${e.reason}`);
+  if (conflicts.length > 0) {
+    const error = conflicts.map((e) => `${e.name}: ${e.reason}`).join("; ");
+    if (!opts.json) log.error(`${c.slug} update failed — ${error}`);
+    return { slug: c.slug, outcome: "failed", status: updated.length > 0 ? "updated-with-failures" : "failed", warnings, error };
+  }
+  if (!opts.json) for (const w of warnings) log.warn(`${c.slug} — ${w}`);
+  if (updated.length > 0 || owned.length > 0) {
+    // Every field it could advance did; a field you edited stays yours (warned above).
+    const status = updated.length > 0 ? "updated" : "unchanged";
+    if (!opts.json) log.success(`${c.slug} — ${status}`);
+    return { slug: c.slug, outcome: status, status, warnings };
+  }
+  // Skipped (cache miss, unresolved definition…) or not reported at all: NOT updated — never "current".
+  const error = mine(r.skipped).map((e) => `${e.name}: ${e.reason}`).join("; ") || "the pod's reconcile did not report this package";
+  if (!opts.json) log.warn(`${c.slug} was not updated — ${error}`);
+  return { slug: c.slug, outcome: "not-updated", status: "not-updated", warnings, error };
+}
+
 export async function marketUpdate(
   slugsArg: string[] | undefined,
   opts: {
@@ -1912,6 +2002,8 @@ export async function marketUpdate(
       process.exit(1);
     }
     for (const c of withUpdates) {
+      // The data-change preview is the workspace door's (`/packages/preflight`).
+      if (updateDoorFor(c.kind) !== "packages-apply") continue;
       const entry = entryBySlug.get(c.slug);
       if (entry) previews.set(c.slug, await previewDataChanges(entry, cat, cfg));
     }
@@ -2065,7 +2157,22 @@ export async function marketUpdate(
     seedSummary?: SeedSummary;
     pendingDataChanges?: DataChange[];
   }> = [];
+  // One pod-wide reconcile serves every view/skill/automation update — run it
+  // at most once, lazily, and read each slug's outcome from its report.
+  let configsReport: Promise<StandaloneReconcileReport> | undefined;
   for (const c of withUpdates) {
+    const door = updateDoorFor(c.kind);
+    if (door === null) {
+      if (!opts.json)
+        log.warn(`${c.slug} is a ${c.kind} — the pod has no per-package update for this kind, so it was not updated. Nothing was written.`);
+      results.push({ slug: c.slug, outcome: "no-updater", status: "no-updater", warnings: [] });
+      continue;
+    }
+    if (door === "configs-reconcile") {
+      configsReport ??= hubPost("/configs/reconcile", {}, cfg!, applyTimeoutMs) as Promise<StandaloneReconcileReport>;
+      results.push(await reconcileOutcome(c, configsReport, { json: opts.json }));
+      continue;
+    }
     const entry = entryBySlug.get(c.slug);
     if (!entry) {
       // Absent from the catalog THIS CLI read — not proof it left the catalog
