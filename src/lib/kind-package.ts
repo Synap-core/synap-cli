@@ -60,6 +60,7 @@ import { dirname, resolve as resolvePath } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { validateFlowDefinition } from "@synap-core/workspace-templates";
 import type { PackageDefinitionLike } from "./template-file.js";
+import type { CapabilityWire, SkillWire } from "./package-wire.js";
 import {
   CONTENT_KINDS,
   parseContentKind,
@@ -334,7 +335,10 @@ export function validateStandalonePackage(
     // catalog's own reader dereferences, not correctness. Claiming more than
     // the check performs is the failure this file already carries a tombstone
     // for.
-    const cap = (pkg.definition as { capability?: unknown }).capability;
+    // The envelope is REQUIRED here (a publish must fill the slot the CP serves),
+    // so this reads `definition.capability` itself — never `unwrapPackage`,
+    // which lets a legacy flat definition through.
+    const cap: unknown = (pkg.definition as Partial<CapabilityWire>).capability;
     if (!cap || typeof cap !== "object" || Array.isArray(cap)) {
       errors.push(
         `category "capability" requires a definition.capability object (the CapabilityDefinition itself — key/name/tools/skills). The CP unwraps exactly this key at GET /api/marketplace/capabilities.`,
@@ -368,7 +372,7 @@ export function validateStandalonePackage(
     // presence plus the one rule the POD enforces — a skill needs documentation
     // or code — so the loop fails at AUTHORING time instead of at install time
     // (where a bodiless skill is refused by `skillsRouter.create`).
-    const raw = (pkg.definition as { skill?: unknown }).skill;
+    const raw: unknown = (pkg.definition as Partial<SkillWire>).skill; // envelope required — see the capability arm
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
       errors.push(
         `category "skill" requires a definition.skill object — ONE skill ({ slug, name, kind, body | code }).`,

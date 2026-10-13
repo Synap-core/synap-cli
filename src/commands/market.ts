@@ -1575,10 +1575,13 @@ export async function resolveInstallPayload(
 
 /**
  * Label the payload with the slug it was resolved for and the version it came
- * from. The SLUG is load-bearing: a catalog definition carries no `_meta` (the
- * official publish strips it), and the pod keys "which existing workspace is
- * this?" on `body._meta.slug`. Without it a governed apply's approval matched
- * nothing and CREATED a second "Content OS" (2026-10-06) instead of updating.
+ * from. The SLUG is load-bearing: the pod keys "which existing workspace is
+ * this?" on `body._meta.slug`. The CP now stamps `_meta.slug` on every stored
+ * and served definition (`synap-control-plane-api` `seeds/template-identity.ts`),
+ * and the bundle's `toPackageDefinition` carries it too; setting it here keeps
+ * it true against a CP that predates the stamp. Without it a governed apply's
+ * approval matched nothing and CREATED a second "Content OS" (2026-10-06)
+ * instead of updating.
  */
 function stampVersion(pkg: Record<string, unknown>, slug: string, version: string | undefined): Record<string, unknown> {
   const meta = (pkg._meta as Record<string, unknown> | undefined) ?? {};
