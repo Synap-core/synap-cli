@@ -35,6 +35,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { lensMatchesPod, type SessionLens } from "./session-lens.js";
+import { writeSecretFile } from "./atomic-file.js";
 
 /** The directory name a lens lives in, and the file inside it. */
 const LENS_DIR_NAME = ".synap";
@@ -150,7 +151,7 @@ export function writeDirectoryLens(
   const next: DirectoryLens = { ...prev, ...patch, updatedAt: Date.now() };
   const file = lensFileIn(dir);
   fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
-  fs.writeFileSync(file, JSON.stringify(next, null, 2) + "\n", { mode: 0o600 });
+  writeSecretFile(file, JSON.stringify(next, null, 2) + "\n", { mode: 0o600 });
   return { lens: next, file, dir };
 }
 
@@ -177,7 +178,7 @@ export function clearDirectoryLensField(
   delete next[field];
   next.updatedAt = Date.now();
   try {
-    fs.writeFileSync(found.file, JSON.stringify(next, null, 2) + "\n", { mode: 0o600 });
+    writeSecretFile(found.file, JSON.stringify(next, null, 2) + "\n", { mode: 0o600 });
   } catch {
     return null;
   }

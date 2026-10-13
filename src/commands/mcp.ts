@@ -22,7 +22,7 @@ import {
   enrollAgentIfNeeded,
 } from "../lib/targets.js";
 import { log } from "../utils/logger.js";
-import { printMcpConnection } from "../lib/mcp-snippets.js";
+import { printMcpConnection, redactKey, writeMcpSnippetFiles, MCP_KEY_ENV } from "../lib/mcp-snippets.js";
 
 interface McpBaseOpts {
   podUrl?: string;
@@ -337,6 +337,10 @@ export async function mcpUiSetup(
 
     const normalizedClient = client.toLowerCase().replace(/-/g, "");
     let output = "";
+    // The key never reaches stdout or argv: fields show it redacted; the full
+    // material is written 0600 and clients reference it through an env var.
+    const keyShown = redactKey(hubApiKey);
+    const snippetFiles = writeMcpSnippetFiles(url, hubApiKey, agentUserId);
 
     const clientConfigs: Record<string, { name: string; format: "http" | "stdio" | "file"; fields: Record<string, string>; notes: string[] }> = {
       chatgpt: {
@@ -346,12 +350,12 @@ export async function mcpUiSetup(
           "Connector Name": "Synap",
           "URL": url,
           "Auth Type": "API Key",
-          "API Key": hubApiKey,
+          "API Key": `${keyShown} (full key: ${snippetFiles.envFile})`,
         },
         notes: [
           "ChatGPT → Settings → Connectors → Add custom connector",
           "Paste the URL and API Key exactly as shown above",
-          "If your build shows a Header field instead: Authorization: Bearer <key>",
+          `If your build shows a Header field instead: Authorization: Bearer <key> (full key in ${snippetFiles.envFile}, 0600)`,
         ],
       },
       chatgptoauth: {
@@ -376,12 +380,12 @@ export async function mcpUiSetup(
           "Config file": "~/.codex/config.toml",
           "Section to add": `[mcp_servers.synap]`,
           "url": url,
-          "http_headers": `{ Authorization = "Bearer ${hubApiKey}" }`,
+          "http_headers": `{ Authorization = "Bearer ${keyShown}" }`,
           "startup_timeout_sec": "30",
           "enabled": "true",
         },
         notes: [
-          "Open ~/.codex/config.toml and add the [mcp_servers.synap] section",
+          `Open ~/.codex/config.toml and add the [mcp_servers.synap] section (replace ${keyShown} with the full key from ${snippetFiles.envFile}, 0600)`,
           "Restart Codex CLI to pick up the new MCP server",
           "The synap tool set will appear in agent mode",
         ],
@@ -392,7 +396,7 @@ export async function mcpUiSetup(
         fields: {
           "Config file": "~/.cursor/mcp.json",
           "mcpServers.synap.url": url,
-          "mcpServers.synap.headers.Authorization": `Bearer ${hubApiKey}`,
+          "mcpServers.synap.headers.Authorization": `Bearer \${env:${MCP_KEY_ENV}}`,
         },
         notes: [
           "Cursor reads native HTTP MCP format from ~/.cursor/mcp.json",
@@ -406,7 +410,7 @@ export async function mcpUiSetup(
           "Config file": "~/Library/Application Support/Code/User/mcp.json (macOS)",
           "servers.synap.type": "http",
           "servers.synap.url": url,
-          "servers.synap.headers.Authorization": `Bearer ${hubApiKey}`,
+          "servers.synap.headers.Authorization": `Bearer \${env:${MCP_KEY_ENV}}`,
         },
         notes: [
           "VS Code 1.99+ uses 'servers' format (not mcpServers)",
@@ -420,7 +424,8 @@ export async function mcpUiSetup(
         fields: {
           "Config file": "~/Library/Application Support/Claude/claude_desktop_config.json (macOS)",
           "mcpServers.synap.command": "npx",
-          "mcpServers.synap.args": `-y mcp-remote ${url} --header "Authorization: Bearer ${hubApiKey}"`,
+          "mcpServers.synap.args": `-y mcp-remote ${url} --header "Authorization:\${SYNAP_AUTH}"`,
+          "mcpServers.synap.env.SYNAP_AUTH": `Bearer ${keyShown} (real value: "mcpRemote" block in ${snippetFiles.jsonFile})`,
         },
         notes: [
           "Claude Desktop only supports stdio MCP — uses mcp-remote bridge",
@@ -432,10 +437,10 @@ export async function mcpUiSetup(
         name: "Claude Code (native HTTP MCP)",
         format: "http",
         fields: {
-          "Command": `claude mcp add --transport http synap-${new URL(hubCfg.podUrl).hostname.split(".")[1] || "pod"} ${url} --header "Authorization: Bearer ${hubApiKey}" --scope user`,
+          "Command": `source ${snippetFiles.envFile} && claude mcp add --transport http synap-${new URL(hubCfg.podUrl).hostname.split(".")[1] || "pod"} ${url} --header 'Authorization: Bearer \${${MCP_KEY_ENV}}' --scope user`,
         },
         notes: [
-          "Runs `claude mcp add` for you — writes to user-scope registry",
+          `The key stays out of the command: it is read from $${MCP_KEY_ENV} when Claude Code starts — launch it from a shell that sourced ${snippetFiles.envFile}`,
           "Relaunch Claude Code to load the tools",
         ],
       },
@@ -444,7 +449,7 @@ export async function mcpUiSetup(
         format: "http",
         fields: {
           "URL": url,
-          "Headers": `Authorization: Bearer ${hubApiKey}`,
+          "Headers": `Authorization: Bearer ${keyShown}`,
         },
         notes: [
           "Paste URL and add Authorization header in your client's MCP config",

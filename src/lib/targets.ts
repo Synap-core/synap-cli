@@ -19,6 +19,8 @@ import chalk from "chalk";
 import ora from "ora";
 import prompts from "prompts";
 import { log } from "../utils/logger.js";
+import { writeSecretFile, copySecretBackup, ensureSecretDir } from "./atomic-file.js";
+import { redactKey } from "./mcp-snippets.js";
 import { installSkills, getDeliverableSkills } from "./skills-installer.js";
 import { TARGET_KEY_MINT, takePreApprovedKey } from "./batch-approval.js";
 import { agentTypeOfSurface, machineInstanceId, machineInstanceLabel } from "./machine-instance.js";
@@ -556,16 +558,16 @@ export async function configureAgentContext(
 
   // Always write to ~/.synap/contexts/<surface>.md
   const contextDir = path.join(os.homedir(), ".synap", "contexts");
-  if (!fs.existsSync(contextDir)) fs.mkdirSync(contextDir, { recursive: true });
+  ensureSecretDir(contextDir);
   const globalContextPath = path.join(contextDir, `${agentType}.md`);
-  fs.writeFileSync(globalContextPath, content, { mode: 0o600 });
+  writeSecretFile(globalContextPath, content, { mode: 0o600 });
 
   // For skills-capable surfaces, also write alongside SKILL.md
   const skillsDir = info?.skillsDir?.();
   if (skillsDir) {
     const synapSkillDir = path.join(skillsDir, "synap");
     if (!fs.existsSync(synapSkillDir)) fs.mkdirSync(synapSkillDir, { recursive: true });
-    fs.writeFileSync(path.join(synapSkillDir, "CONTEXT.md"), content, { mode: 0o600 });
+    writeSecretFile(path.join(synapSkillDir, "CONTEXT.md"), content, { mode: 0o600 });
     log.success(`Agent context written to ${synapSkillDir}/CONTEXT.md`);
   } else {
     log.success(`Agent context written to ${globalContextPath}`);
@@ -909,7 +911,7 @@ export async function writeClaudeCodeEnv(
   if (!fs.existsSync(settingsDir)) {
     fs.mkdirSync(settingsDir, { recursive: true });
   }
-  fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + "\n", { mode: 0o600 });
+  writeSecretFile(settingsPath, JSON.stringify(settings, null, 2) + "\n", { mode: 0o600 });
 
   // ── Register the MCP server where Claude Code actually reads it ───────────
   // The official `claude mcp add` writes to the user-scope registry that
@@ -966,8 +968,19 @@ function registerClaudeCodeMcp(mcpUrl: string, apiKey: string, serverName: strin
       log.dim("  synap connect --target=claude-code --name=team");
     }
   } catch {
-    log.dim("Could not run `claude mcp add` (is the claude CLI on PATH?). Register it by hand:");
-    log.dim(`  claude mcp add --transport http ${serverName} ${mcpUrl} --header "${header}" --scope user`);
+    // Never print the key (terminal scrollback / shell history). Claude Code
+    // expands ${VAR} in an http header at launch, so the printed command names
+    // an env var; the key itself goes to a 0600 file the user sources.
+    const keyFile = path.join(os.homedir(), ".synap", "mcp-keys", `${serverName.replace(/[^A-Za-z0-9_-]/g, "_")}.env`);
+    try {
+      ensureSecretDir(path.dirname(keyFile));
+      writeSecretFile(keyFile, `export SYNAP_MCP_KEY='${apiKey}'\n`);
+      log.dim("Could not run `claude mcp add` (is the claude CLI on PATH?). Register it by hand (the key is in a 0600 file, not on this screen):");
+      log.dim(`  source ${keyFile}`);
+      log.dim(`  claude mcp add --transport http ${serverName} ${mcpUrl} --header 'Authorization: Bearer \${SYNAP_MCP_KEY}' --scope user`);
+    } catch {
+      log.dim("Could not run `claude mcp add` (is the claude CLI on PATH?) and could not save the key file — run `synap mcp url` instead.");
+    }
   }
 }
 
@@ -1009,7 +1022,7 @@ export function setClaudeCodeMcpTransport(transport: "http" | "bridge"): string 
   if (transport === "bridge") env["SYNAP_MCP_TRANSPORT"] = "bridge";
   else delete env["SYNAP_MCP_TRANSPORT"];
   settings.env = env;
-  fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + "\n", { mode: 0o600 });
+  writeSecretFile(settingsPath, JSON.stringify(settings, null, 2) + "\n", { mode: 0o600 });
   const serverName = mcpServerNameFromPodUrl(podUrl);
   registerClaudeCodeMcp(
     buildMcpUrl(podUrl, env["SYNAP_WORKSPACE_ID"], env["SYNAP_PROJECT_ID"]),
@@ -1441,7 +1454,10 @@ async function installClaudeDesktop(
   const desktopServerName = mcpServerNameFromPodUrl(cfg.podUrl);
   writeMcpServerEntry(mcpPath, desktopServerName, {
     command: "npx",
-    args: ["-y", "mcp-remote", desktopMcpUrl, "--header", `Authorization: Bearer ${effectiveApiKey}`],
+    // The header value rides in env (this file is 0600), never in the
+    // mcp-remote process's argv where any local `ps` can read it.
+    args: ["-y", "mcp-remote", desktopMcpUrl, "--header", "Authorization:${SYNAP_AUTH}"],
+    env: { SYNAP_AUTH: `Bearer ${effectiveApiKey}` },
   });
   if (desktopServerName !== "synap") removeMcpServerEntry(mcpPath, "synap");
 
@@ -1574,13 +1590,9 @@ async function installRaycast(cfg: TargetConnectionConfig): Promise<boolean> {
   log.info(`Installing full MCP power door via mcp-remote as '${raycastServerName}' — names overlap @synap.`);
   const synapServerEntry = {
     command: "npx",
-    args: [
-      "-y",
-      "mcp-remote",
-      mcpUrl,
-      "--header",
-      `Authorization: Bearer ${effectiveApiKey}`,
-    ],
+    args: ["-y", "mcp-remote", mcpUrl, "--header", "Authorization:${SYNAP_AUTH}"],
+    // Header value via env, not argv (see Claude Desktop above).
+    env: { SYNAP_AUTH: `Bearer ${effectiveApiKey}` },
   };
 
   // The mcp-config.json lives in an opaque UUID folder Raycast creates the first
@@ -1594,12 +1606,12 @@ async function installRaycast(cfg: TargetConnectionConfig): Promise<boolean> {
       try {
         mcpConfig = JSON.parse(fs.readFileSync(existingPath, "utf-8"));
       } catch {
-        try { fs.copyFileSync(existingPath, `${existingPath}.bak`); } catch { /* best-effort */ }
+        try { copySecretBackup(existingPath, `${existingPath}.bak`); } catch { /* best-effort */ }
       }
       mcpConfig.mcpServers = mcpConfig.mcpServers ?? {};
       mcpConfig.mcpServers[raycastServerName] = synapServerEntry;
       if (raycastServerName !== "synap") delete mcpConfig.mcpServers["synap"];
-      fs.writeFileSync(existingPath, JSON.stringify(mcpConfig, null, 2) + "\n", { mode: 0o600 });
+      writeSecretFile(existingPath, JSON.stringify(mcpConfig, null, 2) + "\n", { mode: 0o600 });
       wrote = true;
       log.success(`Synap MCP server added to Raycast: ${existingPath}`);
       log.dim(`Reopen Raycast → 'Manage MCP Servers' → '${raycastServerName}' is connected with all tools.`);
@@ -1673,13 +1685,11 @@ async function installOpenWebUI(cfg: TargetConnectionConfig): Promise<boolean> {
   log.info("2. MCP tool server:");
   log.dim("   Admin → Tools → Add Tool Server");
   log.dim(`   URL:     ${mcpUrl}`);
-  log.dim(`   Header:  Authorization: Bearer ${cfg.apiKey}`);
+  log.dim(`   Header:  Authorization: Bearer <key — saved in ~/.synap/openwebui-mcp.json (0600)>`);
   log.blank();
 
   const synapDir = path.join(os.homedir(), ".synap");
-  if (!fs.existsSync(synapDir)) {
-    fs.mkdirSync(synapDir, { recursive: true });
-  }
+  ensureSecretDir(synapDir);
 
   const refFile = path.join(synapDir, "openwebui-mcp.json");
   const refData = {
@@ -1689,7 +1699,7 @@ async function installOpenWebUI(cfg: TargetConnectionConfig): Promise<boolean> {
       headers: { Authorization: `Bearer ${cfg.apiKey}` },
     },
   };
-  fs.writeFileSync(refFile, JSON.stringify(refData, null, 2) + "\n", { mode: 0o600 });
+  writeSecretFile(refFile, JSON.stringify(refData, null, 2) + "\n", { mode: 0o600 });
 
   log.success(`Connection details saved to ~/.synap/openwebui-mcp.json`);
   return true;
@@ -1735,7 +1745,7 @@ async function installChatGpt(cfg: TargetConnectionConfig): Promise<boolean> {
   const mcpUrl = buildMcpUrl(cfg.podUrl, cfg.workspaceId, cfg.projectId);
 
   const synapDir = path.join(os.homedir(), ".synap");
-  if (!fs.existsSync(synapDir)) fs.mkdirSync(synapDir, { recursive: true });
+  ensureSecretDir(synapDir);
 
   const refFile = path.join(synapDir, "chatgpt-mcp.json");
   const refData = {
@@ -1750,7 +1760,7 @@ async function installChatGpt(cfg: TargetConnectionConfig): Promise<boolean> {
         "connect_pod, then proxied pod__* tools. Same URL as claude.ai.",
     },
   };
-  fs.writeFileSync(refFile, JSON.stringify(refData, null, 2) + "\n", { mode: 0o600 });
+  writeSecretFile(refFile, JSON.stringify(refData, null, 2) + "\n", { mode: 0o600 });
 
   log.heading("Connecting ChatGPT → " + cfg.podUrl);
   log.blank();
@@ -1760,7 +1770,7 @@ async function installChatGpt(cfg: TargetConnectionConfig): Promise<boolean> {
   log.info(`  Name:     Synap`);
   log.info(`  URL:      ${mcpUrl}`);
   log.info(`  Auth:     API key`);
-  log.info(`  API key:  ${effectiveApiKey}`);
+  log.info(`  API key:  ${redactKey(effectiveApiKey)}  (full key: ~/.synap/chatgpt-mcp.json, 0600)`);
   log.blank();
   log.dim(
     "  ChatGPT shows the key field inline — paste it there. If your build only " +
@@ -1823,13 +1833,13 @@ async function installChatGptOAuth(cfg: TargetConnectionConfig): Promise<boolean
 
   // Save a reference file for the user
   const synapDir = path.join(os.homedir(), ".synap");
-  if (!fs.existsSync(synapDir)) fs.mkdirSync(synapDir, { recursive: true });
+  ensureSecretDir(synapDir);
   const refFile = path.join(synapDir, "chatgpt-oauth.json");
   const refData = {
     oauthUrl: url,
     note: "ChatGPT OAuth connector via Synap Control Plane. Multi-pod: list_pods, connect_pod, then proxied pod__* tools.",
   };
-  fs.writeFileSync(refFile, JSON.stringify(refData, null, 2) + "\n", { mode: 0o600 });
+  writeSecretFile(refFile, JSON.stringify(refData, null, 2) + "\n", { mode: 0o600 });
   log.success(`Connection details saved to ~/.synap/chatgpt-oauth.json`);
   return true;
 }
@@ -1892,7 +1902,7 @@ async function installGoose(cfg: TargetConnectionConfig): Promise<boolean> {
     updated = (existing ? existing.trimEnd() + "\n\n" : "") + "extensions:\n" + block + "\n";
   }
 
-  fs.writeFileSync(configPath, updated, { mode: 0o600 });
+  writeSecretFile(configPath, updated, { mode: 0o600 });
 
   const { setSurfaceAgentKey: save } = await import("./pod.js");
   save("goose", { hubApiKey: effectiveApiKey, agentUserId, podUrl: cfg.podUrl });
@@ -1940,13 +1950,14 @@ async function installZed(cfg: TargetConnectionConfig): Promise<boolean> {
     source: "custom",
     command: {
       path: "npx",
-      args: ["-y", "mcp-remote@latest", mcpUrl, "--header", `Authorization: Bearer ${effectiveApiKey}`],
+      args: ["-y", "mcp-remote@latest", mcpUrl, "--header", "Authorization:${SYNAP_AUTH}"],
+      env: { SYNAP_AUTH: `Bearer ${effectiveApiKey}` },
     },
     settings: {},
   };
   settings.context_servers = contextServers;
 
-  fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + "\n", { mode: 0o600 });
+  writeSecretFile(settingsPath, JSON.stringify(settings, null, 2) + "\n", { mode: 0o600 });
 
   const { setSurfaceAgentKey: save } = await import("./pod.js");
   save("zed", { hubApiKey: effectiveApiKey, agentUserId, podUrl: cfg.podUrl });
@@ -1990,7 +2001,7 @@ async function installVSCode(cfg: TargetConnectionConfig): Promise<boolean> {
     headers: { Authorization: `Bearer ${effectiveApiKey}` },
   };
 
-  fs.writeFileSync(mcpJsonPath, JSON.stringify(existing, null, 2) + "\n", { mode: 0o600 });
+  writeSecretFile(mcpJsonPath, JSON.stringify(existing, null, 2) + "\n", { mode: 0o600 });
 
   const { setSurfaceAgentKey: save } = await import("./pod.js");
   save("vscode", { hubApiKey: effectiveApiKey, agentUserId, podUrl: cfg.podUrl });
@@ -2057,7 +2068,7 @@ function writeGrokTomlMcpServer(
   ].join("\n");
 
   next = (next ? next + "\n" : "") + block;
-  fs.writeFileSync(configPath, next.endsWith("\n") ? next : next + "\n", {
+  writeSecretFile(configPath, next.endsWith("\n") ? next : next + "\n", {
     mode: 0o600,
   });
 }
@@ -2125,23 +2136,23 @@ async function installGeneric(cfg: TargetConnectionConfig): Promise<boolean> {
   log.info("Universal MCP connection config (agent key):");
   log.blank();
   log.info("HTTP direct:");
-  log.dim(JSON.stringify(httpConfig, null, 2));
+  // Redacted on screen; the real key is in ~/.synap/mcp-config.json (0600).
+  const shown = redactKey(effectiveApiKey);
+  log.dim(JSON.stringify({ [serverName]: { ...httpConfig[serverName], headers: { Authorization: `Bearer ${shown}` } } }, null, 2));
   log.blank();
   log.info("Grok Build (~/.grok/config.toml):");
   log.dim(`[mcp_servers.${serverName}]`);
   log.dim(`url = "${mcpUrl}"`);
-  log.dim(`headers = { Authorization = "Bearer ${effectiveApiKey}" }`);
+  log.dim(`headers = { Authorization = "Bearer ${shown}" }`);
   log.blank();
-  log.info("stdio bridge (mcp-remote):");
-  log.dim(
-    `  command: npx -y mcp-remote ${mcpUrl} --header "Authorization: Bearer ${effectiveApiKey}"`
-  );
+  log.info("stdio bridge (mcp-remote) — key via env, not argv:");
+  log.dim(`  command: npx -y mcp-remote ${mcpUrl} --header "Authorization:\${SYNAP_AUTH}"`);
+  log.dim(`  env:     SYNAP_AUTH="Bearer ${shown}"`);
+  log.dim("  Real key: ~/.synap/mcp-config.json (0600).");
   log.blank();
 
   const synapDir = path.join(os.homedir(), ".synap");
-  if (!fs.existsSync(synapDir)) {
-    fs.mkdirSync(synapDir, { recursive: true });
-  }
+  ensureSecretDir(synapDir);
 
   const configFile = path.join(synapDir, "mcp-config.json");
   // Merge with existing so dual-pod generic installs don't clobber each other
@@ -2157,7 +2168,7 @@ async function installGeneric(cfg: TargetConnectionConfig): Promise<boolean> {
     }
   }
   const merged = { ...existing, ...httpConfig };
-  fs.writeFileSync(configFile, JSON.stringify(merged, null, 2) + "\n", {
+  writeSecretFile(configFile, JSON.stringify(merged, null, 2) + "\n", {
     mode: 0o600,
   });
 
@@ -2233,7 +2244,7 @@ async function installCodex(
   }
   if (!updated.endsWith("\n")) updated += "\n";
 
-  fs.writeFileSync(configPath, updated, { mode: 0o600 });
+  writeSecretFile(configPath, updated, { mode: 0o600 });
 
   // Skills → append synap context to ~/.codex/instructions.md
   const instructionsPath = path.join(configDir, "instructions.md");
@@ -2255,7 +2266,7 @@ async function installCodex(
       "Always call orient (or list workspaces) first to discover workspace IDs.",
       "",
     ].join("\n");
-    fs.writeFileSync(
+    writeSecretFile(
       instructionsPath,
       (instructions.trimEnd() + snippet).trimStart() + "\n",
       { mode: 0o600 }
@@ -2373,7 +2384,7 @@ export async function installOpencode(cfg: ProviderInstallConfig & { workspaceId
     try {
       existing = JSON.parse(fs.readFileSync(configPath, "utf-8")) as Record<string, unknown>;
     } catch {
-      fs.copyFileSync(configPath, `${configPath}.bak`);
+      copySecretBackup(configPath, `${configPath}.bak`);
       log.warn("Existing opencode.json unreadable — backed up to opencode.json.bak");
     }
   }
@@ -2411,7 +2422,7 @@ export async function installOpencode(cfg: ProviderInstallConfig & { workspaceId
     ...(existing.model ? {} : { model: defaultModel }),
   };
 
-  fs.writeFileSync(configPath, JSON.stringify(updated, null, 2) + "\n", { mode: 0o600 });
+  writeSecretFile(configPath, JSON.stringify(updated, null, 2) + "\n", { mode: 0o600 });
 
   const { setSurfaceAgentKey: save } = await import("./pod.js");
   save("opencode", { hubApiKey: agentKey, agentUserId, podUrl: cfg.podUrl });
@@ -2451,7 +2462,7 @@ export async function installAider(cfg: ProviderInstallConfig): Promise<boolean>
     ? existing.replace(/# synap-provider[\s\S]*?(?=\n[a-zA-Z#]|\s*$)/, block.trimEnd())
     : existing ? `${existing.trimEnd()}\n\n${block}` : block;
 
-  fs.writeFileSync(confPath, updated.trimEnd() + "\n", { mode: 0o600 });
+  writeSecretFile(confPath, updated.trimEnd() + "\n", { mode: 0o600 });
 
   log.success(`${provider.name} configured in ~/.aider.conf.yml`);
   log.dim(`  Base URL: ${provider.baseUrl}`);
@@ -2480,7 +2491,7 @@ export function writeMcpServerEntry(
     } catch {
       // corrupt or unreadable — back up and start fresh
       const backup = `${configPath}.bak-${Date.now()}`;
-      fs.copyFileSync(configPath, backup);
+      copySecretBackup(configPath, backup);
       log.warn(`Existing config unreadable; backed up to ${path.basename(backup)}`);
     }
   }
@@ -2488,7 +2499,7 @@ export function writeMcpServerEntry(
   config.mcpServers = config.mcpServers ?? {};
   config.mcpServers[serverName] = server;
 
-  fs.writeFileSync(configPath, JSON.stringify(config, null, 2) + "\n", {
+  writeSecretFile(configPath, JSON.stringify(config, null, 2) + "\n", {
     mode: 0o600,
   });
 }
@@ -2503,7 +2514,7 @@ function removeMcpServerEntry(configPath: string, serverName: string): void {
     if (!config.mcpServers?.[serverName]) return;
     delete config.mcpServers[serverName];
     if (Object.keys(config.mcpServers).length === 0) delete config.mcpServers;
-    fs.writeFileSync(configPath, JSON.stringify(config, null, 2) + "\n", {
+    writeSecretFile(configPath, JSON.stringify(config, null, 2) + "\n", {
       mode: 0o600,
     });
   } catch {

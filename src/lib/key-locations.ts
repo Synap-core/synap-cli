@@ -218,6 +218,11 @@ function jsonEntry(name: string, e: unknown): McpEntry {
   let key: string | undefined;
   for (const [h, v] of Object.entries(headers)) if (/^authorization$/i.test(h) && typeof v === "string") key ??= v.match(BEARER)?.[1];
   for (const s of strings) key ??= /Authorization:/i.test(s) ? s.match(BEARER)?.[1] : undefined;
+  // mcp-remote keeps the header VALUE in env (`Authorization:${SYNAP_AUTH}` +
+  // `env.SYNAP_AUTH = "Bearer <key>"`) so the key is never in argv — read it there too.
+  for (const env of [o.env, o.command?.env])
+    if (env && typeof env === "object")
+      for (const v of Object.values(env as Record<string, unknown>)) if (typeof v === "string") key ??= v.match(BEARER)?.[1];
   return { name, url, key };
 }
 

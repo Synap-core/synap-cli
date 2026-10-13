@@ -2,7 +2,7 @@
  * Synap pod connection and management utilities.
  */
 
-import { readJsonStrict, writeFileAtomic } from "./atomic-file.js";
+import { readJsonStrict, writeFileAtomic, ensureSecretDir } from "./atomic-file.js";
 import { execSync, spawnSync } from "child_process";
 import fs from "node:fs";
 import path from "node:path";
@@ -144,9 +144,7 @@ export interface MultiPodConfig {
 }
 
 function ensureConfigDir(): void {
-  if (!fs.existsSync(CONFIG_DIR)) {
-    fs.mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 });
-  }
+  ensureSecretDir(CONFIG_DIR);
 }
 
 function readMultiConfig(): MultiPodConfig {

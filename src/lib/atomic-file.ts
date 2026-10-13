@@ -96,3 +96,32 @@ export function writeFileAtomic(file: string, data: string, opts: { mode?: numbe
     /* Windows / unsupported */
   }
 }
+
+/**
+ * The ONE door for a file that holds a credential and is written in place.
+ *
+ * `fs.writeFileSync(f, d, { mode: 0o600 })` applies the mode only when it
+ * CREATES the file — an existing 0644 file keeps 0644. So write, then chmod.
+ * Accepts the same `{ mode }` options object so call sites swap in by name.
+ */
+export function writeSecretFile(file: string, data: string, opts: { mode?: number } = {}): void {
+  const mode = opts.mode ?? 0o600;
+  fs.writeFileSync(file, data, { mode });
+  fs.chmodSync(file, mode);
+}
+
+/** Copy a file that may hold credentials (a `.bak`) and force it to 0600. */
+export function copySecretBackup(src: string, dst: string): void {
+  fs.copyFileSync(src, dst);
+  fs.chmodSync(dst, 0o600);
+}
+
+/**
+ * Create `dir` (and parents) as 0700 and tighten it if it already existed.
+ * Only for directories Synap owns (`~/.synap`, `~/.synap/contexts`) — never a
+ * client's own config directory.
+ */
+export function ensureSecretDir(dir: string): void {
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  fs.chmodSync(dir, 0o700);
+}

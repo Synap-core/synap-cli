@@ -16,6 +16,7 @@
 import http from "node:http";
 import { openExternalUrl } from "./safe-open.js";
 import fs from "node:fs";
+import { ensureSecretDir, writeSecretFile } from "./atomic-file.js";
 import path from "node:path";
 import os from "node:os";
 
@@ -49,16 +50,12 @@ export interface StoredCredentials {
 // ─── Credential Storage ────────────────────────────────────────────────────
 
 function ensureCredentialsDir(): void {
-  if (!fs.existsSync(CREDENTIALS_DIR)) {
-    fs.mkdirSync(CREDENTIALS_DIR, { recursive: true, mode: 0o700 });
-  }
+  ensureSecretDir(CREDENTIALS_DIR);
 }
 
 function writeCredentials(creds: StoredCredentials): void {
   ensureCredentialsDir();
-  fs.writeFileSync(CREDENTIALS_FILE, JSON.stringify(creds, null, 2), {
-    mode: 0o600,
-  });
+  writeSecretFile(CREDENTIALS_FILE, JSON.stringify(creds, null, 2));
 }
 
 export function getStoredToken(): StoredCredentials | null {

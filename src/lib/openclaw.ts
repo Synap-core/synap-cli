@@ -3,7 +3,8 @@
  * Reads/writes OpenClaw config without modifying unrelated settings.
  */
 
-import { existsSync, readFileSync, writeFileSync, statSync } from "fs";
+import { existsSync, readFileSync, statSync } from "fs";
+import { writeSecretFile } from "./atomic-file.js";
 import { homedir } from "os";
 import { join } from "path";
 import { execSync } from "child_process";
@@ -141,7 +142,7 @@ export function readOpenClawConfig(): Record<string, unknown> | null {
 }
 
 export function writeOpenClawConfig(config: Record<string, unknown>): void {
-  writeFileSync(OPENCLAW_CONFIG, JSON.stringify(config, null, 2) + "\n");
+  writeSecretFile(OPENCLAW_CONFIG, JSON.stringify(config, null, 2) + "\n");
 }
 
 export function getConfigPermissions(): { mode: string; safe: boolean } {

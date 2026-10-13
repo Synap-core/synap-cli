@@ -20,6 +20,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
+import { ensureSecretDir, writeSecretFile } from "./atomic-file.js";
 import os from "node:os";
 import path from "node:path";
 
@@ -54,8 +55,8 @@ function persistedFallbackId(): string {
   if (existing) return existing;
   const id = randomUUID();
   try {
-    fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
-    fs.writeFileSync(file, id + "\n", { mode: 0o600 });
+    ensureSecretDir(path.dirname(file));
+    writeSecretFile(file, id + "\n");
   } catch {
     /* unwritable HOME: the id still holds for this run */
   }

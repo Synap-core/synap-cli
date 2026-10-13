@@ -21,6 +21,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { samePodOrigin } from "./project-ref.js";
+import { writeSecretFile } from "./atomic-file.js";
 
 const LENS_DIR = path.join(os.homedir(), ".synap", "lenses");
 
@@ -68,7 +69,7 @@ export function writeLens(sessionId: string, patch: Partial<SessionLens>): Sessi
   const next: SessionLens = { ...prev, ...patch, updatedAt: Date.now() };
   try {
     fs.mkdirSync(LENS_DIR, { recursive: true, mode: 0o700 });
-    fs.writeFileSync(lensPath(sessionId), JSON.stringify(next, null, 2), { mode: 0o600 });
+    writeSecretFile(lensPath(sessionId), JSON.stringify(next, null, 2), { mode: 0o600 });
   } catch {
     /* best-effort */
   }
@@ -96,7 +97,7 @@ export function clearLensField(sessionId: string, field?: keyof SessionLens): vo
   delete next[field];
   try {
     fs.mkdirSync(LENS_DIR, { recursive: true, mode: 0o700 });
-    fs.writeFileSync(lensPath(sessionId), JSON.stringify(next, null, 2), { mode: 0o600 });
+    writeSecretFile(lensPath(sessionId), JSON.stringify(next, null, 2), { mode: 0o600 });
   } catch {
     /* best-effort */
   }

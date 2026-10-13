@@ -89,6 +89,15 @@ describe("C1: every client file TARGETS says holds a key is read", () => {
     expect(r.unchecked).toEqual([]);
   });
 
+  it("SEC-CLI: finds the key when mcp-remote carries it in env (not argv) — Claude Desktop, Raycast-style, Zed command.env", async () => {
+    const args = ["-y", "mcp-remote", MCP, "--header", "Authorization:${SYNAP_AUTH}"];
+    put(fileOf("claude-desktop"), JSON.stringify({ mcpServers: { s: { command: "npx", args, env: { SYNAP_AUTH: "Bearer k-desktop-env" } } } }));
+    put(fileOf("zed"), JSON.stringify({ context_servers: { s: { command: { path: "npx", args, env: { SYNAP_AUTH: "Bearer k-zed-env" } } } } }));
+    const r = await checkKeyHealth(POD, deps(pod([])));
+    const bySurface = Object.fromEntries(r.locations.filter((l) => l.kind === "client-config").map((l) => [l.surface, l.key]));
+    expect(bySurface).toEqual({ "claude-desktop": "k-desktop-env", zed: "k-zed-env" });
+  });
+
   it("keyStore is DERIVED into the doctor's read set — every target with a key file is read", () => {
     const files = clientKeyFiles();
     const withFile = Object.values(TARGETS).filter((t) => !("none" in t.keyStore) && t.keyStore.path());

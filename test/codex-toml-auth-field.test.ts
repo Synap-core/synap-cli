@@ -41,7 +41,8 @@ describe("Codex MCP TOML uses Codex's real auth field", () => {
   it("the mcp command's printed guidance matches the writer", () => {
     const mcpCmd = readSrc("../src/commands/mcp.ts");
     const codex = mcpCmd.slice(mcpCmd.indexOf("codex: {"));
-    expect(codex).toContain('"http_headers": `{ Authorization = "Bearer ${hubApiKey}" }`');
+    expect(codex).toContain('"http_headers": `{ Authorization = "Bearer ${keyShown}" }`');
+    // The printed form is REDACTED (SEC-CLI): the key is never on stdout.
     // Two doors printing different fields is how the original went unnoticed.
     expect(codex).not.toContain('"headers": `{ Authorization = "Bearer');
   });
