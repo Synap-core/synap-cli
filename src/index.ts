@@ -3093,7 +3093,8 @@ providers
   .option("--target <name>", "Target tool: opencode | aider")
   .option("--pod-url <url>", "Pod URL override")
   .option("--api-key <key>", "API key override")
-  .action(async (opts: { target?: string; podUrl?: string; apiKey?: string }) => {
+  .option("--show-key", "With --target show: print the full API key (default: redacted)")
+  .action(async (opts: { target?: string; podUrl?: string; apiKey?: string; showKey?: boolean }) => {
     const { providersPull } = await import("./commands/providers.js");
     await providersPull(opts);
   });
@@ -3130,9 +3131,10 @@ const keys = program
 keys
   .command("rotate")
   .description("Rotate your CLI key to pick up the latest scope set")
-  .action(async () => {
+  .option("--show-key", "Print the new key in full if it could not be saved to the config")
+  .action(async (opts: { showKey?: boolean }) => {
     const { keysRotate } = await import("./commands/keys.js");
-    await keysRotate({});
+    await keysRotate({ showKey: opts.showKey });
   });
 
 // Resolve a global `--pod <name>` before commander parses (it isn't registered

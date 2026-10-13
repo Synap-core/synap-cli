@@ -28,6 +28,7 @@
 
 import { spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
+import { writeSecretFile } from "../lib/atomic-file.js";
 import os from "node:os";
 import path from "node:path";
 import { resolveHubConfig } from "../lib/hub-client.js";
@@ -261,7 +262,7 @@ function saveState(agent: string, state: WorkerState): void {
   const dir = stateDir(agent);
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   const tmp = path.join(dir, "state.json.tmp");
-  fs.writeFileSync(tmp, JSON.stringify(state, null, 2), { mode: 0o600 });
+  writeSecretFile(tmp, JSON.stringify(state, null, 2), { mode: 0o600 });
   fs.renameSync(tmp, path.join(dir, "state.json"));
 }
 

@@ -61,10 +61,9 @@ describe("secret file helpers tighten what already exists", () => {
   });
 
   it("no src file writes a 0o600 credential with bare fs.writeFileSync (the create-only mode trap)", () => {
-    // Scope: src/lib (the credential/config writers this lane owns). The
-    // `commands/{app,bridge-setup,proton-setup,worker}.ts` writers are NOT
-    // scanned — outside the lane, listed in the report for a follow-up.
-    const root = path.resolve(__dirname, "../src/lib");
+    // Scope: src/lib AND src/commands — the set is derived by walking both trees.
+    const roots = [path.resolve(__dirname, "../src/lib"), path.resolve(__dirname, "../src/commands")];
+    const root = path.resolve(__dirname, "../src");
     const files: string[] = [];
     const walk = (d: string) => {
       for (const e of fs.readdirSync(d, { withFileTypes: true })) {
@@ -73,8 +72,8 @@ describe("secret file helpers tighten what already exists", () => {
         else if (p.endsWith(".ts") && !p.endsWith(".test.ts")) files.push(p);
       }
     };
-    walk(root);
-    expect(files.length).toBeGreaterThan(30); // non-vacuity: the scan sees the tree
+    for (const r of roots) walk(r);
+    expect(files.length).toBeGreaterThan(60); // non-vacuity: the scan sees the tree
     const offenders: string[] = [];
     let sawHelperUse = 0;
     for (const f of files) {
@@ -86,7 +85,7 @@ describe("secret file helpers tighten what already exists", () => {
         if (/mode:\s*0o[67]00/.test(m[0])) offenders.push(`${path.relative(root, f)}: ${m[0].slice(0, 60)}`);
       }
     }
-    expect(sawHelperUse).toBeGreaterThanOrEqual(4); // non-vacuity: the door is actually used
+    expect(sawHelperUse).toBeGreaterThanOrEqual(8); // non-vacuity: the door is actually used
     expect(offenders).toEqual([]);
   });
 });
@@ -129,5 +128,29 @@ describe("printMcpConnection never prints or argv-embeds the key", () => {
 
   it("redactKey keeps only the prefix and the last four", () => {
     expect(redactKey(KEY)).toBe("synap_…cdef");
+  });
+});
+
+describe("providers pull --target show redacts the key unless --show-key", () => {
+  const run = async (showKey: boolean) => {
+    const { providersPull } = await import("../src/commands/providers.js");
+    const out: string[] = [];
+    const spy = vi.spyOn(console, "log").mockImplementation((...a: unknown[]) => void out.push(a.join(" ")));
+    const w = vi.spyOn(process.stdout, "write").mockImplementation((s: unknown) => (out.push(String(s)), true));
+    try {
+      await providersPull({ target: "show", podUrl: "https://pod.test", apiKey: KEY, showKey });
+    } finally {
+      spy.mockRestore();
+      w.mockRestore();
+    }
+    return out.join("\n");
+  };
+  it("default: no key material", async () => {
+    const screen = await run(false);
+    expect(screen).toContain(redactKey(KEY));
+    expect(screen).not.toContain("0123456789abcdef");
+  });
+  it("--show-key: full key", async () => {
+    expect(await run(true)).toContain(KEY);
   });
 });

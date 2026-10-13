@@ -52,6 +52,7 @@
 import path from "node:path";
 import os from "node:os";
 import fs from "node:fs";
+import { writeSecretFile } from "../lib/atomic-file.js";
 import { createRequire } from "node:module";
 import chalk from "chalk";
 import ora from "ora";
@@ -675,7 +676,7 @@ function upsertEnv(
     for (const [k, v] of remaining) out.push(`${k}=${v}`);
   }
 
-  fs.writeFileSync(filePath, out.join("\n"), { mode: 0o600 });
+  writeSecretFile(filePath, out.join("\n"), { mode: 0o600 });
 }
 
 function printNextSteps(

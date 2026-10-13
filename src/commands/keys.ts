@@ -4,7 +4,8 @@
  * Subcommands: rotate
  */
 
-import { writeFileAtomic } from "../lib/atomic-file.js";
+import { writeFileAtomic, writeSecretFile, ensureSecretDir } from "../lib/atomic-file.js";
+import { redactKey } from "../lib/mcp-snippets.js";
 import chalk from "chalk";
 import ora from "ora";
 import fs from "node:fs";
@@ -46,6 +47,7 @@ function updateConfigKey(newApiKey: string): void {
 
 export interface KeysRotateOpts {
   podUrl?: string;
+  showKey?: boolean;
 }
 
 export async function keysRotate(opts: KeysRotateOpts): Promise<void> {
@@ -79,7 +81,17 @@ export async function keysRotate(opts: KeysRotateOpts): Promise<void> {
     updateConfigKey(result.apiKey);
   } catch (err) {
     log.warn(`Key rotated but could not update config file: ${(err as Error).message}`);
-    log.dim(`Set it manually: SYNAP_HUB_API_KEY=${result.apiKey}`);
+    if (opts.showKey) {
+      log.dim(`Set it manually: SYNAP_HUB_API_KEY=${result.apiKey}`);
+    } else {
+      // The old key is already revoked, so the new one must not be lost — keep it
+      // in a 0600 file instead of the terminal scrollback.
+      const dir = path.join(os.homedir(), ".synap");
+      const file = path.join(dir, "rotated-key.env");
+      ensureSecretDir(dir);
+      writeSecretFile(file, `SYNAP_HUB_API_KEY=${result.apiKey}\n`, { mode: 0o600 });
+      log.dim(`New key ${redactKey(result.apiKey)} saved to ${file} (0600). Use --show-key to print it.`);
+    }
   }
 
   process.env.SYNAP_HUB_API_KEY = result.apiKey;

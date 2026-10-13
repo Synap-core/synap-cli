@@ -12,6 +12,7 @@ import ora from "ora";
 import prompts from "prompts";
 import { log } from "../utils/logger.js";
 import { getActivePodConfig } from "../lib/pod.js";
+import { redactKey } from "../lib/mcp-snippets.js";
 import type { ProviderInfo } from "../lib/targets.js";
 
 export interface PodProvider extends ProviderInfo {
@@ -150,6 +151,7 @@ export async function providersPull(opts: {
   target?: string;
   podUrl?: string;
   apiKey?: string;
+  showKey?: boolean;
 }): Promise<void> {
   let podUrl = opts.podUrl;
   let apiKey = opts.apiKey;
@@ -203,7 +205,8 @@ export async function providersPull(opts: {
     // "show" — print the IS endpoint for manual configuration
     log.heading("Intelligence Service endpoint");
     log.info(`Base URL: ${chalk.cyan(podUrl + "/v1")}`);
-    log.info(`API Key:  ${chalk.dim(apiKey)}`);
+    log.info(`API Key:  ${chalk.dim(opts.showKey ? apiKey : redactKey(apiKey))}`);
+    if (!opts.showKey) log.dim("Full key: synap providers pull --target show --show-key");
     log.blank();
     log.dim("This is an OpenAI-compatible endpoint. Use it as your AI provider base URL.");
     log.dim("The API key is your Hub Protocol key — it authenticates and scopes requests.");

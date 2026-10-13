@@ -18,6 +18,7 @@
 
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
+import { writeSecretFile } from "../lib/atomic-file.js";
 import path from "node:path";
 import * as readline from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
@@ -200,7 +201,7 @@ export function readManifest(file: string = manifestPath()): AppManifest {
 }
 
 export function writeManifest(file: string, m: AppManifest): void {
-  fs.writeFileSync(file, serializeManifest(m), { mode: 0o600 });
+  writeSecretFile(file, serializeManifest(m), { mode: 0o600 });
 }
 
 // ─── deploy.env → target mapping (pure) ────────────────────────────────────────
@@ -316,7 +317,7 @@ export function writeDeployTarget(
       throw new Error(`Could not read ${envFile}: ${(err as Error).message}`);
     }
   }
-  fs.writeFileSync(envFile, applyEnvContent(existing, assignments), { mode: 0o600 });
+  writeSecretFile(envFile, applyEnvContent(existing, assignments), { mode: 0o600 });
   return path.relative(root, envFile) || ".env.local";
 }
 
