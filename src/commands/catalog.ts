@@ -185,7 +185,7 @@ export const CATALOG_ERROR_HINTS = {
   "cp-unreachable": "The control plane did not answer — check your network / SYNAP_CP_URL and retry; nothing was published",
   "live-read-failed": "A live catalog row could not be read — retry; nothing was published blind",
   "not-confirmed": "The write was not confirmed — re-run and answer yes, or pass --yes",
-  "unsupported-runtime": "Use Node ≥ 22.18 (the catalog schema is TypeScript loaded by native type stripping)",
+  "unsupported-runtime": "Switch Node: `nvm use 22` (22.18+), or 23.6+. Check which one runs with `which node && node -v`.",
   // This command's own refusals.
   usage: "Run: synap catalog --help",
   "checkout-not-found": "Run from inside the Synap monorepo, or pass --catalog-dir (market publish: --templates-dir) <path to the catalog package>",
