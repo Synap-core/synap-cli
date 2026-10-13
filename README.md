@@ -201,6 +201,11 @@ Re-connect to an existing pod without running the full init wizard.
 
 Update the synap skill in OpenClaw to the latest version.
 
+### `synap playbook run <name-or-id>`
+
+Start a governed process in one step: `synap playbook run "Design to implementation" --subject <entityId> --param goal="..." [--json]`.
+A name resolves through the pod's playbook list (ambiguous or unknown names are refused, candidates listed); `--param` is typed by the playbook's declared params; a required param left out is asked of you by the run, not refused. An agent's run usually comes back as a proposal: that is success, printed with its review link (`synap open proposal <id>`). Same door as MCP `synap_run_playbook`.
+
 ### `synap security-audit`
 
 Check OpenClaw + Synap config for known security issues. `--fix` auto-repairs fixable ones.

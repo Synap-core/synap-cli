@@ -1396,6 +1396,29 @@ session
     await waitSessionCommand(sessionId, opts);
   });
 
+// ─── playbook ─────────────────────────────────────────────────────────────────
+// Start a governed process in one step — the Hub door MCP synap_run_playbook
+// shares. A proposal ("queued for your review") is success.
+
+const playbookCmd = program
+  .command("playbook")
+  .description("Run playbooks — governed, reusable processes");
+
+playbookCmd
+  .command("run <name-or-id>")
+  .description("Run a playbook by name or id, optionally on a subject entity")
+  .option("--subject <entityId>", "The entity the playbook runs on")
+  .option("--param <key=value>", "Answer a declared param (repeatable; typed by the playbook)", collect, [])
+  .option("--workspace <id>", "Write home for the run (defaults to the playbook's own workspace)")
+  .option("--reason <text>", "Why — shown to the reviewer")
+  .option("--json", "Output as JSON")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (ref: string, opts) => {
+    const { runPlaybook } = await import("./commands/playbook.js");
+    await runPlaybook(ref, opts);
+  });
+
 // ─── track ────────────────────────────────────────────────────────────────────
 // A LASTING goal inside a project, worked in sessions (`session start --track`).
 // Legacy tracks also run a method with steps. Writes are governed —
