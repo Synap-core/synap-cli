@@ -99,6 +99,17 @@ export class AgentBoundForDispatchError extends Error {
 }
 
 /**
+ * A person PAUSED this agent: it takes no new work until resumed. Not a failed
+ * read — the worker keeps polling and launches nothing.
+ */
+export class AgentPausedError extends Error {
+  constructor() {
+    super("this agent is paused: it takes no new work until a person resumes it");
+    this.name = "AgentPausedError";
+  }
+}
+
+/**
  * Read `handedToYou` out of `synap_orient`'s text. A missing or `unavailable`
  * block is a FAILED read and throws — never "nothing handed to me". A `bound`
  * block throws `AgentBoundForDispatchError`.
@@ -117,6 +128,7 @@ export function parseHandedToYou(orientText: string): HandedItem[] {
     throw new Error("orient carried no handedToYou block (pod too old, or not an agent key)");
   }
   if (block.status === "bound") throw new AgentBoundForDispatchError();
+  if (block.status === "paused") throw new AgentPausedError();
   if (block.status === "unavailable" || !Array.isArray(block.items)) {
     throw new Error("orient could not read handedToYou (status unavailable)");
   }
@@ -440,16 +452,27 @@ export async function workerCommand(opts: WorkerOptions): Promise<void> {
   };
 
   let failures = 0;
+  let paused = false;
   while (!stopping) {
     try {
       const r = await tick();
       failures = 0;
+      if (paused) say("resumed: picking up work again");
+      paused = false;
       if (r.launched) say(`${r.handed} handed · launched ${r.launched}`);
     } catch (err) {
       if (err instanceof AgentBoundForDispatchError) {
         // Not a failed read: retrying would never change the answer.
         say(err.message);
         break;
+      }
+      if (err instanceof AgentPausedError) {
+        // Not a failed read either: idle at the normal pace, say it once.
+        if (!paused) say(err.message);
+        paused = true;
+        if (opts.once) break;
+        await new Promise((r) => setTimeout(r, intervalMs));
+        continue;
       }
       failures++;
       say(`read failed (${failures} in a row): ${(err as Error).message}`);

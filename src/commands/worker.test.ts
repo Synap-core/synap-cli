@@ -3,6 +3,7 @@ import {
   buildWorkerPrompt,
   findMcpServerName,
   AgentBoundForDispatchError,
+  AgentPausedError,
   parseHandedToYou,
   parseInterval,
   pickNew,
@@ -31,6 +32,10 @@ describe("parseHandedToYou", () => {
 
   it("a bound agent stops the worker — it is never 'nothing handed'", () => {
     expect(() => parseHandedToYou(orient({ status: "bound" }))).toThrow(AgentBoundForDispatchError);
+  });
+
+  it("a paused agent is told apart from a failed read", () => {
+    expect(() => parseHandedToYou(orient({ status: "paused" }))).toThrow(AgentPausedError);
   });
 
   it("a missing block throws instead of reading as nothing handed", () => {
