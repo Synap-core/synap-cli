@@ -103,16 +103,31 @@ jobs:
       # sibling lands NEXT TO `cli/` rather than at a literal `../`. Running
       # every step from `cli/` makes `../synap-backend` resolve exactly as it
       # does on a developer's machine.
+      # Read of the sibling repo only: the Synap release App's token (scoped to
+      # `backend`, contents: read). CROSS_REPO_TOKEN is the fallback until the App
+      # is live (SECURITY-RELEASE-RUNBOOK.md §5).
+      - name: Mint backend read token (GitHub App)
+        id: app-token
+        if: ${{ vars.SYNAP_RELEASE_APP_ID != '' }}
+        continue-on-error: true
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
+        with:
+          app-id: ${{ vars.SYNAP_RELEASE_APP_ID }}
+          private-key: ${{ secrets.SYNAP_RELEASE_APP_KEY }}
+          owner: Synap-core
+          repositories: backend
+          permission-contents: read
+
       - name: Checkout synap-backend (sibling — hub-rest-client + skills)
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: Synap-core/synap-backend
-          # A PAT with read access to the sibling repo. `GITHUB_TOKEN` is scoped
-          # to THIS repository only and cannot read another one, so a missing
-          # secret fails here with a clear checkout error rather than producing
-          # a tarball that is silently missing its bundled client and its
-          # skills.
-          token: ${{ secrets.CROSS_REPO_TOKEN }}
+          # A token with read access to the sibling repo. `GITHUB_TOKEN` is
+          # scoped to THIS repository only and cannot read another one, so a
+          # missing token fails here with a clear checkout error rather than
+          # producing a tarball that is silently missing its bundled client and
+          # its skills.
+          token: ${{ steps.app-token.outputs.token || secrets.CROSS_REPO_TOKEN }}
           path: synap-backend
 
       # npm Trusted Publishing needs Node >= 22.14.0 and npm >= 11.5.1 in the
