@@ -110,9 +110,9 @@ describe("chooseInitFlow: a server only when a pod runs here", () => {
 describe("keyChoices: connect this computer first, advanced last", () => {
   const fresh = { deviceTried: false, deviceAvailable: true };
 
-  it("self-hosted pod: connect this computer, then paste, then PROVISIONING_TOKEN", () => {
+  it("self-hosted pod: connect this computer, then paste — never the bootstrap-only PROVISIONING_TOKEN", () => {
     const c = keyChoices({ managed: false, ...fresh });
-    expect(c.map((x) => x.value)).toEqual(["device", "paste", "provisioning"]);
+    expect(c.map((x) => x.value)).toEqual(["device", "paste"]);
     expect(c[0].title).toMatch(/recommended/);
     expect(c.slice(1).every((x) => /^Advanced/.test(x.title))).toBe(true);
   });
@@ -123,15 +123,12 @@ describe("keyChoices: connect this computer first, advanced last", () => {
 
   it("after a denied or expired code: offered again as a retry, first", () => {
     const c = keyChoices({ managed: false, deviceTried: true, deviceAvailable: true });
-    expect(c.map((x) => x.value)).toEqual(["device", "paste", "provisioning"]);
+    expect(c.map((x) => x.value)).toEqual(["device", "paste"]);
     expect(c[0].title).toMatch(/again/);
   });
 
   it("a pod too old for the device flow: only the advanced ways", () => {
-    expect(keyChoices({ managed: false, deviceTried: true, deviceAvailable: false }).map((x) => x.value)).toEqual([
-      "paste",
-      "provisioning",
-    ]);
+    expect(keyChoices({ managed: false, deviceTried: true, deviceAvailable: false }).map((x) => x.value)).toEqual(["paste"]);
   });
 });
 
@@ -154,6 +151,6 @@ describe("synap init on a linux + docker workstation", () => {
     await runInit("https://pod.example.com");
     expect(loginCalls).toEqual([]);
     expect(asked[0]?.message).toBe("How do you want to connect to this pod?");
-    expect(asked[0]?.choices?.map((c) => c.value)).toEqual(["device", "paste", "provisioning"]);
+    expect(asked[0]?.choices?.map((c) => c.value)).toEqual(["device", "paste"]);
   });
 });

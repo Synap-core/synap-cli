@@ -32,8 +32,6 @@ import {
   TARGETS,
   writeMcpServerEntry,
   writeClaudeCodeEnv,
-  provisionAgentKey,
-  configureAgentContext,
 } from "../lib/targets.js";
 import { renderNextSteps, FLOW } from "../lib/next-steps.js";
 
@@ -183,13 +181,11 @@ export async function podsAdd(name?: string, podUrlArg?: string): Promise<void> 
     choices: [
       { title: "Connect this computer (recommended)", description: "A link and a code to approve from any device", value: "device" },
       { title: "Paste existing API key", value: "paste" },
-      { title: "Generate via PROVISIONING_TOKEN (self-hosted admin)", value: "provisioning" },
     ],
   });
   if (!method) return;
 
   let apiKey: string | undefined;
-  let agentUserId: string | undefined;
   const podUrl = url as string;
 
   if (method === "device") {
@@ -206,25 +202,6 @@ export async function podsAdd(name?: string, podUrlArg?: string): Promise<void> 
   } else if (method === "paste") {
     const { key } = await prompts({ type: "password", name: "key", message: "Hub Protocol API key:" });
     apiKey = key as string | undefined;
-  } else if (method === "provisioning") {
-    const { token } = await prompts({ type: "password", name: "token", message: "PROVISIONING_TOKEN:" });
-    if (!token) return;
-    const genSpinner = ora("Creating agent credentials...").start();
-    try {
-      // Agents are pod-wide singletons now — no per-agent workspaceId comes back
-      // from setup (the old setupAgent() never passed one either, so this was
-      // already always null/"" in practice). Provision via the shared wrapper.
-      // No enrollAgentIfNeeded here: a PROVISIONING_TOKEN isn't a Hub Protocol
-      // API key, so it can't authorize /workspaces/enroll-agent (hub-protocol.write
-      // scope) — same as before this consolidation.
-      const result = await provisionAgentKey(podUrl, token as string, "cli");
-      apiKey = result.hubApiKey;
-      agentUserId = result.agentUserId;
-      genSpinner.succeed("Credentials created");
-    } catch (err) {
-      genSpinner.fail(err instanceof Error ? err.message : "Failed");
-      return;
-    }
   }
 
   if (!apiKey) return;
@@ -232,19 +209,11 @@ export async function podsAdd(name?: string, podUrlArg?: string): Promise<void> 
   addPodProfile(profileName, {
     podUrl,
     workspaceId: "",
-    agentUserId: agentUserId ?? "",
+    agentUserId: "",
     hubApiKey: apiKey,
     label: (label as string | undefined) || undefined,
     savedAt: new Date().toISOString(),
   });
-
-  if (agentUserId) {
-    try {
-      await configureAgentContext(podUrl, apiKey, "cli", agentUserId);
-    } catch (err) {
-      log.warn(`Agent context wizard failed: ${err instanceof Error ? err.message : String(err)}`);
-    }
-  }
 
   log.blank();
   log.success(`Pod '${profileName}' saved.`);

@@ -32,14 +32,15 @@ export function chooseInitFlow(input: {
   return input.localPodUrl ? "server" : "desktop";
 }
 
-export type KeyChoice = "device" | "paste" | "provisioning";
+export type KeyChoice = "device" | "paste";
 
 /**
  * How to get the first key for a pod, in order. Connecting this computer first
  * (the pod's device flow: a code approved on any device, on self-hosted and
- * managed pods alike); the rest are advanced. A synap.live pod has no .env, so
- * no PROVISIONING_TOKEN. A pod that cannot run the device flow (too old) is not
- * offered it again; after a denied or expired code it is offered as a retry.
+ * managed pods alike); pasting a key is the advanced way. The PROVISIONING_TOKEN
+ * is never offered: it is bootstrap-only on the pod (D9) and stops minting keys
+ * once the pod has an owner. A pod that cannot run the device flow (too old) is
+ * not offered it again; after a denied or expired code it is offered as a retry.
  */
 export function keyChoices(input: { managed: boolean; deviceTried: boolean; deviceAvailable: boolean }): Array<{
   title: string;
@@ -59,12 +60,5 @@ export function keyChoices(input: { managed: boolean; deviceTried: boolean; devi
     description: "From your pod: Settings → API keys",
     value: "paste",
   });
-  if (!input.managed) {
-    choices.push({
-      title: "Advanced: use the PROVISIONING_TOKEN",
-      description: "Self-host admin, from the pod's .env file",
-      value: "provisioning",
-    });
-  }
   return choices;
 }

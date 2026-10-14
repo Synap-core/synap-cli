@@ -39,7 +39,6 @@ import {
   setActivePod,
   type LocalPodConfig,
 } from "../lib/pod.js";
-import { provisionAgentKey, configureAgentContext } from "../lib/targets.js";
 import { seedAgentEntities } from "../lib/seed.js";
 import { login, isLoggedIn, listPods, podUrlOf, getStoredToken, waitForPodCallback } from "../lib/auth.js";
 import { detectAgents, type DetectableAgent } from "../lib/agent-detect.js";
@@ -833,59 +832,6 @@ async function connectStep(
       await connectComputer();
     } else if (keyChoice === "paste") {
       apiKey = await pasteKey(podUrl, podId, integration);
-      break;
-    } else if (keyChoice === "provisioning") {
-      const { token } = await prompts({
-        type: "password",
-        name: "token",
-        message: "PROVISIONING_TOKEN (from pod .env):",
-      });
-
-      if (token) {
-        const spinner = ora("Creating agent credentials...").start();
-        try {
-          // Agents are pod-wide singletons now — setupAgent() never passed a
-          // workspaceId in its request either, so the response's workspaceId
-          // was already always null/"" in practice. Provision via the shared
-          // wrapper (no enrollAgentIfNeeded: a PROVISIONING_TOKEN can't
-          // authorize /workspaces/enroll-agent, same as before).
-          const result = await provisionAgentKey(podUrl, token, integration);
-          apiKey = result.hubApiKey;
-          opts.apiKey = apiKey;
-          spinner.succeed("Credentials created");
-          log.dim(`Agent: ${result.agentUserId}`);
-
-          const podConfig: LocalPodConfig = {
-            podUrl,
-            podId: podId ?? undefined,
-            workspaceId: "",
-            agentUserId: result.agentUserId,
-            hubApiKey: result.hubApiKey,
-            savedAt: new Date().toISOString(),
-          };
-          if (integration === "cli") rememberPod(podConfig);
-          else saveLocalPodConfig(podConfig);
-          keySaved = true;
-
-          if (openclawFound) {
-            const config = readOpenClawConfig() ?? {};
-            setConfigValue(config, "synap.podUrl", podUrl);
-            setConfigValue(config, "synap.agentUserId", result.agentUserId);
-            writeOpenClawConfig(config);
-          }
-
-          if (result.agentUserId) {
-            try {
-              await configureAgentContext(podUrl, apiKey, integration, result.agentUserId);
-            } catch (err) {
-              log.warn(`Agent context wizard failed: ${err instanceof Error ? err.message : String(err)}`);
-            }
-          }
-        } catch (err) {
-          spinner.fail(err instanceof Error ? err.message : String(err));
-          return { key: null, grant: null };
-        }
-      }
       break;
     } else {
       break;
