@@ -658,24 +658,6 @@ export function startSelfHostedPod(): void {
  * Install the synap skill into OpenClaw.
  */
 /**
- * Enable OpenClaw as a free addon on a SELF-HOSTED pod.
- * Uses the PROVISIONING_TOKEN directly against the pod.
- *
- * Routes through the shared `provisionAgentKey()` wrapper (dynamic import to
- * avoid a circular pod.ts <-> targets.ts static import). `workspaceId` is no
- * longer part of the response — agents are pod-wide singletons now; scope is
- * granted separately via `enrollAgentIfNeeded()`, not returned from setup.
- */
-export async function enableOpenClawAddon(
-  podUrl: string,
-  provisioningToken: string
-): Promise<{ hubApiKey: string; agentUserId: string; workspaceId: string }> {
-  const { provisionAgentKey } = await import("./targets.js");
-  const { hubApiKey, agentUserId } = await provisionAgentKey(podUrl, provisioningToken, "openclaw");
-  return { hubApiKey, agentUserId, workspaceId: "" };
-}
-
-/**
  * Enable OpenClaw as an addon on a MANAGED pod via the Control Plane.
  * Calls POST /openclaw/provision on the CP (requires CP session token).
  * Returns the podId so the caller can poll status if needed.

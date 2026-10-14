@@ -115,10 +115,18 @@ jobs:
           token: ${{ secrets.CROSS_REPO_TOKEN }}
           path: synap-backend
 
+      # npm Trusted Publishing needs Node >= 22.14.0 and npm >= 11.5.1 in the
+      # publishing job (SECURITY-RELEASE-RUNBOOK.md §2.1). Both pins are EXACT.
+      # The package's own floor is unchanged (`engines.node >=20`): this is only
+      # the toolchain that builds and publishes it, and the typecheck, the tests
+      # and the build all run on this same Node.
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: 20
+          node-version: "22.18.0"
           registry-url: "https://registry.npmjs.org"
+
+      - name: Upgrade npm for Trusted Publishing (exact pin, >= 11.5.1)
+        run: npm install -g npm@11.20.0 && npm --version
 
       # pnpm is needed ONLY to build the sibling's hub-rest-client through the
       # backend's own workspace door. The CLI itself is pure npm (its
