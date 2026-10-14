@@ -69,6 +69,9 @@ permissions:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    # D16: a release from main waits for the `production` environment's
+    # required reviewer; a run dispatched on another branch uses none.
+    environment: ${{ github.ref == 'refs/heads/main' && 'production' || '' }}
     # Least privilege.
     #
     # `contents: write` is REQUIRED, not decorative: the "Commit the version bump"
@@ -200,9 +203,13 @@ jobs:
         working-directory: cli
         run: node scripts/verify-artifact.mjs --local
 
+      # `--provenance` signs a SLSA attestation with this job's OIDC token
+      # (`id-token: write`; this repo is public, which npm requires).
+      # NODE_AUTH_TOKEN stays as the fallback until the npm Trusted Publisher
+      # is configured — removing it is a founder step (SECURITY-RELEASE-RUNBOOK.md).
       - name: Publish to npm
         working-directory: cli
-        run: npm publish --access public
+        run: npm publish --access public --provenance
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 

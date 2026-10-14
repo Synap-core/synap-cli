@@ -44,7 +44,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/synap-core/cli"
+    "url": "git+https://github.com/Synap-core/synap-cli.git"
   },
   "license": "MIT",
   "keywords": [
