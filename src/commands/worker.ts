@@ -85,8 +85,23 @@ export function parseInterval(raw: string | undefined, fallbackMs = 30_000): num
 }
 
 /**
+ * The pod hands this agent its work through a provider binding (reach
+ * `dispatch`), so it lists nothing to pull: a worker pulling for it would run
+ * the same work a second time. The worker stops on it.
+ */
+export class AgentBoundForDispatchError extends Error {
+  constructor() {
+    super(
+      "this agent is bound to a provider: the pod hands it work directly, so there is nothing to pull. Stop this worker, or unbind the agent in Settings › Agents."
+    );
+    this.name = "AgentBoundForDispatchError";
+  }
+}
+
+/**
  * Read `handedToYou` out of `synap_orient`'s text. A missing or `unavailable`
- * block is a FAILED read and throws — never "nothing handed to me".
+ * block is a FAILED read and throws — never "nothing handed to me". A `bound`
+ * block throws `AgentBoundForDispatchError`.
  */
 export function parseHandedToYou(orientText: string): HandedItem[] {
   let data: unknown;
@@ -101,6 +116,7 @@ export function parseHandedToYou(orientText: string): HandedItem[] {
   if (!block || typeof block !== "object") {
     throw new Error("orient carried no handedToYou block (pod too old, or not an agent key)");
   }
+  if (block.status === "bound") throw new AgentBoundForDispatchError();
   if (block.status === "unavailable" || !Array.isArray(block.items)) {
     throw new Error("orient could not read handedToYou (status unavailable)");
   }
@@ -430,6 +446,11 @@ export async function workerCommand(opts: WorkerOptions): Promise<void> {
       failures = 0;
       if (r.launched) say(`${r.handed} handed · launched ${r.launched}`);
     } catch (err) {
+      if (err instanceof AgentBoundForDispatchError) {
+        // Not a failed read: retrying would never change the answer.
+        say(err.message);
+        break;
+      }
       failures++;
       say(`read failed (${failures} in a row): ${(err as Error).message}`);
       if (opts.once) throw err;
