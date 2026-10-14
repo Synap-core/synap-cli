@@ -605,11 +605,61 @@ export interface ApplyVerdict {
     | "unchanged"
     | "composed"
     | "composed-with-failures"
+    | "not-finished"
+    | "awaiting-approval"
     | "stamp-contradiction"
     | "legacy-unknown"
     | "no-workspace";
-  /** Non-fatal warnings — a stamp contradiction or a compose-overlay note. Seed failures are reported separately via `printSeedOutcomes`. */
+  /** Non-fatal warnings — a stamp contradiction, a compose-overlay note, or the next step of an unfinished apply. Seed failures are reported separately via `printSeedOutcomes`. */
   warnings: string[];
+}
+
+/**
+ * How far the pod says layer 2 got, read from the `/packages/apply` response
+ * (synap-backend `hub-protocol/rest/packages.ts`): a thrown layer 2 arrives as
+ * `layer2: {status: "failed"}`, an unconverged one as the `templateApply`
+ * record, and either way the pod's sentence as `templateApplyWarning`.
+ * `null` = the pod reported nothing unfinished (converged, or an older pod).
+ */
+export function podApplyState(
+  res: Record<string, unknown>
+): "not-finished" | "awaiting-approval" | null {
+  const layer2 = res.layer2 as { status?: unknown } | undefined;
+  if (layer2?.status === "failed") return "not-finished";
+  const record = res.templateApply as { state?: unknown } | undefined;
+  if (record?.state === "awaiting-approval") return "awaiting-approval";
+  if (record || heldVersionLine(res)) return "not-finished";
+  return null;
+}
+
+/**
+ * The verdict of one `/packages/apply` response — the ONE reader both
+ * `marketInstall` and `applyOnePackage` call. Layer 2's outcome comes from the
+ * pod's own state (`podApplyState`): an apply the pod says is unfinished is
+ * never "updated", and never a stamp contradiction (the pod held the version
+ * on purpose — redeploying fixes nothing).
+ */
+export function classifyApplyResponse(
+  entry: CatalogEntry,
+  res: Record<string, unknown>,
+  ctx: { remoteVersionSent?: string; wasUnstamped: boolean; stampVerified?: boolean | null }
+): ApplyVerdict {
+  const state = podApplyState(res);
+  if (state) {
+    const next =
+      heldVersionLine(res) ??
+      (state === "awaiting-approval"
+        ? `Approve its proposals (synap proposals), then run synap templates update ${entry.slug}.`
+        : `Run synap templates update ${entry.slug} to finish it.`);
+    return { status: state, warnings: [next] };
+  }
+  return classifyApplyResult(
+    entry,
+    res.workspace as WorkspaceApplyResult | undefined,
+    res.dependencies as ResolvedDependencyLike[] | undefined,
+    res.seedSummary as SeedSummary | undefined,
+    ctx
+  );
 }
 
 /**
@@ -728,6 +778,14 @@ export function printApplyVerdict(entry: CatalogEntry, verdict: ApplyVerdict): v
       return;
     case "composed-with-failures":
       log.warn(`${entry.name} — layered onto its base workspace, with capability failures (see below).`);
+      log.hint(verdict.warnings[0]);
+      return;
+    case "not-finished":
+      log.warn(`${entry.name} is in place, but not finished.`);
+      log.hint(verdict.warnings[0]);
+      return;
+    case "awaiting-approval":
+      log.info(`${entry.name} is in place; the rest waits on your approval.`);
       log.hint(verdict.warnings[0]);
       return;
     case "stamp-contradiction":
@@ -1448,11 +1506,10 @@ export async function marketInstall(
     }
     const steps = FLOW.afterMarketInstall({ slug, proposed: false, projectName });
     s?.stop();
-    const verdict = classifyApplyResult(entry, ws, dependencies, seedSummary, {
+    const verdict = classifyApplyResponse(entry, res, {
       remoteVersionSent: remoteVersion,
       wasUnstamped,
       stampVerified,
-      stampHeld: !!res.templateApply,
     });
     if (opts.json) {
       console.log(
@@ -1501,8 +1558,6 @@ export async function marketInstall(
     printSeedOutcomes(dependencies, seedSummary);
     printLayerOutcomes(ws?.layers);
     for (const line of deferredPlacementLines(res)) log.info(line);
-    const held = heldVersionLine(res);
-    if (held) log.info(held);
     if (ws?.outcome || ws?.status === "composed" || ws?.status === "created") renderNextSteps(steps);
   } catch (e) {
     s?.stop();
@@ -1778,18 +1833,15 @@ async function applyOnePackage(
     // which by construction means it already carried a recorded version. The
     // stamp-contradiction check is therefore a no-op here by design; it's
     // `marketInstall`'s job to catch it on a first-time/unstamped install.
-    const verdict = classifyApplyResult(entry, ws, dependencies, seedSummary, {
+    const verdict = classifyApplyResponse(entry, res, {
       remoteVersionSent: payload.catalogVersion,
       wasUnstamped: false,
-      stampHeld: !!res.templateApply,
     });
     if (!opts.json) {
       printApplyVerdict(entry, verdict);
       printSeedOutcomes(dependencies, seedSummary);
       printLayerOutcomes(ws?.layers);
       for (const line of deferredPlacementLines(res)) log.info(line);
-      const held = heldVersionLine(res);
-      if (held) log.info(held);
     }
     return {
       slug: entry.slug,
@@ -2340,11 +2392,14 @@ export function summarizeApplyResults(
       // this as `failed` (the old `default` fall-through) was dishonest: the
       // whole point of governance is "proposed ≠ error". It just isn't LIVE yet.
       case "proposed":
+      // Layer 2 filed proposals and nothing failed: same bucket, same reason.
+      case "awaiting-approval":
         proposed++;
         break;
       case "installed-with-failures":
       case "updated-with-failures":
       case "composed-with-failures":
+      case "not-finished":
       case "stamp-contradiction":
         withFailures++;
         break;
