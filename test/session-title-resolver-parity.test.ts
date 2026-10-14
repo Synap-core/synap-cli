@@ -20,6 +20,7 @@ import { join } from "node:path";
  *     that is backed off to, and an early one that is not.
  */
 import { resolveSessionTitle } from "../src/commands/sessions.js";
+import { stripComments } from "./helpers/strip-comments.mjs";
 
 const REGISTRY = join(
   process.cwd(),
@@ -28,7 +29,8 @@ const REGISTRY = join(
 const CLI_SRC = join(process.cwd(), "src/commands/sessions.ts");
 
 /** A function body, comments and whitespace normalized away. */
-function body(src: string, name: string): string | null {
+function body(source: string, name: string): string | null {
+  const src = stripComments(source, "ts");
   const start = src.indexOf(`function ${name}(`);
   if (start < 0) return null;
   const open = src.indexOf("{", start);
@@ -40,7 +42,6 @@ function body(src: string, name: string): string | null {
       if (depth === 0) {
         return src
           .slice(open + 1, i)
-          .replace(/\/\/[^\n]*/g, " ")
           .replace(/\s+/g, " ")
           .trim();
       }

@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
+import { stripComments } from "./helpers/strip-comments.mjs";
 
 /**
  * The CLI's `market --list` headings must say what the product's vocabulary
@@ -40,11 +41,11 @@ describe("CLI kind headings match the vocabulary registry", () => {
   /**
    * Comments are stripped BEFORE scanning for the forbidden construction —
    * otherwise this test fails on the docblock that explains the fix, which is
-   * exactly what happened when it was first written. Block and line comments go
-   * in ONE combined alternation: stripping them in sequence has silently eaten
-   * real code in this codebase before, at an apostrophe inside a string.
+   * exactly what happened when it was first written. The shared scanner is
+   * string-aware: a regex strip has silently eaten real code in this codebase
+   * before, at an apostrophe or a glob inside a string.
    */
-  const codeOnly = cli.replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, "");
+  const codeOnly = stripComments(cli, "ts");
 
   it("the CLI table is readable (guards against a vacuous pass)", () => {
     expect(codeOnly.length, "stripper ate the file").toBeGreaterThan(5000);

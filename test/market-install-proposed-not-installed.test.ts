@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { stripComments } from "./helpers/strip-comments.mjs";
 
 /**
  * A governed `synap market install` comes back as a PROPOSAL, not an install.
@@ -31,18 +32,16 @@ import { join } from "node:path";
 const SRC = join(process.cwd(), "src/commands/market.ts");
 
 function stripCommentsAndStrings(src: string): string {
-  // Comments first, then ALL THREE quote styles in ONE left-to-right pass.
+  // Comments first (the shared string-aware scanner), then ALL THREE quote
+  // styles in ONE left-to-right pass.
   //
-  // Stripping them in sequence is wrong and silently ate this test's own
-  // subject: the single-quote pass ran first and treated the apostrophe in a
-  // DOUBLE-quoted `"…didn't…"` as an opening quote, swallowing everything up to
-  // the next apostrophe — including the `outcome.kind` it was asserting on. The
-  // test then failed against correct code. One alternation cannot do that,
-  // because whichever quote opens first consumes its own literal.
-  return src
-    .replace(/\/\*[\s\S]*?\*\//g, " ")
-    .replace(/(^|[^:])\/\/[^\n]*/g, "$1 ")
-    .replace(
+  // Stripping the quote styles in sequence is wrong and silently ate this
+  // test's own subject: the single-quote pass ran first and treated the
+  // apostrophe in a DOUBLE-quoted `"…didn't…"` as an opening quote, swallowing
+  // everything up to the next apostrophe — including the `outcome.kind` it was
+  // asserting on. One alternation cannot do that, because whichever quote opens
+  // first consumes its own literal.
+  return stripComments(src, "ts").replace(
       /`(?:\\[\s\S]|[^\\`])*`|'(?:\\.|[^\\'])*'|"(?:\\.|[^\\"])*"/g,
       '""',
     );

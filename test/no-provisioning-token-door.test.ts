@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { stripComments } from "./helpers/strip-comments.mjs";
 
 /**
  * The PROVISIONING_TOKEN is a pod-side BOOTSTRAP secret (SECURITY-PLAN-R1 §4,
@@ -28,13 +29,14 @@ function sources(dir: string): string[] {
 }
 
 const TOKEN = /provisioningToken|PROVISIONING_TOKEN/;
-const isComment = (line: string) => /^\s*(\/\/|\/\*|\*)/.test(line);
 
 export function hits(src: string): string[] {
-  return src
+  // Comments are blanked by the shared scanner, which keeps every line break:
+  // the line numbers below are the file's own.
+  return stripComments(src, "ts")
     .split("\n")
     .map((line, i) => ({ line, n: i + 1 }))
-    .filter(({ line }) => !isComment(line) && TOKEN.test(line))
+    .filter(({ line }) => TOKEN.test(line))
     .map(({ line, n }) => `${n}: ${line.trim()}`);
 }
 
@@ -45,7 +47,7 @@ describe("the CLI has no PROVISIONING_TOKEN door", () => {
     expect(files.length).toBeGreaterThan(50);
     expect(hits("export async function f(provisioningToken: string) {}")).toHaveLength(1);
     expect(hits("const t = process.env.PROVISIONING_TOKEN;")).toHaveLength(1);
-    expect(hits(" * Uses the PROVISIONING_TOKEN directly against the pod.")).toHaveLength(0);
+    expect(hits("/** Uses the PROVISIONING_TOKEN directly against the pod. */")).toHaveLength(0);
     expect(hits("// PROVISIONING_TOKEN is bootstrap-only")).toHaveLength(0);
   });
 

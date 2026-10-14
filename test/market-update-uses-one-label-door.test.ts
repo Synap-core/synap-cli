@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { readFileSync } from "fs";
 import { fileURLToPath } from "url";
 import { dirname, resolve } from "path";
+import { stripComments } from "./helpers/strip-comments.mjs";
 
 /**
  * `market update`'s preview printed a SECOND, hand-rolled status label instead
@@ -27,53 +28,6 @@ const here = dirname(fileURLToPath(import.meta.url));
 const SRC = resolve(here, "../src/commands/market.ts");
 
 /**
- * Strip comments with a STRING-AWARE scanner. A naive line-comment regex eats
- * the double slash inside every "https://…" literal, truncating real code and
- * unbalancing the braces — exactly how the first version of this test failed
- * against correct source.
- */
-function stripComments(s: string): string {
-  let out = "";
-  let i = 0;
-  while (i < s.length) {
-    const ch = s[i];
-    const next = s[i + 1];
-    if (ch === '"' || ch === "'" || ch === "`") {
-      const quote = ch;
-      out += ch;
-      i++;
-      while (i < s.length) {
-        if (s[i] === "\\") {
-          out += s[i] + (s[i + 1] ?? "");
-          i += 2;
-          continue;
-        }
-        out += s[i];
-        if (s[i] === quote) {
-          i++;
-          break;
-        }
-        i++;
-      }
-      continue;
-    }
-    if (ch === "/" && next === "*") {
-      const end = s.indexOf("*/", i + 2);
-      i = end === -1 ? s.length : end + 2;
-      continue;
-    }
-    if (ch === "/" && next === "/") {
-      const end = s.indexOf("\n", i);
-      i = end === -1 ? s.length : end;
-      continue;
-    }
-    out += ch;
-    i++;
-  }
-  return out;
-}
-
-/**
  * Extract a top-level function body. Anchors on the closing `}` at column 0,
  * which the repo's formatting guarantees for a top-level declaration — more
  * robust than counting braces through regex literals and template expressions.
@@ -89,7 +43,7 @@ function functionBody(source: string, name: string): string {
 }
 
 describe("market update renders status through the ONE label door", () => {
-  const body = functionBody(stripComments(readFileSync(SRC, "utf8")), "marketUpdate");
+  const body = functionBody(stripComments(readFileSync(SRC, "utf8"), "ts"), "marketUpdate");
 
   it("marketUpdate calls installedStatusLabel", () => {
     expect(body).toContain("installedStatusLabel(");

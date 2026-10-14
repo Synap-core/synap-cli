@@ -2,6 +2,7 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { printLayerOutcomes } from "../src/commands/market.js";
+import { stripComments } from "./helpers/strip-comments.mjs";
 
 /**
  * THE FAILURE TEXT FIELD IS `message`, NOT `detail`.
@@ -83,7 +84,7 @@ describe("the local mirror matches the pod's InstallLayerReport", () => {
     expect(block).not.toMatch(/^\s*detail\??:/m);
     // …and the reader must consume it. Comments stripped first so the docblock
     // explaining the fix cannot satisfy the assertion.
-    const codeOnly = cli.replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, "");
+    const codeOnly = stripComments(cli, "ts");
     expect(codeOnly.length, "stripper ate the file").toBeGreaterThan(5000);
     expect(codeOnly).toContain("l.message ??");
     expect(codeOnly).not.toContain("l.detail");
