@@ -11,7 +11,8 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
   test: {
     // A throwaway HOME for every test file — see test/setup/temp-home.ts.
-    setupFiles: ["./test/setup/temp-home.ts"],
+    // …and no test may open the real browser — see test/setup/no-real-browser.ts.
+    setupFiles: ["./test/setup/temp-home.ts", "./test/setup/no-real-browser.ts"],
     exclude: [
       "**/node_modules/**",
       "**/dist/**",
