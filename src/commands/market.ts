@@ -72,6 +72,7 @@ import { HubNetworkError } from "../lib/hub-client.js";
 import {
   parseDataChanges,
   dataChangesFromRefusal,
+  consentNeedsPerson,
   dataChangeRefusalMessage,
   printDataChanges,
   parseAcceptList,
@@ -1337,7 +1338,7 @@ export async function marketInstall(
       const proposalId = outcome.proposalId ? String(outcome.proposalId) : undefined;
       const reviewUrl = outcome.reviewUrl ? String(outcome.reviewUrl) : undefined;
       log.info(`${entry.name} — proposed (under review, NOT installed yet).`);
-      if (proposalId) log.hint(`Approve: synap proposals approve ${proposalId}`);
+      if (proposalId) log.hint(`Review and approve: synap open proposal ${proposalId}`);
       if (reviewUrl) log.hint(`Review: ${reviewUrl}`);
       return;
     }
@@ -1488,7 +1489,7 @@ export async function marketInstall(
         return;
       }
       log.info(`${entry.name} — proposed (under review, not live yet).`);
-      if (proposalId) log.hint(`Approve: synap proposals approve ${proposalId}`);
+      if (proposalId) log.hint(`Review and approve: synap open proposal ${proposalId}`);
       renderNextSteps(steps);
       return;
     }
@@ -1820,7 +1821,7 @@ async function applyOnePackage(
       const proposalId = res.proposalId ? String(res.proposalId) : undefined;
       if (!opts.json) {
         log.info(`${entry.name} — update proposed (under review, not live yet).`);
-        if (proposalId) log.hint(`Approve: synap proposals approve ${proposalId}`);
+        if (proposalId) log.hint(`Review and approve: synap open proposal ${proposalId}`);
       }
       return { slug: entry.slug, outcome: "proposed", status: "proposed", warnings: [] };
     }
@@ -1858,10 +1859,19 @@ async function applyOnePackage(
     const owed = dataChangesFromRefusal(e);
     if (owed) {
       if (!opts.json) {
-        log.warn(`${entry.name} was not updated: it carries data changes you have not agreed to. Nothing was written.`);
+        const person = consentNeedsPerson(e);
+        log.warn(
+          person
+            ? `${entry.name} was not updated: only a person can agree to its data changes, and this ran with an agent's key. Nothing was written.`
+            : `${entry.name} was not updated: it carries data changes you have not agreed to. Nothing was written.`
+        );
         printDataChanges(entry.slug, owed);
         if (owed.some((d) => !d.destructive))
-          log.hint(`To agree and update: ${consentRerunCommand(entry.slug, owed)}`);
+          log.hint(
+            person
+              ? `A person runs, in their own terminal: ${consentRerunCommand(entry.slug, owed)}`
+              : `To agree and update: ${consentRerunCommand(entry.slug, owed)}`
+          );
       }
       return {
         slug: entry.slug,

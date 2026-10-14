@@ -4,6 +4,7 @@ import {
   parseDataChanges,
   decideConsent,
   dataChangesFromRefusal,
+  consentNeedsPerson,
   parseAcceptList,
   parseLifecycle,
   lifecycleNotice,
@@ -346,5 +347,23 @@ describe("overlays — a pack composed onto a space shows under it", () => {
     expect(before.overlayNotices).toEqual([]);
     expect(before.group).toBe("attention");
     expect(before.action).toBe("synap templates update radar");
+  });
+});
+
+describe("consentNeedsPerson — an agent's refusal is not 'you have not agreed'", () => {
+  const refusal = (body: Record<string, unknown>) =>
+    new HubError({ message: "x", status: 409, code: "DATA_CHANGES_NEED_CONSENT", body: { code: "DATA_CHANGES_NEED_CONSENT", dataChanges: [W12], ...body }, rawBody: "", path: "/p", method: "POST" });
+  it("follows the pod's needsPerson flag", () => {
+    expect(consentNeedsPerson(refusal({ needsPerson: true, missing: [] }))).toBe(true);
+    expect(consentNeedsPerson(refusal({ needsPerson: false, missing: ["w12"] }))).toBe(false);
+  });
+  it("older pod: everything agreed (missing []) yet refused can only be an agent", () => {
+    // dogfood 2026-10-14: `--accept-data-changes h0.devplane-story.planned`
+    // from an agent session was told to re-run the same command.
+    expect(consentNeedsPerson(refusal({ missing: [] }))).toBe(true);
+    expect(consentNeedsPerson(refusal({ missing: ["w12"] }))).toBe(false);
+  });
+  it("false for any other error", () => {
+    expect(consentNeedsPerson(new Error("x"))).toBe(false);
   });
 });

@@ -89,6 +89,21 @@ export function dataChangesFromRefusal(err: unknown): DataChange[] | null {
 }
 
 /**
+ * True when a 409 consent refusal is about WHO asked, not what was agreed: the
+ * caller is an agent, and only a person can agree to a data change. The pod
+ * says so with `needsPerson`; an older pod is read from its shape — it refuses
+ * a person only for a missing agreement, so an empty `missing` beside an owed
+ * agreeable change can only be an agent's refusal.
+ */
+export function consentNeedsPerson(err: unknown): boolean {
+  if (dataChangesFromRefusal(err) === null) return false;
+  const body = (err as HubError).body as Record<string, unknown> | undefined;
+  if (typeof body?.needsPerson === "boolean") return body.needsPerson;
+  const owed = parseDataChanges(body) ?? [];
+  return Array.isArray(body?.missing) && body.missing.length === 0 && owed.some((d) => !d.destructive);
+}
+
+/**
  * The pod's two other data-change refusals, in plain words. `null` for any
  * other error (the caller's generic failure path renders those).
  * - 403 `DATA_CHANGES_NEED_POD_ADMIN`: you agreed, but a data change rewrites
