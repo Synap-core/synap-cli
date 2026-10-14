@@ -411,6 +411,14 @@ export function formatDiff(
 ): string {
   const rows = allRows.filter((r) => r.action !== "retire");
   const retirements = allRows.filter((r) => r.action === "retire");
+  // A warning several rows share (an older CP that cannot preview a workspace
+  // version says so on every workspace row) prints ONCE under the summary,
+  // with its row count, instead of under every row.
+  const rowsWarned = new Map<string, number>();
+  for (const r of rows) {
+    for (const w of new Set(Array.isArray(r.warnings) ? r.warnings : [])) rowsWarned.set(w, (rowsWarned.get(w) ?? 0) + 1);
+  }
+  const shared = [...rowsWarned].filter(([, n]) => n > 1);
   const lines = rows.map((r) => {
     const hashes = r.status === "changed" ? `  ${r.hashBefore ?? "?"} → ${r.hashAfter ?? "?"}` : "";
     const head = `  ${STATUS_LABEL[r.status] ?? r.status} ${r.kind}/${r.slug}${hashes}`;
@@ -421,7 +429,9 @@ export function formatDiff(
     if (r.status === "changed" && Array.isArray(r.columns)) {
       for (const c of r.columns) detail.push(`      ~ ${c.column}: ${shortValue(c.before)} → ${shortValue(c.after)}`);
     }
-    const warn = Array.isArray(r.warnings) ? r.warnings.map((w) => `      ! ${w}`) : [];
+    const warn = Array.isArray(r.warnings)
+      ? r.warnings.filter((w) => (rowsWarned.get(w) ?? 0) < 2).map((w) => `      ! ${w}`)
+      : [];
     return [head, ...detail, ...warn].join("\n");
   });
   const count = (s: CatalogDiffRow["status"]) => rows.filter((r) => r.status === s).length;
@@ -440,6 +450,7 @@ export function formatDiff(
     );
   }
   lines.push(`\n  ${count("new")} new · ${count("changed")} changed · ${count("unchanged")} unchanged`);
+  for (const [w, n] of shared) lines.push(`  ! ${w} (${n} rows)`);
   if (retirements.length > 0) {
     const toSend = retirements.filter((r) => r.status !== "unchanged").length;
     lines.push(`  ${retirements.length} retired: ${toSend} to send · ${retirements.length - toSend} unchanged`);

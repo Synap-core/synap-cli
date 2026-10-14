@@ -509,4 +509,15 @@ describe("the preview names what changes", () => {
     expect(text).not.toMatch(/fireflies[^\n]*\n\s+~ definition/);
     expect(text).toContain("capability/proton  h-a → h-b\n      ~ definition: new content version");
   });
+
+  it("a warning several rows share prints once under the summary with its count; a row's own warning stays on the row", () => {
+    const OLD_CP = "This CP cannot preview a workspace version";
+    const text = formatDiff([
+      { kind: "workspace", slug: "crm", status: "changed", hashBefore: "h-a", columns: [], warnings: [OLD_CP] },
+      { kind: "workspace", slug: "networking", status: "changed", hashBefore: "h-b", columns: [], warnings: [OLD_CP, "REMOVES profiles/fields"] },
+    ]);
+    expect(text.split(OLD_CP)).toHaveLength(2);
+    expect(text).toMatch(/unchanged\n {2}! This CP cannot preview a workspace version \(2 rows\)/);
+    expect(text).toContain("workspace/networking  h-b → ?\n      ! REMOVES profiles/fields");
+  });
 });
