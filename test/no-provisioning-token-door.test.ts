@@ -8,8 +8,8 @@ import { fileURLToPath } from "node:url";
  * D9): the pod accepts it only until it has an owner, and the installer drops
  * it from `.env` at that moment. The CLI must therefore never take one — an
  * agent key is minted with a person's key or a device-flow approval
- * (`provisionAgentKey`), never with this token. `enableOpenClawAddon(podUrl,
- * provisioningToken)` was the last such door (dead: no caller) and is gone.
+ * (`provisionAgentKey`), never with this token. The last such door
+ * (an add-on enable call taking the token) is gone.
  *
  * The scanned set is DERIVED: every .ts under src/. A CODE line (not a `//` or
  * block-comment line) naming `provisioningToken` or `PROVISIONING_TOKEN` is a hit.

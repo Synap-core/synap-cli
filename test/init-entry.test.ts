@@ -25,13 +25,12 @@ describe("detectAgents", () => {
     fs.rmSync(bin, { recursive: true, force: true });
   });
 
-  const run = (openClaw = false) =>
-    detectAgents({ home, pathEnv: bin, platform: "linux", openClawFound: () => openClaw });
+  const run = () => detectAgents({ home, pathEnv: bin, platform: "linux" });
   const found = (rows: ReturnType<typeof run>) => rows.filter((r) => r.found).map((r) => r.target);
 
-  it("lists the four connectable agents, OpenClaw as one row, and finds none on a bare machine", () => {
+  it("lists the three connectable agents and finds none on a bare machine", () => {
     const rows = run();
-    expect(rows.map((r) => r.target)).toEqual(["claude-code", "codex", "cursor", "openclaw"]);
+    expect(rows.map((r) => r.target)).toEqual(["claude-code", "codex", "cursor"]);
     expect(found(rows)).toEqual([]);
   });
 
@@ -56,10 +55,6 @@ describe("detectAgents", () => {
   it("does not count a directory named like the binary", () => {
     fs.mkdirSync(path.join(bin, "claude"));
     expect(found(run())).toEqual([]);
-  });
-
-  it("takes OpenClaw's own detector for its row", () => {
-    expect(found(run(true))).toEqual(["openclaw"]);
   });
 });
 

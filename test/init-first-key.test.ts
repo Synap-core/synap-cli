@@ -40,7 +40,7 @@ vi.mock("../src/lib/auth.js", async (orig) => ({
   login: async () => (loginCalls.push("login"), null),
 }));
 
-import { chooseInitFlow, keyChoices } from "../src/lib/init-flow.js";
+import { keyChoices } from "../src/lib/init-flow.js";
 
 const MANAGED = "https://pod.antoinesrvt.synap.live";
 const realPlatform = process.platform;
@@ -73,38 +73,6 @@ afterAll(() => {
 beforeEach(() => {
   asked.length = 0;
   loginCalls.length = 0;
-});
-
-describe("chooseInitFlow: a server only when a pod runs here", () => {
-  const base = { linuxDocker: true, agentsRequested: false };
-
-  it("linux + docker with a synap.live --pod-url is a workstation", () => {
-    expect(chooseInitFlow({ ...base, podUrl: MANAGED, localPodUrl: null })).toBe("desktop");
-    // even if something answers locally: a synap.live pod is never on this machine
-    expect(chooseInitFlow({ ...base, podUrl: MANAGED, localPodUrl: "http://localhost:4000" })).toBe("desktop");
-  });
-
-  it("linux + docker with a remote --pod-url and no local pod is a workstation", () => {
-    expect(chooseInitFlow({ ...base, podUrl: "https://pod.example.com", localPodUrl: null })).toBe("desktop");
-  });
-
-  it("linux + docker with no pod at all is a workstation", () => {
-    expect(chooseInitFlow({ ...base, localPodUrl: null })).toBe("desktop");
-  });
-
-  it("a pod running on this machine is a server", () => {
-    expect(chooseInitFlow({ ...base, localPodUrl: "http://localhost:4000" })).toBe("server");
-    expect(
-      chooseInitFlow({ ...base, podUrl: "https://pod.example.com", localPodUrl: "http://localhost" })
-    ).toBe("server");
-  });
-
-  it("--agents, or no docker, is always the desktop flow", () => {
-    expect(chooseInitFlow({ ...base, agentsRequested: true, localPodUrl: "http://localhost" })).toBe("desktop");
-    expect(chooseInitFlow({ linuxDocker: false, agentsRequested: false, localPodUrl: "http://localhost" })).toBe(
-      "desktop"
-    );
-  });
 });
 
 describe("keyChoices: connect this computer first, advanced last", () => {

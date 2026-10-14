@@ -38,7 +38,6 @@ export type TargetName =
   | "claude-desktop"
   | "cursor"
   | "raycast"
-  | "openclaw"
   | "openwebui"
   | "codex"
   | "chatgpt"
@@ -324,12 +323,6 @@ export const TARGETS: Record<TargetName, TargetInfo> = {
     description: "Native Synap extension (@synap) catalog — full MCP opt-in via --with-mcp",
     supports: { skills: false, mcp: true },
   },
-  openclaw: {
-    name: "openclaw",
-    keyStore: { none: "skills only — no Synap key is written to an OpenClaw file" },
-    label: "OpenClaw",
-    supports: { skills: true, mcp: false },
-  },
   openwebui: {
     name: "openwebui",
     keyStore: { none: "registered in Open WebUI through its API — no local file" },
@@ -614,7 +607,6 @@ export async function installForTarget(
     case "claude-desktop": result = await installClaudeDesktop(info, cfg); break;
     case "cursor":        result = await installCursor(info, cfg); break;
     case "raycast":       result = await installRaycast(cfg); break;
-    case "openclaw":      result = await installOpenclaw(cfg); break;
     case "openwebui":     result = await installOpenWebUI(cfg); break;
     case "codex":         result = await installCodex(info, cfg); break;
     case "chatgpt":       result = await installChatGpt(cfg); break;
@@ -1634,40 +1626,6 @@ async function installRaycast(cfg: TargetConnectionConfig): Promise<boolean> {
     log.dim("  (Re-running `synap connect --target=raycast --with-mcp` after step 2 writes it for you.)");
   }
 
-  return true;
-}
-
-// ─── OpenClaw (wraps existing flow with saved pod config) ───────────────────
-
-async function installOpenclaw(cfg: TargetConnectionConfig): Promise<boolean> {
-  const { detectOpenClaw, readOpenClawConfig, writeOpenClawConfig, setConfigValue } =
-    await import("./openclaw.js");
-
-  const oc = detectOpenClaw();
-  if (!oc.found) {
-    log.warn("OpenClaw not detected on this machine.");
-    log.dim("  Install it first: https://openclaw.dev");
-    log.dim("  Or run `synap init` to set up from scratch.");
-    return false;
-  }
-
-  const ocConfig = readOpenClawConfig() ?? {};
-  setConfigValue(ocConfig, "synap.podUrl", cfg.podUrl);
-  setConfigValue(ocConfig, "synap.hubApiKey", cfg.apiKey);
-  if (cfg.workspaceId) setConfigValue(ocConfig, "synap.workspaceId", cfg.workspaceId);
-  if (cfg.agentUserId) setConfigValue(ocConfig, "synap.agentUserId", cfg.agentUserId);
-  writeOpenClawConfig(ocConfig);
-
-  if (cfg.agentUserId) {
-    await enrollAgentIfNeeded(cfg.podUrl, cfg.apiKey, cfg.agentUserId, cfg.workspaceId);
-  }
-
-  log.success("Wrote OpenClaw config");
-  log.blank();
-  log.info("Install the skills:");
-  for (const name of cfg.skills ?? getDeliverableSkills()) {
-    log.dim(`  openclaw skills install ${name}`);
-  }
   return true;
 }
 

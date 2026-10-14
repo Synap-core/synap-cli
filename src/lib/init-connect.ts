@@ -22,8 +22,6 @@ export interface InstallOutcome {
 export interface ConnectAgentsDeps<T extends TargetName> {
   approve: (targets: readonly T[]) => Promise<BatchApprovalResult>;
   install: (target: T) => Promise<InstallOutcome>;
-  /** Extra setup after a successful install (OpenClaw's skill + seed). */
-  after?: (target: T) => Promise<void>;
   labelOf: (target: T) => string;
 }
 
@@ -62,7 +60,6 @@ export async function connectAgents<T extends TargetName>(
       result.failed.push(target);
       continue;
     }
-    await deps.after?.(target);
     log.success(`${label} connected`);
     result.connected.push(target);
   }

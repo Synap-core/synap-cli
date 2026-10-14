@@ -120,7 +120,7 @@ describe("deviceConnect", () => {
     ];
     const outcome = await deviceConnect(
       podUrl,
-      { agents: ["claude-code", "openclaw", "codex", "claude-code"], hostname: "devbox", platform: "linux" },
+      { agents: ["claude-code", "legacy-agent", "codex", "claude-code"], hostname: "devbox", platform: "linux" },
       { renderQr: qr, timeScale: SCALE }
     );
 
@@ -129,7 +129,7 @@ describe("deviceConnect", () => {
     expect(outcome.grant.computer.apiKey).toBe("computer-key");
     expect(outcome.grant.agents.map((a) => a.apiKey)).toEqual(["claude-code-key"]);
 
-    // Asked for what the pod accepts: openclaw is not a device agent, dupes go.
+    // Asked for what the pod accepts: legacy-agent is not a device agent, dupes go.
     expect(started[0]).toMatchObject({ clientName: "Synap CLI", hostname: "devbox", platform: "linux", agents: ["claude-code", "codex"] });
 
     const out = printed.join("\n");
@@ -208,7 +208,7 @@ describe("agents approved with the computer are not asked for again", () => {
 
 describe("pure helpers", () => {
   it("deviceAgentsFor keeps only the pod's surface agent types", () => {
-    expect(deviceAgentsFor(["openclaw", "cursor", "cursor", "nope", "codex"])).toEqual(["cursor", "codex"]);
+    expect(deviceAgentsFor(["legacy-agent", "cursor", "cursor", "nope", "codex"])).toEqual(["cursor", "codex"]);
   });
 
   it("a computer key is due for renewal 7 days before it expires, and after", () => {

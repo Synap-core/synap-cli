@@ -31,8 +31,7 @@ export interface KeyMintSpec {
 
 /**
  * The targets whose installer mints an agent key that needs the person's
- * approval. Claude Code mints without approval and OpenClaw uses the person's
- * own key, so neither is here. The installers read their spec from this table
+ * approval. Claude Code mints without approval, so it is not here. The installers read their spec from this table
  * (`installCodex` / `installCursor`), so the pre-mint cannot ask for a key the
  * installer would not have asked for.
  */

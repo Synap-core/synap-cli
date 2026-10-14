@@ -401,22 +401,3 @@ export async function listPods(token: string): Promise<Pod[]> {
   );
 }
 
-/**
- * Get the remote OpenClaw provisioning status from the CP.
- * Returns null if not provisioned or on network error.
- */
-export async function getOpenClawRemoteStatus(
-  cpToken: string,
-  podId: string
-): Promise<{ status: "not_provisioned" | "provisioning" | "running" | "error"; url: string | null } | null> {
-  try {
-    const res = await fetch(`${getCpUrl()}/openclaw/status?podId=${encodeURIComponent(podId)}`, {
-      headers: { Authorization: `Bearer ${cpToken}` },
-      signal: AbortSignal.timeout(8000),
-    });
-    if (!res.ok) return null;
-    return (await res.json()) as { status: "not_provisioned" | "provisioning" | "running" | "error"; url: string | null };
-  } catch {
-    return null;
-  }
-}

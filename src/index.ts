@@ -6,14 +6,14 @@
  *   npx @synap-core/cli init              Full setup: detect, harden, connect, install
  *   npx @synap-core/cli connect           Connect an AI surface to a Synap pod
  *   npx @synap-core/cli status            Show pod health and API status
- *   npx @synap-core/cli update            Update skill + check for CLI updates
+ *   npx @synap-core/cli update            Show how to update the CLI
  *
  * Or install globally:
  *   npm i -g @synap-core/cli
  *   synap init
  */
 
-import { Command } from "commander";
+import { Command, Option } from "commander";
 import { readFileSync } from "fs";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
@@ -54,9 +54,10 @@ program
   )
   .option("--pod-url <url>", "Synap pod URL (skip pod choice prompt)")
   .option("--api-key <key>", "Hub Protocol API key (skip key generation)")
-  .option("--skip-is", "Skip Intelligence Service provider setup")
+  // Deprecated no-op, kept so old scripts do not fail on an unknown option.
+  .addOption(new Option("--skip-is", "deprecated, ignored").hideHelp())
   .option("-y, --yes", "Accept the defaults, no prompts (connects the agents found on this machine)")
-  .option("--agents <list>", "Agents to connect, comma-separated: claude-code,codex,cursor,openclaw")
+  .option("--agents <list>", "Agents to connect, comma-separated: claude-code,codex,cursor")
   .option("--json", "Print a JSON summary on stdout: {podUrl, connected, notApproved, failed, pairLink, exitCode}")
   .addHelpText("after", INIT_EXIT_HELP)
   .action(async (opts) => {
@@ -265,7 +266,7 @@ program
 
 program
   .command("update")
-  .description("Update synap skill and check for CLI updates")
+  .description("Show how to update the CLI")
   .action(async () => {
     const { update } = await import("./commands/update.js");
     await update();

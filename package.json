@@ -1,7 +1,7 @@
 {
   "name": "@synap-core/cli",
   "version": "1.12.0",
-  "description": "Synap CLI — connect OpenClaw to sovereign knowledge infrastructure",
+  "description": "Synap CLI — connect any AI agent to sovereign knowledge infrastructure",
   "type": "module",
   "bin": {
     "synap": "./dist/index.js"
@@ -49,7 +49,6 @@
   "license": "MIT",
   "keywords": [
     "synap",
-    "openclaw",
     "ai",
     "knowledge-graph",
     "memory",

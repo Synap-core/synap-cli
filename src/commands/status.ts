@@ -9,11 +9,8 @@
  * Sources (all HTTP):
  *   - Pod `/health` (basic reachability + version)
  *   - Pod `/api/provision/status` (Intelligence Service state)
- *   - CP `/openclaw/status/:podId` for managed pods (via stored creds)
  *
- * Explicitly NOT sources anymore:
- *   - `docker ps` / `docker inspect` / `docker logs` (was getOpenClawDockerStatus)
- *   - `docker exec openclaw openclaw skills list` (was isSynapSkillInstalledInDocker)
+ * Explicitly NOT a source: `docker ps` / `docker inspect` / `docker logs`.
  * For those, the user runs `./synap health` on the pod host.
  */
 

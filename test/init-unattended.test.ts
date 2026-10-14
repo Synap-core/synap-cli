@@ -76,6 +76,21 @@ describe("synap init, unattended", () => {
     expect(JSON.parse(r.stdout).error).toMatch(/Unknown agent: emacs/);
   }, 30_000);
 
+  it("openclaw is no longer a connectable agent: a usage error, not a silent skip", async () => {
+    const r = await runInit(["--pod-url", podUrl, "--agents", "codex,openclaw", "--json"]);
+    expect(r.code).toBe(2);
+    expect(JSON.parse(r.stdout).error).toMatch(/Unknown agent: openclaw\. Use claude-code, codex, cursor\./);
+  }, 30_000);
+
+  it("--skip-is is still accepted (deprecated no-op): old scripts reach init's own checks", async () => {
+    const r = await runInit(["--skip-is", "--json"]);
+    // Commander's unknown-option error would exit 1 with no JSON.
+    expect(r.code).toBe(2);
+    expect(JSON.parse(r.stdout).error).toMatch(/Not a terminal/);
+    const help = await runInit(["--help"]);
+    expect(help.stdout).not.toMatch(/skip-is/);
+  }, 30_000);
+
   it("an unreachable pod exits 3", async () => {
     const r = await runInit(["--pod-url", "http://127.0.0.1:1", "--agents", "codex", "--json"]);
     expect(r.code).toBe(3);

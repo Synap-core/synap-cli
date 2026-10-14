@@ -496,7 +496,7 @@ export async function connectAgentsBatch<T extends TargetName>(
   pod: AgentPod,
   targets: readonly T[],
   scope: AgentScope,
-  opts: { after?: (target: T) => Promise<void>; labelOf?: (target: T) => string } = {}
+  opts: { labelOf?: (target: T) => string } = {}
 ): Promise<{ connected: T[]; notApproved: T[]; failed: T[] }> {
   const { connectAgents } = await import("./init-connect.js");
   const { approveAgentKeysAtOnce } = await import("./batch-approval.js");
@@ -525,7 +525,6 @@ export async function connectAgentsBatch<T extends TargetName>(
               : String(run.error),
       };
     },
-    after: opts.after,
     labelOf,
   });
 }

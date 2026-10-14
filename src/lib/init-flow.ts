@@ -1,6 +1,6 @@
 /**
- * `synap init` decisions that don't need a terminal: which flow a machine
- * gets, and how the first key for a pod is offered. Pure, so they can be
+ * `synap init` decisions that don't need a terminal: how the first key for a
+ * pod is offered. Pure, so they can be
  * tested without spawning the CLI.
  */
 
@@ -12,24 +12,6 @@ export function isManagedPod(podUrl: string): boolean {
   } catch {
     return false;
   }
-}
-
-/**
- * Server flow (OpenClaw beside the pod, compose stack) only when a pod runs on
- * THIS machine. Linux + docker alone is a workstation too (a devbox over SSH).
- */
-export function chooseInitFlow(input: {
-  /** linux + a working docker daemon */
-  linuxDocker: boolean;
-  /** `--agents` names agents on this machine: always the desktop flow */
-  agentsRequested: boolean;
-  podUrl?: string;
-  /** A pod found running on this machine (not an env var), or null. */
-  localPodUrl: string | null;
-}): "server" | "desktop" {
-  if (!input.linuxDocker || input.agentsRequested) return "desktop";
-  if (input.podUrl && isManagedPod(input.podUrl)) return "desktop";
-  return input.localPodUrl ? "server" : "desktop";
 }
 
 export type KeyChoice = "device" | "paste";
