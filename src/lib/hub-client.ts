@@ -649,7 +649,10 @@ export async function resolveHubConfig(opts?: { podUrl?: string; apiKey?: string
     return {
       podUrl,
       apiKey: agentOverride.apiKey,
-      userId: agentOverride.podName ?? "agent",
+      // The AGENT's own id, recorded with its key. Never the pod profile name
+      // (it was, so `synap worker` never recognised its own room posts and
+      // resumed itself on them). Unrecorded → "cli": resolveUserId asks the pod.
+      userId: agentOverride.agentUserId || "cli",
       scopes: envScopes ? envScopes.split(",") : undefined,
     };
   }
