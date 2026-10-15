@@ -15,11 +15,9 @@
  */
 
 import chalk from "chalk";
-import { readFileSync } from "fs";
-import { fileURLToPath } from "url";
-import { dirname, join } from "path";
 import { log, banner } from "../utils/logger.js";
 import { timeAgo } from "../lib/time-ago.js";
+import { cliBuild, formatCliBuild } from "../lib/cli-build.js";
 import { checkPodHealth, getActivePodConfig, listPodProfiles, getAgentWorkspaceRouting } from "../lib/pod.js";
 import { resolveHubConfig, hubGet, HubError, renderHubError } from "../lib/hub-client.js";
 import {
@@ -27,20 +25,6 @@ import {
   getStoredToken,
   isTokenLocallyExpired,
 } from "../lib/auth.js";
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-
-function getCliVersion(): string {
-  try {
-    const pkg = JSON.parse(
-      readFileSync(join(__dirname, "..", "..", "package.json"), "utf-8")
-    ) as { version?: string };
-    return pkg.version ?? "0.1.0";
-  } catch {
-    return "0.1.0";
-  }
-}
 
 interface ReleaseStatus {
   status?: string;
@@ -97,8 +81,7 @@ export async function status(opts: { json?: boolean } = {}): Promise<void> {
   banner();
 
   // CLI version + update hint
-  const cliVersion = getCliVersion();
-  log.info(`CLI v${cliVersion}   ${chalk.dim("Update: npm update -g @synap-core/cli")}`);
+  log.info(`CLI v${formatCliBuild(cliBuild())}   ${chalk.dim("Update: npm update -g @synap-core/cli")}`);
   log.dim("Remote / API-only view. For local docker health, run ./synap health on the pod host.");
 
   const creds = getStoredToken();

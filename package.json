@@ -7,7 +7,7 @@
     "synap": "./dist/index.js"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && node scripts/write-build-info.mjs",
     "dev": "tsx src/index.ts",
     "sync-skills": "bash scripts/sync-skills.sh",
     "prepublishOnly": "npm run sync-skills && npm run build",
