@@ -79,6 +79,54 @@ export function parseDataChanges(raw: unknown): DataChange[] | undefined {
   return out;
 }
 
+/**
+ * The data changes a space's update is HELD for, as the pod's health row
+ * carries them (Hub `GET /workspaces` `pendingDataChanges`): the stamp waits
+ * until a person agrees. The row has no opKeys — the person's door is
+ * `synap templates update <slug>`, whose prompt lists them with their keys.
+ */
+export interface PendingDataChanges {
+  /** How many changes the update waits on. 0 only when `unreadable`. */
+  count: number;
+  /** The pod's own sentence per change (or the one "could not be read" sentence). */
+  sentences: string[];
+  /** The pod knows the update is held but could not read which changes. Held all the same. */
+  unreadable: boolean;
+  /** The READER cannot agree themselves: it takes a pod owner or admin. */
+  needsPodAdmin: boolean;
+}
+
+/**
+ * Read `pendingDataChanges` off a health row.
+ * - `undefined`: the pod sent no such field (an older pod) — draw nothing new.
+ * - `null`: the pod checked and nothing is held.
+ * A malformed value reads as `undefined` (unknown), never as "nothing held".
+ */
+export function parsePendingDataChanges(row: Record<string, unknown>): PendingDataChanges | null | undefined {
+  if (!("pendingDataChanges" in row)) return undefined;
+  const raw = row.pendingDataChanges;
+  if (raw === null) return null;
+  if (!raw || typeof raw !== "object") return undefined;
+  const r = raw as Record<string, unknown>;
+  const sentences = Array.isArray(r.sentences)
+    ? r.sentences.filter((s): s is string => typeof s === "string" && s.trim() !== "").map((s) => s.trim())
+    : [];
+  const count = typeof r.count === "number" && Number.isFinite(r.count) ? r.count : sentences.length;
+  return {
+    count,
+    sentences,
+    unreadable: r.unreadable === true,
+    // Unknown reads as "you may not be able to agree": the pod's own default.
+    needsPodAdmin: r.needsPodAdmin !== false,
+  };
+}
+
+/** An agent's pending "update this space" proposal (`updateProposal`), or null. */
+export function parseUpdateProposal(row: Record<string, unknown>): { id: string } | null {
+  const raw = row.updateProposal as { id?: unknown } | null | undefined;
+  return raw && typeof raw.id === "string" && raw.id ? { id: raw.id } : null;
+}
+
 /** The data changes a 409 consent refusal carries, or null when the error is something else. */
 export function dataChangesFromRefusal(err: unknown): DataChange[] | null {
   if (!(err instanceof HubError)) return null;
@@ -205,6 +253,35 @@ export function decideConsent(
 export function consentRerunCommand(slug: string, changes: DataChange[]): string {
   const keys = changes.filter((d) => !d.destructive).map((d) => d.opKey);
   return `synap templates update ${slug} --accept-data-changes ${keys.join(",")}`;
+}
+
+/**
+ * What the CLI says when the pod refuses an update for its data changes (409
+ * `DATA_CHANGES_NEED_CONSENT`). `person` = `consentNeedsPerson`: the refusal is
+ * about WHO ran it. The person may well be at this terminal with an agent key
+ * configured, so the hint says how to tell: `synap whoami` must say
+ * "Is agent: no" for the agreement to count.
+ */
+export function consentRefusalLines(
+  name: string,
+  slug: string,
+  owed: DataChange[],
+  person: boolean
+): { warn: string; hints: string[] } {
+  const warn = person
+    ? `${name} was not updated: only a person can agree to its data changes, and this ran with an agent's key. Nothing was written.`
+    : `${name} was not updated: it carries data changes you have not agreed to. Nothing was written.`;
+  if (!owed.some((d) => !d.destructive)) return { warn, hints: [] };
+  const rerun = consentRerunCommand(slug, owed);
+  return {
+    warn,
+    hints: person
+      ? [
+          `A person runs, in their own terminal: ${rerun}`,
+          "Check the key first: `synap whoami` must say Is agent: no.",
+        ]
+      : [`To agree and update: ${rerun}`],
+  };
 }
 
 // ── Template lifecycle (retired / unlisted / unknown) ───────────────────────

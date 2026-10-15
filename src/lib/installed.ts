@@ -14,7 +14,15 @@
  */
 
 import { resolveHubConfig, hubGet, HubError, type HubConfig } from "./hub-client.js";
-import { parseLifecycle, parseOverlays, type LifecycleInfo, type OverlayInfo } from "./template-lifecycle.js";
+import {
+  parseLifecycle,
+  parseOverlays,
+  parsePendingDataChanges,
+  parseUpdateProposal,
+  type LifecycleInfo,
+  type OverlayInfo,
+  type PendingDataChanges,
+} from "./template-lifecycle.js";
 
 /** An installed workspace's package identity — slug plus (when the pod stamped one) its content version. */
 export interface InstalledTemplateInfo {
@@ -375,6 +383,14 @@ export interface WorkspaceAttachment {
    * it verbatim, never re-word it. `null`/absent = nothing to say.
    */
   applyWarning?: string | null;
+  /** The pod's reading of the last apply (`healthApplyState`): building / active / awaiting-approval / partial / layer-2-not-run / failed. `null`/absent on an older pod. */
+  state?: string | null;
+  /** Data changes the update is held for until a person agrees. `undefined` on an older pod; `null` = nothing held. */
+  pendingDataChanges?: PendingDataChanges | null;
+  /** An agent's pending "update this space" proposal. `null`/absent = none (or an older pod). */
+  updateProposal?: { id: string } | null;
+  /** Row warnings about the step (a read the pod could not check). Empty on an older pod. */
+  stepWarnings?: string[];
 }
 
 /**
@@ -404,6 +420,10 @@ type HubWorkspaceAttachmentRow = {
   overlays?: unknown;
   awaitingApproval?: unknown;
   applyWarning?: unknown;
+  state?: unknown;
+  pendingDataChanges?: unknown;
+  updateProposal?: unknown;
+  stepWarnings?: unknown;
 };
 
 export function mapWorkspaceAttachments(rows: HubWorkspaceAttachmentRow[]): WorkspaceAttachment[] {
@@ -421,6 +441,12 @@ export function mapWorkspaceAttachments(rows: HubWorkspaceAttachmentRow[]): Work
       ? ws.awaitingApproval.filter((p): p is string => typeof p === "string")
       : undefined,
     applyWarning: typeof ws.applyWarning === "string" ? ws.applyWarning : null,
+    state: typeof ws.state === "string" ? ws.state : null,
+    pendingDataChanges: parsePendingDataChanges(ws as Record<string, unknown>),
+    updateProposal: parseUpdateProposal(ws as Record<string, unknown>),
+    stepWarnings: Array.isArray(ws.stepWarnings)
+      ? ws.stepWarnings.filter((w): w is string => typeof w === "string" && w.trim() !== "")
+      : [],
   }));
 }
 

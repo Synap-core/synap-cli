@@ -66,6 +66,15 @@ import {
 } from "../lib/cp-packages.js";
 import { fetchInstalledSlugs, fetchInstalledTemplates, fetchInstalledInventory, fetchInstalledInventoryStrict, installedRowsToTemplates, fetchWorkspaceAttachments, fetchWorkspaceAttachmentsStrict, verifyStampLanded, INSTALLED_KINDS, type InstalledKind, type InstalledRow, type InstalledTemplateInfo, type WorkspaceAttachment } from "../lib/installed.js";
 import { isSuite } from "../lib/suite.js";
+import {
+  ASKED_BY_AN_AGENT,
+  NEEDS_YOUR_OK,
+  proposalsDoor,
+  stepFromApplyState,
+  templateStepGlyph,
+  templateStepPhrase,
+  type TemplateStep,
+} from "../lib/template-steps.js";
 import { capabilityAdd } from "./capability.js";
 import { bundledTemplatesVersion } from "../lib/bundle-version.js";
 import { HubNetworkError } from "../lib/hub-client.js";
@@ -78,11 +87,13 @@ import {
   parseAcceptList,
   decideConsent,
   consentRerunCommand,
+  consentRefusalLines,
   lifecycleNotice,
   overlayNotice,
   overlayNeedsAttention,
   type DataChange,
   type LifecycleInfo,
+  type PendingDataChanges,
 } from "../lib/template-lifecycle.js";
 
 // Same longer budget launch uses — an apply writes profiles/views/entities.
@@ -505,7 +516,7 @@ export function hasLayerFailure(layers: InstallLayerReport[] | undefined): boole
 /**
  * Name the install layers the pod reported as FAILED.
  *
- * The verdict line already says "completed with capability failures"; without
+ * The verdict line already says "some capabilities failed"; without
  * this the user is told something failed and never which thing — the same
  * complaint that made `install-layers.ts` fall back from `name` to `key`.
  * Silent when the pod sent no layers (an older pod) or none failed.
@@ -647,10 +658,12 @@ export function classifyApplyResponse(
 ): ApplyVerdict {
   const state = podApplyState(res);
   if (state) {
+    const recorded = (res.templateApply as { proposals?: unknown } | undefined)?.proposals;
+    const ids = Array.isArray(recorded) ? recorded.filter((p): p is string => typeof p === "string") : [];
     const next =
       heldVersionLine(res) ??
       (state === "awaiting-approval"
-        ? `Approve its proposals (synap proposals), then run synap templates update ${entry.slug}.`
+        ? `Approve its proposals (${proposalsDoor(ids) ?? "synap proposals"}), then run synap templates update ${entry.slug}.`
         : `Run synap templates update ${entry.slug} to finish it.`);
     return { status: state, warnings: [next] };
   }
@@ -762,13 +775,13 @@ export function printApplyVerdict(entry: CatalogEntry, verdict: ApplyVerdict): v
       log.success(`Installed ${entry.name}.`);
       return;
     case "installed-with-failures":
-      log.warn(`Installed ${entry.name} — completed with capability failures (see below).`);
+      log.warn(`Installed ${entry.name}, but ${templateStepPhrase("unfinished")}: some capabilities failed (see below).`);
       return;
     case "updated":
       log.success(`Updated ${entry.name}.`);
       return;
     case "updated-with-failures":
-      log.warn(`Updated ${entry.name} — completed with capability failures (see below).`);
+      log.warn(`Updated ${entry.name}, but ${templateStepPhrase("unfinished")}: some capabilities failed (see below).`);
       return;
     case "unchanged":
       log.info(`• ${entry.name} is already up to date.`);
@@ -778,11 +791,11 @@ export function printApplyVerdict(entry: CatalogEntry, verdict: ApplyVerdict): v
       log.hint(verdict.warnings[0]);
       return;
     case "composed-with-failures":
-      log.warn(`${entry.name} — layered onto its base workspace, with capability failures (see below).`);
+      log.warn(`${entry.name} — layered onto its base workspace, but ${templateStepPhrase("unfinished")}: some capabilities failed (see below).`);
       log.hint(verdict.warnings[0]);
       return;
     case "not-finished":
-      log.warn(`${entry.name} is in place, but not finished.`);
+      log.warn(`${entry.name} is in place, but ${templateStepPhrase("unfinished")}.`);
       log.hint(verdict.warnings[0]);
       return;
     case "awaiting-approval":
@@ -1545,7 +1558,7 @@ export async function marketInstall(
           break;
         case "installed-with-failures":
         case "updated-with-failures":
-          log.warn(`Reconciled ${entry.name} onto ${wsLabel} — completed with capability failures (see below).`);
+          log.warn(`Reconciled ${entry.name} onto ${wsLabel}, but ${templateStepPhrase("unfinished")}: some capabilities failed (see below).`);
           break;
         case "unchanged":
           log.info(`• ${entry.name} is already up to date on ${wsLabel}.`);
@@ -1859,19 +1872,10 @@ async function applyOnePackage(
     const owed = dataChangesFromRefusal(e);
     if (owed) {
       if (!opts.json) {
-        const person = consentNeedsPerson(e);
-        log.warn(
-          person
-            ? `${entry.name} was not updated: only a person can agree to its data changes, and this ran with an agent's key. Nothing was written.`
-            : `${entry.name} was not updated: it carries data changes you have not agreed to. Nothing was written.`
-        );
+        const said = consentRefusalLines(entry.name, entry.slug, owed, consentNeedsPerson(e));
+        log.warn(said.warn);
         printDataChanges(entry.slug, owed);
-        if (owed.some((d) => !d.destructive))
-          log.hint(
-            person
-              ? `A person runs, in their own terminal: ${consentRerunCommand(entry.slug, owed)}`
-              : `To agree and update: ${consentRerunCommand(entry.slug, owed)}`
-          );
+        for (const hint of said.hints) log.hint(hint);
       }
       return {
         slug: entry.slug,
@@ -2427,7 +2431,9 @@ export function summarizeApplyResults(
   }
   const parts = [`${updated} updated`, `${unchanged} already current`];
   if (proposed > 0) parts.push(`${proposed} proposed (awaiting review)`);
-  if (withFailures > 0) parts.push(`${withFailures} completed with failures`);
+  // The vocabulary's `unfinished` ("Not finished"): one state, one name on
+  // every surface — never "completed with failures" (review2 UX §1 #2).
+  if (withFailures > 0) parts.push(`${withFailures} ${templateStepPhrase("unfinished")}`);
   if (failed > 0) parts.push(`${failed} failed`);
   if (timedOut > 0) parts.push(`${timedOut} timed out`);
   if (needsConsent > 0) parts.push(`${needsConsent} waiting for your agreement to data changes`);
@@ -2476,7 +2482,7 @@ export function installedStatusLabel(c: UpdateCheck, isPrivate: boolean, loggedI
   // finish (it waits on an approval, or part of it failed) — the pod holds the
   // version until it does. Not "version unknown": the fix is to finish it.
   if (c.noVersionInfo && c.updateAvailable)
-    return chalk.yellow("not finished") + chalk.dim(` — run synap templates update ${c.slug}`);
+    return chalk.yellow(templateStepPhrase("unfinished")) + chalk.dim(` — run synap templates update ${c.slug}`);
   if (c.noVersionInfo) return noVersionLabel(isPrivate, loggedIn);
   if (!c.updateAvailable) {
     // Cache-cold honesty: stamped + no drift reported, but the catalog has no
@@ -2485,12 +2491,12 @@ export function installedStatusLabel(c: UpdateCheck, isPrivate: boolean, loggedI
     // actually verified — say we couldn't check (ArgoCD's Unknown ≠ Synced).
     if (c.latestVersion == null && c.installedVersion)
       return chalk.dim("can't check — catalog version unknown");
-    return chalk.green("up to date");
+    return chalk.green(templateStepPhrase("current"));
   }
   const installed = truncateVersion(c.installedVersion);
   const latest = c.latestVersion ? truncateVersion(c.latestVersion) : "?";
   const hashPair = isHashVersion(c.installedVersion) || isHashVersion(c.latestVersion ?? "");
-  const label = hashPair ? "content changed" : "update available";
+  const label = hashPair ? "content changed" : templateStepPhrase("update");
   return chalk.yellow(`${label}  `) + chalk.dim(installed) + " → " + latest;
 }
 
@@ -2718,10 +2724,10 @@ export async function buildCompositionTrees(
 function nodeStatusLabel(node: TreeNode): string {
   if (!node.installed) return chalk.dim("not installed");
   if (node.noVersionInfo) return chalk.dim("can't check");
-  if (!node.updateAvailable) return chalk.green("up to date");
+  if (!node.updateAvailable) return chalk.green(templateStepPhrase("current"));
   const installed = node.installedVersion ? truncateVersion(node.installedVersion) : "?";
   const latest = node.latestVersion ? truncateVersion(node.latestVersion) : "?";
-  return chalk.yellow("update available  ") + chalk.dim(installed) + " → " + latest;
+  return chalk.yellow(`${templateStepPhrase("update")}  `) + chalk.dim(installed) + " → " + latest;
 }
 
 function printDependencyNode(node: TreeNode, prefix: string, isLast: boolean): void {
@@ -2756,8 +2762,8 @@ export function printCompositionTree(pkg: TreePackage): void {
       (pkg.noVersionInfo
         ? chalk.dim("can't check — reinstall")
         : pkg.updateAvailable
-          ? chalk.yellow("update available")
-          : chalk.green("up to date")) +
+          ? chalk.yellow(templateStepPhrase("update"))
+          : chalk.green(templateStepPhrase("current"))) +
       suiteTag
   );
   pkg.children.forEach((child, i) => printDependencyNode(child, "", i === pkg.children.length - 1));
@@ -2828,10 +2834,10 @@ async function buildInstallationGraph(
 function layerNodeStatus(node: CompositionNode, isPrivate: boolean, loggedIn: boolean): string {
   if (!node.installed) return chalk.dim("not installed");
   if (node.noVersionInfo) return noVersionLabel(isPrivate, loggedIn);
-  if (!node.updateAvailable) return chalk.green("up to date");
+  if (!node.updateAvailable) return chalk.green(templateStepPhrase("current"));
   const installed = node.installedVersion ? truncateVersion(node.installedVersion) : "?";
   const latest = node.latestVersion ? truncateVersion(node.latestVersion) : "?";
-  return chalk.yellow("update available  ") + chalk.dim(installed) + " → " + latest;
+  return chalk.yellow(`${templateStepPhrase("update")}  `) + chalk.dim(installed) + " → " + latest;
 }
 
 /**
@@ -3309,7 +3315,7 @@ export function attachmentStatusLabel(s: AttachmentStatus): string {
     case "unattached":
       return chalk.yellow("⚠ not attached to a template");
     case "unfinished":
-      return chalk.yellow("⚠ ") + chalk.cyan(s.slug) + chalk.yellow(" · not finished");
+      return chalk.yellow("⚠ ") + chalk.cyan(s.slug) + chalk.yellow(` · ${templateStepPhrase("unfinished")}`);
     case "no-version":
       return (
         chalk.yellow("⚠ attached to ") +
@@ -3328,7 +3334,7 @@ export function attachmentStatusLabel(s: AttachmentStatus): string {
       return (
         chalk.cyan(s.slug) +
         chalk.dim(` @ ${truncateVersion(s.version)} → ${latest}  `) +
-        chalk.yellow("update available")
+        chalk.yellow(templateStepPhrase("update"))
       );
     }
   }
@@ -3608,7 +3614,7 @@ export function resolveWorkspaceQuery(
 }
 
 type TemplateRowGroup = "attention" | "ok" | "unlinked";
-interface TemplateRow {
+export interface TemplateRow {
   ws: WorkspaceAttachment;
   status: AttachmentStatus;
   suggestion: TemplateSuggestion | null;
@@ -3621,6 +3627,12 @@ interface TemplateRow {
   overlayNotices: Array<{ slug: string; label: string | null; lifecycle: string }>;
   /** The pod's sentence for why the last update did not finish (`applyWarning`) — null when there is nothing to say. */
   applyNotice: string | null;
+  /** The step the pod's apply `state` puts the space on (`stepFromApplyState`) — null when the state says nothing (or an older pod). */
+  step: Exclude<TemplateStep, "current"> | null;
+  /** Data changes the update waits on the person to agree to — null when none (or an older pod). */
+  dataChanges: PendingDataChanges | null;
+  /** An agent's pending "update this space" proposal — null when none (or an older pod). */
+  updateProposalId: string | null;
 }
 
 /** Sort one workspace into the action-ranked home: drifted / unstamped / (unattached-with-suggestion) → attention; current → ok; unattached-no-match → unlinked. */
@@ -3678,14 +3690,43 @@ export function classifyTemplateRow(
   // Why the last update did not finish — the POD's sentence, printed as is.
   // Waiting on the person's approval (live, by the pod): the update cannot
   // finish before it, so the next step is opening the proposal.
-  const applyNotice = ws.applyWarning ?? null;
-  if (applyNotice) group = "attention";
   const waiting = ws.awaitingApproval ?? [];
+  const step = stepFromApplyState(ws.state, waiting);
+  const dataChanges = ws.pendingDataChanges ?? null;
+  const updateProposalId = ws.updateProposal?.id ?? null;
+  // A held update's sentence ("…waits for you to agree…") is what the data
+  // changes block says, door and all: print it once. Any unfinished state's
+  // sentence wins over it at the pod, so it is kept then.
+  const applyNotice = dataChanges && !step ? null : ws.applyWarning ?? null;
+  if (applyNotice || step) group = "attention";
+  // The next step, most specific first. Proposals the last apply waits on:
+  // the one proposal, or the review queue for several — never no door.
+  // Data changes: only `templates update` can agree to them (its prompt lists
+  // them with their keys; the health row carries none). An agent's update
+  // proposal: approving it beats a second update beside it.
   if (waiting.length > 0) {
     group = "attention";
-    action = waiting.length === 1 ? `synap open proposal ${waiting[0]}` : null;
+    action = proposalsDoor(waiting);
+  } else if (dataChanges && ws.packageSlug) {
+    group = "attention";
+    action = `synap templates update ${ws.packageSlug}`;
+  } else if (updateProposalId) {
+    group = "attention";
+    action = `synap open proposal ${updateProposalId}`;
   }
-  return { ws, status, suggestion, group, action, lifecycleNotice: notice, overlayNotices, applyNotice };
+  return {
+    ws,
+    status,
+    suggestion,
+    group,
+    action,
+    lifecycleNotice: notice,
+    overlayNotices,
+    applyNotice,
+    step,
+    dataChanges,
+    updateProposalId,
+  };
 }
 
 function templateRowToJson(r: TemplateRow) {
@@ -3703,6 +3744,11 @@ function templateRowToJson(r: TemplateRow) {
     action: r.action,
     awaitingApproval: r.ws.awaitingApproval ?? [],
     applyWarning: r.ws.applyWarning ?? null,
+    state: r.ws.state ?? null,
+    step: r.step,
+    pendingDataChanges: r.dataChanges,
+    updateProposal: r.updateProposalId ? { id: r.updateProposalId } : null,
+    stepWarnings: r.ws.stepWarnings ?? [],
     lifecycle: r.ws.lifecycle?.lifecycle ?? null,
     replacedBy: r.ws.lifecycle?.replacedBy ?? null,
     retiredReason: r.ws.lifecycle?.retiredReason ?? null,
@@ -3721,7 +3767,13 @@ function templateRowToJson(r: TemplateRow) {
   };
 }
 
-function renderTemplateRow(r: TemplateRow): void {
+/** "2 data changes to existing records" — the count the pod sends, or that it could not tell. */
+function dataChangesCountPhrase(d: PendingDataChanges): string {
+  if (d.unreadable && d.count === 0) return "this update changes existing data";
+  return `${d.count} ${d.count === 1 ? "data change" : "data changes"} to existing records`;
+}
+
+export function renderTemplateRow(r: TemplateRow): void {
   const raw = r.ws.workspaceName;
   const name = raw.length > 34 ? raw.slice(0, 33) + "…" : raw;
   let label = attachmentStatusLabel(r.status);
@@ -3731,6 +3783,15 @@ function renderTemplateRow(r: TemplateRow): void {
       chalk.dim(" · looks like → ") +
       chalk.cyan(r.suggestion.slug);
   }
+  // The pod's apply state outranks the stamp-based cell: a stamped space whose
+  // last update failed is not "update available", and one waiting on live
+  // proposals is waiting, not unfinished.
+  if (r.step && r.ws.packageSlug) {
+    const glyph = templateStepGlyph(r.step);
+    const tone = r.step === "awaiting-approval" ? chalk.cyan : chalk.yellow;
+    label = tone(`${glyph} `) + chalk.cyan(r.ws.packageSlug) + tone(` · ${templateStepPhrase(r.step)}`);
+  }
+  const indent = "    " + " ".repeat(36);
   console.log("    " + chalk.bold(name.padEnd(36)) + label);
   if (r.lifecycleNotice) {
     const tone = r.ws.lifecycle?.lifecycle === "unknown" ? chalk.dim : chalk.yellow;
@@ -3738,8 +3799,23 @@ function renderTemplateRow(r: TemplateRow): void {
     if (r.ws.lifecycle?.retiredReason && !r.ws.lifecycle.warning)
       console.log("    " + " ".repeat(36) + chalk.dim(r.ws.lifecycle.retiredReason));
   }
-  if (r.applyNotice) console.log("    " + " ".repeat(36) + chalk.yellow(`⏳ ${r.applyNotice}`));
-  if (r.action) console.log("    " + " ".repeat(36) + chalk.dim(r.action));
+  if (r.applyNotice) {
+    // ⏳ only while the space waits on someone's decision (live pending
+    // proposals — an older pod sends no `state`); anything else is the
+    // reader's to act on.
+    const waiting = r.step === "awaiting-approval" || (r.ws.awaitingApproval ?? []).length > 0;
+    console.log(indent + (waiting ? chalk.cyan(`⏳ ${r.applyNotice}`) : chalk.yellow(`⚠ ${r.applyNotice}`)));
+  }
+  if (r.dataChanges) {
+    console.log(indent + chalk.yellow(`⚠ ${NEEDS_YOUR_OK}: `) + chalk.yellow(dataChangesCountPhrase(r.dataChanges)));
+    for (const sentence of r.dataChanges.sentences) console.log(indent + "  • " + sentence);
+    if (r.dataChanges.needsPodAdmin)
+      console.log(indent + "  " + chalk.dim("Only a pod owner or admin can agree to them."));
+  }
+  for (const w of r.ws.stepWarnings ?? []) console.log(indent + chalk.dim(w));
+  const agentDoor = r.updateProposalId ? `synap open proposal ${r.updateProposalId}` : null;
+  if (agentDoor) console.log(indent + chalk.cyan(`→ ${ASKED_BY_AN_AGENT}`) + chalk.dim(` · ${agentDoor}`));
+  if (r.action && r.action !== agentDoor) console.log(indent + chalk.dim(r.action));
   for (const o of r.overlayNotices) {
     console.log("    " + " ".repeat(36) + chalk.dim(`↳ overlay ${o.slug}`));
     if (o.label) {
