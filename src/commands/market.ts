@@ -69,6 +69,7 @@ import { isSuite } from "../lib/suite.js";
 import {
   ASKED_BY_AN_AGENT,
   NEEDS_YOUR_OK,
+  TEMPLATE_STEP_LABELS,
   proposalsDoor,
   stepFromApplyState,
   templateStepGlyph,
@@ -3917,7 +3918,7 @@ export async function marketTemplates(opts: {
   log.blank();
   const bandParts: string[] = [];
   if (attention.length) bandParts.push(chalk.yellow(`${attention.length} need attention`));
-  bandParts.push(chalk.green(`${ok.length} up to date`));
+  bandParts.push(chalk.green(`${ok.length} ${templateStepPhrase("current")}`));
   if (unlinked.length) bandParts.push(chalk.dim(`${unlinked.length} without a template`));
   console.log("  " + bandParts.join(chalk.dim(" · ")));
   log.blank();
@@ -3933,7 +3934,7 @@ export async function marketTemplates(opts: {
 
   if (!opts.needsAttention) {
     if (ok.length) {
-      console.log(chalk.dim("  Up to date"));
+      console.log(chalk.dim(`  ${TEMPLATE_STEP_LABELS.current}`));
       for (const r of ok) renderTemplateRow(r);
       log.blank();
     }
