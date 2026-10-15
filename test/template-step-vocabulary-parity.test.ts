@@ -2,16 +2,16 @@ import { describe, it, expect } from "vitest";
 import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import {
-  ASKED_BY_AN_AGENT,
-  NEEDS_YOUR_OK,
   STEP_FOR_STATE,
   TEMPLATE_STEP_LABELS,
+  TEMPLATE_STEP_PRECEDENCE,
 } from "../src/lib/template-steps.js";
 
 /**
- * The CLI's template-step words and its state → step rule are MIRRORS: the
- * product's one table is `TEMPLATE_STEP_LABELS` in `@synap-core/types/vocabulary`
- * and its one rule is `STEP_FOR_STATE` in `@synap-core/web/marketplace`, and
+ * The CLI's template-step words, its state → step rule and its step precedence
+ * are MIRRORS: the product's one table is `TEMPLATE_STEP_LABELS` in
+ * `@synap-core/types/vocabulary`, and its one rule is `STEP_FOR_STATE` +
+ * `TEMPLATE_STEP_PRECEDENCE` in `@synap-core/web/marketplace`, and
  * this package can import neither. This reads both sources across the repo
  * boundary, derives the row set from THEM (a step added there joins the check
  * by existing), and fails on any difference in either direction.
@@ -44,15 +44,18 @@ describe("template-step words mirror the vocabulary", () => {
   it.runIf(existsSync(VOCAB))("TEMPLATE_STEP_LABELS equals the vocabulary's, row for row", () => {
     const src = readFileSync(VOCAB, "utf8");
     const theirs = objectRows(src, "TEMPLATE_STEP_LABELS");
-    expect(Object.keys(theirs).length, "parsed no rows — the comparison would be vacuous").toBeGreaterThanOrEqual(4);
+    expect(Object.keys(theirs).length, "parsed no rows — the comparison would be vacuous").toBeGreaterThanOrEqual(6);
     expect({ ...TEMPLATE_STEP_LABELS }).toEqual(theirs);
   });
 
-  it.runIf(existsSync(VOCAB))("the CLI-only words are not vocabulary yet (move them into the mirror when they are)", () => {
-    const labels = Object.values(objectRows(readFileSync(VOCAB, "utf8"), "TEMPLATE_STEP_LABELS"));
-    expect(labels.length).toBeGreaterThanOrEqual(4);
-    expect(labels).not.toContain(NEEDS_YOUR_OK);
-    expect(labels).not.toContain(ASKED_BY_AN_AGENT);
+  it.runIf(existsSync(CLASSIFIER))("TEMPLATE_STEP_PRECEDENCE equals the shared classifier's, in order", () => {
+    const src = readFileSync(CLASSIFIER, "utf8");
+    const at = src.search(/const TEMPLATE_STEP_PRECEDENCE\b[^=]*=\s*\[/);
+    expect(at, "TEMPLATE_STEP_PRECEDENCE not found — renamed or moved?").toBeGreaterThanOrEqual(0);
+    const body = src.slice(src.indexOf("[", at) + 1, src.indexOf("]", at));
+    const theirs = [...body.matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+    expect(theirs.length, "parsed no rows — the comparison would be vacuous").toBeGreaterThanOrEqual(5);
+    expect([...TEMPLATE_STEP_PRECEDENCE]).toEqual(theirs);
   });
 
   it.runIf(existsSync(CLASSIFIER))("STEP_FOR_STATE equals the shared classifier's, row for row", () => {

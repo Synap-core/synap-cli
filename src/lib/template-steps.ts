@@ -15,25 +15,42 @@ export const TEMPLATE_STEP_LABELS = {
   update: "Update available",
   unfinished: "Not finished",
   "awaiting-approval": "Waiting for approval",
+  "needs-consent": "Needs your OK",
+  "agent-asked": "Asked by an agent",
   current: "Up to date",
 } as const;
 
 export type TemplateStep = keyof typeof TEMPLATE_STEP_LABELS;
+/** A step a space can be on — every step but `current`. */
+export type TemplateUpdateStep = Exclude<TemplateStep, "current">;
 
-/** A step's words inside a CLI line, where the CLI writes lower case: the same words. */
+/**
+ * A step's words inside a CLI line, where the CLI writes them mid-sentence:
+ * the same words with the first letter lowered ("needs your OK", never
+ * "needs your ok" — an acronym keeps its case).
+ */
 export function templateStepPhrase(step: TemplateStep): string {
-  return TEMPLATE_STEP_LABELS[step].toLowerCase();
+  const label = TEMPLATE_STEP_LABELS[step];
+  return label.charAt(0).toLowerCase() + label.slice(1);
 }
 
 /**
- * Two marks the vocabulary does not carry yet (FIX-WAVE-2 lane cli): the
- * update waits on the person to agree to data changes (`pendingDataChanges`),
- * and an agent asked to update the space (`updateProposal`). CLI-only words
- * until the vocabulary names them; the parity test keeps them out of the
- * mirror so they can never pass for vocabulary rows.
+ * Mirror of `TEMPLATE_STEP_PRECEDENCE` (synap-app `template-step.ts`): when
+ * several steps hold, the first one listed is the space's mark and door. A
+ * broken space outranks a decision; data changes outrank an agent's ask (it
+ * would be held on them too); an agent's ask outranks a second plain update.
  */
-export const NEEDS_YOUR_OK = "Needs your OK";
-export const ASKED_BY_AN_AGENT = "Asked by an agent";
+export const TEMPLATE_STEP_PRECEDENCE = [
+  "unfinished",
+  "needs-consent",
+  "agent-asked",
+  "awaiting-approval",
+  "update",
+] as const satisfies ReadonlyArray<TemplateUpdateStep>;
+type _EveryStepRanked =
+  Exclude<TemplateUpdateStep, (typeof TEMPLATE_STEP_PRECEDENCE)[number]> extends never ? true : never;
+const _everyStepRanked: _EveryStepRanked = true;
+void _everyStepRanked;
 
 /**
  * Mirror of `STEP_FOR_STATE` (synap-app `packages/web/src/marketplace/utils/template-step.ts`):
@@ -47,7 +64,7 @@ export const STEP_FOR_STATE = {
   partial: "unfinished",
   "layer-2-not-run": "unfinished",
   failed: "unfinished",
-} as const satisfies Record<string, Exclude<TemplateStep, "current"> | null>;
+} as const satisfies Record<string, TemplateUpdateStep | null>;
 
 /**
  * The step the pod's apply `state` puts a space on, by the same rule as
@@ -60,7 +77,7 @@ export const STEP_FOR_STATE = {
 export function stepFromApplyState(
   state: string | null | undefined,
   awaitingApproval: readonly string[]
-): Exclude<TemplateStep, "current"> | null {
+): TemplateUpdateStep | null {
   if (!state) return null;
   const step =
     state in STEP_FOR_STATE
@@ -70,14 +87,44 @@ export function stepFromApplyState(
   return step;
 }
 
+/** The health-row fields the step is decided from (Hub `GET /workspaces`). */
+export interface TemplateStepFields {
+  drifted?: boolean;
+  state?: string | null;
+  awaitingApproval?: readonly string[];
+  pendingDataChanges?: unknown;
+  updateProposal?: { id: string } | null;
+}
+
+/**
+ * The space's step by the shared rule (`classifyTemplateHealth`): each step
+ * that holds, then the first by `TEMPLATE_STEP_PRECEDENCE`. `null` = current.
+ * An older pod sends no `state` / `pendingDataChanges` / `updateProposal`, so
+ * only `update` (from `drifted`) can hold there.
+ */
+export function classifyTemplateStep(row: TemplateStepFields): TemplateUpdateStep | null {
+  const fromState = stepFromApplyState(row.state, row.awaitingApproval ?? []);
+  const holds: Record<TemplateUpdateStep, boolean> = {
+    unfinished: fromState === "unfinished",
+    "needs-consent": row.pendingDataChanges != null,
+    "agent-asked": row.updateProposal != null,
+    "awaiting-approval": fromState === "awaiting-approval",
+    update: row.drifted === true,
+  };
+  return TEMPLATE_STEP_PRECEDENCE.find((step) => holds[step]) ?? null;
+}
+
 /**
  * The glyph in front of a step. ⏳ says "wait", so it is kept for the one step
- * where the space waits on someone else's decision; a step the reader acts on
- * (not finished) is ⚠ (review2 UX §1 #6: ⏳ was printed on a failed apply).
+ * where the space waits on decisions already filed; a step the reader acts on
+ * (not finished, data changes to agree to) is ⚠ (review2 UX §1 #6: ⏳ was
+ * printed on a failed apply); an agent's ask to decide is →, the CLI's mark
+ * for "proposed, awaiting review".
  */
-export function templateStepGlyph(step: TemplateStep): "⚠" | "⏳" | null {
+export function templateStepGlyph(step: TemplateStep): "⚠" | "⏳" | "→" | null {
   if (step === "awaiting-approval") return "⏳";
-  if (step === "unfinished") return "⚠";
+  if (step === "unfinished" || step === "needs-consent") return "⚠";
+  if (step === "agent-asked") return "→";
   return null;
 }
 

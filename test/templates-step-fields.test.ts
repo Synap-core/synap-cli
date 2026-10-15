@@ -30,6 +30,7 @@ vi.mock("../src/utils/logger.js", () => {
 import { mapWorkspaceAttachments } from "../src/lib/installed.js";
 import { classifyTemplateRow, renderTemplateRow, summarizeApplyResults, classifyApplyResponse } from "../src/commands/market.js";
 import { consentRefusalLines, type DataChange } from "../src/lib/template-lifecycle.js";
+import { classifyTemplateStep } from "../src/lib/template-steps.js";
 
 const plain = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, "");
 const P1 = "a99e1d4e-0000-4000-8000-000000000001";
@@ -103,7 +104,8 @@ describe("synap templates — the step the pod reports", () => {
       },
       stepWarnings: ["Could not check which of this update's data changes already ran."],
     });
-    expect(text).toContain("⚠ Needs your OK: 2 data changes to existing records");
+    expect(text).toContain("⚠ builder · needs your OK");
+    expect(text).toContain("2 data changes to existing records:");
     expect(text).toContain("• Stories move from planned to backlog.");
     expect(text).toContain("• Bugs gain a severity.");
     expect(text).toContain("Could not check which of this update's data changes already ran.");
@@ -121,11 +123,36 @@ describe("synap templates — the step the pod reports", () => {
     expect(text).toContain("Only a pod owner or admin can agree to them.");
   });
 
-  it("an agent's update proposal: 'Asked by an agent' and its door, printed once", () => {
+  it("an agent's update proposal leads: 'asked by an agent', its door printed once", () => {
     const text = printed({ state: "active", updateProposal: { id: AGENT_P } });
-    expect(text).toContain(`→ Asked by an agent · synap open proposal ${AGENT_P}`);
+    expect(text).toContain("→ builder · asked by an agent");
+    // Leading, the mark says it: the words are not repeated on a second line.
+    expect(text).not.toContain("Asked by an agent");
     expect(text.match(new RegExp(`synap open proposal ${AGENT_P}`, "g"))?.length).toBe(1);
-    expect(rowOf({ updateProposal: { id: AGENT_P } }).action).toBe(`synap open proposal ${AGENT_P}`);
+    expect(rowOf({ state: "active", updateProposal: { id: AGENT_P } }).action).toBe(`synap open proposal ${AGENT_P}`);
+  });
+
+  it("data changes outrank an agent's ask; the ask keeps its own door on its own line", () => {
+    const fields = {
+      state: "active",
+      updateProposal: { id: AGENT_P },
+      pendingDataChanges: { count: 1, sentences: ["Stories move."], unreadable: false, needsPodAdmin: false },
+    };
+    expect(rowOf(fields).action).toBe("synap templates update builder");
+    const text = printed(fields);
+    expect(text).toContain("⚠ builder · needs your OK");
+    expect(text).toContain(`→ Asked by an agent · synap open proposal ${AGENT_P}`);
+  });
+
+  it("a failed apply outranks held data changes; the block names itself", () => {
+    const text = printed({
+      state: "failed",
+      applyWarning: "Not finished: it stopped.",
+      pendingDataChanges: { count: 1, sentences: ["Stories move."], unreadable: false, needsPodAdmin: false },
+    });
+    expect(text).toContain("⚠ builder · not finished");
+    expect(text).toContain("⚠ Needs your OK: 1 data change to existing records");
+    expect(text).toContain("⚠ Not finished: it stopped.");
   });
 
   it("an older pod that sends none of the new fields draws what it drew before", () => {
@@ -133,7 +160,7 @@ describe("synap templates — the step the pod reports", () => {
     const r = rowOf({ packageVersion: null });
     expect(r.dataChanges).toBeNull();
     expect(r.updateProposalId).toBeNull();
-    expect(r.step).toBeNull();
+    expect(r.step).toBe("update"); // only `drifted` can hold on an older pod
     expect(r.action).toBe("synap templates update builder");
     const text = printed({ packageVersion: null });
     expect(text).toContain("⚠ builder · not finished");
@@ -146,6 +173,22 @@ describe("synap templates — the step the pod reports", () => {
     const [none] = mapWorkspaceAttachments([wire({ pendingDataChanges: null }) as never]);
     expect(none!.pendingDataChanges).toBeNull();
   });
+});
+
+describe("classifyTemplateStep — the shared precedence", () => {
+  // Each row holds TWO steps, so it rules out every precedence but the shared one.
+  const dc = { count: 1, sentences: ["x"], unreadable: false, needsPodAdmin: false };
+  const cases: Array<[string, Parameters<typeof classifyTemplateStep>[0], string | null]> = [
+    ["unfinished > needs-consent", { state: "partial", pendingDataChanges: dc }, "unfinished"],
+    ["needs-consent > agent-asked", { state: "active", pendingDataChanges: dc, updateProposal: { id: "p" } }, "needs-consent"],
+    ["agent-asked > awaiting-approval", { state: "awaiting-approval", awaitingApproval: ["p1"], updateProposal: { id: "p" } }, "agent-asked"],
+    ["awaiting-approval > update", { state: "awaiting-approval", awaitingApproval: ["p1"], drifted: true }, "awaiting-approval"],
+    ["awaiting with nothing pending is unfinished", { state: "awaiting-approval", awaitingApproval: [], drifted: true }, "unfinished"],
+    ["an unknown state reads unfinished", { state: "rolling-back" }, "unfinished"],
+    ["unreadable held changes still hold", { state: "active", pendingDataChanges: { ...dc, count: 0, unreadable: true } }, "needs-consent"],
+    ["nothing holds → current", { state: "active", drifted: false, pendingDataChanges: null, updateProposal: null }, null],
+  ];
+  for (const [name, row, want] of cases) it(name, () => expect(classifyTemplateStep(row)).toBe(want));
 });
 
 describe("one name for the unfinished state", () => {

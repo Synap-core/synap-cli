@@ -67,14 +67,13 @@ import {
 import { fetchInstalledSlugs, fetchInstalledTemplates, fetchInstalledInventory, fetchInstalledInventoryStrict, installedRowsToTemplates, fetchWorkspaceAttachments, fetchWorkspaceAttachmentsStrict, verifyStampLanded, INSTALLED_KINDS, type InstalledKind, type InstalledRow, type InstalledTemplateInfo, type WorkspaceAttachment } from "../lib/installed.js";
 import { isSuite } from "../lib/suite.js";
 import {
-  ASKED_BY_AN_AGENT,
-  NEEDS_YOUR_OK,
   TEMPLATE_STEP_LABELS,
+  classifyTemplateStep,
   proposalsDoor,
   stepFromApplyState,
   templateStepGlyph,
   templateStepPhrase,
-  type TemplateStep,
+  type TemplateUpdateStep,
 } from "../lib/template-steps.js";
 import { capabilityAdd } from "./capability.js";
 import { bundledTemplatesVersion } from "../lib/bundle-version.js";
@@ -3628,8 +3627,8 @@ export interface TemplateRow {
   overlayNotices: Array<{ slug: string; label: string | null; lifecycle: string }>;
   /** The pod's sentence for why the last update did not finish (`applyWarning`) — null when there is nothing to say. */
   applyNotice: string | null;
-  /** The step the pod's apply `state` puts the space on (`stepFromApplyState`) — null when the state says nothing (or an older pod). */
-  step: Exclude<TemplateStep, "current"> | null;
+  /** The space's leading step (`classifyTemplateStep`, the shared rule + precedence) — null when current. */
+  step: TemplateUpdateStep | null;
   /** Data changes the update waits on the person to agree to — null when none (or an older pod). */
   dataChanges: PendingDataChanges | null;
   /** An agent's pending "update this space" proposal — null when none (or an older pod). */
@@ -3692,29 +3691,33 @@ export function classifyTemplateRow(
   // Waiting on the person's approval (live, by the pod): the update cannot
   // finish before it, so the next step is opening the proposal.
   const waiting = ws.awaitingApproval ?? [];
-  const step = stepFromApplyState(ws.state, waiting);
   const dataChanges = ws.pendingDataChanges ?? null;
   const updateProposalId = ws.updateProposal?.id ?? null;
+  // The space's ONE step, by the shared rule and precedence (unfinished >
+  // needs-consent > agent-asked > awaiting-approval > update): the mark and
+  // the door the desktop and the catalog draw for the same row.
+  const step = classifyTemplateStep(ws);
   // A held update's sentence ("…waits for you to agree…") is what the data
   // changes block says, door and all: print it once. Any unfinished state's
   // sentence wins over it at the pod, so it is kept then.
-  const applyNotice = dataChanges && !step ? null : ws.applyWarning ?? null;
-  if (applyNotice || step) group = "attention";
-  // The next step, most specific first. Proposals the last apply waits on:
-  // the one proposal, or the review queue for several — never no door.
-  // Data changes: only `templates update` can agree to them (its prompt lists
-  // them with their keys; the health row carries none). An agent's update
-  // proposal: approving it beats a second update beside it.
-  if (waiting.length > 0) {
-    group = "attention";
-    action = proposalsDoor(waiting);
-  } else if (dataChanges && ws.packageSlug) {
-    group = "attention";
+  const applyNotice =
+    dataChanges && !stepFromApplyState(ws.state, waiting) ? null : ws.applyWarning ?? null;
+  if (applyNotice || (step && step !== "update")) group = "attention";
+  // The door of the leading step. Finishing and agreeing to data changes are
+  // both `templates update` (its prompt lists the changes with their keys; the
+  // health row carries none). An agent's ask: approving it beats a second
+  // update beside it. Proposals the last apply waits on: the one proposal, or
+  // the review queue for several — never no door. `update` keeps the action
+  // above (lifecycle outranks drift).
+  if (ws.packageSlug && (step === "unfinished" || step === "needs-consent")) {
     action = `synap templates update ${ws.packageSlug}`;
-  } else if (updateProposalId) {
-    group = "attention";
+  } else if (step === "agent-asked" && updateProposalId) {
     action = `synap open proposal ${updateProposalId}`;
+  } else if (step === "awaiting-approval" || (!ws.state && waiting.length > 0)) {
+    // (An older pod sends no `state`: its live pending list is the signal.)
+    action = proposalsDoor(waiting);
   }
+  if (!ws.state && waiting.length > 0) group = "attention";
   return {
     ws,
     status,
@@ -3787,9 +3790,9 @@ export function renderTemplateRow(r: TemplateRow): void {
   // The pod's apply state outranks the stamp-based cell: a stamped space whose
   // last update failed is not "update available", and one waiting on live
   // proposals is waiting, not unfinished.
-  if (r.step && r.ws.packageSlug) {
+  if (r.step && r.step !== "update" && r.ws.packageSlug) {
     const glyph = templateStepGlyph(r.step);
-    const tone = r.step === "awaiting-approval" ? chalk.cyan : chalk.yellow;
+    const tone = r.step === "awaiting-approval" || r.step === "agent-asked" ? chalk.cyan : chalk.yellow;
     label = tone(`${glyph} `) + chalk.cyan(r.ws.packageSlug) + tone(` · ${templateStepPhrase(r.step)}`);
   }
   const indent = "    " + " ".repeat(36);
@@ -3808,14 +3811,23 @@ export function renderTemplateRow(r: TemplateRow): void {
     console.log(indent + (waiting ? chalk.cyan(`⏳ ${r.applyNotice}`) : chalk.yellow(`⚠ ${r.applyNotice}`)));
   }
   if (r.dataChanges) {
-    console.log(indent + chalk.yellow(`⚠ ${NEEDS_YOUR_OK}: `) + chalk.yellow(dataChangesCountPhrase(r.dataChanges)));
+    // Leading, the mark above already says "needs your OK"; behind another
+    // step (a failed apply that also holds data changes) the block names itself.
+    const what = dataChangesCountPhrase(r.dataChanges);
+    console.log(
+      indent +
+        chalk.yellow(r.step === "needs-consent" ? `${what}:` : `⚠ ${TEMPLATE_STEP_LABELS["needs-consent"]}: ${what}`)
+    );
     for (const sentence of r.dataChanges.sentences) console.log(indent + "  • " + sentence);
     if (r.dataChanges.needsPodAdmin)
       console.log(indent + "  " + chalk.dim("Only a pod owner or admin can agree to them."));
   }
   for (const w of r.ws.stepWarnings ?? []) console.log(indent + chalk.dim(w));
-  const agentDoor = r.updateProposalId ? `synap open proposal ${r.updateProposalId}` : null;
-  if (agentDoor) console.log(indent + chalk.cyan(`→ ${ASKED_BY_AN_AGENT}`) + chalk.dim(` · ${agentDoor}`));
+  // An agent's ask behind another step keeps its own door on its own line;
+  // leading, the mark says it and the action line below is its door.
+  const agentDoor =
+    r.updateProposalId && r.step !== "agent-asked" ? `synap open proposal ${r.updateProposalId}` : null;
+  if (agentDoor) console.log(indent + chalk.cyan(`→ ${TEMPLATE_STEP_LABELS["agent-asked"]}`) + chalk.dim(` · ${agentDoor}`));
   if (r.action && r.action !== agentDoor) console.log(indent + chalk.dim(r.action));
   for (const o of r.overlayNotices) {
     console.log("    " + " ".repeat(36) + chalk.dim(`↳ overlay ${o.slug}`));
