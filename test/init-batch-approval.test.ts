@@ -249,6 +249,9 @@ describe("connectAgents (the agents step of init)", () => {
         const f = opts.failing?.[target];
         return f ? { ok: false, ...f } : { ok: true, output: "installer chatter" };
       }),
+      // The pod confirms every installed key (the not-confirmed case:
+      // test/setup-verifies-itself.test.ts).
+      confirm: vi.fn(async () => ({ verdict: "active" as const })),
       labelOf: (t: string) => labels[t] ?? t,
     };
     return { order, lines, deps };

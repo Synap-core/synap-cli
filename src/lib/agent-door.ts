@@ -11,7 +11,9 @@
  *   - Approval: every new agent key goes through the pod's approval page.
  *     (`agents create` used to mint with `requireApproval: false`.)
  *   - Proof: every path ends with a check against the pod's `/mcp` using the
- *     AGENT key — the key the client will actually hold.
+ *     AGENT key — the key the client will actually hold — and a known client
+ *     reads "connected" only after the pod confirms the key now in its config
+ *     (`confirmSurfaceKey`, the reader `synap doctor` uses).
  *
  * Three ways in, picked by `planAgentAdd`:
  *   known   — a client we can wire (claude-code, cursor, codex, …): mint, write
@@ -252,13 +254,18 @@ export async function connectKnownAgent(
   });
 
   log.blank();
-  if (ok) {
-    log.success(`${TARGETS[target].label} connected to ${pod.podUrl}`);
-    log.dim("Run 'synap connections' to see everything connected.");
-  } else {
+  if (!ok) {
     log.warn(`${TARGETS[target].label} install did not complete — see above.`);
+    return false;
   }
-  return ok;
+  // Connected only once the pod confirms the key the install wrote — the same
+  // check, and the same line, as `synap init` (`reportSetupCheck`).
+  const { reportSetupCheck } = await import("./init-connect.js");
+  const { confirmSurfaceKey } = await import("./key-doctor.js");
+  const label = TARGETS[target].label;
+  const confirmed = reportSetupCheck(label, await confirmSurfaceKey(pod.podUrl, target), `${label} connected to ${pod.podUrl}`);
+  if (confirmed) log.dim("Run 'synap connections' to see everything connected.");
+  return confirmed;
 }
 
 // ─── Custom agent ─────────────────────────────────────────────────────────────
@@ -525,6 +532,7 @@ export async function connectAgentsBatch<T extends TargetName>(
               : String(run.error),
       };
     },
+    confirm: async (target) => (await import("./key-doctor.js")).confirmSurfaceKey(pod.podUrl, target),
     labelOf,
   });
 }
