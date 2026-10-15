@@ -123,13 +123,18 @@ export function isFixable(d: Diagnosis): boolean {
 
 /**
  * What setup may say about one agent after writing its config:
- *   active     — the pod confirms the key now in its files works
- *   not-active — anything else, as the doctor's own diagnosis line + command
- *   unchecked  — the target keeps no key the CLI can read back (`keyStore.none`)
+ *   active      — the pod confirms the key now in its files works
+ *   not-active  — the pod (or the files) SAID it does not: pending, revoked,
+ *                 expired, unknown, stale copies, no key where setup writes it —
+ *                 as the doctor's own diagnosis line + command
+ *   unconfirmed — the check itself FAILED (pod unreachable, file unreadable,
+ *                 read threw). Not a dead key — the doctor prints it "?"
+ *   unchecked   — the target keeps no key the CLI can read back (`keyStore.none`)
  */
 export type SetupCheck =
   | { verdict: "active" }
   | { verdict: "not-active"; title: string; command?: string }
+  | { verdict: "unconfirmed"; reason: string }
   | { verdict: "unchecked"; reason: string };
 
 /**
@@ -145,12 +150,14 @@ export async function confirmSurfaceKey(podUrl: string, surface: string, deps: K
   try {
     report = await checkKeyHealth(podUrl, { ...deps, surface });
   } catch (err) {
-    return { verdict: "not-active", title: `${surface}: could not read back its key (${err instanceof Error ? err.message : String(err)})`, command: "synap doctor" };
+    return { verdict: "unconfirmed", reason: `its key could not be read back (${err instanceof Error ? err.message : String(err)})` };
   }
   const unread = report.unchecked?.[0];
-  if (unread) return { verdict: "not-active", title: `not checked: ${unread.tool} — ${unread.file} ${unread.reason}`, command: "synap doctor" };
+  if (unread) return { verdict: "unconfirmed", reason: `${unread.tool} — ${unread.file} ${unread.reason}` };
   const d = report.diagnoses.find((x) => x.surface === surface);
   if (d?.code === "ok") return { verdict: "active" };
+  if (d?.code === "unverifiable")
+    return { verdict: "unconfirmed", reason: (d.key && report.states.get(d.key)?.error) || "the pod did not answer" };
   if (d) return { verdict: "not-active", title: d.title, command: d.command };
   const { TARGETS, isTargetName } = await import("./targets.js");
   const target = isTargetName(surface) ? TARGETS[surface] : undefined;

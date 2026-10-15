@@ -4,8 +4,9 @@
  * own output is shown only when it failed.
  *
  * "connected" is printed only after `confirm` read back the key the install
- * wrote and the pod said it works (`confirmSurfaceKey`); otherwise the line is
- * the doctor's diagnosis and the agent counts as not connected.
+ * wrote and the pod said it works (`confirmSurfaceKey`). A pod "no" prints the
+ * doctor's diagnosis; a check that could not run prints "? … could not
+ * confirm". Either way the agent counts as not connected.
  *
  * The approve, install and confirm doors are injected so the order and the
  * per-agent outcome are testable without a pod.
@@ -54,6 +55,13 @@ export function reportSetupCheck(label: string, check: SetupCheck, connectedLine
   if (check.verdict === "unchecked") {
     log.success(`${label} set up — not checked: ${check.reason}`);
     return true;
+  }
+  if (check.verdict === "unconfirmed") {
+    // A failed check, not a dead key: "?" as the doctor prints it. Still not
+    // counted as connected, so a script's exit code sees it.
+    console.error(chalk.yellow(`  ? ${label} set up — could not confirm: ${check.reason}`));
+    log.hint("→ synap doctor");
+    return false;
   }
   log.warn(`${check.title} — not connected.`);
   if (check.command) log.hint(`→ ${check.command}`);

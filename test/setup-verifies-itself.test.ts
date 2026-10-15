@@ -101,12 +101,21 @@ describe("init / agents add: the batch door", () => {
     expect(text()).not.toContain(KEY("codex"));
   });
 
-  it("a key the pod could not be asked about is not claimed connected either", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => new Response("down", { status: 503 })));
+  // A FAILED check is not a dead key (CLAUDE.md: an empty result and a failed
+  // read are different facts): "? … could not confirm", never "not connected" —
+  // and still not counted as connected, so the exit code sees it.
+  it.each([
+    ["the pod answers 503", () => new Response("down", { status: 503 }), "HTTP 503 from /auth/key-state"],
+    ["the pod cannot be reached", () => Promise.reject(new TypeError("fetch failed")), "fetch failed"],
+  ])("%s: could not confirm — not connected, not called dead", async (_case, answer, why) => {
+    vi.stubGlobal("fetch", vi.fn(async () => answer()));
     const r = await connectAgentsBatch({ podUrl: POD, apiKey: "fake-human-key" }, ["cursor"], {});
     expect(r.connected).toEqual([]);
     expect(r.failed).toEqual(["cursor"]);
-    expect(text()).toContain("Cursor: could not check the key — not connected.");
+    expect(text()).toContain(`? Cursor set up — could not confirm: ${why}`);
+    expect(text()).toContain("→ synap doctor");
+    expect(text()).not.toContain("not connected");
+    expect(text()).not.toContain("Cursor connected");
   });
 });
 
@@ -134,6 +143,34 @@ describe("confirmSurfaceKey", () => {
       reason: "OAuth through the control plane — no key",
     });
     expect(asked).toEqual([]);
+  });
+
+  it("an unreadable client file is 'unconfirmed', not 'not-active'", async () => {
+    const { setSurfaceAgentKey } = await import("../src/lib/pod.js");
+    setSurfaceAgentKey("cursor", { hubApiKey: KEY("cursor"), agentUserId: "b", podUrl: POD });
+    podSays[KEY("cursor")] = { state: "active" };
+    const file = path.join(os.homedir(), ".cursor", "mcp.json");
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, "{ not json");
+    try {
+      const r = await confirmSurfaceKey(POD, "cursor");
+      expect(r.verdict).toBe("unconfirmed");
+      expect(r).toMatchObject({ reason: expect.stringContaining("Cursor") });
+    } finally {
+      fs.rmSync(path.join(os.homedir(), ".cursor"), { recursive: true, force: true });
+    }
+  });
+
+  it("a read that throws is 'unconfirmed', with why", async () => {
+    const { setSurfaceAgentKey } = await import("../src/lib/pod.js");
+    setSurfaceAgentKey("cursor", { hubApiKey: KEY("cursor"), agentUserId: "b", podUrl: POD });
+    const r = await confirmSurfaceKey(POD, "cursor", {
+      labelOf: () => {
+        throw new Error("boom");
+      },
+      clients: [],
+    });
+    expect(r).toEqual({ verdict: "unconfirmed", reason: "its key could not be read back (boom)" });
   });
 
   it("a target whose key should be in a file, but none is there, is not active", async () => {
