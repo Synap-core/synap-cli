@@ -206,14 +206,19 @@ export const COMPUTER_KEY_RENEW_DAYS = 7;
 
 /**
  * True when a saved computer key expires within `COMPUTER_KEY_RENEW_DAYS`, or
- * already has. A credential with no recorded expiry (a pasted key, an old
- * operator key) is never "due": nothing says it expires.
+ * already has — and when a device-flow computer key (`credential: "computer"`)
+ * records NO expiry at all: the pod always mints computer keys with a TTL
+ * (`resolveMachineKeyTtlDays`, default 90 days), so a missing expiry means a
+ * hand-edited or half-written profile, and renewing is the one way to get a
+ * key whose end is known. A profile without the `computer` marker (a pasted
+ * key) is never "due" here: nothing says it expires, and `synap doctor` is
+ * what flags it.
  */
 export function computerKeyNeedsRenewal(
-  config: { keyExpiresAt?: string | null },
+  config: { keyExpiresAt?: string | null; credential?: string },
   now: number = Date.now()
 ): boolean {
-  if (!config.keyExpiresAt) return false;
+  if (!config.keyExpiresAt) return config.credential === "computer";
   const at = Date.parse(config.keyExpiresAt);
   if (Number.isNaN(at)) return false;
   return at - now < COMPUTER_KEY_RENEW_DAYS * 24 * 60 * 60 * 1000;

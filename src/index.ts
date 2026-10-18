@@ -474,7 +474,9 @@ program
     const { computerKeyNeedsRenewal, connectThisComputer } = await import("./lib/device-connect.js");
     const renewed = new Set<string>();
     for (const p of checks.filter((c) => c.healthy && computerKeyNeedsRenewal(c.config))) {
-      const when = `this computer's key ${p.keyValid ? "expires" : "expired"} ${p.config.keyExpiresAt}`;
+      const when = p.config.keyExpiresAt
+        ? `this computer's key ${p.keyValid ? "expires" : "expired"} ${p.config.keyExpiresAt}`
+        : "this computer's key has no recorded expiry";
       if (!process.stdin.isTTY) {
         console.log(chalk.yellow(`  ${p.name}: ${when}. Run synap login in a terminal to renew it.`));
         continue;

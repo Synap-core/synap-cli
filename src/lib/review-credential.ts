@@ -7,9 +7,22 @@
  * approve (`rejectAgentReviewer`), which is correct but leaves the human with
  * no CLI door at all — the agent key is the one in the session's environment.
  *
- * RATIFIED: review verbs authenticate with the HUMAN key stored in the pod
- * profile on disk (`pods.<name>.hubApiKey` in `~/.synap/config.json`), and fall
- * back to the browser/deep-link handoff when no such key exists.
+ * What the door reads: the key in the ACTIVE pod profile on disk
+ * (`pods.<name>.hubApiKey` in `~/.synap/config.json`) — never an env var, never
+ * `--api-key`. What that key IS depends on how the machine was enrolled:
+ *
+ *   - LEGACY machine (profile has no `credential: "computer"`): a pasted or
+ *     pre-device-flow key, a HUMAN pod key. The pod accepts it as the reviewer
+ *     and `approve` works from the terminal. That key is also readable by any
+ *     same-user process, which is why `synap doctor` flags such a profile and
+ *     points at `synap login --reconnect <name>`.
+ *   - DEVICE-FLOW machine (`credential: "computer"`): the profile holds this
+ *     computer's key, an AGENT principal. This door still hands it over — it
+ *     does not look at the marker — and the pod answers 403 (`rejectAgentReviewer`).
+ *     The CLI cannot approve there; the human step is `synap open proposal <id>`.
+ *
+ * When the profile has no key at all, the result is `absent` and the caller
+ * falls back to the browser/deep-link handoff.
  *
  * ── What this is NOT ─────────────────────────────────────────────────────────
  * **This is not a hard security boundary, and must not be described as one.**

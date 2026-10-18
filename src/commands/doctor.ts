@@ -14,6 +14,8 @@
  *   (e) the connection broker answers — and when it does not, WHY: broker
  *       kind, relay credential presence + expiry, control-plane issuer trust
  *       and the owner's identity link, with the one fix for that reason.
+ *   (0) every saved pod profile holds a device-flow computer key, not a
+ *       person's key an agent could read off disk (local check, runs first).
  *   (f) prints the active lens (pod, workspace, project) so the user sees
  *       exactly where they're pointed.
  *
@@ -98,6 +100,34 @@ interface CheckResult {
   unknown?: boolean;
   detail: string;
   fix?: string;
+}
+
+export const PROFILE_CREDENTIAL_CHECK_NAME = "Pod profiles hold a computer key";
+
+/**
+ * A saved pod profile whose key is NOT this computer's own device-flow key.
+ *
+ * `credential: "computer"` is stamped only by `saveDeviceGrant` (the device
+ * flow). A profile without it holds a pasted key or a legacy human key from
+ * before device-flow enrolment: `hub_inbound`, no expiry, write scopes. Any
+ * same-user process (an AI agent's shell included) can read it from
+ * `~/.synap/config.json` and act as the person. A LOCAL marker check — no pod
+ * call — and it names the PROFILE, never the key. Profiles with no key at all
+ * hold nothing to leak and are skipped.
+ */
+export function profileCredentialCheck(
+  profiles: ReadonlyArray<{ name: string; config: { hubApiKey?: string; credential?: string } }>
+): CheckResult {
+  const legacy = profiles.filter((p) => p.config.hubApiKey && p.config.credential !== "computer").map((p) => p.name);
+  if (legacy.length === 0) {
+    return { name: PROFILE_CREDENTIAL_CHECK_NAME, ok: true, detail: "every saved pod profile holds this computer's own key" };
+  }
+  return {
+    name: PROFILE_CREDENTIAL_CHECK_NAME,
+    ok: false,
+    detail: `${legacy.length === 1 ? "profile" : "profiles"} ${legacy.map((n) => `'${n}'`).join(", ")} ${legacy.length === 1 ? "holds" : "hold"} a person's key in ~/.synap/config.json, readable by any process on this computer, agents included`,
+    fix: legacy.map((n) => `Replace it with this computer's own key: synap login --reconnect ${n}`).join("\n    → "),
+  };
 }
 
 /**
@@ -261,6 +291,9 @@ export async function doctor(opts: DoctorOpts = {}): Promise<void> {
   } catch {
     /* fall through to profile/env */
   }
+
+  // ── (0) Saved profiles hold a computer key, not a person's key (local) ───
+  checks.push(profileCredentialCheck(listPodProfiles()));
 
   // ── (a) Host resolves — the pod is actually served at this URL ───────────
   const localConfig = getActivePodConfig();
@@ -734,6 +767,7 @@ const SHORT_NAME: Record<string, string> = {
   [IS_CHECK_NAME]: "intelligence",
   [BROKER_CHECK_NAME]: "broker",
   "Keys on this computer": "agent keys",
+  [PROFILE_CREDENTIAL_CHECK_NAME]: "profile keys",
 };
 
 const UUID = /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi;

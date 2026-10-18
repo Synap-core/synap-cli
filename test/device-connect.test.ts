@@ -220,4 +220,10 @@ describe("pure helpers", () => {
     expect(computerKeyNeedsRenewal({ keyExpiresAt: inDays(-1) }, now)).toBe(true);
     expect(computerKeyNeedsRenewal({}, now)).toBe(false); // a pasted key: no expiry known
   });
+
+  it("a device-flow computer key with NO recorded expiry is due: the pod always mints a TTL", () => {
+    expect(computerKeyNeedsRenewal({ credential: "computer" })).toBe(true);
+    expect(computerKeyNeedsRenewal({ credential: "computer", keyExpiresAt: null })).toBe(true);
+    expect(computerKeyNeedsRenewal({ credential: "computer", keyExpiresAt: "2099-01-01T00:00:00Z" })).toBe(false);
+  });
 });

@@ -275,13 +275,13 @@ async function ensurePodKey(
     const renew = computerKeyNeedsRenewal(saved.config);
     if (res?.ok && (!renew || opts.unattended)) {
       if (renew) {
-        log.warn(`This computer's key for this pod expires ${saved.config.keyExpiresAt}. Renew it: ${chalk.cyan("synap login")}`);
+        log.warn(`This computer's key for this pod ${saved.config.keyExpiresAt ? `expires ${saved.config.keyExpiresAt}` : "has no recorded expiry"}. Renew it: ${chalk.cyan("synap login")}`);
       }
       if (!saved.active) setActivePod(saved.name);
       return { key: saved.config.hubApiKey, grant: null };
     }
     if (res?.ok) {
-      log.info(`This computer's key for this pod expires ${saved.config.keyExpiresAt}. Renewing it.`);
+      log.info(`This computer's key for this pod ${saved.config.keyExpiresAt ? `expires ${saved.config.keyExpiresAt}` : "has no recorded expiry"}. Renewing it.`);
     } else if (res && (res.status === 401 || res.status === 403)) {
       log.warn("Your saved key for this pod no longer works. Connecting this computer again.");
     } else {
