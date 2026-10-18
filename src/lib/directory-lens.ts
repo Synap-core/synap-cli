@@ -34,7 +34,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { lensMatchesPod, type SessionLens } from "./session-lens.js";
+import { getClaudeSessionId, lensMatchesPod, type SessionLens } from "./session-lens.js";
 import { writeSecretFile } from "./atomic-file.js";
 
 /** The directory name a lens lives in, and the file inside it. */
@@ -123,6 +123,25 @@ export function resolveDirectoryLensForPod(
   const found = findDirectoryLens(startDir);
   if (!found) return null;
   return lensMatchesPod(found.lens, podUrl) ? found : null;
+}
+
+/**
+ * The fields of a directory lens that are in force for THIS process.
+ *
+ * Workspace and project are the tree's durable scope and always apply. The
+ * focus SESSION does not, inside a Claude Code conversation: a session is the
+ * conversation's own, and `attachActiveSessionId` writes it to the session lens
+ * there for exactly that reason. Read through, a directory-lens session —
+ * attached from a plain terminal, or migrated from a `.synap-session` — was
+ * sent as `X-Session-Id` by every conversation opened in the tree, long after
+ * it went quiet, so each one's writes were filed into that old session (and a
+ * stale one was revived by them). Outside Claude Code there is no conversation
+ * to own a session, so the directory lens still carries it.
+ */
+export function effectiveDirectoryLens(lens: DirectoryLens): DirectoryLens {
+  if (!getClaudeSessionId()) return lens;
+  const { focusSessionId: _conversationOwned, ...scope } = lens;
+  return scope;
 }
 
 /**

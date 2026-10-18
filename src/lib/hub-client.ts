@@ -20,6 +20,7 @@ import {
 } from "./session-lens.js";
 import { conversationHeaders } from "./conversation-headers.js";
 import {
+  effectiveDirectoryLens,
   resolveDirectoryLensForPod,
   writeDirectoryLens,
   clearDirectoryLensField,
@@ -748,6 +749,10 @@ export async function resolveHubConfig(opts?: { podUrl?: string; apiKey?: string
 //
 //   env SYNAP_SESSION_ID  ›  session lens (per Claude tab)  ›  directory lens
 //
+// The directory rung supplies a session only OUTSIDE a Claude Code conversation
+// (`effectiveDirectoryLens`): inside one, the session belongs to the
+// conversation, never to the working tree.
+//
 // The retired legacy store was a per-CWD `.synap-session` file that the session
 // lens already silently shadowed — two concurrent "current session" stores for
 // one concept. It is now read exactly once, to migrate (below).
@@ -805,10 +810,10 @@ export function resolveActiveSessionId(podUrl?: string): string | undefined {
   const fromEnv = process.env.SYNAP_SESSION_ID;
   if (fromEnv) return fromEnv;
   migrateLegacySessionFile();
-  return (
-    resolveActiveLensForPod(podUrl)?.focusSessionId ||
-    resolveDirectoryLensForPod(podUrl)?.lens.focusSessionId
-  );
+  const fromSessionLens = resolveActiveLensForPod(podUrl)?.focusSessionId;
+  if (fromSessionLens) return fromSessionLens;
+  const dir = resolveDirectoryLensForPod(podUrl);
+  return dir ? effectiveDirectoryLens(dir.lens).focusSessionId : undefined;
 }
 
 /** Where an attach landed — reported so the user knows what owns their scope. */

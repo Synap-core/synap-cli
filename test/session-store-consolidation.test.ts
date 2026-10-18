@@ -120,8 +120,19 @@ describe("resolution precedence — one store, ordered rungs", () => {
     expect(resolveActiveSessionId(POD_A)).toBe(SESSION_X);
   });
 
-  it("falls through to the directory lens when the tab pinned nothing", async () => {
+  it("a tab that pinned nothing does NOT inherit the directory lens's session", async () => {
+    // The mirror of "a plain terminal must NOT inherit the tab's session"
+    // below: the session belongs to the conversation, so an old one left in the
+    // tree's lens (a plain-terminal attach, a migrated `.synap-session`) is not
+    // this conversation's current session.
     enterClaudeSession();
+    seedDirectoryLens({ focusSessionId: SESSION_Y });
+    const { resolveActiveSessionId } = await loadHubClient();
+
+    expect(resolveActiveSessionId(POD_A)).toBeUndefined();
+  });
+
+  it("a plain terminal still takes the directory lens's session", async () => {
     seedDirectoryLens({ focusSessionId: SESSION_Y });
     const { resolveActiveSessionId } = await loadHubClient();
 
@@ -197,5 +208,34 @@ describe("X-Session-Id still reaches the pod", () => {
     }
 
     expect((init?.headers as Record<string, string>)["X-Session-Id"]).toBe(SESSION_X);
+  });
+
+  it("an upload from a Claude conversation is not filed into the tree's old session", async () => {
+    // The reported defect: `synap upload` in a conversation that never
+    // attached a session sent the directory lens's long-quiet session as
+    // `X-Session-Id`, and the pod filed the file into it.
+    enterClaudeSession();
+    seedDirectoryLens({ focusSessionId: SESSION_Y, workspaceId: "ws-1", podUrl: POD_A });
+    const { hubPostMultipart } = await loadHubClient();
+
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response("{}", { status: 200, headers: { "Content-Type": "application/json" } })
+    );
+    let init: RequestInit | undefined;
+    try {
+      await hubPostMultipart("/files", new FormData(), { podUrl: POD_A, apiKey: "k", userId: "u" });
+      init = fetchSpy.mock.calls[0]?.[1] as RequestInit;
+    } finally {
+      fetchSpy.mockRestore();
+    }
+
+    expect(init).toBeDefined();
+    expect((init?.headers as Record<string, string>)["X-Session-Id"]).toBeUndefined();
+    // Only the session is withheld — the tree's workspace scope (what
+    // `synap lens` / `synap doctor` report from this rung) still applies.
+    const { effectiveDirectoryLens } = await import("../src/lib/directory-lens.js");
+    expect(effectiveDirectoryLens({ focusSessionId: SESSION_Y, workspaceId: "ws-1" })).toEqual({
+      workspaceId: "ws-1",
+    });
   });
 });

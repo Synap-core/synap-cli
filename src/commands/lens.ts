@@ -420,7 +420,7 @@ export async function clearProject(opts: BaseOpts & { session?: boolean }): Prom
 export async function showLens(opts: BaseOpts): Promise<void> {
   const session = getClaudeSessionId();
   const { resolveLensProvenance } = await import("../lib/describe-lens.js");
-  const { resolveDirectoryLensForPod, findDirectoryLens } = await import("../lib/directory-lens.js");
+  const { resolveDirectoryLensForPod, findDirectoryLens, effectiveDirectoryLens } = await import("../lib/directory-lens.js");
   const { getActiveWorkspaceId } = await import("../lib/pod.js");
 
   // Which pod are we resolving against? Needed to pod-qualify both lenses the
@@ -444,7 +444,7 @@ export async function showLens(opts: BaseOpts): Promise<void> {
   // Highest precedence first — same order as the ladder in hub-client.ts.
   const provenance = resolveLensProvenance([
     { source: "session", detail: session ? session.slice(0, 8) : undefined, ...(sessionLens ?? {}) },
-    { source: "directory", detail: dir?.file, ...(dir?.lens ?? {}) },
+    { source: "directory", detail: dir?.file, ...(dir ? effectiveDirectoryLens(dir.lens) : {}) },
     {
       source: "env",
       detail: "SYNAP_WORKSPACE_ID",
