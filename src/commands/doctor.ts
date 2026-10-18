@@ -36,6 +36,7 @@ import { isFixable, type KeyHealthReport } from "../lib/key-doctor.js";
 import { connectionLines, type PodConnection } from "../lib/agent-connections.js";
 import { thisComputerInstanceIds } from "../lib/machine-instance.js";
 import { tildify } from "../lib/key-locations.js";
+import { cliBuild, formatCliBuild } from "../lib/cli-build.js";
 import os from "node:os";
 import path from "node:path";
 import { unwrapList } from "../lib/unwrapList.js";
@@ -799,6 +800,7 @@ async function finish(
                 notSentToThisPod: (keyHealth.notSent ?? []).map((l) => l.label),
               }
             : null,
+          cli: cliBuild(),
           lens: {
             pod: activeName,
             podUrl: lens.podUrl,
@@ -838,6 +840,8 @@ async function finish(
   const lensText = lens.projectId ? `${wsName} › ${lens.project ?? (v ? lens.projectId : "a project this pod does not list")}` : wsName;
   const origin = lensOrigin(provenance.project ?? provenance.workspace);
   console.log(`${chalk.dim("Lens")}   ${lensText}${origin && (lens.workspaceId || lens.projectId) ? chalk.dim(`   (from ${origin})`) : ""}`);
+  // Which build is talking: a stale CLI is the first thing to rule out.
+  console.log(`${chalk.dim("CLI")}    ${formatCliBuild(cliBuild())}`);
   if (v) {
     console.log(`${chalk.dim("Key")}    ${formatKeySource(keySource)}`);
     if (lens.podUrl) console.log(`${chalk.dim("URL")}    ${lens.podUrl}`);

@@ -1,13 +1,13 @@
 {
   "name": "@synap-core/cli",
-  "version": "1.12.0",
-  "description": "Synap CLI — connect any AI agent to sovereign knowledge infrastructure",
+  "version": "1.12.1",
+  "description": "Connect any AI agent (Claude Code, Codex, Cursor and more) to your own Synap data pod: shared memory, structured data and human-approved changes.",
   "type": "module",
   "bin": {
     "synap": "./dist/index.js"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && node scripts/write-build-info.mjs",
     "dev": "tsx src/index.ts",
     "sync-skills": "bash scripts/sync-skills.sh",
     "prepublishOnly": "npm run sync-skills && npm run build",
@@ -47,11 +47,20 @@
     "url": "git+https://github.com/Synap-core/synap-cli.git"
   },
   "license": "MIT",
+  "homepage": "https://synap.live/download/cli",
+  "bugs": {
+    "url": "https://github.com/Synap-core/synap-cli/issues"
+  },
   "keywords": [
     "synap",
-    "ai",
+    "mcp",
+    "ai-agents",
+    "claude-code",
+    "codex",
+    "cursor",
     "knowledge-graph",
     "memory",
-    "agent"
+    "personal-data",
+    "self-hosted"
   ]
 }

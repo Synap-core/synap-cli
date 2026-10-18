@@ -14,24 +14,12 @@
  */
 
 import { Command, Option } from "commander";
-import { readFileSync } from "fs";
-import { fileURLToPath } from "url";
-import { dirname, join } from "path";
 import { bootstrapPodOverride } from "./lib/pod.js";
 import { INIT_EXIT_HELP } from "./lib/init-exit.js";
+import { cliBuild, formatCliBuild } from "./lib/cli-build.js";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-
-let version = "0.1.0";
-try {
-  const pkg = JSON.parse(
-    readFileSync(join(__dirname, "..", "package.json"), "utf-8")
-  );
-  version = pkg.version;
-} catch {
-  // use default
-}
+// The version AND the commit this build came from — a stale build is visible.
+const version = formatCliBuild(cliBuild());
 
 const program = new Command();
 

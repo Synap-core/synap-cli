@@ -198,12 +198,21 @@ describe("locating the checkout", () => {
 });
 
 describe("auth", () => {
+  // Auth is checked after the catalog folder is found but before its lib is
+  // loaded, so a folder that only names the package is enough here. Without it
+  // these ran against the sibling checkout and read "checkout-not-found" in a
+  // CLI-only checkout (the publish workflow's).
+  const catalogStub = mkdtempSync(join(tmpdir(), "synap-catalog-stub-"));
+  writeFileSync(join(catalogStub, "package.json"), JSON.stringify({ name: "@synap-core/workspace-templates" }));
+  const runAuth = (opts: Record<string, unknown>, deps: Partial<OfficialPublishDeps> = {}) =>
+    run([], { templatesDir: catalogStub, ...opts }, deps);
+
   it("no session / expired session → run synap login, no network", async () => {
     const { calls, fetchImpl } = fakeCp();
-    const none = await run([], { json: true }, { credentials: null, fetchImpl });
+    const none = await runAuth({ json: true }, { credentials: null, fetchImpl });
     expect(none.code).toBe(1);
     expect(JSON.parse(none.text)).toMatchObject({ error: "not-logged-in" });
-    const expired = await run([], { json: true }, {
+    const expired = await runAuth({ json: true }, {
       credentials: { ...CREDS, expiresAt: "2000-01-01T00:00:00Z" },
       fetchImpl,
     });
@@ -214,7 +223,7 @@ describe("auth", () => {
 
   it("non-interactive without --yes or --dry-run refuses rather than publish", async () => {
     const { calls, fetchImpl } = fakeCp();
-    const { code, text } = await run([], { json: true }, { fetchImpl });
+    const { code, text } = await runAuth({ json: true }, { fetchImpl });
     expect(code).toBe(1);
     expect(JSON.parse(text)).toMatchObject({ error: "confirmation-required" });
     expect(calls).toHaveLength(0);

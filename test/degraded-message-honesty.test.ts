@@ -133,13 +133,15 @@ describe("degraded copy: never leak a token, never lie about retrying", () => {
  */
 const APP_TYPES = resolve(
   dirname(fileURLToPath(import.meta.url)),
-  "../../synap-app/packages/core/capture-pipeline/src/types.ts"
+  "../../synap-app/packages/headless/src/capture-pipeline/types.ts"
 );
 
 describe.skipIf(!existsSync(APP_TYPES))(
   "parity with @synap-core/capture-pipeline describeDegradedReason",
   () => {
-    const source = readFileSync(APP_TYPES, "utf8");
+    // vitest runs a describe's body at collection even when it is skipped, so
+    // the read itself must respect the skip or a CLI-only checkout crashes.
+    const source = existsSync(APP_TYPES) ? readFileSync(APP_TYPES, "utf8") : "";
 
     /** Titles keyed by reason, parsed out of the app's own switch statement. */
     const appTitles = (): Record<string, string> => {

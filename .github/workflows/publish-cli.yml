@@ -121,13 +121,14 @@ jobs:
       - name: Checkout synap-backend (sibling — hub-rest-client + skills)
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          repository: Synap-core/synap-backend
-          # A token with read access to the sibling repo. `GITHUB_TOKEN` is
-          # scoped to THIS repository only and cannot read another one, so a
-          # missing token fails here with a clear checkout error rather than
-          # producing a tarball that is silently missing its bundled client and
-          # its skills.
-          token: ${{ steps.app-token.outputs.token || secrets.CROSS_REPO_TOKEN }}
+          # The repo is `Synap-core/backend`. The old `Synap-core/synap-backend`
+          # 404s, which is why the only run before 2026-10-16 failed here.
+          repository: Synap-core/backend
+          # `backend` is public, so this run's own token can read it when
+          # neither the release App nor CROSS_REPO_TOKEN is configured. An empty
+          # token is what failed the 2026-10-11 run ("Input required and not
+          # supplied: token").
+          token: ${{ steps.app-token.outputs.token || secrets.CROSS_REPO_TOKEN || github.token }}
           path: synap-backend
 
       # npm Trusted Publishing needs Node >= 22.14.0 and npm >= 11.5.1 in the
@@ -176,6 +177,12 @@ jobs:
       - name: Typecheck
         working-directory: cli
         run: npx tsc --noEmit
+
+      # `skills/` is gitignored and filled from the sibling at publish time;
+      # `test/skills-baseline-parity.test.ts` checks that copy, so fill it first.
+      - name: Sync skills from the sibling
+        working-directory: cli
+        run: npm run sync-skills
 
       - name: Test
         working-directory: cli

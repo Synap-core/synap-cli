@@ -51,6 +51,11 @@ export interface KeyHealthDeps {
   /** Client config files to read. Default: derived from `TARGETS` (`clientKeyFiles`). */
   clients?: ClientKeyFile[];
   timeoutMs?: number;
+  /**
+   * Only this agent surface: its copies are read and its keys asked about —
+   * not the person's key, the env, or another agent's (`confirmSurfaceKey`).
+   */
+  surface?: string;
 }
 
 async function targetLabel(surface: string): Promise<string> {
@@ -63,14 +68,18 @@ async function targetLabel(surface: string): Promise<string> {
 }
 
 export async function checkKeyHealth(podUrl: string, deps: KeyHealthDeps = {}): Promise<KeyHealthReport> {
-  const clients = deps.clients ?? (await import("./targets.js")).clientKeyFiles();
-  const inventory = collectKeyInventory({
+  const allClients = deps.clients ?? (await import("./targets.js")).clientKeyFiles();
+  const clients = deps.surface ? allClients.filter((c) => c.surface === deps.surface) : allClients;
+  const all = collectKeyInventory({
     home: deps.home ?? os.homedir(),
     podUrl,
     envKey: "envKey" in deps ? deps.envKey : process.env.SYNAP_HUB_API_KEY,
     envPodUrl: "envPodUrl" in deps ? deps.envPodUrl : process.env.SYNAP_POD_URL,
     clients,
   });
+  const inventory = deps.surface
+    ? { ...all, locations: all.locations.filter((l) => l.role === "agent" && l.surface === deps.surface) }
+    : all;
   const keys = keysToProbe(inventory.locations);
   const probed = new Set(keys);
   const states = new Map<string, KeyState>();
@@ -110,6 +119,50 @@ export function keyProblems(report: KeyHealthReport): Diagnosis[] {
 /** A problem `--fix` can act on (not merely tell you a command). */
 export function isFixable(d: Diagnosis): boolean {
   return d.action !== "none" && d.action !== "login" && d.action !== "edit_shell_rc";
+}
+
+/**
+ * What setup may say about one agent after writing its config:
+ *   active      — the pod confirms the key now in its files works
+ *   not-active  — the pod (or the files) SAID it does not: pending, revoked,
+ *                 expired, unknown, stale copies, no key where setup writes it —
+ *                 as the doctor's own diagnosis line + command
+ *   unconfirmed — the check itself FAILED (pod unreachable, file unreadable,
+ *                 read threw). Not a dead key — the doctor prints it "?"
+ *   unchecked   — the target keeps no key the CLI can read back (`keyStore.none`)
+ */
+export type SetupCheck =
+  | { verdict: "active" }
+  | { verdict: "not-active"; title: string; command?: string }
+  | { verdict: "unconfirmed"; reason: string }
+  | { verdict: "unchecked"; reason: string };
+
+/**
+ * The check behind every "<Agent> connected" line: read back what setup WROTE
+ * for `surface` — the same copies `synap doctor` reads — ask the pod about each
+ * key, and pass only when the doctor would say "key works". The 2026-10-15
+ * devbox printed "✓ Claude Code connected" over a key the pod held as
+ * awaiting approval; a success line now comes from this read, never from
+ * having written the file.
+ */
+export async function confirmSurfaceKey(podUrl: string, surface: string, deps: KeyHealthDeps = {}): Promise<SetupCheck> {
+  let report: KeyHealthReport;
+  try {
+    report = await checkKeyHealth(podUrl, { ...deps, surface });
+  } catch (err) {
+    return { verdict: "unconfirmed", reason: `its key could not be read back (${err instanceof Error ? err.message : String(err)})` };
+  }
+  const unread = report.unchecked?.[0];
+  if (unread) return { verdict: "unconfirmed", reason: `${unread.tool} — ${unread.file} ${unread.reason}` };
+  const d = report.diagnoses.find((x) => x.surface === surface);
+  if (d?.code === "ok") return { verdict: "active" };
+  if (d?.code === "unverifiable")
+    return { verdict: "unconfirmed", reason: (d.key && report.states.get(d.key)?.error) || "the pod did not answer" };
+  if (d) return { verdict: "not-active", title: d.title, command: d.command };
+  const { TARGETS, isTargetName } = await import("./targets.js");
+  const target = isTargetName(surface) ? TARGETS[surface] : undefined;
+  if (target && "none" in target.keyStore) return { verdict: "unchecked", reason: target.keyStore.none };
+  return { verdict: "not-active", title: `${target?.label ?? surface}: no key for this pod was found where setup writes it`, command: "synap doctor" };
 }
 
 const plural = (n: number, one: string, many = one + "s") => `${n} ${n === 1 ? one : many}`;

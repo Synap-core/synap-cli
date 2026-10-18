@@ -3,13 +3,19 @@
  * install each agent, one line per agent ("✓ Codex connected"). An install's
  * own output is shown only when it failed.
  *
- * The approve and install doors are injected so the order and the per-agent
- * outcome are testable without a pod.
+ * "connected" is printed only after `confirm` read back the key the install
+ * wrote and the pod said it works (`confirmSurfaceKey`). A pod "no" prints the
+ * doctor's diagnosis; a check that could not run prints "? … could not
+ * confirm". Either way the agent counts as not connected.
+ *
+ * The approve, install and confirm doors are injected so the order and the
+ * per-agent outcome are testable without a pod.
  */
 
 import chalk from "chalk";
 import type { TargetName } from "./targets.js";
 import type { BatchApprovalResult } from "./batch-approval.js";
+import type { SetupCheck } from "./key-doctor.js";
 import { log } from "../utils/logger.js";
 
 export interface InstallOutcome {
@@ -22,6 +28,8 @@ export interface InstallOutcome {
 export interface ConnectAgentsDeps<T extends TargetName> {
   approve: (targets: readonly T[]) => Promise<BatchApprovalResult>;
   install: (target: T) => Promise<InstallOutcome>;
+  /** Read back what the install wrote and ask the pod (`confirmSurfaceKey`). */
+  confirm: (target: T) => Promise<SetupCheck>;
   labelOf: (target: T) => string;
 }
 
@@ -33,6 +41,31 @@ export interface ConnectAgentsResult<T extends TargetName> {
 
 export function retryCommand(target: TargetName): string {
   return chalk.cyan(`synap connect --target=${target}`);
+}
+
+/**
+ * The ONE place a setup prints "<Agent> connected": only for a confirmed key.
+ * Returns whether the agent counts as connected.
+ */
+export function reportSetupCheck(label: string, check: SetupCheck, connectedLine = `${label} connected`): boolean {
+  if (check.verdict === "active") {
+    log.success(connectedLine);
+    return true;
+  }
+  if (check.verdict === "unchecked") {
+    log.success(`${label} set up — not checked: ${check.reason}`);
+    return true;
+  }
+  if (check.verdict === "unconfirmed") {
+    // A failed check, not a dead key: "?" as the doctor prints it. Still not
+    // counted as connected, so a script's exit code sees it.
+    console.error(chalk.yellow(`  ? ${label} set up — could not confirm: ${check.reason}`));
+    log.hint("→ synap doctor");
+    return false;
+  }
+  log.warn(`${check.title} — not connected.`);
+  if (check.command) log.hint(`→ ${check.command}`);
+  return false;
 }
 
 export async function connectAgents<T extends TargetName>(
@@ -60,8 +93,8 @@ export async function connectAgents<T extends TargetName>(
       result.failed.push(target);
       continue;
     }
-    log.success(`${label} connected`);
-    result.connected.push(target);
+    if (reportSetupCheck(label, await deps.confirm(target))) result.connected.push(target);
+    else result.failed.push(target);
   }
   return result;
 }
