@@ -26,8 +26,6 @@ synap init
 
 **Requirements**: Node.js 20+
 
-Detailed environment setup: [docs/INSTALL.md](docs/INSTALL.md)
-
 ---
 
 ## `synap init`
@@ -110,14 +108,17 @@ Agents self-discover entity types and views at runtime — no hardcoding.
 
 ### Self-hosted (free)
 
+Run the pod on your own machine or server ([backend repo](https://github.com/Synap-core/backend)), then connect to it:
+
 ```bash
-curl -fsSL https://synap.live/install.sh | bash
-synap init --pod-url http://localhost:4000
+git clone https://github.com/Synap-core/backend synap && cd synap
+curl -fsSL https://raw.githubusercontent.com/Synap-core/backend/main/install.sh | bash
+synap init --pod-url https://<your-pod-domain>
 ```
 
-### Managed pod
+### Managed pod (private beta)
 
-1. Create a pod at [synap.live](https://synap.live)
+1. Join the waitlist at [synap.live](https://synap.live); once you are in, create your pod there
 2. `synap init` and select your pod — the CLI handles the rest
 
 ---
