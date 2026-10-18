@@ -510,6 +510,31 @@ describe("the preview names what changes", () => {
     expect(text).toContain("capability/proton  h-a → h-b\n      ~ definition: new content version");
   });
 
+  it("a same-version CHANGED row names the sourcePackage stamp move; an unmoved stamp prints nothing", () => {
+    const text = formatDiff([
+      {
+        kind: "workspace",
+        slug: "agency-os",
+        status: "changed",
+        hashBefore: "h-a",
+        hashAfter: "h-a",
+        sourcePackage: { before: { version: "0.17.2" }, after: { version: "0.17.4" } },
+        columns: [],
+      },
+      {
+        kind: "workspace",
+        slug: "crm",
+        status: "changed",
+        hashBefore: "h-a",
+        hashAfter: "h-b",
+        sourcePackage: { before: { version: "0.17.4" }, after: { version: "0.17.4" } },
+        columns: [],
+      },
+    ]);
+    expect(text).toContain("workspace/agency-os  h-a → h-a\n      ~ sourcePackage: 0.17.2 → 0.17.4");
+    expect(text).not.toMatch(/crm[^\n]*\n[^\n]*sourcePackage/);
+  });
+
   it("a warning several rows share prints once under the summary with its count; a row's own warning stays on the row", () => {
     const OLD_CP = "This CP cannot preview a workspace version";
     const text = formatDiff([

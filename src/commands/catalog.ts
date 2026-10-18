@@ -84,6 +84,8 @@ export interface CatalogDiffRow {
   status: "new" | "changed" | "unchanged";
   hashBefore?: string;
   hashAfter?: string;
+  /** Stamp on the live row vs the one the publish writes (`{ version }`; null = unstamped). Absent on an older lib. */
+  sourcePackage?: { before: { version?: string } | null; after: { version?: string } | null };
   /** Row columns the publish would change on the row it writes. */
   columns?: Array<{ column: string; before: unknown; after: unknown }>;
   /** Optional lib-provided detail lines (e.g. a profile-removal warning). */
@@ -425,6 +427,11 @@ export function formatDiff(
     const detail: string[] = [];
     if (r.status === "changed" && r.hashBefore && r.hashAfter && r.hashBefore !== r.hashAfter) {
       detail.push("      ~ definition: new content version");
+    }
+    const spBefore = r.sourcePackage?.before?.version ?? "none";
+    const spAfter = r.sourcePackage?.after?.version ?? "none";
+    if (r.status === "changed" && spBefore !== spAfter) {
+      detail.push(`      ~ sourcePackage: ${spBefore} → ${spAfter}`);
     }
     if (r.status === "changed" && Array.isArray(r.columns)) {
       for (const c of r.columns) detail.push(`      ~ ${c.column}: ${shortValue(c.before)} → ${shortValue(c.after)}`);
