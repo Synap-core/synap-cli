@@ -683,14 +683,14 @@ async function probeBrokerDiagnostics(cfg: HubConfig): Promise<BrokerDiagnostics
  */
 async function activeLensProvenance(podUrl?: string) {
   const { getClaudeSessionId, resolveActiveLensForPod } = await import("../lib/session-lens.js");
-  const { resolveDirectoryLensForPod } = await import("../lib/directory-lens.js");
+  const { resolveDirectoryLensForPod, effectiveDirectoryLens } = await import("../lib/directory-lens.js");
   const session = getClaudeSessionId();
   const sessionLens = resolveActiveLensForPod(podUrl);
   const dir = resolveDirectoryLensForPod(podUrl);
 
   const rungs: LensRung[] = [
     { source: "session", detail: session ? session.slice(0, 8) : undefined, ...(sessionLens ?? {}) },
-    { source: "directory", detail: dir?.file, ...(dir?.lens ?? {}) },
+    { source: "directory", detail: dir?.file, ...(dir ? effectiveDirectoryLens(dir.lens) : {}) },
     {
       source: "env",
       detail: "SYNAP_WORKSPACE_ID",
