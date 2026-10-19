@@ -178,3 +178,10 @@ describe("buildHandoff", () => {
     expect(buildHandoff([]).agentLabel).toBe("your agent");
   });
 });
+
+describe("noPodStep menu", () => {
+  it("offers sign-in first (the default) and Create in browser second", async () => {
+    const { NO_POD_CHOICES } = await import("../src/commands/init.js");
+    expect(NO_POD_CHOICES.map((c) => c.value).slice(0, 2)).toEqual(["login", "create"]);
+  });
+});

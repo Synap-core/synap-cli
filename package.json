@@ -1,6 +1,6 @@
 {
   "name": "@synap-core/cli",
-  "version": "1.12.1",
+  "version": "1.12.2",
   "description": "Connect any AI agent (Claude Code, Codex, Cursor and more) to your own Synap data pod: shared memory, structured data and human-approved changes.",
   "type": "module",
   "bin": {

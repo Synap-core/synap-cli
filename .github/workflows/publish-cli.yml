@@ -248,12 +248,17 @@ jobs:
       # what consumers get.
       - name: Verify the PUBLISHED artifact
         working-directory: cli
+        # 1.12.2 (run 39163073354) was on npm within minutes but 5 x 10 s was
+        # not enough, and npm caches the "no such version" answer: retry for
+        # up to ~4 min and always ask the registry, never the local cache.
+        env:
+          npm_config_prefer_online: "true"
         run: |
           VERSION=$(node -p "require('./package.json').version")
-          for i in 1 2 3 4 5; do
+          for i in $(seq 1 16); do
             node scripts/verify-artifact.mjs --registry "@synap-core/cli@$VERSION" && exit 0
-            echo "registry not propagated yet (attempt $i) — retrying in 10s"
-            sleep 10
+            echo "registry not propagated yet (attempt $i/16) — retrying in 15s"
+            sleep 15
           done
           exit 1
 

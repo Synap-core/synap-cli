@@ -178,18 +178,22 @@ async function resolveDesktopPod(opts: InitOptions): Promise<{ podUrl: string; p
   return noPodStep();
 }
 
+/** Sign-in first (and the default): a person with a pod on synap.live must not land on "Create". */
+export const NO_POD_CHOICES = [
+  { title: "I have one on synap.live (sign in)", value: "login" },
+  { title: "Create in browser", value: "create" },
+  { title: "I have a URL", value: "url" },
+  { title: "Self-host", value: "self-host" },
+] as const;
+
 async function noPodStep(): Promise<{ podUrl: string; podId?: string }> {
   log.blank();
   const { choice } = await prompts({
     type: "select",
     name: "choice",
     message: "No Synap pod yet. Create one, or point me at yours?",
-    choices: [
-      { title: "Create in browser", value: "create" },
-      { title: "I have one on synap.live (sign in)", value: "login" },
-      { title: "I have a URL", value: "url" },
-      { title: "Self-host", value: "self-host" },
-    ],
+    choices: [...NO_POD_CHOICES],
+    initial: 0,
   });
   if (!choice) throw new InitExit(INIT_EXIT.cancelled, "Cancelled.");
 

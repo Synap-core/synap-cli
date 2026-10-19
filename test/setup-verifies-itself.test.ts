@@ -31,7 +31,7 @@ vi.mock("../src/lib/targets.js", async (importOriginal) => {
     ...real,
     // What every installer does with its key: store it for this pod. Returns
     // "installed" — the success the door must NOT take at its word.
-    installForTarget: vi.fn(async (target: string, cfg: { podUrl: string }) => {
+    installForTarget: vi.fn(async (target: string, cfg: { podUrl: string }, _opts?: { verify?: boolean }) => {
       setSurfaceAgentKey(target as never, { hubApiKey: KEY(target), agentUserId: `agent-${target}`, podUrl: cfg.podUrl });
       return true;
     }),
@@ -186,5 +186,23 @@ describe("confirmSurfaceKey", () => {
     podSays[KEY("cursor")] = { state: "active" };
     expect(await confirmSurfaceKey(POD, "cursor")).toEqual({ verdict: "active" });
     expect(asked).toEqual([KEY("cursor")]);
+  });
+});
+
+// The install's own /mcp check authenticates AS the agent and so stamps its key
+// `lastUsedAt` — the desktop reads that as "agent connected". The install must
+// not make that call; only the agent's own first call may.
+describe("install does not stamp the agent key as used", () => {
+  it.each([
+    ["batch door (init / agents add)", () => connectAgentsBatch({ podUrl: POD, apiKey: "h" }, ["cursor"], {})],
+    ["single door (synap connect)", () => connectKnownAgent("cursor", { podUrl: POD, apiKey: "h" }, {})],
+  ])("%s passes verify:false to the installer", async (_n, run) => {
+    podSays[KEY("cursor")] = { state: "active" };
+    const { installForTarget } = await import("../src/lib/targets.js");
+    vi.mocked(installForTarget).mockClear();
+    await run().catch(() => undefined);
+    const calls = vi.mocked(installForTarget).mock.calls;
+    expect(calls.length).toBe(1);
+    expect(calls[0]![2]).toEqual({ verify: false });
   });
 });
