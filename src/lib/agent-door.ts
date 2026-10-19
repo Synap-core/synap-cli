@@ -251,7 +251,7 @@ export async function connectKnownAgent(
     workspaceId: scope.workspaceId,
     projectId: scope.projectId,
     withMcp: opts.withMcp,
-  });
+  }, NO_STAMP);
 
   log.blank();
   if (!ok) {
@@ -496,6 +496,14 @@ export async function addDetectedAgents(pod: AgentPod, scope: AgentScope): Promi
 }
 
 /**
+ * The install must not call the agent's `/mcp`: any authenticated call bumps the
+ * key's `lastUsedAt`, which the desktop reads as "agent connected". The honest
+ * confirm (`confirmSurfaceKey` → `/auth/key-state`) does not stamp, so the
+ * desktop flips only on the agent's own first call.
+ */
+const NO_STAMP = { verify: false } as const;
+
+/**
  * Several known clients at once: every key approved on ONE page first, then
  * each installed, one line per client. `synap init` connects through here too.
  */
@@ -519,7 +527,7 @@ export async function connectAgentsBatch<T extends TargetName>(
           workspaceId: scope.workspaceId,
           projectId: scope.projectId,
           unattended: true,
-        })
+        }, NO_STAMP)
       );
       return {
         ok: run.value === true,
