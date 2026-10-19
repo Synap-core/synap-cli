@@ -38,18 +38,29 @@ interface EntityItem {
   properties?: Record<string, unknown>;
 }
 
+// The readers THROW on a failed read (hubGet raises HubError) — a failure is
+// never folded into [] (an EMPTY section). contextSummary settles each section
+// on its own and says which one could not be read.
+
+/** One section's read: its rows, or why it could not be read. */
+type SectionRead = { items: EntityItem[] } | { error: string };
+
+async function settle(read: Promise<EntityItem[]>): Promise<SectionRead> {
+  try {
+    return { items: await read };
+  } catch (e) {
+    return { error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
 async function fetchEntities(
   cfg: HubConfig,
   params: Record<string, string | number>,
   workspaceId: string | undefined
 ): Promise<EntityItem[]> {
-  try {
-    if (workspaceId) params.workspaceId = workspaceId;
-    const res = await hubGet("/entities", params, cfg) as Record<string, unknown>;
-    return unwrapList<EntityItem>(res, ["entities", "items"]);
-  } catch {
-    return [];
-  }
+  if (workspaceId) params.workspaceId = workspaceId;
+  const res = await hubGet("/entities", params, cfg) as Record<string, unknown>;
+  return unwrapList<EntityItem>(res, ["entities", "items"]);
 }
 
 async function fetchProposals(
@@ -57,14 +68,10 @@ async function fetchProposals(
   workspaceId: string | undefined,
   limit: number
 ): Promise<EntityItem[]> {
-  try {
-    const params: Record<string, string | number> = { status: "pending", limit };
-    if (workspaceId) params.workspaceId = workspaceId;
-    const res = await hubGet("/proposals", params, cfg) as Record<string, unknown>;
-    return unwrapList<EntityItem>(res, ["proposals", "items"]);
-  } catch {
-    return [];
-  }
+  const params: Record<string, string | number> = { status: "pending", limit };
+  if (workspaceId) params.workspaceId = workspaceId;
+  const res = await hubGet("/proposals", params, cfg) as Record<string, unknown>;
+  return unwrapList<EntityItem>(res, ["proposals", "items"]);
 }
 
 async function fetchSessions(
@@ -72,14 +79,10 @@ async function fetchSessions(
   workspaceId: string | undefined,
   limit: number
 ): Promise<EntityItem[]> {
-  try {
-    const params: Record<string, string | number> = { status: "active", limit };
-    if (workspaceId) params.workspaceId = workspaceId;
-    const res = await hubGet("/focus-sessions", params, cfg) as Record<string, unknown>;
-    return unwrapList<EntityItem>(res, ["sessions", "items"]);
-  } catch {
-    return [];
-  }
+  const params: Record<string, string | number> = { status: "active", limit };
+  if (workspaceId) params.workspaceId = workspaceId;
+  const res = await hubGet("/focus-sessions", params, cfg) as Record<string, unknown>;
+  return unwrapList<EntityItem>(res, ["sessions", "items"]);
 }
 
 export async function contextSummary(opts: ContextOpts): Promise<void> {
@@ -94,12 +97,24 @@ export async function contextSummary(opts: ContextOpts): Promise<void> {
       routing?.memoryWorkspaceId ??
       cfg.workspaceId;
 
-    const [rawKnowledge, proposals, tasks, sessions] = await Promise.all([
-      fetchEntities(cfg, { profileSlug: "knowledge", limit }, workspaceId),
-      fetchProposals(cfg, workspaceId, limit),
-      fetchEntities(cfg, { profileSlug: "task", limit, status: "todo" }, workspaceId),
-      fetchSessions(cfg, workspaceId, limit),
+    const [knowledgeRead, proposalsRead, tasksRead, sessionsRead] = await Promise.all([
+      settle(fetchEntities(cfg, { profileSlug: "knowledge", limit }, workspaceId)),
+      settle(fetchProposals(cfg, workspaceId, limit)),
+      settle(fetchEntities(cfg, { profileSlug: "task", limit, status: "todo" }, workspaceId)),
+      settle(fetchSessions(cfg, workspaceId, limit)),
     ]);
+    const reads = [knowledgeRead, proposalsRead, tasksRead, sessionsRead];
+    // Nothing could be read at all: that is a failed command, not an empty pod.
+    if (reads.every((r) => "error" in r)) {
+      throw new Error(
+        `could not read the pod — ${(reads[0] as { error: string }).error}`
+      );
+    }
+    const itemsOf = (r: SectionRead): EntityItem[] => ("items" in r ? r.items : []);
+    const rawKnowledge = itemsOf(knowledgeRead);
+    const proposals = itemsOf(proposalsRead);
+    const tasks = itemsOf(tasksRead);
+    const sessions = itemsOf(sessionsRead);
 
     // Filter knowledge by repo tag if requested
     const knowledge = opts.repo
@@ -114,18 +129,31 @@ export async function contextSummary(opts: ContextOpts): Promise<void> {
       : rawKnowledge;
 
     if (opts.json) {
-      console.log(JSON.stringify({ section: "knowledge", items: knowledge }));
-      console.log(JSON.stringify({ section: "proposals", items: proposals }));
-      console.log(JSON.stringify({ section: "tasks", items: tasks }));
-      console.log(JSON.stringify({ section: "sessions", items: sessions }));
+      // A failed section carries `error` and NO `items` — a reader can never
+      // mistake it for an empty one.
+      const line = (section: string, read: SectionRead, items: EntityItem[]) =>
+        JSON.stringify("error" in read ? { section, error: read.error } : { section, items });
+      console.log(line("knowledge", knowledgeRead, knowledge));
+      console.log(line("proposals", proposalsRead, proposals));
+      console.log(line("tasks", tasksRead, tasks));
+      console.log(line("sessions", sessionsRead, sessions));
       return;
     }
+
+    /** The failed-read line, printed where "(none)" would have lied. */
+    const unreadable = (read: SectionRead): boolean => {
+      if (!("error" in read)) return false;
+      console.log(chalk.yellow(`  (could not read: ${read.error})`));
+      return true;
+    };
 
     // ── Markdown output ────────────────────────────────────────────────────
 
     // Knowledge
     console.log(chalk.bold("\n## Engineering Knowledge"));
-    if (knowledge.length === 0) {
+    if (unreadable(knowledgeRead)) {
+      // said above
+    } else if (knowledge.length === 0) {
       console.log(chalk.dim("  (none)"));
     } else {
       for (const item of knowledge) {
@@ -140,8 +168,16 @@ export async function contextSummary(opts: ContextOpts): Promise<void> {
     }
 
     // Proposals
-    console.log(chalk.bold(`\n## Open Proposals (${proposals.length} pending)`));
-    if (proposals.length === 0) {
+    console.log(
+      chalk.bold(
+        "error" in proposalsRead
+          ? "\n## Open Proposals (unknown)"
+          : `\n## Open Proposals (${proposals.length} pending)`
+      )
+    );
+    if (unreadable(proposalsRead)) {
+      // said above
+    } else if (proposals.length === 0) {
       console.log(chalk.dim("  (none)"));
     } else {
       for (const item of proposals) {
@@ -153,8 +189,12 @@ export async function contextSummary(opts: ContextOpts): Promise<void> {
     }
 
     // Tasks
-    console.log(chalk.bold(`\n## Active Tasks (${tasks.length})`));
-    if (tasks.length === 0) {
+    console.log(
+      chalk.bold("error" in tasksRead ? "\n## Active Tasks (unknown)" : `\n## Active Tasks (${tasks.length})`)
+    );
+    if (unreadable(tasksRead)) {
+      // said above
+    } else if (tasks.length === 0) {
       console.log(chalk.dim("  (none)"));
     } else {
       for (const item of tasks) {
@@ -165,8 +205,16 @@ export async function contextSummary(opts: ContextOpts): Promise<void> {
     }
 
     // Focus sessions
-    console.log(chalk.bold(`\n## Active Focus Sessions (${sessions.length})`));
-    if (sessions.length === 0) {
+    console.log(
+      chalk.bold(
+        "error" in sessionsRead
+          ? "\n## Active Focus Sessions (unknown)"
+          : `\n## Active Focus Sessions (${sessions.length})`
+      )
+    );
+    if (unreadable(sessionsRead)) {
+      // said above
+    } else if (sessions.length === 0) {
       console.log(chalk.dim("  (none)"));
     } else {
       for (const s of sessions as Array<Record<string, unknown>>) {
