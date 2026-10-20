@@ -63,6 +63,25 @@ export interface AuthStatus {
   isActive?: boolean;
   keyType?: string | null;
   workspaceId?: string | null;
+  /**
+   * What the key may touch — its grant (pod ≥ owner-app-connect-key; absent
+   * on older pods, null when the pod read no grant for the request).
+   */
+  access?: KeyAccess | null;
+}
+
+/** `/auth/status` `access`: the calling key's grant, ids and patterns only. */
+export interface KeyAccess {
+  isFullAccess: boolean;
+  /** "full access", or what limits it ("limited to 1 space (<id>)"). */
+  summary: string;
+  scopes: Array<{
+    permissions: string[];
+    workspaceIds: string[] | null;
+    projectIds: string[] | null;
+    entityIds: string[] | null;
+  }>;
+  clientId: string | null;
 }
 
 /** Introspect a key. `apiKey` overrides `cfg.apiKey` (used by `whoami` to probe both sides of a divergence). */
