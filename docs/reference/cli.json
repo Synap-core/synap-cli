@@ -2896,12 +2896,6 @@
             "takesValue": "required"
           },
           {
-            "flags": "--mcp-server <name>",
-            "long": "--mcp-server",
-            "description": "Claude Code MCP server name for this pod (detected from ~/.claude.json by default)",
-            "takesValue": "required"
-          },
-          {
             "flags": "--allowed-tools <list>",
             "long": "--allowed-tools",
             "description": "Comma-separated Claude tools allowed without asking (the pod MCP server is always added)",
