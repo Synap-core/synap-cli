@@ -28,7 +28,7 @@
  * blocked), classification is deliberately three-valued and the guard is
  * belt-and-braces:
  *   • `agent`   — positive agent signal → refuse locally, before the network call.
- *   • `human`   — positive human signal (`user_pat`) → never blocked.
+ *   • `human`   — positive human signal (`user_pat` NOT owned by an agent user) → never blocked.
  *   • `unknown` — no signal → PROCEED, and translate the server's 403 after the
  *                 fact (`isAgentReviewRejection`). The server stays authoritative.
  *
@@ -115,12 +115,13 @@ const AGENT_EMAIL_DOMAIN = "@synap.agent";
 
 export function classifyReviewer(status: AuthStatus | null | undefined): ReviewClass {
   if (!status) return "unknown";
-  // A personal access token is a HUMAN session by construction — it carries no
-  // linkedUserId, so `rejectAgentReviewer` never fires for it. Check this FIRST
-  // so a human key can never be caught by the email heuristic below.
-  if (status.keyType === "user_pat") return "human";
+  // The agent domain FIRST: the server derives the agent from the key owner's
+  // `userType === 'agent'` (access/key-identity.ts), whatever the key type, and
+  // only agent users carry the synthetic domain. The device flow mints
+  // `user_pat` keys owned by a machine agent, so keyType alone is not human.
   const email = (status.userEmail ?? "").toLowerCase();
   if (email.endsWith(AGENT_EMAIL_DOMAIN)) return "agent";
+  if (status.keyType === "user_pat") return "human";
   return "unknown";
 }
 

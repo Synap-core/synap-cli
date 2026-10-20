@@ -45,12 +45,13 @@ describe("classifyReviewer — who may perform a human review", () => {
     ).toBe("human");
   });
 
-  it("user_pat wins even if the identity looks agent-shaped", () => {
-    // keyType is the positive human signal and is checked FIRST, so the email
-    // heuristic can never demote a real PAT.
+  it("a user_pat OWNED by an agent user is 'agent' (device-flow computer key)", () => {
+    // The device flow mints `user_pat` keys whose owner is a machine agent
+    // (`agent-machine-<id>@synap.agent`). The server derives the agent from the
+    // owner's userType, so it refuses approve; the CLI must not say "yes".
     expect(
-      classifyReviewer({ keyType: "user_pat", userEmail: "agent-x-1@synap.agent" })
-    ).toBe("human");
+      classifyReviewer({ keyType: "user_pat", userEmail: "agent-machine-410cae52@synap.agent" })
+    ).toBe("agent");
   });
 
   it("an unrecognised key is 'unknown' — proceed, let the server decide", () => {
