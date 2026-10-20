@@ -94,6 +94,12 @@ describe("prompt + verdict", () => {
     expect(p).toContain("devbox/c5a34b78-");
     expect(p).toContain("WORKER-RESULT:");
   });
+  it("lets the goal name the directory and allows only a preview deploy the goal asks for", () => {
+    const p = buildWorkerPrompt({ sessionId: "c5a34b78-0000", goal: "g", agentName: "cc-devbox", cwd: "/w", mcpServer: "synap-pod" });
+    expect(p).toContain("Work in /w, or in the directory the session goal names");
+    expect(p).toContain("Never deploy to production");
+    expect(p).toContain("preview deploy only when the session goal asks for one");
+  });
   it("reads the last WORKER-RESULT line", () => {
     expect(workerVerdict("work\nWORKER-RESULT: done — posted report")).toBe("done — posted report");
     expect(workerVerdict("no verdict here")).toBeUndefined();
