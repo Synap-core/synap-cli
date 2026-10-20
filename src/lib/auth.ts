@@ -131,8 +131,8 @@ export async function isLoggedIn(): Promise<{
  * Store a manually provided API token (Better Auth session token).
  * Validates against the CP before saving.
  *
- * Usage: synap login --token <token>
- * Get a token from: https://synap.live/account/tokens
+ * Not wired to any command: `synap login` has no --token flag (it uses the
+ * device-approval flow below, which works from a box without a browser).
  */
 export async function loginWithToken(token: string): Promise<StoredCredentials | null> {
   const res = await fetch(`${CP_URL}/auth/me`, {

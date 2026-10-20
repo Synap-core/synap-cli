@@ -1,0 +1,46 @@
+name: CLI reference
+
+# docs/reference/cli.{json,md} are generated from the commander tree that
+# src/index.ts builds (scripts/gen-cli-reference.mjs). The doc site consumes
+# them, so a command, option or description changed without regenerating would
+# publish a wrong reference. This job regenerates in memory and fails when the
+# committed files differ. Fix: `npm run docs:cli` and commit the result.
+
+on:
+  pull_request:
+    paths:
+      - "src/**"
+      - "scripts/gen-cli-reference.mjs"
+      - "docs/reference/**"
+      - "package.json"
+      - ".github/workflows/cli-reference.yml"
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "scripts/gen-cli-reference.mjs"
+      - "docs/reference/**"
+      - "package.json"
+      - ".github/workflows/cli-reference.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22.18.0"
+
+      # `npm install`, not `npm ci`, for the reason recorded in publish-cli.yml:
+      # the committed lockfile lags the manifest.
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Check the CLI reference is up to date
+        run: npm run docs:cli:check

@@ -530,7 +530,7 @@ program
           console.log(chalk.green(`  ✓ Logged in as ${creds.email} — private templates unlocked.`));
         }
       } else {
-        console.log(chalk.dim("  Later: synap login  ·  or  synap login --token <token>  (synap.live/account/tokens)"));
+        console.log(chalk.dim("  Later: synap login  (prints a link you can open on any device)"));
       }
     }
 

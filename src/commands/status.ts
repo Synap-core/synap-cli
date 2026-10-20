@@ -106,7 +106,7 @@ export async function status(opts: { json?: boolean } = {}): Promise<void> {
         log.dim(`Token refreshed (valid until ${new Date(creds.expiresAt).toLocaleDateString()})`);
       } else {
         log.warn("Session expired — run: synap login");
-        log.dim("On a server without a browser? Use: synap login --token <token>");
+        log.dim("On a server without a browser? synap login prints a link to open on any device.");
       }
     } else {
       // Token is locally fresh — validate in background but don't block on failure.
