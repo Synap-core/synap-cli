@@ -47,13 +47,11 @@ Health check across the stack: pod, auth, Intelligence Service.
 ### `synap login`
 
 ```bash
-synap login                      # Opens browser
-synap login --token <token>      # Headless / server
+synap login                      # Prints a sign-in link and code, opens the browser when it can
+synap login --reconnect [name]   # Re-authenticate a saved pod without re-entering its URL
 ```
 
-Token: [synap.live/account/tokens](https://synap.live/account/tokens). Your session auto-refreshes for 7 days.
-
-### `synap logout`
+No browser on this machine (SSH, a server)? Open the printed link on any device and enter the code. Your session auto-refreshes for 7 days.
 
 ### `synap connect`
 
@@ -73,7 +71,7 @@ Stored in `~/.synap/` (user-only, `chmod 600`):
 | File | Contents |
 |---|---|
 | `credentials.json` | CP auth token |
-| `pod-config.json` | Pod URL, workspace ID, agent user ID, Hub API key |
+| `config.json` | Saved pods (URL, workspace ID, agent user ID, Hub API key), the active pod, per-agent keys. Replaces the older `pod-config.json`, which is migrated on first read |
 
 Never commit these.
 
@@ -129,7 +127,7 @@ synap init --pod-url https://<your-pod-domain>
 Pod unreachable. Check `synap status` and docker compose.
 
 **"Session expired" in synap status**
-Run `synap login --token <token>` on the server.
+Run `synap login` and open the printed link on any device.
 
 ---
 
