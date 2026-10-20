@@ -13,7 +13,9 @@
     "prepublishOnly": "npm run sync-skills && npm run build",
     "postbuild": "chmod +x dist/index.js",
     "test": "vitest run",
-    "verify-artifact": "node scripts/verify-artifact.mjs"
+    "verify-artifact": "node scripts/verify-artifact.mjs",
+    "docs:cli": "node scripts/gen-cli-reference.mjs",
+    "docs:cli:check": "node scripts/gen-cli-reference.mjs --check"
   },
   "dependencies": {
     "@synap-core/hub-rest-client": "^1.1.1",
