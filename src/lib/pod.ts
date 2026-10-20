@@ -3,6 +3,7 @@
  */
 
 import { readJsonStrict, writeFileAtomic, ensureSecretDir } from "./atomic-file.js";
+import { PodMovedError, podFetch } from "./pod-moved.js";
 import { execSync } from "child_process";
 import fs from "node:fs";
 import path from "node:path";
@@ -611,6 +612,11 @@ export interface PodStatus {
   version?: string;
   entityCount?: number;
   workspaceId?: string;
+  /**
+   * The address redirects to ANOTHER host — the pod has most likely moved
+   * (pod-moved.ts). Never followed; `synap doctor` asks the Control Plane.
+   */
+  moved?: boolean;
 }
 
 /**
@@ -620,7 +626,7 @@ export async function checkPodHealth(podUrl: string): Promise<PodStatus> {
   const status: PodStatus = { url: podUrl, healthy: false };
 
   try {
-    const res = await fetch(`${podUrl}/health`, {
+    const res = await podFetch(`${podUrl}/health`, {
       signal: AbortSignal.timeout(5000),
     });
     if (res.ok) {
@@ -628,8 +634,9 @@ export async function checkPodHealth(podUrl: string): Promise<PodStatus> {
       const data = (await res.json()) as Record<string, unknown>;
       status.version = data.version as string | undefined;
     }
-  } catch {
-    // pod unreachable
+  } catch (err) {
+    // pod unreachable — or it answered with a redirect to another host
+    if (err instanceof PodMovedError) status.moved = true;
   }
 
   return status;

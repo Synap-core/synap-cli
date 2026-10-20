@@ -20,7 +20,7 @@ import { ensureSecretDir, writeSecretFile } from "./atomic-file.js";
 import path from "node:path";
 import os from "node:os";
 
-const CP_URL =
+export const CP_URL =
   process.env.SYNAP_CP_URL || "https://api.synap.live";
 const LANDING_URL =
   process.env.SYNAP_LANDING_URL || "https://synap.live";

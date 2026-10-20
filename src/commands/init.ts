@@ -23,13 +23,14 @@ import {
   setActivePod,
   type LocalPodConfig,
 } from "../lib/pod.js";
-import { login, isLoggedIn, listPods, podUrlOf, getStoredToken, waitForPodCallback } from "../lib/auth.js";
+import { CP_URL, login, isLoggedIn, listPods, podUrlOf, getStoredToken, waitForPodCallback } from "../lib/auth.js";
 import { detectAgents, type DetectableAgent } from "../lib/agent-detect.js";
 import { createPodInBrowser } from "../lib/init-pod.js";
 import { buildPairLink, renderTerminalQr } from "../lib/pair-link.js";
 import { buildHandoff } from "../lib/init-handoff.js";
 import { connectAgentsBatch } from "../lib/agent-door.js";
 import { INIT_EXIT, InitExit } from "../lib/init-exit.js";
+import { askControlPlaneWherePodIs, podMovedMessage } from "../lib/pod-moved.js";
 import { reserveStdoutForJson } from "../lib/init-output.js";
 import { isManagedPod, keyChoices, type KeyChoice } from "../lib/init-flow.js";
 import {
@@ -101,6 +102,28 @@ function parseAgents(list: string): DetectableAgent[] {
   return [...new Set(names)] as DetectableAgent[];
 }
 
+/**
+ * The one line for a pod address that redirects to another host: the new
+ * address when the Control Plane knows it (never the redirect's), else what
+ * to run to find it.
+ */
+async function movedPodLine(
+  podUrl: string,
+  next: (newUrl: string) => string,
+  saved = false
+): Promise<string> {
+  const answer = await askControlPlaneWherePodIs({
+    podUrl,
+    cpUrl: CP_URL,
+    cpToken: getStoredToken()?.token,
+  });
+  if (answer.kind === "moved") return `The pod at ${podUrl} moved to ${answer.podUrl}. ${next(answer.podUrl)}`;
+  if (saved) return podMovedMessage(podUrl);
+  return answer.kind === "signed-out"
+    ? `The pod at ${podUrl} has a new address. Run: synap login — then run init again to look it up.`
+    : `The pod at ${podUrl} has a new address. Use the address shown in your account.`;
+}
+
 async function runInit(opts: InitOptions): Promise<InitSummary | null> {
   const tty = Boolean(process.stdin.isTTY);
   if (!tty && (!opts.podUrl || !opts.agents)) {
@@ -113,6 +136,12 @@ async function runInit(opts: InitOptions): Promise<InitSummary | null> {
   // typo'd URL fails loud with a checklist instead of silent 500s later.
   if (opts.podUrl) {
     const probe = await checkPodHealth(opts.podUrl);
+    if (probe.moved) {
+      throw new InitExit(
+        INIT_EXIT.noPod,
+        await movedPodLine(opts.podUrl, (to) => `Run: synap init --pod-url ${to}`)
+      );
+    }
     if (!probe.healthy) {
       printUnreachablePodInstructions(opts.podUrl);
       throw new InitExit(INIT_EXIT.noPod, `Pod at ${opts.podUrl} is not reachable.`, true);
@@ -161,9 +190,17 @@ async function resolveDesktopPod(opts: InitOptions): Promise<{ podUrl: string; p
   const saved = getLocalPodConfig();
   if (saved?.podUrl) {
     const spinner = ora(`Checking ${saved.podUrl}…`).start();
-    if ((await checkPodHealth(saved.podUrl)).healthy) {
+    const health = await checkPodHealth(saved.podUrl);
+    if (health.healthy) {
       spinner.succeed(`Pod: ${saved.podUrl}`);
       return { podUrl: saved.podUrl, podId: saved.podId };
+    }
+    if (health.moved) {
+      spinner.fail();
+      throw new InitExit(
+        INIT_EXIT.noPod,
+        await movedPodLine(saved.podUrl, () => "Run: synap doctor --fix", true)
+      );
     }
     spinner.warn(`Your saved pod at ${saved.podUrl} is not answering.`);
   }
@@ -209,9 +246,17 @@ async function noPodStep(): Promise<{ podUrl: string; podId?: string }> {
     const { url } = await prompts({ type: "text", name: "url", message: "Pod URL:" });
     if (!url) throw new InitExit(INIT_EXIT.cancelled, "Cancelled.");
     const spinner = ora("Checking pod health...").start();
-    if ((await checkPodHealth(url)).healthy) {
+    const health = await checkPodHealth(url);
+    if (health.healthy) {
       spinner.succeed(`Pod: ${url}`);
       return { podUrl: url };
+    }
+    if (health.moved) {
+      spinner.fail();
+      throw new InitExit(
+        INIT_EXIT.noPod,
+        await movedPodLine(url, (to) => `Run: synap init --pod-url ${to}`)
+      );
     }
     spinner.fail(`Pod not reachable at ${url}`);
     throw new InitExit(INIT_EXIT.noPod, `Pod not reachable at ${url}`, true);

@@ -50,14 +50,18 @@ export async function podsList(): Promise<void> {
 
   const checks = await Promise.all(
     profiles.map(async (p) => {
-      const health = await checkPodHealth(p.config.podUrl).catch(() => ({ healthy: false }));
-      return { ...p, healthy: health.healthy };
+      const health = await checkPodHealth(p.config.podUrl).catch(() => ({ healthy: false, moved: false }));
+      return { ...p, healthy: health.healthy, moved: Boolean(health.moved) };
     })
   );
 
   for (const p of checks) {
     const active = p.active ? chalk.green(" ● active") : chalk.dim(" ○");
-    const health = p.healthy ? chalk.green("healthy") : chalk.red("unreachable");
+    const health = p.healthy
+      ? chalk.green("healthy")
+      : p.moved
+        ? chalk.yellow("moved — run: synap doctor --fix")
+        : chalk.red("unreachable");
     const label = p.config.label ? chalk.dim(` (${p.config.label})`) : "";
     console.log(`  ${chalk.bold(p.name.padEnd(14))}${active}  ${health}  ${chalk.dim(p.config.podUrl)}${label}`);
   }

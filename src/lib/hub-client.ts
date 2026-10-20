@@ -27,6 +27,7 @@ import {
 } from "./directory-lens.js";
 import { preferClaudeCodeSurfaceKey } from "./key-source.js";
 import { samePodOrigin } from "./project-ref.js";
+import { PodMovedError, podFetch } from "./pod-moved.js";
 import { HubRestClient } from "@synap-core/hub-rest-client";
 import { log } from "../utils/logger.js";
 import chalk from "chalk";
@@ -444,6 +445,11 @@ function renderHubErrorBody(err: unknown): void {
   if (err instanceof HubNetworkError) {
     log.error(err.message);
     log.hint(err.hint);
+    return;
+  }
+  if (err instanceof PodMovedError) {
+    // One line: what happened and what to run.
+    log.error(err.message);
     return;
   }
   if (!(err instanceof HubError)) {
@@ -960,8 +966,9 @@ async function hubFetchWithRetry(
     await acquireHubSlot();
     let res: Response;
     try {
-      res = await fetch(url, init);
+      res = await podFetch(url, init);
     } catch (err) {
+      if (err instanceof PodMovedError) throw err;
       throw networkError(err, url, labelMethod, labelPath, timeoutMs);
     }
     if (res.status !== 429) return res;
@@ -1105,13 +1112,14 @@ export async function hubPostMultipartRetryable(
     const url = `${cfg.podUrl}/api/hub${path}`;
     let res: Response;
     try {
-      res = await fetch(url, {
+      res = await podFetch(url, {
         method: "POST",
         headers: { Authorization: `Bearer ${cfg.apiKey}`, ...sessionHeaders(cfg) },
         body: form,
         signal: AbortSignal.timeout(timeoutMs),
       });
     } catch (err) {
+      if (err instanceof PodMovedError) throw err;
       throw networkError(err, url, "POST multipart", path, timeoutMs);
     }
     if (res.status !== 429) {
@@ -1145,13 +1153,14 @@ export async function hubPatch(path: string, body: unknown, cfg: HubConfig): Pro
   const url = `${cfg.podUrl}/api/hub${path}`;
   let res: Response;
   try {
-    res = await fetch(url, {
+    res = await podFetch(url, {
       method: "PATCH",
       headers: { Authorization: `Bearer ${cfg.apiKey}`, "Content-Type": "application/json", ...sessionHeaders(cfg) },
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(15_000),
     });
   } catch (err) {
+    if (err instanceof PodMovedError) throw err;
     throw networkError(err, url, "PATCH", path, 15_000);
   }
   if (!res.ok) {
@@ -1168,12 +1177,13 @@ export async function hubDelete(path: string, cfg: HubConfig): Promise<unknown> 
   const url = `${cfg.podUrl}/api/hub${path}`;
   let res: Response;
   try {
-    res = await fetch(url, {
+    res = await podFetch(url, {
       method: "DELETE",
       headers: { Authorization: `Bearer ${cfg.apiKey}`, ...sessionHeaders(cfg) },
       signal: AbortSignal.timeout(15_000),
     });
   } catch (err) {
+    if (err instanceof PodMovedError) throw err;
     throw networkError(err, url, "DELETE", path, 15_000);
   }
   if (!res.ok) {

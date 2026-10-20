@@ -25,7 +25,7 @@
 
 import chalk from "chalk";
 import { log } from "../utils/logger.js";
-import { getActivePodConfig, getActiveWorkspaceId, getActiveProjectId, listPodProfiles, checkPodHealth } from "../lib/pod.js";
+import { getActivePodConfig, getActiveWorkspaceId, getActiveProjectId, listPodProfiles, checkPodHealth, findPodNameByUrl } from "../lib/pod.js";
 import { resolveHubConfig, hubGet, HubError, type HubConfig } from "../lib/hub-client.js";
 import { formatKeySource, resolveKeySource } from "../lib/key-source.js";
 import { resolveLensProvenance, type LensRung } from "../lib/describe-lens.js";
@@ -37,6 +37,8 @@ import { connectionLines, type PodConnection } from "../lib/agent-connections.js
 import { thisComputerInstanceIds } from "../lib/machine-instance.js";
 import { tildify } from "../lib/key-locations.js";
 import { cliBuild, formatCliBuild } from "../lib/cli-build.js";
+import { CP_URL, getStoredToken } from "../lib/auth.js";
+import { askControlPlaneWherePodIs, POD_MOVED_HINT } from "../lib/pod-moved.js";
 import os from "node:os";
 import path from "node:path";
 import { unwrapList } from "../lib/unwrapList.js";
@@ -75,6 +77,79 @@ async function printAgentConnections(cfg: HubConfig): Promise<void> {
   for (const r of live) console.log(`  ${r.name.padEnd(width)}${r.lines.join(chalk.dim("   ·   "))}`);
   if (idle) console.log(chalk.dim(`  +${idle} agent${idle === 1 ? "" : "s"} with no live connection — synap agents list`));
   if (olderPod) console.log(chalk.dim("  (this pod predates per-computer connections — update it to see them)"));
+}
+
+/** A saved pod address the Control Plane says has moved. */
+export interface PodMove {
+  from: string;
+  to: string;
+  /** The saved profile holding `from`, when there is one. */
+  profileName?: string;
+}
+
+/** Hosted pods (the only ones the Control Plane can move) live under synap.live. */
+function isSynapHosted(podUrl: string): boolean {
+  try {
+    const host = new URL(podUrl).hostname;
+    return host === "synap.live" || host.endsWith(".synap.live");
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Why a pod host did not answer, when the reason is a move. Null when it is not
+ * one (or nothing suggests it), so the caller keeps its generic message. Asks
+ * the Control Plane only on a signal: a redirect to another host, or a hosted
+ * address that stopped answering.
+ */
+export async function diagnosePodMove(
+  podUrl: string,
+  health: { moved?: boolean },
+  activeName: string
+): Promise<{ check: CheckResult; move?: PodMove } | null> {
+  if (!health.moved && !isSynapHosted(podUrl)) return null;
+  const answer = await askControlPlaneWherePodIs({
+    podUrl,
+    cpUrl: CP_URL,
+    cpToken: getStoredToken()?.token,
+  });
+  const name = "Pod host resolves";
+  if (answer.kind === "moved") {
+    return {
+      check: {
+        name,
+        ok: false,
+        detail: `${podUrl} has a new address: ${answer.podUrl}`,
+        fix: POD_MOVED_HINT,
+      },
+      move: { from: podUrl, to: answer.podUrl, profileName: findPodNameByUrl(podUrl) },
+    };
+  }
+  if (!health.moved) return null;
+  return {
+    check: {
+      name,
+      ok: false,
+      detail: `${podUrl} sends its requests to another address, and Synap does not follow it`,
+      fix:
+        answer.kind === "signed-out"
+          ? "Sign in so Synap can look up the new address: synap login — then run: synap doctor --fix"
+          : `Find the pod's address in your account, then run: synap pods update ${activeName} <new-url>`,
+    },
+  };
+}
+
+/** `doctor --fix` for a moved pod: the same door as `synap pods update`. */
+async function fixPodMove(move: PodMove): Promise<boolean> {
+  if (!move.profileName) {
+    console.log(`  ${chalk.red("✗")} No saved pod uses ${move.from}, so there is nothing to update here.`);
+    console.log(chalk.dim(`    → Set SYNAP_POD_URL to ${move.to}, or save it: synap pods add`));
+    return false;
+  }
+  const { podsUpdate } = await import("./pods.js");
+  await podsUpdate(move.profileName, move.to);
+  return findPodNameByUrl(move.to) === move.profileName;
 }
 
 interface DoctorOpts {
@@ -278,6 +353,7 @@ export async function doctor(opts: DoctorOpts = {}): Promise<void> {
   }
 
   let hostServed = false;
+  let podMove: PodMove | undefined;
   const names: { workspace?: string; project?: string; podVersion?: string } = {};
   const health = await checkPodHealth(podUrl);
   names.podVersion = health.version;
@@ -289,15 +365,23 @@ export async function doctor(opts: DoctorOpts = {}): Promise<void> {
       detail: `${podUrl} is served${health.version ? ` (v${health.version})` : ""}`,
     });
   } else {
-    // The classic failure this check exists for: a saved profile URL that no
-    // longer resolves to a live pod — most often a stale/migrated domain, not
-    // a transient network blip (checkPodHealth already retried the timeout).
-    checks.push({
-      name: "Pod host resolves",
-      ok: false,
-      detail: `${podUrl} did not answer /health`,
-      fix: `Your profile URL may be stale. Run: synap pods list   (see saved pods) — or: synap pods update ${activeName} <new-url>`,
-    });
+    // A moved pod: the old name redirects elsewhere, or (after the redirect
+    // window) no longer answers. Only the Control Plane says where it went.
+    const diagnosis = await diagnosePodMove(podUrl, health, activeName);
+    if (diagnosis) {
+      checks.push(diagnosis.check);
+      podMove = diagnosis.move;
+    } else {
+      // The classic failure this check exists for: a saved profile URL that no
+      // longer resolves to a live pod — most often a stale/migrated domain, not
+      // a transient network blip (checkPodHealth already retried the timeout).
+      checks.push({
+        name: "Pod host resolves",
+        ok: false,
+        detail: `${podUrl} did not answer /health`,
+        fix: `Your profile URL may be stale. Run: synap pods list   (see saved pods) — or: synap pods update ${activeName} <new-url>`,
+      });
+    }
   }
 
   // ── (b) Key authenticates against this pod ────────────────────────────────
@@ -458,7 +542,7 @@ export async function doctor(opts: DoctorOpts = {}): Promise<void> {
     workspaceId: cfgResolved?.workspaceId,
     projectId: cfgResolved?.projectId,
     ...names,
-  }, keyHealth, cfgResolved);
+  }, keyHealth, cfgResolved, podMove);
 }
 
 /**
@@ -774,7 +858,8 @@ async function finish(
   opts: DoctorOpts,
   lens: { podUrl?: string; workspaceId?: string; projectId?: string; workspace?: string; project?: string; podVersion?: string },
   keyHealth?: KeyHealthReport,
-  hubCfg?: HubConfig
+  hubCfg?: HubConfig,
+  podMove?: PodMove
 ): Promise<void> {
   // Green requires every check to have VERIFIED something. An undetermined
   // check suppresses green (it is not a pass) but does not fail the run — only
@@ -877,6 +962,19 @@ async function finish(
         keyRow.ok = true;
         keyRow.unknown = false;
         keyRow.detail = "fixed and verified (MCP initialize)";
+      }
+    }
+  }
+
+  // ── A moved pod: rewrite the saved address through the one door ──────────
+  if (podMove && opts.fix) {
+    log.blank();
+    console.log(chalk.bold("Fixing"));
+    const hostRow = checks.find((c) => c.name === "Pod host resolves");
+    if (await fixPodMove(podMove)) {
+      if (hostRow) {
+        hostRow.ok = true;
+        hostRow.detail = `updated to ${podMove.to} — run synap doctor again to check the rest`;
       }
     }
   }
