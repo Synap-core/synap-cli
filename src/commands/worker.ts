@@ -28,7 +28,7 @@
 
 import { spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
-import { writeSecretFile } from "../lib/atomic-file.js";
+import { ensureSecretDir, writeSecretFile } from "../lib/atomic-file.js";
 import os from "node:os";
 import path from "node:path";
 import { resolveHubConfig, resolveUserId } from "../lib/hub-client.js";
@@ -42,7 +42,6 @@ export interface WorkerOptions {
   maxParallel?: string;
   claudeBin?: string;
   claudeConfigDir?: string;
-  mcpServer?: string;
   allowedTools?: string;
   skipPermissions?: boolean;
   dryRun?: boolean;
@@ -162,26 +161,32 @@ export function pickNew(items: HandedItem[], state: WorkerState, slots: number):
 }
 
 /**
- * The MCP server name the local Claude Code uses for THIS pod: the entry in
- * ~/.claude.json whose URL is `<podUrl>/mcp` (user or project scope).
+ * The pod MCP server every run gets, under this name, carrying the WORKER
+ * AGENT's own key. Runs never inherit the server in ~/.claude.json: whatever
+ * key that file holds (a `synap login --reconnect` on the box rewrites it with
+ * another agent's) would decide who the run posts as, and the worker would
+ * then read its own posts as follow-ups (2026-10-20).
  */
-export function findMcpServerName(claudeJson: unknown, podUrl: string): string | null {
-  const want = `${podUrl.replace(/\/+$/, "")}/mcp`;
-  const scan = (servers: unknown): string | null => {
-    if (!servers || typeof servers !== "object") return null;
-    for (const [name, v] of Object.entries(servers as Record<string, { url?: unknown }>)) {
-      if (typeof v?.url === "string" && v.url.replace(/\/+$/, "") === want) return name;
-    }
-    return null;
+export const RUN_MCP_SERVER = "synap-worker";
+
+export function runMcpConfig(podUrl: string, apiKey: string): { mcpServers: Record<string, unknown> } {
+  return {
+    mcpServers: {
+      [RUN_MCP_SERVER]: {
+        type: "http",
+        url: `${podUrl.replace(/\/+$/, "")}/mcp`,
+        headers: { Authorization: `Bearer ${apiKey}` },
+      },
+    },
   };
-  const cj = claudeJson as { mcpServers?: unknown; projects?: Record<string, { mcpServers?: unknown }> } | null;
-  const top = scan(cj?.mcpServers);
-  if (top) return top;
-  for (const p of Object.values(cj?.projects ?? {})) {
-    const hit = scan(p?.mcpServers);
-    if (hit) return hit;
-  }
-  return null;
+}
+
+/** Writes the run config owner-only (it holds the key) and returns its path. */
+export function writeRunMcpConfig(dir: string, config: { mcpServers: Record<string, unknown> }): string {
+  ensureSecretDir(dir);
+  const file = path.join(dir, "mcp.json");
+  writeSecretFile(file, JSON.stringify(config, null, 2));
+  return file;
 }
 
 export const DEFAULT_ALLOWED_TOOLS = ["Read", "Edit", "Write", "Glob", "Grep", "Bash", "TodoWrite"];
@@ -310,17 +315,8 @@ export async function workerCommand(opts: WorkerOptions): Promise<void> {
   const cwd = path.resolve(opts.cwd ?? path.join(os.homedir(), "Documents", "Code", "synap"));
   const claudeBin = opts.claudeBin ?? "claude";
 
-  const claudeJsonPath = path.join(opts.claudeConfigDir ?? os.homedir(), ".claude.json");
-  let mcpServer = opts.mcpServer ?? null;
-  if (!mcpServer && fs.existsSync(claudeJsonPath)) {
-    mcpServer = findMcpServerName(JSON.parse(fs.readFileSync(claudeJsonPath, "utf8")), cfg.podUrl);
-  }
-  if (!mcpServer) {
-    throw new Error(
-      `No Claude Code MCP server points at ${cfg.podUrl}/mcp in ${claudeJsonPath}. ` +
-        `Connect Claude Code to the pod with this agent's key, or pass --mcp-server <name>.`
-    );
-  }
+  const mcpServer = RUN_MCP_SERVER;
+  const mcpConfigPath = writeRunMcpConfig(stateDir(agent), runMcpConfig(cfg.podUrl, cfg.apiKey));
 
   const allowed = (opts.allowedTools ? opts.allowedTools.split(",") : DEFAULT_ALLOWED_TOOLS)
     .map((t) => t.trim())
@@ -358,8 +354,8 @@ export async function workerCommand(opts: WorkerOptions): Promise<void> {
   const launch = (item: HandedItem, resume?: { claudeSessionId: string; prompt: string }) => {
     const prompt =
       resume?.prompt ??
-      buildWorkerPrompt({ sessionId: item.id, goal: item.goal, agentName: agent, cwd, mcpServer: mcpServer as string });
-    const args = ["-p", prompt, "--output-format", "stream-json", "--verbose"];
+      buildWorkerPrompt({ sessionId: item.id, goal: item.goal, agentName: agent, cwd, mcpServer });
+    const args = ["-p", prompt, "--output-format", "stream-json", "--verbose", "--mcp-config", mcpConfigPath];
     if (resume) args.push("--resume", resume.claudeSessionId);
     if (opts.skipPermissions) args.push("--dangerously-skip-permissions");
     else args.push("--permission-mode", "acceptEdits", "--allowedTools", ...allowed);

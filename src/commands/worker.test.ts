@@ -1,7 +1,12 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   buildWorkerPrompt,
-  findMcpServerName,
+  RUN_MCP_SERVER,
+  runMcpConfig,
+  writeRunMcpConfig,
   AgentBoundForDispatchError,
   AgentPausedError,
   parseHandedToYou,
@@ -58,17 +63,29 @@ describe("pickNew", () => {
   });
 });
 
-describe("findMcpServerName", () => {
-  it("finds the user-scope server pointing at the pod", () => {
-    const cj = { mcpServers: { other: { url: "https://x/mcp" }, "synap-pod": { url: "https://pod.example/mcp/" } } };
-    expect(findMcpServerName(cj, "https://pod.example")).toBe("synap-pod");
+describe("the run's MCP server is pinned to the worker agent's own key", () => {
+  // A `synap login --reconnect` on the box rewrote ~/.claude.json with ANOTHER
+  // agent's key; runs that inherited it posted as that agent (2026-10-20).
+  it("points one http server at the pod with the worker's key", () => {
+    expect(runMcpConfig("https://pod.example/", "synap_hub_k")).toEqual({
+      mcpServers: {
+        [RUN_MCP_SERVER]: {
+          type: "http",
+          url: "https://pod.example/mcp",
+          headers: { Authorization: "Bearer synap_hub_k" },
+        },
+      },
+    });
   });
-  it("falls back to a project-scope server", () => {
-    const cj = { projects: { "/w": { mcpServers: { s: { url: "https://pod.example/mcp" } } } } };
-    expect(findMcpServerName(cj, "https://pod.example/")).toBe("s");
-  });
-  it("returns null when none matches", () => {
-    expect(findMcpServerName({ mcpServers: { s: { url: "https://other/mcp" } } }, "https://pod.example")).toBeNull();
+
+  it("writes it owner-only, replacing a wider file", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "worker-mcp-"));
+    const file = path.join(dir, "mcp.json");
+    fs.writeFileSync(file, "{}", { mode: 0o644 });
+    const written = writeRunMcpConfig(dir, runMcpConfig("https://pod.example", "k"));
+    expect(written).toBe(file);
+    expect(fs.statSync(file).mode & 0o777).toBe(0o600);
+    expect(JSON.parse(fs.readFileSync(file, "utf8")).mcpServers[RUN_MCP_SERVER].url).toBe("https://pod.example/mcp");
   });
 });
 
