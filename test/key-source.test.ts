@@ -64,6 +64,11 @@ describe("preferClaudeCodeSurfaceKey", () => {
     expect(r.userId).toBe("surface-user");
   });
 
+  it("with no SYNAP_USER_ID the user is asked of the pod (\"cli\")", () => {
+    const r = preferClaudeCodeSurfaceKey({ ...base, envUser: undefined, surface: null });
+    expect(r.userId).toBe("cli");
+  });
+
   it("falls back to envUser when surface has no agentUserId", () => {
     const r = preferClaudeCodeSurfaceKey({
       ...base,
@@ -121,8 +126,7 @@ describe("classifyKeySource", () => {
     });
   });
 
-  it("needs the full env triple (pod + key + user) before claiming env", () => {
-    // Missing SYNAP_USER_ID → profile rung (same as resolveHubConfig).
+  it("pod + key claim env without SYNAP_USER_ID (same as resolveHubConfig)", () => {
     expect(
       classifyKeySource({
         envPod: "https://pod.example",
@@ -130,6 +134,12 @@ describe("classifyKeySource", () => {
         envUser: undefined,
         profileName: "perso",
       })
+    ).toEqual({ source: "env", detail: "SYNAP_HUB_API_KEY" });
+  });
+
+  it("a pod URL without a key is not the env rung", () => {
+    expect(
+      classifyKeySource({ envPod: "https://pod.example", envUser: "u", profileName: "perso" })
     ).toEqual({ source: "profile", detail: "perso" });
   });
 });
