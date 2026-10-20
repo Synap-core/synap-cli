@@ -4,7 +4,7 @@
  * A Capability is a named, installable PACK of what you (and your AI) can do
  * (e.g. "Google Workspace", "Discord Bot"). Tools = its connection; skills = its
  * verbs; templates = the catalog. The user only ever lists, adds, and enables a
- * PACK — never a bare tool or skill (CAPABILITIES-NORTH-STAR.md).
+ * PACK — never a bare tool or skill (CAPABILITIES-NORTH-STAR, team pod).
  *
  * A capability VERB is a runnable action backed by a skill (verbId = skill name).
  * `run` is the launcher: it parses arbitrary `--key value` flags into the skill's

@@ -43,6 +43,11 @@ changes `npm install` makes unless your change is about dependencies.
 | `docs/reference/`    | `cli.json` and `cli.md`, generated from the command tree               |
 | `scripts/`           | Build info, skill sync, artifact verification, reference generator     |
 
+Code comments sometimes cite an internal plan by name, for example
+`APP-CONNECT-SPEC §5` or `MACHINE-IDENTITY-PLAN W4`. Those plans are not files
+in this repository or any other: the Synap team keeps them in its own pod
+(`synap ask "<plan name>"`). The comment itself should say what the code does.
+
 ## The checks
 
 Run these before you open a pull request. The first four are the checks the
