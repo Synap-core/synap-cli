@@ -65,6 +65,8 @@ export interface RunRecord {
   result?: string;
   /** How many times a room follow-up resumed this Claude conversation. */
   resumes?: number;
+  /** How many times a run that failed before Claude started was relaunched. */
+  launchRetries?: number;
 }
 
 interface WorkerState {
@@ -154,10 +156,36 @@ function findKey(x: unknown, key: string): unknown {
   return undefined;
 }
 
-/** Sessions handed to the agent that this worker has not launched yet. */
-export function pickNew(items: HandedItem[], state: WorkerState, slots: number): HandedItem[] {
+/**
+ * A run that failed BEFORE Claude started (no Claude session: an expired login,
+ * exhausted credits) is relaunched after 30 min, then 1 h, 2 h and 4 h, enough
+ * to outlast a credit reset. A run Claude did start is resumed only by a room
+ * follow-up, never relaunched from scratch.
+ */
+export const LAUNCH_RETRY_BASE_MS = 30 * 60_000;
+export const MAX_LAUNCH_RETRIES = 4;
+
+function launchRetryDue(rec: RunRecord, now: number): boolean {
+  if (rec.status !== "failed" || rec.claudeSessionId || !rec.finishedAt) return false;
+  const retries = rec.launchRetries ?? 0;
+  if (retries >= MAX_LAUNCH_RETRIES) return false;
+  return now - Date.parse(rec.finishedAt) >= LAUNCH_RETRY_BASE_MS * 2 ** retries;
+}
+
+/** Sessions to launch now: never launched, or due a relaunch (see above). */
+export function pickNew(
+  items: HandedItem[],
+  state: WorkerState,
+  slots: number,
+  now: number = Date.now()
+): HandedItem[] {
   if (slots <= 0) return [];
-  return items.filter((i) => !state.runs[i.id]).slice(0, slots);
+  return items
+    .filter((i) => {
+      const rec = state.runs[i.id];
+      return !rec || launchRetryDue(rec, now);
+    })
+    .slice(0, slots);
 }
 
 /**
@@ -363,7 +391,15 @@ export async function workerCommand(opts: WorkerOptions): Promise<void> {
     const prior = state.runs[item.id];
     const record: RunRecord = resume && prior
       ? Object.assign(prior, { status: "running" as const, resumes: (prior.resumes ?? 0) + 1, exitCode: undefined })
-      : { sessionId: item.id, status: "running", startedAt: new Date().toISOString() };
+      : {
+          sessionId: item.id,
+          status: "running",
+          startedAt: new Date().toISOString(),
+          // A relaunch of a run that never started keeps counting its retries.
+          ...(prior && prior.status === "failed" && !prior.claudeSessionId
+            ? { launchRetries: (prior.launchRetries ?? 0) + 1 }
+            : {}),
+        };
     state.runs[item.id] = record;
     if (opts.dryRun) {
       record.status = "done";

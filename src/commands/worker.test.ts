@@ -12,6 +12,8 @@ import {
   parseHandedToYou,
   parseInterval,
   pickNew,
+  LAUNCH_RETRY_BASE_MS,
+  MAX_LAUNCH_RETRIES,
   workerEnv,
   workerVerdict,
 } from "./worker.js";
@@ -60,6 +62,46 @@ describe("pickNew", () => {
   });
   it("launches nothing when no slot is free", () => {
     expect(pickNew(items, { runs: {} }, 0)).toEqual([]);
+  });
+
+  // A run that failed BEFORE Claude started (no Claude session: an expired
+  // login, exhausted credits) had no way back: the session stayed dead even
+  // after the cause was fixed (2026-10-20). It is retried with backoff now.
+  describe("a run that failed before Claude started is retried with backoff", () => {
+    const T0 = Date.parse("2026-10-20T12:00:00Z");
+    const failedAt = (retries: number, extra: Record<string, unknown> = {}) => ({
+      runs: {
+        a: {
+          sessionId: "a",
+          status: "failed" as const,
+          startedAt: "t",
+          finishedAt: new Date(T0).toISOString(),
+          launchRetries: retries,
+          ...extra,
+        },
+      },
+    });
+    const one = [{ id: "a", goal: null }];
+    it("not before its backoff", () => {
+      expect(pickNew(one, failedAt(0), 1, T0 + LAUNCH_RETRY_BASE_MS - 1)).toEqual([]);
+    });
+    it("once the backoff has passed", () => {
+      expect(pickNew(one, failedAt(0), 1, T0 + LAUNCH_RETRY_BASE_MS).map((i) => i.id)).toEqual(["a"]);
+    });
+    it("the backoff doubles with each retry", () => {
+      expect(pickNew(one, failedAt(2), 1, T0 + 4 * LAUNCH_RETRY_BASE_MS - 1)).toEqual([]);
+      expect(pickNew(one, failedAt(2), 1, T0 + 4 * LAUNCH_RETRY_BASE_MS).map((i) => i.id)).toEqual(["a"]);
+    });
+    it("never after the last retry", () => {
+      expect(pickNew(one, failedAt(MAX_LAUNCH_RETRIES), 1, T0 + 1e12)).toEqual([]);
+    });
+    it("never when Claude did start (a room follow-up resumes that one)", () => {
+      expect(pickNew(one, failedAt(0, { claudeSessionId: "c1" }), 1, T0 + 1e12)).toEqual([]);
+    });
+    it("never a run that finished", () => {
+      const state = { runs: { a: { sessionId: "a", status: "done" as const, startedAt: "t", finishedAt: new Date(T0).toISOString() } } };
+      expect(pickNew(one, state, 1, T0 + 1e12)).toEqual([]);
+    });
   });
 });
 
