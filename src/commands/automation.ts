@@ -89,23 +89,12 @@ function extractResult(res: unknown): unknown {
   return res;
 }
 
-async function trpcQuery(
-  procedure: string,
-  input: Record<string, unknown>,
-  cfg: HubCfg
-): Promise<unknown> {
-  // Hub-protocol procedures require the acting userId in their input.
-  if (input.userId === undefined) input.userId = await resolveUserId(cfg);
-  // Backend tRPC uses the superjson transformer: GET input must be wrapped
-  // in the { json: ... } envelope (mirrors the POST body shape below).
-  const res = await hubGet(
-    `/trpc/${procedure}`,
-    { input: JSON.stringify({ json: input }) },
-    cfg
-  );
-  return extractResult(res);
-}
-
+/**
+ * The ONE remaining hub-tRPC call: `automations.deleteAutomation`, which has no
+ * Hub REST door. It is a GATED mutation on the pod's Bearer tRPC fence (S7 —
+ * the governed-write gate bounds it by the key's grant), so a scoped key still
+ * passes. Every other automation command uses the Hub REST door below.
+ */
 async function trpcMutation(
   procedure: string,
   input: Record<string, unknown>,
@@ -117,16 +106,11 @@ async function trpcMutation(
 }
 
 /**
- * `automation list` / `automation create` go through the Hub-REST automations
- * door (`/api/hub/automations`, `/api/hub/automations/create`) rather than the
- * legacy `/trpc/automations.*` transport used by trpcQuery/trpcMutation above.
- * The legacy tRPC procedures are `protectedProcedure` (session-cookie shaped)
- * and trip an identity-remap bug for API-key-authenticated CLI/agent callers,
- * producing a bare 403. The Hub-REST routes call the SAME underlying
- * automations logic through `hubAutomationsRouter` (`scopedProcedure`,
- * API-key-native, no remap) — this is the door `automation describe/enable/
- * disable/delete` should also eventually use, but they are out of scope here
- * (still on the legacy door, same latent 403).
+ * Every other automation command goes through the Hub-REST automations door
+ * (`/api/hub/automations…`, backend `hub-protocol/rest/automations.ts`). The
+ * pod's Bearer tRPC door refuses a scoped key (the default agent key) on every
+ * mutation the gate does not bound — `activateAutomation` among them (S7,
+ * 2026-10-20) — and the REST doors are the documented ones.
  */
 async function hubListAutomations(
   input: { workspaceId?: string; status?: string },
@@ -146,6 +130,34 @@ async function hubCreateAutomation(
 ): Promise<unknown> {
   const userId = await resolveUserId(cfg);
   return hubPost("/automations/create", { ...payload, userId }, cfg);
+}
+
+async function hubGetAutomation(
+  id: string,
+  workspaceId: string | undefined,
+  cfg: HubCfg
+): Promise<unknown> {
+  const userId = await resolveUserId(cfg);
+  return hubGet(
+    `/automations/${encodeURIComponent(id)}`,
+    { userId, workspaceId },
+    cfg
+  );
+}
+
+/** `POST /automations/:id/activate|pause` — the door needs a workspace. */
+async function hubAutomationAction(
+  id: string,
+  action: "activate" | "pause",
+  workspaceId: string,
+  cfg: HubCfg
+): Promise<{ status?: string; proposalId?: string; message?: string }> {
+  const userId = await resolveUserId(cfg);
+  return (await hubPost(
+    `/automations/${encodeURIComponent(id)}/${action}`,
+    { userId, workspaceId },
+    cfg
+  )) as { status?: string; proposalId?: string; message?: string };
 }
 
 function parseYamlOrJson(filePath: string): Record<string, unknown> {
@@ -365,11 +377,8 @@ export async function automationDescribe(id: string, opts: DescribeOpts): Promis
   // actually read. Only narrow when the user explicitly asks with --workspace.
   const workspaceId = opts.workspace;
 
-  const input: Record<string, unknown> = { id };
-  if (workspaceId) input.workspaceId = workspaceId;
-
   if (opts.json) {
-    const data = await trpcQuery("automations.getAutomation", input, cfg);
+    const data = await hubGetAutomation(id, workspaceId, cfg);
     console.log(JSON.stringify(data, null, 2));
     return;
   }
@@ -377,7 +386,7 @@ export async function automationDescribe(id: string, opts: DescribeOpts): Promis
   const spinner = ora({ text: "Fetching automation…", color: "cyan" }).start();
   let automation: Automation;
   try {
-    const data = await trpcQuery("automations.getAutomation", input, cfg);
+    const data = await hubGetAutomation(id, workspaceId, cfg);
     automation = data as Automation;
     spinner.stop();
   } catch (err) {
@@ -588,15 +597,15 @@ export async function automationEnable(id: string, opts: EnableOpts): Promise<vo
   }
 
   const workspaceId = opts.workspace ?? cfg.workspaceId;
+  if (!workspaceId) {
+    log.error("Activating an automation needs its workspace: pass --workspace <id>.");
+    process.exit(1);
+  }
   const spinner = ora({ text: "Activating automation…", color: "cyan" }).start();
 
-  const input: Record<string, unknown> = { id };
-  if (workspaceId) input.workspaceId = workspaceId;
-
-  let result: Automation;
+  let result: Awaited<ReturnType<typeof hubAutomationAction>>;
   try {
-    const data = await trpcMutation("automations.activateAutomation", input, cfg);
-    result = data as Automation;
+    result = await hubAutomationAction(id, "activate", workspaceId, cfg);
   } catch (err) {
     spinner.fail(chalk.red("Failed to activate automation"));
     renderHubError(err);
@@ -604,7 +613,17 @@ export async function automationEnable(id: string, opts: EnableOpts): Promise<vo
   }
 
   spinner.stop();
-  log.success(`Automation ${chalk.bold(result.name ?? id)} is now active`);
+  if (result.status === "proposed") {
+    // An agent key proposes the activation; a person approves it.
+    log.success(`Activation of ${chalk.bold(id)} proposed for review`);
+    if (result.proposalId) log.dim(`proposal ${result.proposalId}`);
+    return;
+  }
+  if (result.status === "already_active") {
+    log.info(`Automation ${chalk.bold(id)} was already active`);
+    return;
+  }
+  log.success(`Automation ${chalk.bold(id)} is now active`);
 }
 
 // ── Public: automationDisable ─────────────────────────────────────────────────
@@ -623,15 +642,14 @@ export async function automationDisable(id: string, opts: DisableOpts): Promise<
   }
 
   const workspaceId = opts.workspace ?? cfg.workspaceId;
+  if (!workspaceId) {
+    log.error("Pausing an automation needs its workspace: pass --workspace <id>.");
+    process.exit(1);
+  }
   const spinner = ora({ text: "Pausing automation…", color: "cyan" }).start();
 
-  const input: Record<string, unknown> = { id };
-  if (workspaceId) input.workspaceId = workspaceId;
-
-  let result: Automation;
   try {
-    const data = await trpcMutation("automations.pauseAutomation", input, cfg);
-    result = data as Automation;
+    await hubAutomationAction(id, "pause", workspaceId, cfg);
   } catch (err) {
     spinner.fail(chalk.red("Failed to pause automation"));
     renderHubError(err);
@@ -639,7 +657,7 @@ export async function automationDisable(id: string, opts: DisableOpts): Promise<
   }
 
   spinner.stop();
-  console.log(`  ${chalk.red("⊘")} Automation ${chalk.bold(result.name ?? id)} paused`);
+  console.log(`  ${chalk.red("⊘")} Automation ${chalk.bold(id)} paused`);
 }
 
 // ── Public: automationDelete ──────────────────────────────────────────────────
@@ -669,9 +687,7 @@ export async function automationDelete(id: string, opts: DeleteOpts): Promise<vo
   let automationName = id;
   if (!opts.force) {
     try {
-      const input: Record<string, unknown> = { id };
-      if (workspaceId) input.workspaceId = workspaceId;
-      const data = await trpcQuery("automations.getAutomation", input, cfg);
+      const data = await hubGetAutomation(id, workspaceId, cfg);
       automationName = (data as Automation).name ?? id;
     } catch {
       // Fall back to ID in prompt
