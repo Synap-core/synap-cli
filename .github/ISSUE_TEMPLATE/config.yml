@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/Synap-core/synap-cli/security/policy
+    about: Do not open a public issue. Report it privately by email, as the security policy describes.
+  - name: A problem with the pod itself (API, MCP server, install, upgrades)
+    url: https://github.com/Synap-core/backend/issues
+    about: The pod and its operator tooling live in the backend repository.
