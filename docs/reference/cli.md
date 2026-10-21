@@ -308,7 +308,6 @@ Plug something into your pod: an AI agent (claude-code, cursor, codex, …) or a
 | `--api-key <key>` | Hub Protocol API key |  |
 | `--name <name>` | Pod profile to use (default: active pod) |  |
 | `--list` | List what can be connected and exit |  |
-| `--with-mcp` | Raycast only: also install the full 56-tool MCP server via mcp-remote (names overlap @synap) |  |
 | `--target <name>` | Legacy spelling of <thing> |  |
 | `--pin-workspace <id>` | Legacy spelling of --workspace |  |
 | `--pin-project <id>` | Legacy spelling of --project |  |
@@ -2254,7 +2253,6 @@ Bring an agent into the pod: a client (claude-code, cursor, codex, …), your ow
 | `--role <role>` | Workspace role: admin \| editor \| viewer (default: editor) |  |
 | `--workspace <id>` | Focus on one workspace (default: pod-wide) |  |
 | `--project <id>` | Focus on one project (composable with --workspace) |  |
-| `--with-mcp` | Raycast only: also install the full MCP server via mcp-remote |  |
 | `--api-key <key>` | Register a key you already hold, on this machine only (mints nothing) |  |
 | `--label <label>` | Human-readable description |  |
 
