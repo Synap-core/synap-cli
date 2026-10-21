@@ -141,4 +141,4 @@ Run `synap login` and open the printed link on any device.
 
 ## License
 
-MIT
+[MIT](LICENSE)
