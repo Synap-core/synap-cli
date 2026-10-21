@@ -1,8 +1,7 @@
 # Contributing to the Synap CLI
 
-Thank you for helping. This file covers working on `@synap-core/cli` (the
-`synap` command): setting it up, running the checks CI runs, and sending a
-change.
+Thank you for helping. Below: how to set up `@synap-core/cli` (the `synap`
+command), run the checks CI runs and send a change.
 
 - Found a security problem? Do not open an issue: see [SECURITY.md](SECURITY.md).
 - For a large change, open an issue first so the approach can be agreed before
