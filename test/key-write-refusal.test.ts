@@ -120,6 +120,32 @@ describe("provisionAgentKey: one request per computer, never a pending key hande
     expect(mint.body.instanceLabel).toBe(machineInstanceLabel());
   });
 
+  /**
+   * FB1020 B7: `synap init` REUSES a live Claude Code key (`idempotent`). A key
+   * minted before the CLI sent its computer's name stayed unnamed forever, so
+   * every proposal it filed read like its twin's on another computer. The pod
+   * now names that key on reuse — from THIS request: it must carry this
+   * computer's id (which key) and name (what to call it). The pod half is
+   * `agent-connect.pglite.test.ts` "re-running init names this computer's
+   * unnamed key".
+   */
+  it("the reuse request synap init sends also carries this computer's id and name", async () => {
+    const { provisionAgentKey } = await import("../src/lib/targets.js");
+    const { machineInstanceId, machineInstanceLabel } = await import("../src/lib/machine-instance.js");
+    vi.stubGlobal(
+      "fetch",
+      podStub({ setupAgent: () => ({ alreadyValid: true, agentUserId: "agent-1" }), states: () => ({ state: "active" }) })
+    );
+    await provisionAgentKey(POD, "human-key", "claude-code", { idempotent: true, surfaceName: "claude-code" }).catch(
+      () => undefined
+    );
+    const reuse = calls.find((c) => c.url.endsWith("/setup/agent"))!;
+    expect(reuse.body.idempotent).toBe(true);
+    expect(reuse.body.instanceId).toBe(machineInstanceId("claude-code"));
+    expect(reuse.body.instanceLabel).toBe(machineInstanceLabel());
+    expect(reuse.body.instanceLabel).toEqual(expect.any(String));
+  });
+
   it("a minted key the pod says is not live is refused, not returned", async () => {
     const { provisionAgentKey } = await import("../src/lib/targets.js");
     const { KeyNotLiveError } = await import("../src/lib/key-state.js");
