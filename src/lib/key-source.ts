@@ -47,7 +47,8 @@ export function formatKeySource(info: KeySourceInfo): string {
 export function preferClaudeCodeSurfaceKey(input: {
   envPod: string;
   envKey: string;
-  envUser: string;
+  /** SYNAP_USER_ID — optional: unset, the pod is asked (`"cli"` → /users/me). */
+  envUser?: string;
   surface: { podUrl?: string; hubApiKey: string; agentUserId?: string } | null | undefined;
 }): { apiKey: string; userId: string; usedSurface: boolean } {
   const s = input.surface;
@@ -63,11 +64,11 @@ export function preferClaudeCodeSurfaceKey(input: {
   ) {
     return {
       apiKey: s.hubApiKey,
-      userId: s.agentUserId || input.envUser,
+      userId: s.agentUserId || input.envUser || "cli",
       usedSurface: true,
     };
   }
-  return { apiKey: input.envKey, userId: input.envUser, usedSurface: false };
+  return { apiKey: input.envKey, userId: input.envUser || "cli", usedSurface: false };
 }
 
 /**
@@ -89,7 +90,8 @@ export function classifyKeySource(input: {
   if (input.podOverride) return { source: "flag", detail: "--pod" };
   if (input.flagApiKey) return { source: "flag" };
   if (input.agentName) return { source: "agent", detail: input.agentName };
-  if (input.envPod && input.envKey && input.envUser) {
+  // Pod + key are enough: SYNAP_USER_ID is optional (the pod is asked).
+  if (input.envPod && input.envKey) {
     if (input.surfacePrefersOverEnv) {
       return { source: "env-surface", detail: "claude-code" };
     }
@@ -114,7 +116,6 @@ export function resolveKeySource(opts?: { podUrl?: string; apiKey?: string }): K
   const surfacePrefersOverEnv = Boolean(
     envPod &&
       envKey &&
-      envUser &&
       preferClaudeCodeSurfaceKey({
         envPod,
         envKey,

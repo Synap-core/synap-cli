@@ -182,3 +182,53 @@ describe("whoami human-readable output", () => {
     expect(text).toContain("same — this key acts as its own owner");
   });
 });
+
+/**
+ * The owner's key was refused by `synap app connect` as "scoped" and nothing
+ * showed what bounded it. `/auth/status` now carries the key's grant
+ * (`access`), and whoami prints it on its own line.
+ */
+describe("whoami Access line (the key's grant)", () => {
+  const WS = "2f2f2f2f-0000-4000-8000-0000000000bb";
+  const human = { id: "u1", scopes: [], isAgent: false };
+  const humanKey = { ...AGENT_AUTH_STATUS, keyType: "user_pat", userId: "u1", userEmail: "sam@example.test" };
+
+  it("names the limit a scoped key carries", async () => {
+    routeHub(
+      {
+        ...humanKey,
+        access: {
+          isFullAccess: false,
+          summary: `limited to 1 space (${WS})`,
+          scopes: [{ permissions: ["*"], workspaceIds: [WS], projectIds: null, entityIds: null }],
+          clientId: null,
+        },
+      },
+      human
+    );
+    const { whoami } = await import("../src/commands/whoami.js");
+    await whoami();
+    const line = out.join("\n").split("\n").find((l) => l.includes("Access"));
+    expect(line).toBeDefined();
+    expect(line).toContain(`limited to 1 space (${WS})`);
+  });
+
+  it("says full for the person's unbounded key", async () => {
+    routeHub(
+      {
+        ...humanKey,
+        access: { isFullAccess: true, summary: "full access", scopes: [{ permissions: ["*"], workspaceIds: null, projectIds: null, entityIds: null }], clientId: null },
+      },
+      human
+    );
+    const { whoami } = await import("../src/commands/whoami.js");
+    await whoami({ json: true });
+    expect(JSON.parse(out.join("\n")).access).toMatchObject({ isFullAccess: true });
+  });
+
+  it("an older pod without `access` reads unknown, never full", async () => {
+    const { formatAccess } = await import("../src/commands/whoami.js");
+    expect(formatAccess(undefined)).toContain("unknown");
+    expect(formatAccess(undefined)).not.toContain("full");
+  });
+});

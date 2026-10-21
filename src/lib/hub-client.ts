@@ -670,7 +670,13 @@ export async function resolveHubConfig(opts?: { podUrl?: string; apiKey?: string
   const envScopes = process.env.SYNAP_KEY_SCOPES;
   const envWorkspace = process.env.SYNAP_WORKSPACE_ID;
   const envProject = process.env.SYNAP_PROJECT_ID;
-  if (envPod && envKey && envUser) {
+  // Pod + key are enough. SYNAP_USER_ID used to be required too, so a shell
+  // with just the pair (`SYNAP_POD_URL=… SYNAP_HUB_API_KEY=… synap app
+  // connect`, the documented way to try another key) fell through to "No pod
+  // configured" (2026-10-20). Unset, userId is "cli" and resolveUserId asks
+  // the pod (/users/me) — the same fallback --pod and SYNAP_AGENT use. The
+  // claude-code surface-key preference below still applies.
+  if (envPod && envKey) {
     // Surface-bound resolution guard: if this pod has a `claude-code` surface
     // key pinned to it (via `synap connect --target=claude-code`) and the
     // ambient SYNAP_HUB_API_KEY doesn't match it, the session inherited a

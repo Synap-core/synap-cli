@@ -151,6 +151,19 @@ function renderIdentityTriple(s: AuthStatus, me: EffectiveIdentity | null): void
   }
 }
 
+/**
+ * The key's grant in one line: "full" or "limited to …" — the SAME phrase the
+ * pod's refusal prints (`describeGrantLimit`), so `synap app connect`'s "A
+ * scoped key cannot …" and this line name the same limit. A pod that predates
+ * `access` says so instead of guessing "full".
+ */
+export function formatAccess(access: AuthStatus["access"]): string {
+  if (access === undefined) return chalk.dim("unknown (this pod does not report it)");
+  if (access === null) return chalk.dim("unknown (no grant read for this key)");
+  if (access.isFullAccess) return chalk.green("full");
+  return `${chalk.yellow(access.summary)} ${chalk.dim("(cannot connect apps or use owner-only doors)")}`;
+}
+
 function renderAuthStatus(s: AuthStatus, me: EffectiveIdentity | null): void {
   log.info(`Key ID     : ${s.keyIdPrefix ?? "unknown"}`);
   log.info(`Key type   : ${s.keyType ?? chalk.dim("unknown")}`);
@@ -158,6 +171,7 @@ function renderAuthStatus(s: AuthStatus, me: EffectiveIdentity | null): void {
   if (s.name) log.info(`Key name   : ${s.name}`);
   log.info(`Workspace  : ${s.workspaceId ?? chalk.dim("unknown")}`);
   log.info(`Scopes     : ${s.scopes && s.scopes.length ? s.scopes.join(", ") : chalk.dim("(none)")}`);
+  log.info(`Access     : ${formatAccess(s.access)}`);
   // Whether this key may perform a HUMAN review (proposal approve/revert). The
   // pod blocks agent self-review, so say it here rather than letting
   // `synap proposals approve` discover it as a 403.
@@ -245,6 +259,7 @@ export async function whoami(opts: { json?: boolean } = {}): Promise<void> {
                   isActive: winnerProbe.status.isActive,
                 }
               : null,
+          access: winnerProbe.kind === "ok" ? winnerProbe.status.access ?? null : null,
           effectiveUser: effective ? { userId: effective.id, scopes: effective.scopes } : null,
           isAgent: effective?.isAgent ?? null,
           agentType,
