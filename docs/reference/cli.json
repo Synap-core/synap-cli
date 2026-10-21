@@ -349,8 +349,9 @@
           {
             "flags": "--with-mcp",
             "long": "--with-mcp",
-            "description": "Raycast only: also install the full 56-tool MCP server via mcp-remote (names overlap @synap)",
-            "takesValue": "none"
+            "description": "deprecated, ignored: Raycast always gets the pod's MCP server",
+            "takesValue": "none",
+            "hidden": true
           },
           {
             "flags": "--target <name>",
@@ -4682,8 +4683,9 @@
               {
                 "flags": "--with-mcp",
                 "long": "--with-mcp",
-                "description": "Raycast only: also install the full MCP server via mcp-remote",
-                "takesValue": "none"
+                "description": "deprecated, ignored: Raycast always gets the pod's MCP server",
+                "takesValue": "none",
+                "hidden": true
               },
               {
                 "flags": "--api-key <key>",
@@ -7989,7 +7991,7 @@
             "path": "synap raycast generate",
             "name": "generate",
             "usage": "[options]",
-            "description": "Power-user escape: emit a Script Command per enabled verb (extension uses list-actions/run-action)",
+            "description": "Power-user escape: emit a Script Command per enabled verb (Raycast AI uses the pod's MCP server)",
             "hidden": false,
             "arguments": [],
             "options": [
