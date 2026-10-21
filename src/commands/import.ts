@@ -4,6 +4,8 @@
  * Routing (INTAKE-CONSOLIDATION-PLAN Wave 1):
  *   - Superwhisper store-first     → lib/superwhisper-import (unchanged)
  *   - Single file OR single URL    → POST /capture/structure + /capture/execute
+ *   - Any .csv (even ONE)          → its own `source: csv` batch on the table
+ *                                    door below (a CSV is a table, never prose)
  *   - 2 text-like files
  *     (md / markdown / txt / csv)  → ONE batch via SYNCHRONOUS REST import:
  *         POST /import/analyze  → human review (or --yes / --dry-run)
@@ -372,6 +374,29 @@ function sourceForBatchItems(items: BatchTextItem[]): ImportSource {
   const mdCount = items.filter((i) => /\.(md|markdown)$/i.test(i.path)).length;
   if (mdCount * 2 >= items.length) return "markdown";
   return "markdown";
+}
+
+/**
+ * Which batch-eligible files go through the table/batch door, and in which
+ * batches:
+ *   - every CSV, even a lone one, in ONE `source: csv` batch. A CSV is a TABLE:
+ *     the batch door builds a column→kind plan for it, while the single-file
+ *     capture door reads it as free text (a 1,500-row contacts export came back
+ *     as one degraded note filed in the wrong space). Keeping CSVs apart also
+ *     stops a mixed md + csv batch from parsing the markdown as CSV.
+ *   - the other text files in ONE batch when there are ≥2; a lone one stays on
+ *     the capture door (unchanged).
+ */
+export function groupBatchFiles<T extends { path: string }>(
+  files: T[]
+): { batches: T[][]; single: T[] } {
+  const isCsv = (f: T) => f.path.toLowerCase().endsWith(".csv");
+  const csv = files.filter(isCsv);
+  const text = files.filter((f) => !isCsv(f));
+  const batches: T[][] = [];
+  if (csv.length > 0) batches.push(csv);
+  if (text.length >= 2) batches.push(text);
+  return { batches, single: text.length >= 2 ? [] : text };
 }
 
 function toBatchTextItem(item: ImportItem & { kind: "file" }): BatchTextItem {
@@ -1822,17 +1847,19 @@ export async function importData(inputs: string[], opts: ImportOpts): Promise<vo
       batchFileItems.length = GLOBAL_BATCH_CAP;
     }
 
-    const useBatch = batchFileItems.length >= 2;
-    const batchCandidates: BatchTextItem[] = useBatch
-      ? batchFileItems.map(toBatchTextItem)
-      : [];
-    if (!useBatch) {
-      captureItems.push(...batchFileItems);
-    }
+    const grouped = groupBatchFiles(batchFileItems);
+    const batchGroups: BatchTextItem[][] = grouped.batches.map((group) =>
+      group.map(toBatchTextItem)
+    );
+    captureItems.push(...grouped.single);
 
     if (!opts.json) {
       const parts: string[] = [];
-      if (useBatch) parts.push(`${batchCandidates.length} text files (batch import)`);
+      for (const group of batchGroups) {
+        parts.push(
+          `${group.length} ${sourceForBatchItems(group) === "csv" ? "CSV" : "text"} file${group.length !== 1 ? "s" : ""} (batch import)`
+        );
+      }
       if (captureItems.length > 0) {
         parts.push(
           `${captureItems.length} item${captureItems.length !== 1 ? "s" : ""} (capture pipeline)`
@@ -1849,7 +1876,7 @@ export async function importData(inputs: string[], opts: ImportOpts): Promise<vo
     const interactive = !opts.json && !opts.dryRun && !opts.yes;
     const rl = interactive ? readline.createInterface({ input, output }) : undefined;
     try {
-      if (useBatch) {
+      for (const batchCandidates of batchGroups) {
         try {
           outcomes.push(
             await processBatchImport(
