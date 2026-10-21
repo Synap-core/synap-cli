@@ -133,10 +133,7 @@ program
   .option("--api-key <key>", "Hub Protocol API key")
   .option("--name <name>", "Pod profile to use (default: active pod)")
   .option("--list", "List what can be connected and exit")
-  .option(
-    "--with-mcp",
-    "Raycast only: also install the full 56-tool MCP server via mcp-remote (names overlap @synap)"
-  )
+  .addOption(new Option("--with-mcp", "deprecated, ignored: Raycast always gets the pod's MCP server").hideHelp())
   .option("--target <name>", "Legacy spelling of <thing>")
   .option("--pin-workspace <id>", "Legacy spelling of --workspace")
   .option("--pin-project <id>", "Legacy spelling of --project")
@@ -1801,7 +1798,7 @@ agents
   .option("--role <role>", "Workspace role: admin | editor | viewer (default: editor)")
   .option("--workspace <id>", "Focus on one workspace (default: pod-wide)")
   .option("--project <id>", "Focus on one project (composable with --workspace)")
-  .option("--with-mcp", "Raycast only: also install the full MCP server via mcp-remote")
+  .addOption(new Option("--with-mcp", "deprecated, ignored: Raycast always gets the pod's MCP server").hideHelp())
   .option("--api-key <key>", "Register a key you already hold, on this machine only (mints nothing)")
   .option("--label <label>", "Human-readable description")
   .action(async (kind: string | undefined, opts) => {
@@ -3037,8 +3034,9 @@ sync
   });
 
 // ─── raycast (hidden power-user escape) ───────────────────────────────────────
-// Prefer the native Synap Raycast extension (@synap). Capability verbs there go
-// through list-actions / run-action. Script Commands are a per-verb escape hatch.
+// Prefer Raycast AI on the pod's MCP server (`synap connect raycast`), where
+// capability verbs run through synap_run_capability. Script Commands are a
+// per-verb escape hatch.
 
 const raycast = program
   .command("raycast", { hidden: true })
@@ -3049,7 +3047,7 @@ const raycast = program
 raycast
   .command("generate")
   .description(
-    "Power-user escape: emit a Script Command per enabled verb (extension uses list-actions/run-action)"
+    "Power-user escape: emit a Script Command per enabled verb (Raycast AI uses the pod's MCP server)"
   )
   .option("--out <dir>", "Output directory (default: ~/.synap/raycast-commands)")
   .option("--workspace <id>", "Workspace context")
