@@ -172,8 +172,8 @@ Every command also accepts `-h, --help`.
 - [`synap cell`](#synap-cell) — Define and bundle frame cells for the Synap runtime
   - [`synap cell define`](#synap-cell-define) — Create or update a frame cell on the pod from ESM source
   - [`synap cell build`](#synap-cell-build) — Bundle a multi-file cell/app into a single ESM module the runtime expects
-- [`synap artifact`](#synap-artifact) — Create and manage HTML artifacts as Synap documents
-  - [`synap artifact create`](#synap-artifact-create) — Create an HTML artifact from a local file
+- [`synap artifact`](#synap-artifact) — Create HTML artifacts as Synap cells: an HTML/JS page that opens in the desktop app and can read pod data
+  - [`synap artifact create`](#synap-artifact-create) — Define a cell from a local HTML file (governed: an agent key files a proposal)
 - [`synap connect-service`](#synap-connect-service) — Connect an external service (Google, GitHub, Notion, Linear, Slack, …)
 - [`synap tools`](#synap-tools) — Add and manage external service tools and their credentials
   - [`synap tools list`](#synap-tools-list) — List available tools and their connection status
@@ -1930,6 +1930,7 @@ Fetch a skill from the knowledge base by slug and print its body
 
 | Option | Description | Default |
 |---|---|---|
+| `--raw` | Print only the stored body, exactly (for scripts) |  |
 | `--pod-url <url>` | Pod URL override |  |
 | `--api-key <key>` | API key override |  |
 
@@ -2970,7 +2971,7 @@ Examples:
 synap artifact [options] [command]
 ```
 
-Create and manage HTML artifacts as Synap documents
+Create HTML artifacts as Synap cells: an HTML/JS page that opens in the desktop app and can read pod data
 
 Subcommands: [`create`](#synap-artifact-create)
 
@@ -2980,12 +2981,12 @@ Subcommands: [`create`](#synap-artifact-create)
 synap artifact create [options]
 ```
 
-Create an HTML artifact from a local file
+Define a cell from a local HTML file (governed: an agent key files a proposal)
 
 | Option | Description | Default |
 |---|---|---|
 | `--html <file>` | HTML file to upload (required) |  |
-| `--name <name>` | Document title (default: filename) |  |
+| `--name <name>` | Cell name (default: filename) |  |
 | `--workspace <id>` | Workspace context |  |
 | `--open` | Open in the Synap desktop app after creation |  |
 | `--json` | JSON output |  |
