@@ -261,10 +261,12 @@ export async function listProposals(
         const kind = String(prop.proposalType ?? "");
         const target = String(prop.targetType ?? "");
         const label = kind && target ? `${kind} → ${target}` : kind || target || "proposal";
-        // A ready-made human sentence the importer already wrote, when present.
+        // A ready-made human sentence the producer already wrote, when present:
+        // the summary (what it does) first; an import's quality line only when
+        // there is no summary — same order as the pod's BASIC projection.
         const data = (prop.data ?? {}) as Record<string, unknown>;
         const quality = (data.quality ?? {}) as Record<string, unknown>;
-        const summary = String(quality.summary ?? data.summary ?? "");
+        const summary = String(data.summary || quality.summary || "");
         // Under `--status all` the rows are a MIX, so each one must carry its
         // own outcome — a uniform bullet there would be the same fail-open
         // "every row renders the identical label" defect the payload-field fix
