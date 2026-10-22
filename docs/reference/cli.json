@@ -3973,6 +3973,12 @@
             ],
             "options": [
               {
+                "flags": "--raw",
+                "long": "--raw",
+                "description": "Print only the stored body, exactly (for scripts)",
+                "takesValue": "none"
+              },
+              {
                 "flags": "--pod-url <url>",
                 "long": "--pod-url",
                 "description": "Pod URL override",
@@ -6257,7 +6263,7 @@
         "path": "synap artifact",
         "name": "artifact",
         "usage": "[options] [command]",
-        "description": "Create and manage HTML artifacts as Synap documents",
+        "description": "Create HTML artifacts as Synap cells: an HTML/JS page that opens in the desktop app and can read pod data",
         "hidden": false,
         "arguments": [],
         "options": [],
@@ -6266,7 +6272,7 @@
             "path": "synap artifact create",
             "name": "create",
             "usage": "[options]",
-            "description": "Create an HTML artifact from a local file",
+            "description": "Define a cell from a local HTML file (governed: an agent key files a proposal)",
             "hidden": false,
             "arguments": [],
             "options": [
@@ -6280,7 +6286,7 @@
               {
                 "flags": "--name <name>",
                 "long": "--name",
-                "description": "Document title (default: filename)",
+                "description": "Cell name (default: filename)",
                 "takesValue": "required"
               },
               {

@@ -894,7 +894,7 @@ export async function writeClaudeCodeEnv(
  * Server name is pod-derived (`mcpServerNameFromPodUrl`) so multi-pod setups
  * (perso + team) do not overwrite each other — same pattern as Grok/Cursor.
  */
-function registerClaudeCodeMcp(mcpUrl: string, apiKey: string, serverName: string): void {
+export function registerClaudeCodeMcp(mcpUrl: string, apiKey: string, serverName: string): void {
   const header = `Authorization: Bearer ${apiKey}`;
   const bridge = claudeCodeMcpTransport() === "bridge";
   try {
@@ -912,7 +912,9 @@ function registerClaudeCodeMcp(mcpUrl: string, apiKey: string, serverName: strin
         ? // Stdio: Claude Code hands a stdio server its own session id, which
           // the bridge forwards — see lib/mcp-bridge.ts. The key rides in the
           // server's env, as the header does for http.
-          ["mcp", "add", "--scope", "user", "-e", `SYNAP_MCP_API_KEY=${apiKey}`, serverName, "--", ...synapBridgeCommand(mcpUrl)]
+          // `-e` is variadic in Claude Code's CLI: the server name must come
+          // BEFORE it, or `-e` swallows it as an env var.
+          ["mcp", "add", "--scope", "user", serverName, "-e", `SYNAP_MCP_API_KEY=${apiKey}`, "--", ...synapBridgeCommand(mcpUrl)]
         : ["mcp", "add", "--transport", "http", serverName, mcpUrl, "--header", header, "--scope", "user"],
       { stdio: "ignore" }
     );
@@ -934,13 +936,23 @@ function registerClaudeCodeMcp(mcpUrl: string, apiKey: string, serverName: strin
     try {
       ensureSecretDir(path.dirname(keyFile));
       writeSecretFile(keyFile, `export SYNAP_MCP_KEY='${apiKey}'\n`);
-      log.dim("Could not run `claude mcp add` (is the claude CLI on PATH?). Register it by hand (the key is in a 0600 file, not on this screen):");
+      log.dim(
+        `Could not run \`claude mcp add\` (is the claude CLI on PATH?). The '${serverName}' MCP server may now be UNREGISTERED in Claude Code. Register it by hand (the key is in a 0600 file, not on this screen):`
+      );
       log.dim(`  source ${keyFile}`);
-      log.dim(`  claude mcp add --transport http ${serverName} ${mcpUrl} --header 'Authorization: Bearer \${SYNAP_MCP_KEY}' --scope user`);
+      log.dim(
+        bridge
+          ? `  claude mcp add --scope user ${serverName} -e SYNAP_MCP_API_KEY="$SYNAP_MCP_KEY" -- ${synapBridgeCommand(mcpUrl).map(shellQuote).join(" ")}`
+          : `  claude mcp add --transport http ${serverName} ${mcpUrl} --header 'Authorization: Bearer \${SYNAP_MCP_KEY}' --scope user`
+      );
     } catch {
       log.dim("Could not run `claude mcp add` (is the claude CLI on PATH?) and could not save the key file — run `synap mcp url` instead.");
     }
   }
+}
+
+function shellQuote(arg: string): string {
+  return /^[A-Za-z0-9_\-./:=@]+$/.test(arg) ? arg : `'${arg.replace(/'/g, `'\\''`)}'`;
 }
 
 /**
