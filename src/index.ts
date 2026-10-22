@@ -2391,13 +2391,13 @@ Examples:
 
 const artifact = program
   .command("artifact")
-  .description("Create and manage HTML artifacts as Synap documents");
+  .description("Create HTML artifacts as Synap cells: an HTML/JS page that opens in the desktop app and can read pod data");
 
 artifact
   .command("create")
-  .description("Create an HTML artifact from a local file")
+  .description("Define a cell from a local HTML file (governed: an agent key files a proposal)")
   .requiredOption("--html <file>", "HTML file to upload")
-  .option("--name <name>", "Document title (default: filename)")
+  .option("--name <name>", "Cell name (default: filename)")
   .option("--workspace <id>", "Workspace context")
   .option("--open", "Open in the Synap desktop app after creation")
   .option("--json", "JSON output")
