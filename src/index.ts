@@ -1544,6 +1544,7 @@ skillCmd
 skillCmd
   .command("get <slug>")
   .description("Fetch a skill from the knowledge base by slug and print its body")
+  .option("--raw", "Print only the stored body, exactly (for scripts)")
   .option("--pod-url <url>", "Pod URL override")
   .option("--api-key <key>", "API key override")
   .action(async (slug: string, opts) => {

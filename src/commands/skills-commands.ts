@@ -39,6 +39,8 @@ interface AgentSkill {
 interface SkillOpts {
   podUrl?: string;
   apiKey?: string;
+  /** `get` only: print the stored body exactly, nothing around it (for scripts). */
+  raw?: boolean;
 }
 
 // ─── suggest ───────────────────────────────────────────────────────────────
@@ -95,7 +97,16 @@ export async function getSkill(slug: string, opts: SkillOpts): Promise<void> {
 
     if (!skill || !skill.slug) {
       log.error(`Skill "${slug}" not found.`);
-      log.dim("Try: synap skill suggest <topic>  — to find available skills");
+      log.hint("Try: synap skill suggest <topic>  — to find available skills");
+      // A script must be able to tell "no such skill" from a body it can use.
+      process.exitCode = 1;
+      return;
+    }
+
+    if (opts.raw) {
+      // The body as stored, byte for byte, ending in one newline: what a
+      // script renders from (e.g. .claude/helpers/rules-from-pod.zsh).
+      process.stdout.write(skill.body.endsWith("\n") ? skill.body : `${skill.body}\n`);
       return;
     }
 
