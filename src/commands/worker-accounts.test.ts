@@ -106,6 +106,19 @@ describe("selectAccount", () => {
     expect(selectAccount(file(), s, { design: true }).account?.id).toBe("dev");
   });
 
+  it("another run spends the design account only when no other account has room", () => {
+    // dev resets soonest, yet a takes the run: dev's quota stays for the designs.
+    const s = new Map<string, Standing>([
+      ["dev", room({ fiveHourReset: T + 1 * H })],
+      ["a", room({ fiveHourReset: T + 4 * H })],
+      ["b", { kind: "full", until: T + H }],
+      ["c", { kind: "full", until: T + H }],
+    ]);
+    expect(selectAccount(file(), s, { design: false }).account?.id).toBe("a");
+    s.set("a", { kind: "full", until: T + H });
+    expect(selectAccount(file(), s, { design: false }).account?.id).toBe("dev");
+  });
+
   it("a design run with no design account flagged is refused in words", () => {
     const f = file({ accounts: [{ id: "a", label: "A", token: "t" }] });
     expect(selectAccount(f, new Map([["a", room({})]]), { design: true }).reason).toMatch(/flagged design/);

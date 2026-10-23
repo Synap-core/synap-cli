@@ -304,6 +304,8 @@ export interface Selection {
  *   the publishing account). None with room ⇒ nothing: wait, never another one.
  * - Any other run: leave out the reserve; among the rest with room, the one
  *   whose 5-hour window resets SOONEST (use it or lose it); ties → file order.
+ *   A design account comes last: it is spent on other runs only when no other
+ *   account has room, so its quota stays for the designs only it can publish.
  * An unmeasured, refused or full account is never picked.
  */
 export function selectAccount(
@@ -326,7 +328,10 @@ export function selectAccount(
     return { reason: `no ${opts.design ? "design " : ""}account with room (${why || "all reserved"})` };
   }
   withRoom.sort(
-    (x, y) => (x.s.meter.fiveHourReset ?? Infinity) - (y.s.meter.fiveHourReset ?? Infinity) || x.order - y.order
+    (x, y) =>
+      (opts.design ? 0 : Number(!!x.a.design) - Number(!!y.a.design)) ||
+      (x.s.meter.fiveHourReset ?? Infinity) - (y.s.meter.fiveHourReset ?? Infinity) ||
+      x.order - y.order
   );
   return { account: withRoom[0].a };
 }
