@@ -1223,7 +1223,7 @@ session
   .option("--workspace <id>", "Workspace that owns the session")
   .option("--project <id>", "Project that owns the session (defaults to the active project lens; the pod accepts a workspace OR a project)")
   .option("--task-id <id>", "Link session to an existing task entity")
-  .option("--track <id>", "Born inside a track (a project's lasting goal) — implies its project")
+  .option("--track <id>", "Born inside a track (a project's goal) — implies its project")
   .option("--template <id>", "Start from a playbook (seeds currentStage from its stages)")
   .option("--no-template", "Opt out of auto-matching a playbook — start ad-hoc")
   .option("--parent <id>", "Push from another session — records session --spawned_from--> session (the parent stays open)")
@@ -1408,19 +1408,19 @@ playbookCmd
   });
 
 // ─── track ────────────────────────────────────────────────────────────────────
-// A LASTING goal inside a project, worked in sessions (`session start --track`).
-// Legacy tracks also run a method with steps. Writes are governed —
+// A goal inside a project, worked in sessions (`session start --track`); a
+// person closes it with a verdict. Legacy tracks also run a method with steps. Writes are governed —
 // "queued for your review" is success.
 
 const track = program
   .command("track")
-  .description("Manage tracks — the lasting goals a project pursues");
+  .description("Manage tracks — the goals a project pursues");
 
 track
   .command("list")
   .description("List a project's tracks (defaults to the active project lens)")
   .option("--project <id>", "Project id (defaults to the active project lens)")
-  .option("--all", "Include archived tracks")
+  .option("--all", "Include dropped (archived) tracks")
   .option("--json", "Output as JSON")
   .option("--pod-url <url>", "Pod URL override")
   .option("--api-key <key>", "API key override")
@@ -1442,7 +1442,7 @@ track
 
 track
   .command("start")
-  .description("Start a track — a lasting goal — on a project")
+  .description("Start a track — a goal — on a project")
   .option("--name <name>", "The track's name (required without --playbook)")
   .option("--direction <text>", "Where it is heading, one line")
   .option("--playbook <id>", "Legacy: a track template (project-scoped playbook with steps)")
@@ -1471,7 +1471,14 @@ track
 
 track
   .command("status <id> <status>")
-  .description("Pause, resume or archive a track (active|paused|archived)")
+  .description(
+    "Move a track: proposed|agreed|ready|active|paused|completed (Closed)|archived (Dropped). " +
+      "Closing needs --verdict met|partly_met|not_met; dropping should carry " +
+      "no_longer_needed|impossible|replaced|mistake (impossible and replaced need --verdict-reason). " +
+      "Both are final — reopen makes a new version."
+  )
+  .option("--verdict <verdict>", "How the goal ended (required to close; advised to drop)")
+  .option("--verdict-reason <text>", "Why — required for impossible and replaced")
   .option("--reason <text>", "Why — shown to the reviewer")
   .option("--json", "Output as JSON")
   .option("--pod-url <url>", "Pod URL override")
@@ -1479,6 +1486,19 @@ track
   .action(async (id: string, status: string, opts) => {
     const { setTrackStatus } = await import("./commands/tracks.js");
     await setTrackStatus(id, status, opts);
+  });
+
+track
+  .command("reopen <id>")
+  .description("Reopen a closed or dropped goal as a NEW version (the old one keeps its verdict)")
+  .option("--name <name>", "A new name (default: the old one's)")
+  .option("--reason <text>", "Why — shown to the reviewer")
+  .option("--json", "Output as JSON")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (id: string, opts) => {
+    const { reopenTrack } = await import("./commands/tracks.js");
+    await reopenTrack(id, opts);
   });
 
 track

@@ -158,3 +158,58 @@ describe("synap session start --track", () => {
     expect(attachActiveSessionId).not.toHaveBeenCalled();
   });
 });
+
+describe("synap track status / reopen", () => {
+  it("sends the verdict and its reason on a close", async () => {
+    hubPatch.mockResolvedValueOnce({ status: "proposed", proposalId: "prop-2" });
+    const { setTrackStatus } = await import("../src/commands/tracks.js");
+    await setTrackStatus("t-1", "archived", {
+      verdict: "replaced",
+      verdictReason: "the launch track took over",
+      reason: "duplicate",
+    });
+    const [path, body] = hubPatch.mock.calls[0] as [string, Record<string, unknown>];
+    expect(path).toBe("/tracks/t-1");
+    expect(body).toEqual({
+      status: "archived",
+      verdict: "replaced",
+      verdictReason: "the launch track took over",
+      reasoning: "duplicate",
+    });
+    expect(printed()).toContain("queued for your review");
+  });
+
+  it("sends no verdict when none is given", async () => {
+    hubPatch.mockResolvedValueOnce({ status: "updated", track: { id: "t-1" } });
+    const { setTrackStatus } = await import("../src/commands/tracks.js");
+    await setTrackStatus("t-1", "paused", {});
+    expect(hubPatch.mock.calls[0]![1]).toEqual({ status: "paused" });
+  });
+
+  it("reopen POSTs /tracks/:id/reopen and prints a proposal as queued", async () => {
+    hubPost.mockResolvedValueOnce({
+      status: "proposed",
+      proposalId: "prop-3",
+      reviewUrl: "https://pod/open/prop-3",
+    });
+    const { reopenTrack } = await import("../src/commands/tracks.js");
+    await reopenTrack("t-1", { name: "Grow v2", reason: "it matters again" });
+    const [path, body] = hubPost.mock.calls[0] as [string, Record<string, unknown>];
+    expect(path).toBe("/tracks/t-1/reopen");
+    expect(body).toEqual({ name: "Grow v2", reasoning: "it matters again" });
+    expect(printed()).toContain("queued for your review");
+    expect(printed()).not.toContain("reopened as a new version");
+  });
+
+  it("reopen prints the new version when the pod made it", async () => {
+    hubPost.mockResolvedValueOnce({
+      status: "started",
+      track: { id: "t-2", name: "Grow", status: "active", currentStage: null },
+    });
+    const { reopenTrack } = await import("../src/commands/tracks.js");
+    await reopenTrack("t-1", {});
+    expect(hubPost.mock.calls[0]![1]).toEqual({});
+    expect(printed()).toContain("reopened as a new version");
+    expect(printed()).toContain("t-2");
+  });
+});

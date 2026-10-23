@@ -1,13 +1,16 @@
 /**
- * `synap track` — a LASTING goal inside a project (Hub `/api/hub/tracks`).
- * Work in it = `synap session start --track <id>`. A legacy track also runs a
+ * `synap track` — a goal inside a project (Hub `/api/hub/tracks`).
+ * Work in it = `synap session start --track <id>`. A goal stays open as long as
+ * it matters, or a person closes it with a verdict. A legacy track also runs a
  * method (a project-scoped playbook) with steps; a new one needs none.
  *
  *   list        a project's tracks (defaults to the active project lens)
  *   show        one track, its steps and where it stands
  *   start       start a track on a project (--name; --playbook is legacy)
  *   advance     move a track to a step — returns the step's session OFFER
- *   status      pause / resume / complete / archive
+ *   status      move it through its lifecycle; close (completed) and drop
+ *               (archived) carry --verdict
+ *   reopen      a closed or dropped goal comes back as a NEW version
  *   params      answer the method's params (merged; `key=null` clears)
  *   start-step  start the work session of one step (default: current step)
  *
@@ -48,6 +51,8 @@ interface TrackRow {
   }>;
   params?: Json;
   declaredParams?: unknown[];
+  verdict?: string | null;
+  verdictReason?: string | null;
 }
 
 const STAGE_MARK: Record<string, string> = {
@@ -85,7 +90,10 @@ function printDomainNote(r: Json): void {
 function printTrack(t: TrackRow): void {
   const paused = t.status === "paused" && t.pausedBy ? ` (held by ${t.pausedBy} gate)` : "";
   console.log(`  ${chalk.bold(t.name)}  ${chalk.dim(t.id)}`);
-  console.log(`    ${t.status}${paused}`);
+  const ended = t.verdict
+    ? ` — ${t.verdict}${t.verdictReason ? `: ${t.verdictReason}` : ""}`
+    : "";
+  console.log(`    ${t.status}${paused}${ended}`);
   for (const s of t.stages ?? []) {
     const mark = STAGE_MARK[s.position] ?? chalk.dim("·");
     const domain = s.domain ? chalk.dim(`  in ${s.domain}`) : "";
@@ -263,12 +271,14 @@ export async function advanceTrack(
 export async function setTrackStatus(
   id: string,
   status: string,
-  opts: BaseOpts & { reason?: string }
+  opts: BaseOpts & { reason?: string; verdict?: string; verdictReason?: string }
 ): Promise<void> {
   await run(async () => {
     const cfg = await resolveHubConfig(opts);
     const body: Json = { status };
     if (opts.reason) body.reasoning = opts.reason;
+    if (opts.verdict) body.verdict = opts.verdict;
+    if (opts.verdictReason) body.verdictReason = opts.verdictReason;
     const r = (await hubPatch(trackPath(id), body, cfg)) as Json;
     if (opts.json) {
       console.log(JSON.stringify(r, null, 2));
@@ -277,6 +287,33 @@ export async function setTrackStatus(
     if (isProposed(r)) printProposed(r, "Changing this track's status");
     else if (r.status === "unchanged") log.info(`The track is already ${status}.`);
     else log.success(`Track is now ${status}.`);
+  });
+}
+
+/** A closed or dropped goal comes back as a NEW version — never moved back. */
+export async function reopenTrack(
+  id: string,
+  opts: BaseOpts & { name?: string; reason?: string }
+): Promise<void> {
+  await run(async () => {
+    const cfg = await resolveHubConfig(opts);
+    const body: Json = {};
+    if (opts.name) body.name = opts.name;
+    if (opts.reason) body.reasoning = opts.reason;
+    const r = (await hubPost(trackPath(id, "/reopen"), body, cfg)) as Json;
+    if (opts.json) {
+      console.log(JSON.stringify(r, null, 2));
+      return;
+    }
+    if (isProposed(r)) {
+      printProposed(r, "Reopening this goal");
+      return;
+    }
+    const t = r.track as TrackRow;
+    if (r.status === "exists") log.info(`The new version is already live: ${t.name}`);
+    else log.success(`Goal reopened as a new version: ${chalk.bold(t.name)}`);
+    console.log(`  ID: ${chalk.bold(t.id)}`);
+    log.dim(`Work in it: synap session start --track ${t.id} "<goal>"`);
   });
 }
 
