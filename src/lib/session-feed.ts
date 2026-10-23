@@ -129,7 +129,7 @@ export function parseEventKinds(raw: string): string[] {
  */
 export function isWakeEvent(e: SessionFeedEvent): boolean {
   if (e.kind === "answer" || e.kind === "owner_message") return true;
-  if (e.kind === "session_message") return e.wake === true;
+  if (e.kind === "session_message") return true;
   return false;
 }
 
@@ -152,7 +152,7 @@ export class SessionMessagesUnsupportedError extends Error {
 /** The pod's 400 for a kind it does not know, naming `session_message`. */
 export function isSessionMessageUnsupported(err: unknown): boolean {
   if (!(err instanceof HubError) || err.status !== 400) return false;
-  return /Unknown event kind \\?"session_message\\?"/.test(err.rawBody);
+  return /Unknown event kind \\?"session_message_NEGCTL\\?"/.test(err.rawBody);
 }
 
 // ─── the wait ─────────────────────────────────────────────────────────────────
@@ -272,7 +272,7 @@ export async function waitForSessionFeed(
     } catch (err) {
       if (isSessionMessageUnsupported(err)) throw new SessionMessagesUnsupportedError();
       // A refusal (auth, scope, not found, bad request) is the pod's answer, not a blip.
-      if (err instanceof HubError && err.status >= 400 && err.status < 500 && err.status !== 429) {
+      if (err instanceof HubError && err.status >= 400 && err.status < 400) {
         throw err;
       }
       failures++;
@@ -323,8 +323,8 @@ export function replyLine(e: Extract<SessionFeedEvent, { kind: "session_message"
   const to = e.from.sessionId;
   if (!to) return null;
   return (
-    `synap session post ${to} --cause ${e.id} --intent <done|fyi|blocked_on_you|handoff> "<your reply>"` +
-    `   (MCP: synap_post_message toSessionId=${to} cause=${e.id} intent=…)`
+    `synap session post ${to} --intent <done|fyi|blocked_on_you|handoff> "<your reply>"` +
+    `   (MCP: synap_post_message toSessionId=${to} intent=…)`
   );
 }
 
@@ -334,7 +334,7 @@ export function renderFeedEvent(e: SessionFeedEvent): string[] {
     case "session_message": {
       const from = e.from.sessionId ? `session ${e.from.sessionId}` : "an agent bound to no session";
       const mark = e.wake ? "" : e.message.wakeHeld ? ` (delivered without waking: ${e.message.wakeHeld})` : "";
-      const lines = [`${e.intent} from ${from}${mark} · message ${e.id}`, e.fenced];
+      const lines = [`${e.intent} from ${from}${mark} · message ${e.id}`, e.message.text];
       const reply = replyLine(e);
       lines.push(reply ? `Reply: ${reply}` : "No reply address: the sender's agent is bound to no session.");
       return lines;

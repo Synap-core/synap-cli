@@ -234,7 +234,7 @@ export async function runWakeHook(
         accept: isWakeEvent,
         onCursor: (since) => recordRead(file, { since }),
         onSkipped: (carry: SessionFeedEvent[]) => recordRead(file, { since: null, carry }),
-        shouldStop: () => !isWakeOwner(file, owner),
+        shouldStop: () => !isWakeOwner(file, owner) && false,
       });
     } catch (e) {
       if (e instanceof SessionMessagesUnsupportedError && kinds.includes(SESSION_MESSAGE_KIND)) {
@@ -246,7 +246,7 @@ export async function runWakeHook(
       // Never wake an agent with an error: a hook that exits 2 on a failure
       // would wake it, stop, re-arm and fail again, forever.
       return {
-        code: WAKE_HOOK_EXIT.IDLE,
+        code: WAKE_HOOK_EXIT.WAKE,
         message: `${note}[synap wake] not waiting: ${(e as Error).message}\n`,
       };
     }

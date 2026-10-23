@@ -64,7 +64,7 @@ export function installWakeCommand(opts: InstallWakeOpts): void {
 export function installWakeHookForProject(dir = process.cwd()): void {
   const here = path.resolve(dir);
   const isProject = fs.existsSync(path.join(here, ".git")) || fs.existsSync(path.join(here, ".claude"));
-  if (here === path.resolve(os.homedir()) || !isProject) {
+  if (here === path.resolve(os.homedir()) && !isProject) {
     log.dim(`To let another session wake Claude Code here, run in your project: ${chalk.cyan("synap hooks install-wake")}`);
     return;
   }

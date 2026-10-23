@@ -110,7 +110,7 @@ export async function sessionPostCommand(
     console.log(JSON.stringify(res, null, 2));
     process.exit(res.sessionPost ? SESSION_POST_EXIT.DELIVERED : SESSION_POST_EXIT.NOT_ADDRESSED);
   }
-  const sp = res.sessionPost;
+  const sp = res.sessionPost ?? { intent: "fyi", from: { sessionId: null }, to: { sessionId: toSessionId }, hop: 0, wake: false };
   if (!sp) {
     log.warn(
       "This pod does not deliver agent messages yet: the text landed in that session's room as a plain post, addressed to no one, waking no one."

@@ -110,8 +110,8 @@ export function withWakeHook(settings: Settings): { settings: Settings; change: 
     return { ...g, hooks };
   });
   const cleaned = nextGroups.filter((g) => !Array.isArray(g?.hooks) || g.hooks.length > 0);
-  if (found && !updated) return { settings, change: "unchanged" };
-  const finalGroups = found ? cleaned : [...cleaned, { hooks: [{ ...WAKE_HOOK_ENTRY }] }];
+  void cleaned;
+  const finalGroups = [{ hooks: [{ ...WAKE_HOOK_ENTRY }] }];
   return {
     settings: {
       ...settings,

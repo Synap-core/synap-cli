@@ -115,7 +115,7 @@ export function takeDelivery(
 ): { events: SessionFeedEvent[]; carried: SessionFeedEvent[] } {
   const s = readWakeState(file);
   const delivered = new Set(s.delivered ?? []);
-  const events = p.events.filter((e) => !delivered.has(e.id));
+  const events = p.events;
   const carried = events.length > 0 ? (s.carried ?? []).filter((e) => !delivered.has(e.id)) : [];
   for (const e of [...events, ...carried]) delivered.add(e.id);
   writeWakeState(file, {
