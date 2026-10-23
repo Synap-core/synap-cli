@@ -50,7 +50,7 @@ export function preferClaudeCodeSurfaceKey(input: {
   /** SYNAP_USER_ID — optional: unset, the pod is asked (`"cli"` → /users/me). */
   envUser?: string;
   surface: { podUrl?: string; hubApiKey: string; agentUserId?: string } | null | undefined;
-}): { apiKey: string; userId: string; usedSurface: boolean } {
+}): { apiKey: string; userId: string; agentUserId?: string; usedSurface: boolean } {
   const s = input.surface;
   // Trailing-slash-tolerant: surface keys and env pods are often saved with
   // slightly different URL shapes after multi-pod connect.
@@ -64,7 +64,10 @@ export function preferClaudeCodeSurfaceKey(input: {
   ) {
     return {
       apiKey: s.hubApiKey,
-      userId: s.agentUserId || input.envUser || "cli",
+      // Never the surface's agent id as the acting user: the pod acts an agent
+      // key as its linked human (HubConfig.userId). The agent id rides apart.
+      userId: input.envUser || "cli",
+      agentUserId: s.agentUserId || undefined,
       usedSurface: true,
     };
   }

@@ -1,6 +1,6 @@
 import chalk from "chalk";
 import { log } from "../utils/logger.js";
-import { resolveHubConfig, resolveUserId, hubGet, renderHubError } from "../lib/hub-client.js";
+import { resolveHubConfig, resolveUserId, hubGet, renderHubError, HubError } from "../lib/hub-client.js";
 import { unwrapList } from "../lib/unwrapList.js";
 import { classifyActiveCredential } from "../lib/credential-class.js";
 import { fetchFacets, renderRoles } from "./facet.js";
@@ -24,7 +24,11 @@ export async function showEntity(
     ]);
 
     if (entityRes.status === "rejected") {
-      console.error(chalk.red(`Entity not found: ${id}`));
+      // Only a 404 is "not found". A refusal (403) or an unreachable pod is a
+      // failed read, not an absent entity — say which (repo rule).
+      const err = entityRes.reason;
+      if (err instanceof HubError && err.status === 404) console.error(chalk.red(`Entity not found: ${id}`));
+      else renderHubError(err);
       process.exit(1);
     }
 

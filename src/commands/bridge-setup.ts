@@ -348,7 +348,9 @@ async function resolveBridgePod(
     cfg: {
       podUrl: c.podUrl,
       apiKey: c.hubApiKey,
-      userId: c.agentUserId,
+      // Acting user asked of the pod; the key's agent id rides apart (HubConfig.userId).
+      userId: "cli",
+      agentUserId: c.agentUserId || undefined,
       workspaceId: c.workspaceId || undefined,
     },
     podName: chosen.name,
