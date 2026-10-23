@@ -173,11 +173,15 @@ describe("threshold routing, asserted at the wire", () => {
     expect(postedPaths()).not.toContain("/import/analyze");
   });
 
-  it("sends `content` (not `text`) and forwards the active workspace", async () => {
+  it("sends `content` (not `text`) and never pins the saved default space", async () => {
     await runImport(3);
     const call = hubPost.mock.calls.find((c) => c[0] === "/import/enqueue-corpus");
     const body = call![1] as Record<string, any>;
-    expect(body.workspaceId).toBe(WS);
+    // The saved default space (cfg.workspaceId) is not a choice made for this
+    // import; only --workspace pins one, else the pod places the graph by its
+    // kinds (2026-10-22: an all-pod-wide contacts import was filed under the
+    // default "Brand"). Pinned with --workspace: test/import-agent-proposes.
+    expect(body).not.toHaveProperty("workspaceId");
     expect(body.source).toBe("markdown");
     expect(body.items).toHaveLength(3);
     for (const item of body.items) {
