@@ -184,7 +184,7 @@ pods
   .option("--yes", "Non-interactive: skip prompts (won't recreate a rejected key)")
   .action(async (name: string, url: string | undefined, opts: { url?: string; yes?: boolean }) => {
     const { podsUpdate } = await import("./commands/pods.js");
-    await podsUpdate(name, url, { url: opts.url, yes: opts.yes });
+    if (!(await podsUpdate(name, url, { url: opts.url, yes: opts.yes }))) process.exitCode = 1;
   });
 
 pods

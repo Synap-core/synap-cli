@@ -588,23 +588,29 @@ async function verifyKeyAgainstPod(
  * the key if the pod genuinely rejects it (keys survive a domain change, so a
  * re-auth is usually unnecessary). Nothing is written until both checks pass, so
  * a typo or a not-yet-live domain leaves the working profile untouched.
+ *
+ * Resolves true only when the profile was written. Every other outcome is
+ * false, with what is left to do printed: the caller exits non-zero (a fix that
+ * did not happen is not a success). Without a terminal nothing is asked: a
+ * prompt on a closed stdin never answers, and node exits 0 mid-await.
  */
 export async function podsUpdate(
   name: string,
   newUrlArg?: string,
   opts: { url?: string; yes?: boolean } = {}
-): Promise<void> {
+): Promise<boolean> {
   const profiles = listPodProfiles();
   const profile = profiles.find((p) => p.name === name);
   if (!profile) {
     log.error(podNotFoundMessage(name));
-    return;
+    return false;
   }
   const currentUrl = profile.config.podUrl;
+  const interactive = !opts.yes && Boolean(process.stdin.isTTY);
 
   // Resolve the new URL: positional arg > --url > prompt (default = current).
   let newUrl = (newUrlArg ?? opts.url)?.trim();
-  if (!newUrl && !opts.yes) {
+  if (!newUrl && interactive) {
     const { url } = await prompts({
       type: "text",
       name: "url",
@@ -612,12 +618,12 @@ export async function podsUpdate(
       initial: currentUrl,
       validate: (v: string) => v.startsWith("http") || "Must be a valid URL (https://…)",
     });
-    if (!url) return;
+    if (!url) return false;
     newUrl = (url as string).trim();
   }
   if (!newUrl) {
     log.error("No new URL provided. Usage: synap pods update <name> <url>");
-    return;
+    return false;
   }
   newUrl = newUrl.replace(/\/$/, "");
 
@@ -633,7 +639,7 @@ export async function podsUpdate(
   if (!health.healthy) {
     spinner.fail(`Pod not reachable at ${newUrl} — profile left unchanged.`);
     log.dim(`Verify the domain is live first: curl -sI ${newUrl}/health`);
-    return;
+    return false;
   }
   spinner.succeed(`Pod healthy at ${newUrl}${health.version ? `  (v${health.version})` : ""}`);
 
@@ -650,10 +656,19 @@ export async function podsUpdate(
   } else {
     // rejected — the key is genuinely refused; a recreate is required.
     keySpinner.fail("Pod rejected the existing key — it must be recreated.");
-    if (opts.yes) {
-      log.warn("Non-interactive (--yes): profile left unchanged so nothing breaks.");
-      log.dim(`Recreate the key with: synap pods reconnect ${name}`);
-      return;
+    if (!interactive) {
+      // Reconnecting asks the person to approve this computer: it needs a
+      // terminal. `pods reconnect` would use the saved (old) URL, so a move
+      // names the update itself.
+      const rerun =
+        newUrl === currentUrl.replace(/\/$/, "")
+          ? `synap pods reconnect ${name}`
+          : `synap pods update ${name} ${newUrl}`;
+      log.warn(
+        `${opts.yes ? "Non-interactive (--yes)" : "No terminal to ask in"}: profile left unchanged (still ${currentUrl}).`
+      );
+      log.dim(`Connect this computer again, in a terminal: ${rerun}`);
+      return false;
     }
     const { recreate } = await prompts({
       type: "confirm",
@@ -663,7 +678,7 @@ export async function podsUpdate(
     });
     if (!recreate) {
       log.warn(`URL not updated (old profile kept). Re-run when ready, or: synap pods reconnect ${name}`);
-      return;
+      return false;
     }
     // The pod's device flow — the same door as `synap pods reconnect`. It saves
     // the computer's new key under this profile (at the new URL) itself.
@@ -671,7 +686,7 @@ export async function podsUpdate(
     const saved = await connectThisComputer(newUrl, { name });
     if (!saved) {
       log.warn("URL not updated (old profile kept). Re-run when ready.");
-      return;
+      return false;
     }
     config = saved;
     log.success("New key issued.");
@@ -695,4 +710,5 @@ export async function podsUpdate(
   } else {
     log.dim(`'${name}' is not the active pod. Run 'synap pods use ${name}' to propagate the new URL to agent surfaces.`);
   }
+  return true;
 }
