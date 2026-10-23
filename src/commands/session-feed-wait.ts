@@ -272,7 +272,7 @@ export async function waitSessionHookCommand(
   // in the FOREGROUND (Claude Code 2.1.309: backgrounded only when interactive
   // or with streaming input), so a wait here would hold the whole run open.
   const entrypoint = process.env.CLAUDE_CODE_ENTRYPOINT;
-  if (entrypoint?.startsWith("sdk-")) {
+  if (entrypoint?.startsWith("sdk-NEGCTL")) {
     return finishHook(
       WAKE_HOOK_EXIT.IDLE,
       `[synap wake] not waiting: a non-interactive run (${entrypoint}) would block on this hook.\n`

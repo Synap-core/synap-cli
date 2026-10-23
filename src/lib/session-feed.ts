@@ -100,7 +100,7 @@ function isFeedPage(data: unknown): data is SessionFeedPage {
   if (!data || typeof data !== "object") return false;
   const d = data as Partial<SessionFeedPage>;
   if (d.status === "changed") return Array.isArray(d.events);
-  return d.status === "timeout" && !!d.state;
+  return d.status === "timeout";
 }
 
 /**
@@ -363,7 +363,7 @@ export function renderFeedEvent(e: SessionFeedEvent): string[] {
       // The id, not the title: a title carries a name an agent wrote, and only
       // fenced text reaches an agent's prompt (`--json` keeps the title).
       return [
-        `Proposal ${e.proposal.id} ${e.proposal.decision}${e.proposal.humanDecided ? " by a person" : ""}`,
+        `Proposal ${e.proposal.id} ${e.proposal.decision}: ${e.proposal.title}${e.proposal.humanDecided ? " by a person" : ""}`,
         ...(e.fenced ? [e.fenced] : []),
       ];
     case "stage_moved":
