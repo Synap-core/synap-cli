@@ -19,6 +19,17 @@
  *
  * Best-effort by design: a lost write costs at most one duplicate line, and a
  * file that cannot be read is a fresh start, never a crash in someone's hook.
+ * The read-modify-writes are unlocked: two waiters racing inside the same
+ * milliseconds can both wake the agent once.
+ *
+ * Stated limits, both from the pod's contract rather than this file:
+ *   - the pod marks a message read when it HANDS it out (there is no ack), so
+ *     a hook killed between that read and its stderr write (the session ended,
+ *     the hook's timeout) loses that one wake — the message stays in the room;
+ *   - after the first run the hook reads in CURSOR mode (`since`), which sees
+ *     owner messages written while the agent worked its turn, but not a post
+ *     whose row commits after a concurrent read already moved the cursor past
+ *     its timestamp (unread mode would; it would also drop those owner messages).
  */
 
 import fs from "node:fs";
