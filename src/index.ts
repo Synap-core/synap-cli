@@ -1198,6 +1198,10 @@ program
   .option("--max-parallel <n>", "Runs at the same time", "1")
   .option("--claude-bin <path>", "The claude binary", "claude")
   .option("--claude-config-dir <dir>", "CLAUDE_CONFIG_DIR for launched runs — picks which Claude subscription they use")
+  .option(
+    "--accounts <file>",
+    "Claude accounts to rotate across ({version:1, reserve, accounts:[{id,label,token,design?}]}, mode 600); default ~/.config/synap-worker/accounts.json when it exists, else the environment's login"
+  )
   .option("--allowed-tools <list>", "Comma-separated Claude tools allowed without asking (the pod MCP server is always added)")
   .option("--skip-permissions", "Launch with --dangerously-skip-permissions instead of an allow-list")
   .option("--dry-run", "Claim and log what would launch, without launching Claude")

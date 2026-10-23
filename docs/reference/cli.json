@@ -2896,6 +2896,12 @@
             "takesValue": "required"
           },
           {
+            "flags": "--accounts <file>",
+            "long": "--accounts",
+            "description": "Claude accounts to rotate across ({version:1, reserve, accounts:[{id,label,token,design?}]}, mode 600); default ~/.config/synap-worker/accounts.json when it exists, else the environment's login",
+            "takesValue": "required"
+          },
+          {
             "flags": "--allowed-tools <list>",
             "long": "--allowed-tools",
             "description": "Comma-separated Claude tools allowed without asking (the pod MCP server is always added)",

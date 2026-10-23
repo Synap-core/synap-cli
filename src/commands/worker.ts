@@ -21,18 +21,37 @@
  * variables are removed from the launched environment so a stray key can never
  * silently switch billing away from the subscription.
  *
+ * Several Claude accounts (`--accounts <file>`, default
+ * ~/.config/synap-worker/accounts.json when it exists): before each launch the
+ * accounts are measured and one is picked (worker-accounts.ts); its token goes
+ * into the run's environment only. A run cut off by a usage limit marks that
+ * account full and is RESUMED (same Claude conversation) on the next account.
+ *
+ * A DESIGN run (the session declares an outcome of kind "design") launches as
+ * `claude --bg` — the only mode that has the Artifact tool — on the account
+ * flagged `design`, and is watched through `claude agents --json` and its
+ * transcript.
+ *
  * State (which sessions were launched, their Claude session ids and outcome)
  * lives in ~/.synap/worker/<agent>/state.json; each run's stream-json goes to
- * ~/.synap/worker/<agent>/runs/<sessionId>.jsonl.
+ * ~/.synap/worker/<agent>/runs/<sessionId>.jsonl. Neither ever holds a token.
  */
 
-import { spawn, type ChildProcess } from "node:child_process";
+import { execFile, spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import { ensureSecretDir, writeSecretFile } from "../lib/atomic-file.js";
 import os from "node:os";
 import path from "node:path";
 import { resolveHubConfig, resolveUserId } from "../lib/hub-client.js";
 import { createMcpClient, type McpCallClient } from "../lib/mcp-call.js";
+import {
+  AccountPool,
+  accountsFileTooOpen,
+  defaultAccountsFile,
+  loadAccountsFile,
+  probeAccount,
+  type AccountSpec,
+} from "./worker-accounts.js";
 
 export interface WorkerOptions {
   agent: string;
@@ -45,6 +64,8 @@ export interface WorkerOptions {
   allowedTools?: string;
   skipPermissions?: boolean;
   dryRun?: boolean;
+  /** The Claude accounts file (default ~/.config/synap-worker/accounts.json, used when it exists). */
+  accounts?: string;
 }
 
 export interface HandedItem {
@@ -52,7 +73,8 @@ export interface HandedItem {
   goal: string | null;
 }
 
-export type RunStatus = "running" | "done" | "failed";
+/** `limited`: cut off by a usage limit, waiting to be resumed on another account. */
+export type RunStatus = "running" | "done" | "failed" | "limited";
 
 export interface RunRecord {
   sessionId: string;
@@ -67,6 +89,18 @@ export interface RunRecord {
   resumes?: number;
   /** How many times a run that failed before Claude started was relaunched. */
   launchRetries?: number;
+  /** The accounts-file id the latest launch ran on — an id, never a token. */
+  accountId?: string;
+  /** `print` = `claude -p` (default); `bg` = `claude --bg`, a design run. */
+  mode?: "print" | "bg";
+  /** The short id `claude --bg` printed (what `claude agents|stop` take). */
+  bgId?: string;
+  /** When the latest launch (first or resumed) started. */
+  launchedAt?: string;
+  /** How many times a run cut off by a usage limit was resumed on another account. */
+  limitResumes?: number;
+  /** A background run first seen blocked (needs input) at this time. */
+  blockedSince?: string;
 }
 
 interface WorkerState {
@@ -219,6 +253,9 @@ export function writeRunMcpConfig(dir: string, config: { mcpServers: Record<stri
 
 export const DEFAULT_ALLOWED_TOOLS = ["Read", "Edit", "Write", "Glob", "Grep", "Bash", "TodoWrite"];
 
+/** The tools a design run adds: the claude.ai Artifact tool (and the search that loads deferred tools). */
+export const DESIGN_EXTRA_TOOLS = ["Artifact", "ToolSearch"];
+
 /** The protocol the launched Claude Code follows for one handed session. */
 export function buildWorkerPrompt(p: {
   sessionId: string;
@@ -226,6 +263,8 @@ export function buildWorkerPrompt(p: {
   agentName: string;
   cwd: string;
   mcpServer: string;
+  /** A design run: the deliverable is a claude.ai Design artifact. */
+  design?: boolean;
 }): string {
   const short = p.sessionId.slice(0, 8);
   return [
@@ -235,26 +274,233 @@ export function buildWorkerPrompt(p: {
     ``,
     `Session: ${p.sessionId}`,
     `Goal as handed: ${p.goal ?? "(read it from the session)"}`,
+    ...(p.design ? [`This is a DESIGN run: the deliverable is a design made with the Artifact tool.`] : []),
     ``,
     `Protocol:`,
     `1. Read: synap_get_session {sessionId} for the goal, outcomes and channelId (the room); then synap_get_thread_context {threadId: <channelId>} for what was said so far.`,
     `2. Claim: synap_post_message to the room (kind "update"), one line: you picked it up and what you will do first.`,
-    `3. Work in ${p.cwd}, or in the directory the session goal names (e.g. a new site under ~/sites). Shared-tree rules: never commit on a shared clone's main; for code changes in an existing repo use a git worktree on a branch named devbox/${short}-<slug>; never push to main, never run git checkout --, restore, stash or reset --hard on a shared clone. Never deploy to production or change a domain; a preview deploy only when the session goal asks for one.`,
+    `3. Work in ${p.cwd}, or in the directory the session goal names (e.g. a new site under ~/sites). Shared-tree rules: never commit on a shared clone's main; for code changes in an existing repo use a git worktree on a branch named devbox/${short}-<slug>; never push to main, never run git checkout --, restore, stash or reset --hard on a shared clone. You may push that branch and open a DRAFT pull request (gh pr create --draft); never merge one. Never deploy to production or change a domain; a preview deploy only when the session goal asks for one.`,
+    ...(p.design
+      ? [
+          `3b. Design: call the Artifact tool with action "quickstart" and intent "design" FIRST, follow what it returns, then publish, and keep the claude.ai URL the publish returns.`,
+        ]
+      : []),
     `4. Need help or a decision: post in the room starting with "QUESTION:" — kind "update" when the orchestrating AI can answer it, kind "question" only for a decision only the person can make. Then wait for the reply: read synap_get_thread_context about every 60 seconds (Bash "sleep 60" between reads), up to 30 minutes, and use the first reply posted after your question. No reply: state your assumption in the room and continue, or stop and say what is blocked.`,
-    `5. Report: post a concise result in the room (what changed, where — branch, commit, files). Record deliverables against the session's outcomes with synap_update_session (completeOutput = the outcome key, with a ref when an object exists). Do not close the session; the owner does.`,
-    `6. End your final message with one line: WORKER-RESULT: done | blocked | failed — <one sentence>.`,
+    `5. Record EVERY deliverable as a session output: synap_update_session {sessionId, outcomes:[{key, label, kind, ref:{url}}]}, then completeOutput <key> for each — the draft PR (ref = its URL), the branch, the gate summary path (name both in the label)${p.design ? `, and the design (the outcome of kind "design", ref = the artifact's claude.ai URL); also put that URL on the session's subject entity (synap_update_entity)` : ""}. Do not close the session; the owner does.`,
+    `6. Report: post ONE paragraph in the room starting "Look at first:" — what changed, where (PR, branch${p.design ? ", artifact URL" : ""}), and the first thing to check.`,
+    `7. End your final message with one line: WORKER-RESULT: done | blocked | failed — <one sentence>.`,
   ].join("\n");
 }
 
-/** The launched environment: the subscription, never a stray API key. */
-export function workerEnv(base: NodeJS.ProcessEnv, claudeConfigDir?: string): NodeJS.ProcessEnv {
+/**
+ * The launched environment: the subscription, never a stray API key. With an
+ * account picked, its token REPLACES any token the worker inherited.
+ */
+export function workerEnv(base: NodeJS.ProcessEnv, claudeConfigDir?: string, oauthToken?: string): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...base };
   delete env.ANTHROPIC_API_KEY;
   delete env.ANTHROPIC_AUTH_TOKEN;
   delete env.ANTHROPIC_BASE_URL;
   if (claudeConfigDir) env.CLAUDE_CONFIG_DIR = claudeConfigDir;
+  if (oauthToken) {
+    env.CLAUDE_CODE_OAUTH_TOKEN = oauthToken;
+    delete env.CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR;
+  }
   return env;
 }
+
+// ─── usage limits (stream-json and transcript) ────────────────────────────────
+
+/**
+ * The `error` values Claude Code puts on an API-error assistant message that
+ * mean the ACCOUNT is out (SDKAssistantMessage.error; transcript `error`).
+ * Verified on Claude Code 2.1.309 (and present in 2.1.296): a usage limit is
+ * `error: "rate_limit"`, `apiError: "usage_limit_reached"`, status 429, with
+ * `apiErrorParams.rate_limit_info.resetsAt` (epoch seconds) — 507 such
+ * entries in this Mac's transcripts, text "You've hit your session limit ·
+ * resets 7:30am". `billing_error` = out of credits.
+ */
+const LIMIT_ERRORS = new Set(["rate_limit", "billing_error"]);
+
+export interface LimitHit {
+  error: string;
+  /** When the limit lifts (ms), when Claude Code said. */
+  resetsAt?: number;
+}
+
+/** What one run's events say about how it ended. */
+export interface RunEnd {
+  claudeSessionId?: string;
+  /** The `result` text (stream) or the last main assistant text (transcript). */
+  text?: string;
+  /** Set when the run's LAST main-thread turn was refused by a usage limit. */
+  limit?: LimitHit;
+  isError?: boolean;
+}
+
+function epochToMs(v: unknown): number | undefined {
+  return typeof v === "number" && Number.isFinite(v) ? v * 1000 : undefined;
+}
+
+/**
+ * Fold one event (a stream-json line of `claude -p`, or a transcript line of
+ * a background session — the two spell the fields differently) into the run's
+ * ending. A later healthy assistant message clears an earlier limit: only a
+ * run whose last turn hit the limit "ended on a limit".
+ */
+export function foldRunEvent(end: RunEnd, ev: Record<string, unknown>, rejectedResetsAt?: { at?: number }): RunEnd {
+  const type = ev.type;
+  if (type === "system" && ev.subtype === "init" && typeof ev.session_id === "string" && !end.claudeSessionId) {
+    return { ...end, claudeSessionId: ev.session_id };
+  }
+  if (type === "rate_limit_event") {
+    const info = ev.rate_limit_info as { status?: string; resetsAt?: number } | undefined;
+    if (info?.status === "rejected" && rejectedResetsAt) rejectedResetsAt.at = epochToMs(info.resetsAt);
+    return end;
+  }
+  if (type === "assistant") {
+    // Subagent turns (parent_tool_use_id / isSidechain) never decide how the run ended.
+    if (ev.parent_tool_use_id || ev.isSidechain) return end;
+    const error = typeof ev.error === "string" ? ev.error : undefined;
+    if (error && LIMIT_ERRORS.has(error)) {
+      const params = (ev.api_error_params ?? ev.apiErrorParams) as { rate_limit_info?: { resetsAt?: number } } | undefined;
+      return { ...end, limit: { error, resetsAt: epochToMs(params?.rate_limit_info?.resetsAt) ?? rejectedResetsAt?.at } };
+    }
+    if (error || ev.isApiErrorMessage) return end;
+    const content = (ev.message as { content?: unknown } | undefined)?.content;
+    const text = Array.isArray(content)
+      ? content
+          .filter((b): b is { type: string; text: string } => !!b && (b as { type?: unknown }).type === "text" && typeof (b as { text?: unknown }).text === "string")
+          .map((b) => b.text)
+          .join("\n")
+      : undefined;
+    return { ...end, limit: undefined, ...(text ? { text } : {}) };
+  }
+  if (type === "result") {
+    const next: RunEnd = { ...end, isError: ev.is_error === true };
+    if (typeof ev.result === "string") next.text = ev.result;
+    if (ev.api_error_status === 429 && !next.limit) next.limit = { error: "rate_limit", resetsAt: rejectedResetsAt?.at };
+    return next;
+  }
+  return end;
+}
+
+/** A run that printed its WORKER-RESULT verdict finished its protocol: never a limit. */
+export function endedOnLimit(end: RunEnd): LimitHit | undefined {
+  if (workerVerdict(end.text)) return undefined;
+  return end.limit;
+}
+
+/** How long an account stays out after a limit with no reset time given. */
+export function limitUntil(hit: LimitHit, now: number): number {
+  if (hit.resetsAt && hit.resetsAt > now) return hit.resetsAt;
+  return now + (hit.error === "billing_error" ? 60 : 15) * 60_000;
+}
+
+/** At most this many usage-limit resumes per session. */
+export const MAX_LIMIT_RESUMES = 6;
+
+/** The prompt that resumes a run a usage limit cut off, on another account. */
+export const LIMIT_RESUME_PROMPT =
+  "Continue where you stopped. Your previous turn was cut off by a Claude usage limit and this session moved to another account. Same protocol; end with one line: WORKER-RESULT: done | blocked | failed — <one sentence>.";
+
+// ─── design runs ──────────────────────────────────────────────────────────────
+
+/**
+ * The structured signal for a DESIGN run: the session declares an outcome of
+ * kind "design" (`synap_get_session` → `outcomes.outcomes[].kind`, the
+ * playbook's `expectedOutputs: [{kind: "design", label: "Design"}]`). The goal
+ * text is never read for it. A session whose outcomes could not be read
+ * THROWS: an unreadable session is not "not a design run".
+ */
+export const DESIGN_OUTCOME_KIND = "design";
+
+export function isDesignSession(getSessionText: string): boolean {
+  let data: unknown;
+  try {
+    data = JSON.parse(getSessionText);
+  } catch {
+    throw new Error(`get_session did not return JSON: ${getSessionText.slice(0, 160)}`);
+  }
+  const d = data as { error?: unknown; outcomes?: { status?: string; outcomes?: Array<{ kind?: unknown }> } };
+  if (typeof d?.error === "string") throw new Error(`get_session: ${d.error}`);
+  const o = d?.outcomes;
+  if (!o || o.status !== "ok" || !Array.isArray(o.outcomes)) {
+    throw new Error(`get_session could not read the session's outcomes (${o?.status ?? "missing"})`);
+  }
+  return o.outcomes.some((x) => x?.kind === DESIGN_OUTCOME_KIND);
+}
+
+/** The short id `claude --bg` prints ("backgrounded · fd009109"). */
+export function parseBgId(output: string): string | undefined {
+  return /backgrounded\b[^\n0-9a-f]*([0-9a-f]{8})\b/.exec(output)?.[1];
+}
+
+export interface BgEntry {
+  id: string;
+  sessionId?: string;
+  /** Background sessions: working | blocked | done | failed (Claude Code 2.1.296+). */
+  state?: string;
+  status?: string;
+}
+
+/** `claude agents --json --all` → entries. Anything but a JSON list THROWS (a failed read is not "gone"). */
+export function parseAgentsList(text: string): BgEntry[] {
+  const data = JSON.parse(text) as unknown;
+  if (!Array.isArray(data)) throw new Error("claude agents --json did not return a list");
+  return data.filter((e): e is BgEntry => !!e && typeof (e as { id?: unknown }).id === "string");
+}
+
+export type BgPhase = "running" | "finished" | "blocked" | "gone";
+
+export function bgPhase(entry: BgEntry | undefined): BgPhase {
+  if (!entry) return "gone";
+  if (entry.state === "done" || entry.state === "failed") return "finished";
+  if (entry.state === "blocked") return "blocked";
+  return "running";
+}
+
+/** The transcript of a Claude session: `<config>/projects/<any>/<sessionId>.jsonl`. */
+export function findTranscript(claudeConfigDir: string | undefined, sessionId: string): string | undefined {
+  const projects = path.join(claudeConfigDir ?? path.join(os.homedir(), ".claude"), "projects");
+  let dirs: string[];
+  try {
+    dirs = fs.readdirSync(projects);
+  } catch {
+    return undefined;
+  }
+  for (const d of dirs) {
+    const f = path.join(projects, d, `${sessionId}.jsonl`);
+    if (fs.existsSync(f)) return f;
+  }
+  return undefined;
+}
+
+/** How a background run's transcript ends, reading only entries written since `sinceMs`. */
+export function readTranscriptEnd(text: string, sinceMs: number): RunEnd & { seen: number } {
+  let end: RunEnd = {};
+  let seen = 0;
+  for (const line of text.split("\n")) {
+    if (!line.trim()) continue;
+    let ev: Record<string, unknown>;
+    try {
+      ev = JSON.parse(line) as Record<string, unknown>;
+    } catch {
+      continue;
+    }
+    if (ev.type !== "assistant") continue;
+    const at = typeof ev.timestamp === "string" ? Date.parse(ev.timestamp) : NaN;
+    if (!(at >= sinceMs)) continue;
+    seen++;
+    end = foldRunEvent(end, ev);
+  }
+  return { ...end, seen };
+}
+
+/** A background run blocked (it needs input nobody will give) this long is ended. */
+export const BG_BLOCKED_MAX_MS = 15 * 60_000;
+/** A background run not yet listed, or listed with nothing new, is waited for this long after launch. */
+export const BG_SETTLE_MS = 2 * 60_000;
 
 /** The final `WORKER-RESULT:` line of a run's result text, if present. */
 export function workerVerdict(resultText: string | undefined): string | undefined {
@@ -331,6 +577,475 @@ function say(line: string): void {
   process.stdout.write(`[synap worker ${new Date().toISOString()}] ${line}\n`);
 }
 
+// ─── the worker ───────────────────────────────────────────────────────────────
+
+export interface ExecResult {
+  code: number | null;
+  stdout: string;
+  stderr: string;
+}
+
+/** Runs a short-lived command (`claude --bg`, `claude agents`, `claude stop`). */
+export type ExecFn = (bin: string, args: string[], o: { cwd: string; env: NodeJS.ProcessEnv }) => Promise<ExecResult>;
+
+const defaultExec: ExecFn = (bin, args, o) =>
+  new Promise((resolve) => {
+    execFile(bin, args, { cwd: o.cwd, env: o.env, timeout: 60_000, maxBuffer: 16 * 1024 * 1024 }, (err, stdout, stderr) => {
+      const code = err ? (typeof (err as { code?: unknown }).code === "number" ? ((err as { code: number }).code) : 1) : 0;
+      resolve({ code, stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
+    });
+  });
+
+export interface WorkerDeps {
+  mcp: McpCallClient;
+  podUrl: string;
+  apiKey: string;
+  /** The worker agent's own user id: its posts never resume it. */
+  selfAgentId: string;
+  exec?: ExecFn;
+  /** The account probe's fetch (tests stub it). */
+  fetchImpl?: typeof fetch;
+  now?: () => number;
+  say?: (line: string) => void;
+}
+
+export interface Worker {
+  tick(): Promise<{ handed: number; launched: number }>;
+  /** Re-read the background runs' state (design runs). */
+  watch(): Promise<void>;
+  waitForChildren(): Promise<void>;
+  backgroundRunning(): number;
+  stop(): void;
+  readonly state: WorkerState;
+}
+
+type How =
+  | { kind: "fresh" }
+  | { kind: "followUp"; claudeSessionId: string; prompt: string }
+  | { kind: "limitResume"; claudeSessionId?: string };
+
+export function createWorker(opts: WorkerOptions, deps: WorkerDeps): Worker {
+  const agent = opts.agent;
+  const now = deps.now ?? Date.now;
+  const log = deps.say ?? say;
+  const exec = deps.exec ?? defaultExec;
+  const iso = () => new Date(now()).toISOString();
+  const maxParallel = Math.max(1, Number(opts.maxParallel ?? "1"));
+  const cwd = path.resolve(opts.cwd ?? path.join(os.homedir(), "Documents", "Code", "synap"));
+  const claudeBin = opts.claudeBin ?? "claude";
+
+  const mcpServer = RUN_MCP_SERVER;
+  const mcpConfigPath = writeRunMcpConfig(stateDir(agent), runMcpConfig(deps.podUrl, deps.apiKey));
+
+  const allowed = (opts.allowedTools ? opts.allowedTools.split(",") : DEFAULT_ALLOWED_TOOLS)
+    .map((t) => t.trim())
+    .filter(Boolean);
+  allowed.push(`mcp__${mcpServer}`);
+
+  const accountsFile = loadAccountsFile(opts.accounts);
+  const pool = accountsFile
+    ? new AccountPool(accountsFile, (token) => probeAccount(token, { fetchImpl: deps.fetchImpl, now }), now)
+    : undefined;
+  if (accountsFile && accountsFileTooOpen(opts.accounts ?? defaultAccountsFile())) {
+    log(`warning: the accounts file is readable by other users — chmod 600 ${opts.accounts ?? defaultAccountsFile()}`);
+  }
+
+  const state = loadState(agent);
+  for (const r of Object.values(state.runs)) {
+    // A print run dies with this process. A background run outlives it and is
+    // watched again — unless it never got its id (the worker died mid-launch).
+    if (r.status === "running" && (r.mode !== "bg" || !r.bgId)) {
+      r.status = "failed";
+      r.result = "worker restarted while this run was in flight";
+      r.finishedAt = iso();
+    }
+  }
+  saveState(agent, state);
+  const save = () => saveState(agent, state);
+
+  const runsDir = path.join(stateDir(agent), "runs");
+  const appendRunLog = (sessionId: string, line: Record<string, unknown>) => {
+    fs.mkdirSync(runsDir, { recursive: true, mode: 0o700 });
+    fs.appendFileSync(path.join(runsDir, `${sessionId}.jsonl`), `${JSON.stringify({ ...line, at: iso() })}\n`, { mode: 0o600 });
+  };
+
+  const children = new Map<string, ChildProcess>();
+  const bgRunning = () => Object.values(state.runs).filter((r) => r.status === "running" && r.mode === "bg");
+  const active = () => children.size + bgRunning().length;
+
+  const who = accountsFile
+    ? `accounts ${accountsFile.accounts.map((a) => `${a.id}${a.design ? " (design)" : ""}`).join(", ")} · reserve ${accountsFile.reserve}`
+    : "the environment's Claude login";
+  log(`agent ${agent} → ${deps.podUrl} · MCP server "${mcpServer}" · cwd ${cwd} · max ${maxParallel} parallel · ${who}`);
+
+  // ── accounts ──
+  const saidOnce = new Set<string>();
+  const sayOnce = (key: string, line: string) => {
+    if (saidOnce.has(key)) return;
+    saidOnce.add(key);
+    log(line);
+  };
+  let measuredThisTick = false;
+  /** `undefined`: no accounts file (the environment's login). `null`: no account with room — do not launch. */
+  const pick = async (design: boolean): Promise<AccountSpec | null | undefined> => {
+    if (!pool) return undefined;
+    if (!measuredThisTick) {
+      await pool.measure();
+      measuredThisTick = true;
+    }
+    const key = `noroom:${design ? "design" : "run"}`;
+    const sel = pool.select({ design });
+    if (!sel.account) {
+      sayOnce(key, `${sel.reason} — not launching ${design ? "design runs" : "runs"} for now; checking every tick`);
+      return null;
+    }
+    if (saidOnce.delete(key)) log(`account ${sel.account.id} has room again`);
+    return sel.account;
+  };
+
+  /** A run that ended on a usage limit: that account is out until its reset, the run waits to move. */
+  const markLimited = (rec: RunRecord, hit: LimitHit) => {
+    if (!pool || !rec.accountId) return false;
+    const until = limitUntil(hit, now());
+    pool.markFull(rec.accountId, until);
+    rec.status = "limited";
+    rec.result = `usage limit (${hit.error}) on account ${rec.accountId} until ${new Date(until).toISOString()} — resumes on another account`;
+    return true;
+  };
+
+  // ── launching ──
+  const launch = async (item: HandedItem, how: How, design: boolean, account: AccountSpec | undefined): Promise<void> => {
+    const resumeId = how.kind === "fresh" ? undefined : how.claudeSessionId;
+    const prompt =
+      how.kind === "followUp"
+        ? how.prompt
+        : how.kind === "limitResume" && how.claudeSessionId
+          ? LIMIT_RESUME_PROMPT
+          : buildWorkerPrompt({ sessionId: item.id, goal: item.goal, agentName: agent, cwd, mcpServer, design });
+
+    const prior = state.runs[item.id];
+    const base = {
+      status: "running" as const,
+      exitCode: undefined,
+      accountId: account?.id,
+      mode: design ? ("bg" as const) : ("print" as const),
+      launchedAt: iso(),
+      blockedSince: undefined,
+    };
+    const record: RunRecord =
+      how.kind !== "fresh" && prior
+        ? Object.assign(
+            prior,
+            base,
+            how.kind === "followUp" ? { resumes: (prior.resumes ?? 0) + 1 } : { limitResumes: (prior.limitResumes ?? 0) + 1 }
+          )
+        : {
+            sessionId: item.id,
+            startedAt: iso(),
+            ...base,
+            // A relaunch of a run that never started keeps counting its retries.
+            ...(prior && prior.status === "failed" && !prior.claudeSessionId
+              ? { launchRetries: (prior.launchRetries ?? 0) + 1 }
+              : {}),
+          };
+    state.runs[item.id] = record;
+    const what =
+      how.kind === "fresh"
+        ? "launched"
+        : how.kind === "followUp"
+          ? `resumed (follow-up #${record.resumes})`
+          : `resumed after a usage limit (#${record.limitResumes})`;
+    const on = account ? ` on account ${account.id}` : "";
+    const env = workerEnv(process.env, opts.claudeConfigDir, account?.token);
+
+    if (design) {
+      // `claude --bg` is the mode that has the Artifact tool. --strict-mcp-config: a
+      // project .mcp.json would stop it on an interactive "new MCP servers" prompt.
+      // dontAsk: a tool outside the list is denied, never a prompt nobody answers.
+      const args = [
+        "--bg",
+        ...(resumeId ? ["--resume", resumeId] : []),
+        prompt,
+        "--strict-mcp-config",
+        "--mcp-config",
+        mcpConfigPath,
+        ...(opts.skipPermissions
+          ? ["--dangerously-skip-permissions"]
+          : ["--permission-mode", "dontAsk", "--allowedTools", [...allowed, ...DESIGN_EXTRA_TOOLS].join(",")]),
+      ];
+      if (opts.dryRun) {
+        record.status = "done";
+        record.result = `dry run: would launch ${claudeBin} --bg in ${cwd}${on}`;
+        save();
+        log(`dry run — design session ${item.id}${on}: ${claudeBin} --bg <prompt> ${args.slice(2 + (resumeId ? 2 : 0)).join(" ")}`);
+        return;
+      }
+      save();
+      const res = await exec(claudeBin, args, { cwd, env });
+      const bgId = parseBgId(`${res.stdout}\n${res.stderr}`);
+      appendRunLog(item.id, { type: "synap-worker", event: "bg-launch", bgId: bgId ?? null, accountId: account?.id ?? null, exit: res.code });
+      if (res.code !== 0 || !bgId) {
+        record.status = "failed";
+        record.exitCode = res.code;
+        record.finishedAt = iso();
+        record.result = `claude --bg did not start (exit ${res.code}): ${(res.stderr || res.stdout).trim().slice(-200)}`;
+        save();
+        log(`session ${item.id}: ${record.result}`);
+        return;
+      }
+      record.bgId = bgId;
+      save();
+      log(`${what} design session ${item.id} as background ${bgId}${on}`);
+      return;
+    }
+
+    const args = ["-p", prompt, "--output-format", "stream-json", "--verbose", "--mcp-config", mcpConfigPath];
+    if (resumeId) args.push("--resume", resumeId);
+    if (opts.skipPermissions) args.push("--dangerously-skip-permissions");
+    else args.push("--permission-mode", "acceptEdits", "--allowedTools", ...allowed);
+
+    if (opts.dryRun) {
+      record.status = "done";
+      record.result = `dry run: would launch ${claudeBin} in ${cwd}${on}`;
+      save();
+      log(`dry run — session ${item.id}${on}: ${claudeBin} ${args.slice(0, 1).join(" ")} <prompt> ${args.slice(2).join(" ")}`);
+      return;
+    }
+
+    fs.mkdirSync(runsDir, { recursive: true, mode: 0o700 });
+    const out = fs.createWriteStream(path.join(runsDir, `${item.id}.jsonl`), { flags: "a", mode: 0o600 });
+    const child = spawn(claudeBin, args, { cwd, env, stdio: ["ignore", "pipe", "pipe"] });
+    children.set(item.id, child);
+    record.pid = child.pid;
+    save();
+    log(`${what} session ${item.id} (pid ${child.pid})${on}`);
+
+    let buffered = "";
+    let end: RunEnd = {};
+    const rejected: { at?: number } = {};
+    child.stdout?.on("data", (chunk: Buffer) => {
+      out.write(chunk);
+      buffered += chunk.toString("utf8");
+      const lines = buffered.split("\n");
+      buffered = lines.pop() ?? "";
+      for (const line of lines) {
+        try {
+          end = foldRunEvent(end, JSON.parse(line) as Record<string, unknown>, rejected);
+        } catch {
+          continue; // a partial or non-JSON line — kept in the run log, not parsed
+        }
+        if (end.claudeSessionId && !record.claudeSessionId) {
+          record.claudeSessionId = end.claudeSessionId;
+          save();
+        }
+      }
+    });
+    child.stderr?.on("data", (chunk: Buffer) => out.write(chunk));
+    child.on("error", (err) => {
+      // The binary could not be started: `close` follows with no exit code.
+      out.write(`synap-worker: could not start ${claudeBin}: ${err.message}\n`);
+    });
+    child.on("close", (code) => {
+      children.delete(item.id);
+      out.end();
+      record.exitCode = code;
+      record.finishedAt = iso();
+      const hit = endedOnLimit(end);
+      if (!(hit && markLimited(record, hit))) {
+        record.result = workerVerdict(end.text) ?? (end.text ? end.text.slice(-300) : undefined);
+        record.status = code === 0 ? "done" : "failed";
+      }
+      save();
+      log(`session ${item.id} finished — exit ${code}${record.result ? ` · ${record.result}` : ""}`);
+    });
+  };
+
+  // ── watching background (design) runs ──
+  const stopBg = async (rec: RunRecord) => {
+    if (!rec.bgId) return;
+    const r = await exec(claudeBin, ["stop", rec.bgId], { cwd, env: workerEnv(process.env, opts.claudeConfigDir) });
+    if (r.code !== 0) log(`could not stop background ${rec.bgId} (exit ${r.code}); stop it with: claude stop ${rec.bgId}`);
+  };
+  const endBg = async (rec: RunRecord, status: "done" | "failed", result: string | undefined) => {
+    rec.status = status;
+    rec.result = result;
+    rec.finishedAt = iso();
+    rec.blockedSince = undefined;
+    save();
+    appendRunLog(rec.sessionId, { type: "synap-worker", event: "bg-end", bgId: rec.bgId ?? null, status });
+    log(`session ${rec.sessionId} (background ${rec.bgId}) finished — ${status}${result ? ` · ${result}` : ""}`);
+    await stopBg(rec);
+  };
+
+  const watch = async () => {
+    const running = bgRunning().filter((r) => r.bgId);
+    if (!running.length) return;
+    const res = await exec(claudeBin, ["agents", "--json", "--all", "--cwd", cwd], {
+      cwd,
+      env: workerEnv(process.env, opts.claudeConfigDir),
+    });
+    let list: BgEntry[];
+    try {
+      if (res.code !== 0) throw new Error(`exit ${res.code}: ${res.stderr.trim().slice(-160)}`);
+      list = parseAgentsList(res.stdout);
+    } catch (err) {
+      // A failed read is not "gone": the runs stay as they were.
+      log(`could not list background sessions (${(err as Error).message}); checking again next tick`);
+      return;
+    }
+    for (const rec of running) {
+      const entry = list.find((e) => e.id === rec.bgId);
+      if (entry?.sessionId && !rec.claudeSessionId) {
+        rec.claudeSessionId = entry.sessionId;
+        save();
+      }
+      const phase = bgPhase(entry);
+      const since = Date.parse(rec.launchedAt ?? rec.startedAt);
+      if (phase === "running") {
+        if (rec.blockedSince) {
+          rec.blockedSince = undefined;
+          save();
+        }
+        continue;
+      }
+      if (phase === "gone") {
+        if (now() - since > BG_SETTLE_MS) await endBg(rec, "failed", "background session no longer listed by claude agents");
+        continue;
+      }
+      const file = rec.claudeSessionId ? findTranscript(opts.claudeConfigDir, rec.claudeSessionId) : undefined;
+      const end = file ? readTranscriptEnd(fs.readFileSync(file, "utf8"), since) : undefined;
+      const hit = end ? endedOnLimit(end) : undefined;
+      if (hit) {
+        rec.finishedAt = iso();
+        rec.blockedSince = undefined;
+        if (!markLimited(rec, hit)) {
+          rec.status = "failed";
+          rec.result = `usage limit (${hit.error})`;
+        }
+        save();
+        log(`session ${rec.sessionId} (background ${rec.bgId}): ${rec.result}`);
+        await stopBg(rec);
+        continue;
+      }
+      if (phase === "finished") {
+        // Just resumed: the listing can still show the previous turn's ending.
+        if (!end?.seen && now() - since < BG_SETTLE_MS) continue;
+        const text = end?.text;
+        await endBg(
+          rec,
+          entry?.state === "done" ? "done" : "failed",
+          workerVerdict(text) ?? (text ? text.slice(-300) : file ? "no reply since launch" : "transcript not found")
+        );
+        continue;
+      }
+      // Blocked and not on a limit: it waits for input nobody here will give.
+      if (!rec.blockedSince) {
+        rec.blockedSince = iso();
+        save();
+      } else if (now() - Date.parse(rec.blockedSince) > BG_BLOCKED_MAX_MS) {
+        await endBg(rec, "failed", `background session blocked (needs input) for ${BG_BLOCKED_MAX_MS / 60_000} min — claude attach ${rec.bgId}`);
+      }
+    }
+  };
+
+  // ── the tick ──
+  const roomFollowUps = async (sessionId: string, since: string): Promise<RoomMessage[]> => {
+    const s = await deps.mcp.call("synap_get_session", { sessionId });
+    if (s.isError) throw new Error(`get_session ${sessionId} refused: ${s.text.slice(0, 160)}`);
+    const channelId = (findKey(JSON.parse(s.text), "channelId") as string | undefined) ?? null;
+    if (!channelId) return [];
+    const t = await deps.mcp.call("synap_get_thread_context", { threadId: channelId });
+    if (t.isError) throw new Error(`thread ${channelId} refused: ${t.text.slice(0, 160)}`);
+    const messages = (JSON.parse(t.text) as { messages?: RoomMessage[] }).messages ?? [];
+    return followUpsSince(messages, since, deps.selfAgentId);
+  };
+
+  /** Whether a handed session is a design run; `undefined` when that could not be read (not launched this tick). */
+  const readDesign = async (sessionId: string): Promise<boolean | undefined> => {
+    try {
+      const s = await deps.mcp.call("synap_get_session", { sessionId });
+      if (s.isError) throw new Error(`refused: ${s.text.slice(0, 160)}`);
+      return isDesignSession(s.text);
+    } catch (err) {
+      const msg = (err as Error).message;
+      sayOnce(`design:${sessionId}:${msg}`, `session ${sessionId}: could not read whether it is a design run (${msg}) — not launched; retried every tick`);
+      return undefined;
+    }
+  };
+
+  const tick = async () => {
+    measuredThisTick = false;
+    const res = await deps.mcp.call("synap_orient", {});
+    if (res.isError) throw new Error(`orient refused: ${res.text.slice(0, 200)}`);
+    const items = parseHandedToYou(res.text);
+    await watch();
+    const free = () => maxParallel - active();
+    const handed = new Map(items.map((i) => [i.id, i]));
+    let launched = 0;
+
+    // 1. Runs a usage limit cut off: resumed first, on an account with room.
+    for (const rec of Object.values(state.runs)) {
+      if (free() <= 0) break;
+      const item = rec.status === "limited" ? handed.get(rec.sessionId) : undefined;
+      if (!item) continue;
+      if ((rec.limitResumes ?? 0) >= MAX_LIMIT_RESUMES) {
+        rec.status = "failed";
+        rec.result = `stopped: cut off by a usage limit ${MAX_LIMIT_RESUMES + 1} times`;
+        save();
+        log(`session ${rec.sessionId}: ${rec.result}`);
+        continue;
+      }
+      const design = rec.mode === "bg";
+      const account = await pick(design);
+      if (account === null) continue;
+      await launch(item, { kind: "limitResume", claudeSessionId: rec.claudeSessionId }, design, account);
+      launched++;
+    }
+
+    // 2. Sessions never launched (or due a relaunch).
+    for (const item of pickNew(items, state, items.length, now())) {
+      if (free() <= 0) break;
+      const design = await readDesign(item.id);
+      if (design === undefined) continue;
+      const account = await pick(design);
+      if (account === null) continue;
+      await launch(item, { kind: "fresh" }, design, account);
+      launched++;
+    }
+
+    // 3. Finished runs with new room messages: resumed.
+    for (const item of items) {
+      if (free() <= 0) break;
+      const rec = state.runs[item.id];
+      if (!rec || rec.status === "running" || rec.status === "limited" || !rec.claudeSessionId || !rec.finishedAt) continue;
+      if ((rec.resumes ?? 0) >= MAX_RESUMES) continue;
+      const follow = await roomFollowUps(item.id, rec.finishedAt);
+      if (!follow.length) continue;
+      const design = rec.mode === "bg";
+      const account = await pick(design);
+      if (account === null) continue;
+      await launch(item, { kind: "followUp", claudeSessionId: rec.claudeSessionId, prompt: buildFollowUpPrompt(follow) }, design, account);
+      launched++;
+    }
+    return { handed: items.length, launched };
+  };
+
+  return {
+    tick,
+    watch,
+    state,
+    backgroundRunning: () => bgRunning().length,
+    waitForChildren: async () => {
+      while (children.size) {
+        await Promise.all([...children.values()].map((c) => new Promise((r) => c.once("close", r))));
+      }
+    },
+    stop: () => {
+      for (const c of children.values()) c.kill("SIGTERM");
+    },
+  };
+}
+
 // ─── the loop ─────────────────────────────────────────────────────────────────
 
 export async function workerCommand(opts: WorkerOptions): Promise<void> {
@@ -339,156 +1054,30 @@ export async function workerCommand(opts: WorkerOptions): Promise<void> {
   process.env.SYNAP_AGENT = agent;
   const cfg = await resolveHubConfig();
   const intervalMs = parseInterval(opts.interval);
-  const maxParallel = Math.max(1, Number(opts.maxParallel ?? "1"));
-  const cwd = path.resolve(opts.cwd ?? path.join(os.homedir(), "Documents", "Code", "synap"));
-  const claudeBin = opts.claudeBin ?? "claude";
-
-  const mcpServer = RUN_MCP_SERVER;
-  const mcpConfigPath = writeRunMcpConfig(stateDir(agent), runMcpConfig(cfg.podUrl, cfg.apiKey));
-
-  const allowed = (opts.allowedTools ? opts.allowedTools.split(",") : DEFAULT_ALLOWED_TOOLS)
-    .map((t) => t.trim())
-    .filter(Boolean);
-  allowed.push(`mcp__${mcpServer}`);
 
   const mcp: McpCallClient = createMcpClient({
     url: `${cfg.podUrl.replace(/\/+$/, "")}/mcp`,
     apiKey: cfg.apiKey,
     clientName: `synap-worker/${agent}`,
   });
+  // Its own posts must never resume it: compare with the key's real agent id.
+  const selfAgentId = await resolveUserId(cfg);
+  const worker = createWorker(opts, { mcp, podUrl: cfg.podUrl, apiKey: cfg.apiKey, selfAgentId });
 
-  const state = loadState(agent);
-  // A run "running" at start is a run this process can no longer watch.
-  for (const r of Object.values(state.runs)) {
-    if (r.status === "running") {
-      r.status = "failed";
-      r.result = "worker restarted while this run was in flight";
-      r.finishedAt = new Date().toISOString();
-    }
-  }
-  saveState(agent, state);
-
-  const children = new Map<string, ChildProcess>();
   let stopping = false;
   const stop = () => {
     stopping = true;
-    for (const c of children.values()) c.kill("SIGTERM");
+    worker.stop();
   };
   process.on("SIGTERM", stop);
   process.on("SIGINT", stop);
-
-  say(`agent ${agent} → ${cfg.podUrl} · MCP server "${mcpServer}" · cwd ${cwd} · every ${intervalMs / 1000}s · max ${maxParallel} parallel`);
-
-  const launch = (item: HandedItem, resume?: { claudeSessionId: string; prompt: string }) => {
-    const prompt =
-      resume?.prompt ??
-      buildWorkerPrompt({ sessionId: item.id, goal: item.goal, agentName: agent, cwd, mcpServer });
-    const args = ["-p", prompt, "--output-format", "stream-json", "--verbose", "--mcp-config", mcpConfigPath];
-    if (resume) args.push("--resume", resume.claudeSessionId);
-    if (opts.skipPermissions) args.push("--dangerously-skip-permissions");
-    else args.push("--permission-mode", "acceptEdits", "--allowedTools", ...allowed);
-
-    const prior = state.runs[item.id];
-    const record: RunRecord = resume && prior
-      ? Object.assign(prior, { status: "running" as const, resumes: (prior.resumes ?? 0) + 1, exitCode: undefined })
-      : {
-          sessionId: item.id,
-          status: "running",
-          startedAt: new Date().toISOString(),
-          // A relaunch of a run that never started keeps counting its retries.
-          ...(prior && prior.status === "failed" && !prior.claudeSessionId
-            ? { launchRetries: (prior.launchRetries ?? 0) + 1 }
-            : {}),
-        };
-    state.runs[item.id] = record;
-    if (opts.dryRun) {
-      record.status = "done";
-      record.result = `dry run: would launch ${claudeBin} in ${cwd}`;
-      saveState(agent, state);
-      say(`dry run — session ${item.id}: ${claudeBin} ${args.slice(0, 1).join(" ")} <prompt> ${args.slice(2).join(" ")}`);
-      return;
-    }
-
-    const runsDir = path.join(stateDir(agent), "runs");
-    fs.mkdirSync(runsDir, { recursive: true, mode: 0o700 });
-    const out = fs.createWriteStream(path.join(runsDir, `${item.id}.jsonl`), { flags: "a", mode: 0o600 });
-    const child = spawn(claudeBin, args, { cwd, env: workerEnv(process.env, opts.claudeConfigDir), stdio: ["ignore", "pipe", "pipe"] });
-    children.set(item.id, child);
-    record.pid = child.pid;
-    saveState(agent, state);
-    say(`${resume ? `resumed (follow-up #${record.resumes})` : "launched"} session ${item.id} (pid ${child.pid})`);
-
-    let buffered = "";
-    let lastResult: string | undefined;
-    child.stdout?.on("data", (chunk: Buffer) => {
-      out.write(chunk);
-      buffered += chunk.toString("utf8");
-      const lines = buffered.split("\n");
-      buffered = lines.pop() ?? "";
-      for (const line of lines) {
-        try {
-          const ev = JSON.parse(line) as { type?: string; subtype?: string; session_id?: string; result?: string };
-          if (ev.type === "system" && ev.subtype === "init" && ev.session_id && !record.claudeSessionId) {
-            record.claudeSessionId = ev.session_id;
-            saveState(agent, state);
-          }
-          if (ev.type === "result" && typeof ev.result === "string") lastResult = ev.result;
-        } catch {
-          /* a partial or non-JSON line — kept in the run log, not parsed */
-        }
-      }
-    });
-    child.stderr?.on("data", (chunk: Buffer) => out.write(chunk));
-    child.on("close", (code) => {
-      children.delete(item.id);
-      out.end();
-      record.exitCode = code;
-      record.finishedAt = new Date().toISOString();
-      record.result = workerVerdict(lastResult) ?? (lastResult ? lastResult.slice(-300) : undefined);
-      record.status = code === 0 ? "done" : "failed";
-      saveState(agent, state);
-      say(`session ${item.id} finished — exit ${code}${record.result ? ` · ${record.result}` : ""}`);
-    });
-  };
-
-  // Its own posts must never resume it: compare with the key's real agent id.
-  const selfAgentId = await resolveUserId(cfg);
-  const roomFollowUps = async (sessionId: string, since: string): Promise<RoomMessage[]> => {
-    const s = await mcp.call("synap_get_session", { sessionId });
-    if (s.isError) throw new Error(`get_session ${sessionId} refused: ${s.text.slice(0, 160)}`);
-    const channelId = (findKey(JSON.parse(s.text), "channelId") as string | undefined) ?? null;
-    if (!channelId) return [];
-    const t = await mcp.call("synap_get_thread_context", { threadId: channelId });
-    if (t.isError) throw new Error(`thread ${channelId} refused: ${t.text.slice(0, 160)}`);
-    const messages = (JSON.parse(t.text) as { messages?: RoomMessage[] }).messages ?? [];
-    return followUpsSince(messages, since, selfAgentId);
-  };
-
-  const tick = async () => {
-    const res = await mcp.call("synap_orient", {});
-    if (res.isError) throw new Error(`orient refused: ${res.text.slice(0, 200)}`);
-    const items = parseHandedToYou(res.text);
-    const fresh = pickNew(items, state, maxParallel - children.size);
-    for (const item of fresh) launch(item);
-    let resumed = 0;
-    for (const item of items) {
-      if (children.size >= maxParallel) break;
-      const rec = state.runs[item.id];
-      if (!rec || rec.status === "running" || !rec.claudeSessionId || !rec.finishedAt) continue;
-      if ((rec.resumes ?? 0) >= MAX_RESUMES) continue;
-      const follow = await roomFollowUps(item.id, rec.finishedAt);
-      if (!follow.length) continue;
-      launch(item, { claudeSessionId: rec.claudeSessionId, prompt: buildFollowUpPrompt(follow) });
-      resumed++;
-    }
-    return { handed: items.length, launched: fresh.length + resumed };
-  };
+  say(`every ${intervalMs / 1000}s`);
 
   let failures = 0;
   let paused = false;
   while (!stopping) {
     try {
-      const r = await tick();
+      const r = await worker.tick();
       failures = 0;
       if (paused) say("resumed: picking up work again");
       paused = false;
@@ -514,8 +1103,12 @@ export async function workerCommand(opts: WorkerOptions): Promise<void> {
     if (opts.once) break;
     await new Promise((r) => setTimeout(r, Math.min(intervalMs * Math.max(1, failures), 10 * 60_000)));
   }
-  if (opts.once && children.size) {
-    say(`--once: waiting for ${children.size} run(s) to finish`);
-    await Promise.all([...children.values()].map((c) => new Promise((r) => c.on("close", r))));
+  if (opts.once) {
+    say(`--once: waiting for the run(s) to finish`);
+    await worker.waitForChildren();
+    while (!stopping && worker.backgroundRunning()) {
+      await new Promise((r) => setTimeout(r, intervalMs));
+      await worker.watch();
+    }
   }
 }
