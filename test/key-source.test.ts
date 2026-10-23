@@ -61,7 +61,9 @@ describe("preferClaudeCodeSurfaceKey", () => {
     });
     expect(r.usedSurface).toBe(true);
     expect(r.apiKey).toBe("surface-key-bbbbbb");
-    expect(r.userId).toBe("surface-user");
+    // The agent id is never the acting user (the pod 403s it for a linked key).
+    expect(r.userId).toBe("env-user");
+    expect(r.agentUserId).toBe("surface-user");
   });
 
   it("with no SYNAP_USER_ID the user is asked of the pod (\"cli\")", () => {

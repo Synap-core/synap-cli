@@ -811,8 +811,10 @@ export async function provisionAgentWorkspace(
 ): Promise<void> {
   try {
     const cfg = await resolveHubConfig();
-    const userId = await resolveUserId(cfg);
-    const agentUserId = opts.agentUserId ?? userId;
+    // "Defaults to caller" = the calling KEY's agent principal, not the human
+    // the pod acts it as (resolveUserId) — that would provision the person.
+    const { resolveAgentUserId } = await import("../lib/credential-class.js");
+    const agentUserId = opts.agentUserId ?? (await resolveAgentUserId(cfg));
 
     const res = await hubPost("/workspaces/provision-agent", {
       agentUserId,

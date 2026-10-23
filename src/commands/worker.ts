@@ -31,7 +31,8 @@ import fs from "node:fs";
 import { ensureSecretDir, writeSecretFile } from "../lib/atomic-file.js";
 import os from "node:os";
 import path from "node:path";
-import { resolveHubConfig, resolveUserId } from "../lib/hub-client.js";
+import { resolveHubConfig } from "../lib/hub-client.js";
+import { resolveAgentUserId } from "../lib/credential-class.js";
 import { createMcpClient, type McpCallClient } from "../lib/mcp-call.js";
 
 export interface WorkerOptions {
@@ -451,8 +452,9 @@ export async function workerCommand(opts: WorkerOptions): Promise<void> {
     });
   };
 
-  // Its own posts must never resume it: compare with the key's real agent id.
-  const selfAgentId = await resolveUserId(cfg);
+  // Its own posts must never resume it: compare with the key's AGENT id (who
+  // the key is), never the acting user /users/me answers (its linked human).
+  const selfAgentId = await resolveAgentUserId(cfg);
   const roomFollowUps = async (sessionId: string, since: string): Promise<RoomMessage[]> => {
     const s = await mcp.call("synap_get_session", { sessionId });
     if (s.isError) throw new Error(`get_session ${sessionId} refused: ${s.text.slice(0, 160)}`);
