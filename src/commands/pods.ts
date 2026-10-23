@@ -254,7 +254,7 @@ function isSupportedUseSurface(s: SurfaceName): s is SupportedUseSurface {
 
 /**
  * Raycast's support dir — its presence is our "is Raycast installed" gate.
- * Mirrors `raycastSupportDir()` in lib/targets.ts, which is private to that file.
+ * (The one place the CLI looks for Raycast's support dir.)
  */
 function raycastSupportDir(): string {
   return path.join(os.homedir(), "Library", "Application Support", "com.raycast.macos");
