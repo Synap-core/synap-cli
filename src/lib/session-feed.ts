@@ -100,7 +100,17 @@ function isFeedPage(data: unknown): data is SessionFeedPage {
   if (!data || typeof data !== "object") return false;
   const d = data as Partial<SessionFeedPage>;
   if (d.status === "changed") return Array.isArray(d.events);
-  return d.status === "timeout";
+  return d.status === "timeout" && !!d.state;
+}
+
+/**
+ * A pod that predates the change feed ignores `events` and answers the
+ * answer-only wait: `answered` with `answers`, or a `timeout` with no `state`.
+ */
+function isAnswerOnlyPage(data: unknown): boolean {
+  if (!data || typeof data !== "object") return false;
+  const d = data as { status?: unknown; state?: unknown };
+  return d.status === "answered" || (d.status === "timeout" && !d.state);
 }
 
 /** The kinds `synap session wait --hook` waits on when `--events` is not given. */
@@ -286,7 +296,11 @@ export async function waitForSessionFeed(
       continue;
     }
     if (!isFeedPage(page)) {
-      throw new SessionFeedReadFailure("Unexpected response shape from the pod's change-feed door.");
+      throw new SessionFeedReadFailure(
+        isAnswerOnlyPage(page)
+          ? "This pod does not serve the session change feed yet (it answered the answer-only wait). Update the pod."
+          : "Unexpected response shape from the pod's change-feed door."
+      );
     }
     failures = 0;
     if (page.nextSince) cursor = page.nextSince;
@@ -346,8 +360,10 @@ export function renderFeedEvent(e: SessionFeedEvent): string[] {
     case "owner_message":
       return ["The session owner wrote in the room:", e.fenced];
     case "proposal_decided":
+      // The id, not the title: a title carries a name an agent wrote, and only
+      // fenced text reaches an agent's prompt (`--json` keeps the title).
       return [
-        `Proposal ${e.proposal.decision}: ${e.proposal.title}${e.proposal.humanDecided ? " (by a person)" : ""}`,
+        `Proposal ${e.proposal.id} ${e.proposal.decision}${e.proposal.humanDecided ? " by a person" : ""}`,
         ...(e.fenced ? [e.fenced] : []),
       ];
     case "stage_moved":
