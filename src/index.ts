@@ -1366,23 +1366,68 @@ session
   });
 
 session
-  .command("wait <sessionId>")
+  .command("wait [sessionId]")
   .description(
-    "Block until the human replies in the session room, then print the reply. Exit 0 replied · 1 timeout · 2 failure (auth/network/broken read)"
+    "Block until the human replies in the session room (or, with --events, until the session changes), then print it. Session: the argument, else the one attached to this terminal. Exit 0 replied · 1 timeout · 2 failure (auth/network/broken read); with --hook: 2 wake · 0 anything else"
   )
   .option(
     "--since <iso>",
-    "Only answers strictly after this ISO timestamp (default: now — skips anything that predates this wait)"
+    "Only events strictly after this ISO timestamp (default: now — skips anything that predates this wait; with --events: the unread ones)"
   )
+  .option(
+    "--events <kinds>",
+    "Wait on the session change feed: comma list of answer, proposal_decided, stage_moved, owner_message, session_message (a message from another session's agent), or all"
+  )
+  .option("--wake-only", "Stop only on what should wake an agent: answers, owner messages, and agent messages the pod marked wake (the rest is read and skipped)")
+  .option("--once", "One read, no waiting loop")
+  .option("--peek", "Mark nothing picked up or read (a watcher that is not the agent doing the work)")
+  .option("--hook", "Run as a Claude Code asyncRewake Stop hook: wait for a wake-worthy event, print it on stderr, exit 2 (see: synap hooks install-wake)")
   .option("--timeout <duration>", "Give up after this long (e.g. 30m, 2h)", "30m")
-  .option("--interval <duration>", "Delay between checks (e.g. 10s)", "10s")
-  .option("--limit <n>", "Max answers per page, 1-100", "20")
-  .option("--json", "Output the reply(ies) — or the timeout — as JSON")
+  .option("--interval <duration>", "Delay between checks of the answer-only wait (e.g. 10s)", "10s")
+  .option("--limit <n>", "Max answers / events per page, 1-100", "20")
+  .option("--json", "Output the reply(ies) or events — or the timeout — as JSON")
   .option("--pod-url <url>", "Pod URL override")
   .option("--api-key <key>", "API key override")
-  .action(async (sessionId: string, opts) => {
+  .action(async (sessionId: string | undefined, opts) => {
     const { waitSessionCommand } = await import("./commands/session-wait.js");
     await waitSessionCommand(sessionId, opts);
+  });
+
+session
+  .command("post <toSessionId> <text...>")
+  .description(
+    "Message ANOTHER of your sessions' agent: blocked_on_you / handoff may wake it, done / fyi never do. Replying to a message that woke you? Pass its id as --cause. Exit 0 delivered · 1 pod does not deliver agent messages · 2 failure"
+  )
+  .option("--intent <intent>", "blocked_on_you | handoff | done | fyi", "fyi")
+  .option("--cause <messageId>", "The message that woke you (the id `synap session wait` printed), when this replies to it")
+  .option("--from <sessionId>", "Your session, when this terminal is not bound to it")
+  .option("--ref <kind:id[:label]>", "The state behind the message: session:<id>, blocked_by:<id>, proposal:<id>, slot:<sessionId>:<label> (repeatable)", collect, [])
+  .option("--json", "Output the pod's reply as JSON")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (toSessionId: string, text: string[], opts) => {
+    const { sessionPostCommand } = await import("./commands/session-post.js");
+    await sessionPostCommand(toSessionId, text, opts);
+  });
+
+// ─── hooks ────────────────────────────────────────────────────────────────────
+// Claude Code hooks the CLI owns. install-wake: the asyncRewake Stop hook that
+// lets another session's agent (or the person) wake an idle terminal.
+
+const hooksCmd = program
+  .command("hooks")
+  .description("Claude Code hooks that connect a terminal to its Synap session");
+
+hooksCmd
+  .command("install-wake")
+  .description("Add the wake hook (a Stop hook running `synap session wait --hook`) to this project's .claude/settings.json — idempotent, other hooks kept")
+  .option("--uninstall", "Remove the wake hook instead")
+  .option("--user", "Use ~/.claude/settings.json (every project) instead of the project's")
+  .option("--dir <path>", "The project directory (default: the current one)")
+  .option("--json", "Output the result as JSON")
+  .action(async (opts) => {
+    const { installWakeCommand } = await import("./commands/hooks.js");
+    installWakeCommand(opts);
   });
 
 // ─── playbook ─────────────────────────────────────────────────────────────────

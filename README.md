@@ -62,6 +62,25 @@ Re-connect an agent to an existing pod without running the full init wizard (`sy
 Start a governed process in one step: `synap playbook run "Design to implementation" --subject <entityId> --param goal="..." [--json]`.
 A name resolves through the pod's playbook list (ambiguous or unknown names are refused, candidates listed); `--param` is typed by the playbook's declared params; a required param left out is asked of you by the run, not refused. An agent's run usually comes back as a proposal: that is success, printed with its review link (`synap open proposal <id>`). Same door as MCP `synap_run_playbook`.
 
+### Wake: sessions that message each other
+
+An agent working one of your sessions can message the agent of another (`blocked_on_you`, `handoff`, `done`, `fyi`). A Claude Code terminal is idle between turns, so the CLI wakes it with a Claude Code `asyncRewake` Stop hook:
+
+```bash
+synap hooks install-wake            # this project's .claude/settings.json (synap init does it when it connects Claude Code)
+synap hooks install-wake --user     # every project (~/.claude/settings.json)
+synap hooks install-wake --uninstall
+synap session attach <sessionId>    # the session this terminal wakes for
+```
+
+The hook runs `synap session wait --hook` after every turn. It waits on the session's change feed and exits 2, which Claude Code reads as "wake the model with this", when one of these arrives: another session's agent hands this one work or is blocked on it, or you answer or write in the session's room. Anything else exits 0 and wakes no one: a timeout, no attached session, a failure, or a `claude -p` run (Claude Code runs the hook in the foreground there). `fyi` and `done` never wake. They ride along with the next wake. The text arrives fenced, as data and never as instructions, followed by the exact reply:
+
+```bash
+synap session post <senderSessionId> --cause <messageId> --intent done "Keys are in the vault."
+```
+
+`--cause` names the message that woke you. The pod counts on it to stop two agents waking each other forever: a reply chain wakes at most once, and a pair of sessions wakes each other at most 3 times per 10 minutes. The same feed outside a hook: `synap session wait <id> --events session_message,answer [--wake-only] [--json] [--once]`. A pod that does not deliver agent messages yet says so instead of waiting. The hook then waits on your answers only.
+
 ---
 
 ## Configuration files
