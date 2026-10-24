@@ -34,6 +34,18 @@ import {
   renderHubError,
 } from "../lib/hub-client.js";
 import { type BaseOpts } from "./data.js";
+import {
+  GOAL_CRITERION_MARK_LABELS,
+  GOAL_FIELD_LABELS,
+  TRACK_COMMITMENT_STATE_LABELS,
+  TRACK_PARTICIPANT_ROLE_LABELS,
+  TRACK_STATUS_LABELS,
+  TRACK_UNCERTAINTY_LABELS,
+  TRACK_VERDICT_LABELS,
+  TRACK_WORK_KIND_LABELS,
+  WAITING_ON_REASON_LABELS,
+  goalWord,
+} from "../lib/goal-words.js";
 
 type Json = Record<string, unknown>;
 
@@ -79,7 +91,7 @@ interface TrackRow {
 }
 
 /** The kinds of check a person can name for a criterion (`--criterion "judged: …"`). */
-const CRITERION_KINDS = [
+export const CRITERION_KINDS = [
   "measured",
   "judged",
   "handed_over",
@@ -88,8 +100,16 @@ const CRITERION_KINDS = [
   "certified",
 ] as const;
 
-/** The stored evaluator that carries each kind (`CHECK_MEANING_EVALUATORS`, first fit for a typed line). */
-const CRITERION_EVALUATOR: Record<(typeof CRITERION_KINDS)[number], string> = {
+/**
+ * The stored evaluator a typed line gets for each kind — one the pod's
+ * `CHECK_MEANING_EVALUATORS` allows for it (a person typing a line cannot
+ * post evidence, so the person's grade wherever the meaning allows one);
+ * `test/goal-criterion-parity.test.ts` holds both tables to the pod's.
+ */
+/** The pod's criterion key length (`sessionCriterionSchema` `key` `.max`). */
+export const CRITERION_KEY_MAX = 80;
+
+export const CRITERION_EVALUATOR: Record<(typeof CRITERION_KINDS)[number], string> = {
   measured: "evidence",
   judged: "human",
   handed_over: "human",
@@ -115,20 +135,24 @@ export function parseCriterion(line: string, taken: Set<string>): Json {
     }
   }
   if (!statement) throw new Error(`Criterion "${line}" has no statement.`);
+  // Room for a "-NN" de-duplication suffix inside the pod's key length.
   const base =
     statement
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, "-")
       .replace(/^-+|-+$/g, "")
-      .slice(0, 40)
+      .slice(0, CRITERION_KEY_MAX - 4)
       .replace(/-+$/, "") || "criterion";
   let key = base;
   for (let n = 2; taken.has(key); n++) key = `${base}-${n}`;
   taken.add(key);
+  const evaluator = CRITERION_EVALUATOR[kind];
   return {
     key,
     statement,
-    check: { kind: CRITERION_EVALUATOR[kind] },
+    // An evidence check names the key its evidence is posted under — the pod
+    // refuses one without (`sessionCriterionSchema`); the criterion's own key.
+    check: evaluator === "evidence" ? { kind: evaluator, evidenceKey: key } : { kind: evaluator },
     checkKind: kind,
     ...(kind === "learning" ? { about: "method" } : {}),
   };
@@ -202,27 +226,40 @@ function printDomainNote(r: Json): void {
 function printTrack(t: TrackRow): void {
   const paused = t.status === "paused" && t.pausedBy ? ` (held by ${t.pausedBy} gate)` : "";
   console.log(`  ${chalk.bold(t.name)}  ${chalk.dim(t.id)}`);
+  // Words, never tokens (the vocabulary door, mirrored in `lib/goal-words.ts`).
   const ended = t.verdict
-    ? ` — ${t.verdict}${t.verdictReason ? `: ${t.verdictReason}` : ""}`
+    ? ` — ${goalWord(TRACK_VERDICT_LABELS, t.verdict)}${t.verdictReason ? `: ${t.verdictReason}` : ""}`
     : "";
-  console.log(`    ${t.status}${paused}${ended}`);
-  if (t.endState) console.log(`    ${chalk.dim("Done looks like:")} ${t.endState}`);
-  const kindLine = [t.workKind, t.uncertainty].filter(Boolean).join(" · ");
+  console.log(`    ${goalWord(TRACK_STATUS_LABELS, t.status)}${paused}${ended}`);
+  if (t.endState) {
+    console.log(`    ${chalk.dim(`${GOAL_FIELD_LABELS.endState}:`)} ${t.endState}`);
+  }
+  const kindLine = [
+    goalWord(TRACK_WORK_KIND_LABELS, t.workKind),
+    goalWord(TRACK_UNCERTAINTY_LABELS, t.uncertainty),
+  ]
+    .filter(Boolean)
+    .join(" · ");
   if (kindLine) console.log(`    ${chalk.dim(kindLine)}`);
   for (const c of t.criteria ?? []) {
+    const mark = c.mark ? `, ${goalWord(GOAL_CRITERION_MARK_LABELS, c.mark).toLowerCase()}` : "";
+    console.log(`    ${chalk.dim("▫")} ${c.statement ?? c.key} ${chalk.dim(`(${c.key}${mark})`)}`);
+  }
+  if (t.inReview) {
     console.log(
-      `    ${chalk.dim("▫")} ${c.statement ?? c.key} ${chalk.dim(`(${c.key}${c.mark ? `, ${c.mark}` : ""})`)}`
+      `    ${chalk.yellow("In review")} ${chalk.dim("— every required criterion is met or claimed; a claim waits on the judge")}`
     );
   }
-  if (t.inReview) console.log(`    ${chalk.yellow("In review")} ${chalk.dim("— every required criterion is claimed, none accepted yet")}`);
   for (const w of t.waitingOn ?? []) {
-    console.log(`    ${chalk.dim(`Waiting on ${w.reason}${w.count > 1 ? ` (${w.count})` : ""}`)}`);
+    const reason = goalWord(WAITING_ON_REASON_LABELS, w.reason).toLowerCase();
+    console.log(`    ${chalk.dim(`Waiting on ${reason}${w.count > 1 ? ` (${w.count})` : ""}`)}`);
   }
   if (t.loop?.on) console.log(`    ${chalk.dim(`Loop on — up to ${t.loop.perWeek ?? 3} sessions a week`)}`);
   for (const p of t.participants ?? []) {
     const who = p.displayName ?? "someone (name unknown)";
-    const commit = p.commitment ? ` — ${p.commitment}${p.commitmentState ? ` [${p.commitmentState}]` : ""}` : "";
-    console.log(`    ${chalk.dim(`${p.role}:`)} ${who}${commit}`);
+    const state = goalWord(TRACK_COMMITMENT_STATE_LABELS, p.commitmentState);
+    const commit = p.commitment ? ` — ${p.commitment}${state ? ` [${state}]` : ""}` : "";
+    console.log(`    ${chalk.dim(`${goalWord(TRACK_PARTICIPANT_ROLE_LABELS, p.role)}:`)} ${who}${commit}`);
   }
   for (const s of t.stages ?? []) {
     const mark = STAGE_MARK[s.position] ?? chalk.dim("·");

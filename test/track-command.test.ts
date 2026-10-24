@@ -40,7 +40,9 @@ beforeEach(() => {
 });
 afterEach(() => vi.restoreAllMocks());
 
-const printed = () => out.join("\n");
+// Colour codes stripped: the words are what is asserted, whatever chalk's level.
+// eslint-disable-next-line no-control-regex
+const printed = () => out.join("\n").replace(/\x1b\[[0-9;]*m/g, "");
 
 describe("synap track start", () => {
   it("prints a proposal as queued with its review link, and the domain note", async () => {
@@ -246,7 +248,8 @@ describe("synap track start / update — what the goal holds (W2, W4)", () => {
     expect(parseCriterion("measured: Ten readers pay", taken)).toEqual({
       key: "ten-readers-pay",
       statement: "Ten readers pay",
-      check: { kind: "evidence" },
+      // The pod refuses an evidence check with no key to post evidence under.
+      check: { kind: "evidence", evidenceKey: "ten-readers-pay" },
       checkKind: "measured",
     });
     expect(parseCriterion("Ten readers pay", taken)).toMatchObject({
@@ -336,13 +339,48 @@ describe("synap track show — the goal's derived reads (W2, W3, W5b)", () => {
       "claimed",
       "In review",
       "Waiting on judge",
-      "owner: Ada",
+      "Owner: Ada",
       "name unknown",
-      "Draft [accepted]",
+      "Draft [Accepted]",
+      "What done looks like: Ten paying readers",
+      "Active",
+      "Flow",
     ]) {
       expect(text).toContain(piece);
     }
     expect(text).not.toContain("a-1");
+  });
+
+  it("a closed goal reads in words — never `completed`, `not_met` or `reported_impossible`", async () => {
+    hubGet.mockResolvedValueOnce({
+      id: "t-2",
+      name: "Launch",
+      status: "completed",
+      verdict: "not_met",
+      currentStage: null,
+      workKind: "operation",
+      uncertainty: "complicated",
+      criteria: [{ key: "up", statement: "Site is up", mark: "not_started" }],
+      waitingOn: [{ reason: "another_work", count: 2 }],
+      participants: [
+        { role: "delegate", displayName: "Bo", principalId: "u-2", commitment: "Ship", commitmentState: "reported_impossible" },
+      ],
+    });
+    const { showTrack } = await import("../src/commands/tracks.js");
+    await showTrack("t-2", {});
+    const text = printed();
+    for (const piece of [
+      "Closed — Not met",
+      "Operation · Complicated",
+      "(up, not started)",
+      "Waiting on other work (2)",
+      "Delegate: Bo — Ship [Reported impossible]",
+    ]) {
+      expect(text).toContain(piece);
+    }
+    for (const token of ["completed", "not_met", "not_started", "another_work", "reported_impossible"]) {
+      expect(text, token).not.toContain(token);
+    }
   });
 });
 
