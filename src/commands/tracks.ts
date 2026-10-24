@@ -1,13 +1,19 @@
 /**
- * `synap track` — a LASTING goal inside a project (Hub `/api/hub/tracks`).
- * Work in it = `synap session start --track <id>`. A legacy track also runs a
+ * `synap track` — a goal inside a project (Hub `/api/hub/tracks`).
+ * Work in it = `synap session start --track <id>`. A goal stays open as long as
+ * it matters, or a person closes it with a verdict. A legacy track also runs a
  * method (a project-scoped playbook) with steps; a new one needs none.
  *
- *   list        a project's tracks (defaults to the active project lens)
+ *   list        a project's tracks (the active project lens, else every goal on the pod)
  *   show        one track, its steps and where it stands
- *   start       start a track on a project (--name; --playbook is legacy)
+ *   start       start a track on a project (--name; --end-state, --criterion, … say what done is)
+ *   update      set a goal's direction, KPI and content
+ *   accept      the goal's judge accepts / sends back / rejects a claimed criterion
  *   advance     move a track to a step — returns the step's session OFFER
- *   status      pause / resume / complete / archive
+ *   status      move it through its lifecycle; close (completed) and drop
+ *               (archived) carry --verdict
+ *   reopen      a closed or dropped goal comes back as a NEW version
+ *   convert     (`synap goal convert`) make a goal / objective / OKR entity a goal
  *   params      answer the method's params (merged; `key=null` clears)
  *   start-step  start the work session of one step (default: current step)
  *
@@ -28,6 +34,18 @@ import {
   renderHubError,
 } from "../lib/hub-client.js";
 import { type BaseOpts } from "./data.js";
+import {
+  GOAL_CRITERION_MARK_LABELS,
+  GOAL_FIELD_LABELS,
+  TRACK_COMMITMENT_STATE_LABELS,
+  TRACK_PARTICIPANT_ROLE_LABELS,
+  TRACK_STATUS_LABELS,
+  TRACK_UNCERTAINTY_LABELS,
+  TRACK_VERDICT_LABELS,
+  TRACK_WORK_KIND_LABELS,
+  WAITING_ON_REASON_LABELS,
+  goalWord,
+} from "../lib/goal-words.js";
 
 type Json = Record<string, unknown>;
 
@@ -48,6 +66,129 @@ interface TrackRow {
   }>;
   params?: Json;
   declaredParams?: unknown[];
+  verdict?: string | null;
+  verdictReason?: string | null;
+  endState?: string | null;
+  criteria?: Array<{
+    key: string;
+    statement?: string;
+    mark?: string;
+    required?: boolean;
+  }>;
+  dropConditions?: string[];
+  workKind?: string | null;
+  uncertainty?: string | null;
+  loop?: { on: boolean; perWeek?: number };
+  inReview?: boolean | null;
+  waitingOn?: Array<{ reason: string; count: number }> | null;
+  participants?: Array<{
+    role: string;
+    displayName?: string | null;
+    principalId: string;
+    commitment?: string | null;
+    commitmentState?: string | null;
+  }>;
+}
+
+/** The kinds of check a person can name for a criterion (`--criterion "judged: …"`). */
+export const CRITERION_KINDS = [
+  "measured",
+  "judged",
+  "handed_over",
+  "learning",
+  "decided_outside",
+  "certified",
+] as const;
+
+/**
+ * The stored evaluator a typed line gets for each kind — one the pod's
+ * `CHECK_MEANING_EVALUATORS` allows for it (a person typing a line cannot
+ * post evidence, so the person's grade wherever the meaning allows one);
+ * `test/goal-criterion-parity.test.ts` holds both tables to the pod's.
+ */
+/** The pod's criterion key length (`sessionCriterionSchema` `key` `.max`). */
+export const CRITERION_KEY_MAX = 80;
+
+export const CRITERION_EVALUATOR: Record<(typeof CRITERION_KINDS)[number], string> = {
+  measured: "evidence",
+  judged: "human",
+  handed_over: "human",
+  learning: "human",
+  decided_outside: "human",
+  certified: "human",
+};
+
+/**
+ * `--criterion "[kind:] statement"` → a goal criterion. Kind defaults to
+ * `judged` (a person checks it); the key is a slug of the statement, made
+ * unique among `taken`. A `learning` criterion is about the method.
+ */
+export function parseCriterion(line: string, taken: Set<string>): Json {
+  let kind: (typeof CRITERION_KINDS)[number] = "judged";
+  let statement = line.trim();
+  const colon = statement.indexOf(":");
+  if (colon > 0) {
+    const head = statement.slice(0, colon).trim();
+    if ((CRITERION_KINDS as readonly string[]).includes(head)) {
+      kind = head as (typeof CRITERION_KINDS)[number];
+      statement = statement.slice(colon + 1).trim();
+    }
+  }
+  if (!statement) throw new Error(`Criterion "${line}" has no statement.`);
+  // Room for a "-NN" de-duplication suffix inside the pod's key length.
+  const base =
+    statement
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, CRITERION_KEY_MAX - 4)
+      .replace(/-+$/, "") || "criterion";
+  let key = base;
+  for (let n = 2; taken.has(key); n++) key = `${base}-${n}`;
+  taken.add(key);
+  const evaluator = CRITERION_EVALUATOR[kind];
+  return {
+    key,
+    statement,
+    // An evidence check names the key its evidence is posted under — the pod
+    // refuses one without (`sessionCriterionSchema`); the criterion's own key.
+    check: evaluator === "evidence" ? { kind: evaluator, evidenceKey: key } : { kind: evaluator },
+    checkKind: kind,
+    ...(kind === "learning" ? { about: "method" } : {}),
+  };
+}
+
+/** The goal-content flags shared by `track start` and `track update`. */
+interface GoalContentOpts {
+  endState?: string;
+  criterion?: string[];
+  dropCondition?: string[];
+  kind?: string;
+  uncertainty?: string;
+  loop?: string;
+}
+
+/** Goal-content flags → the body fields the pod reads (only what was typed). */
+export function goalContentBody(opts: GoalContentOpts): Json {
+  const body: Json = {};
+  if (opts.endState !== undefined) body.endState = opts.endState;
+  if (opts.criterion?.length) {
+    const taken = new Set<string>();
+    body.criteria = opts.criterion.map((c) => parseCriterion(c, taken));
+  }
+  if (opts.dropCondition?.length) body.dropConditions = opts.dropCondition;
+  if (opts.kind) body.workKind = opts.kind;
+  if (opts.uncertainty) body.uncertainty = opts.uncertainty;
+  if (opts.loop !== undefined) {
+    if (opts.loop === "off") body.loop = null;
+    else if (opts.loop === "on" || opts.loop === "") body.loop = { on: true };
+    else if (/^\d+$/.test(opts.loop)) {
+      body.loop = { on: true, perWeek: Number(opts.loop) };
+    } else {
+      throw new Error(`--loop takes on, off or a number of sessions a week, not "${opts.loop}".`);
+    }
+  }
+  return body;
 }
 
 const STAGE_MARK: Record<string, string> = {
@@ -85,7 +226,41 @@ function printDomainNote(r: Json): void {
 function printTrack(t: TrackRow): void {
   const paused = t.status === "paused" && t.pausedBy ? ` (held by ${t.pausedBy} gate)` : "";
   console.log(`  ${chalk.bold(t.name)}  ${chalk.dim(t.id)}`);
-  console.log(`    ${t.status}${paused}`);
+  // Words, never tokens (the vocabulary door, mirrored in `lib/goal-words.ts`).
+  const ended = t.verdict
+    ? ` — ${goalWord(TRACK_VERDICT_LABELS, t.verdict)}${t.verdictReason ? `: ${t.verdictReason}` : ""}`
+    : "";
+  console.log(`    ${goalWord(TRACK_STATUS_LABELS, t.status)}${paused}${ended}`);
+  if (t.endState) {
+    console.log(`    ${chalk.dim(`${GOAL_FIELD_LABELS.endState}:`)} ${t.endState}`);
+  }
+  const kindLine = [
+    goalWord(TRACK_WORK_KIND_LABELS, t.workKind),
+    goalWord(TRACK_UNCERTAINTY_LABELS, t.uncertainty),
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  if (kindLine) console.log(`    ${chalk.dim(kindLine)}`);
+  for (const c of t.criteria ?? []) {
+    const mark = c.mark ? `, ${goalWord(GOAL_CRITERION_MARK_LABELS, c.mark).toLowerCase()}` : "";
+    console.log(`    ${chalk.dim("▫")} ${c.statement ?? c.key} ${chalk.dim(`(${c.key}${mark})`)}`);
+  }
+  if (t.inReview) {
+    console.log(
+      `    ${chalk.yellow("In review")} ${chalk.dim("— every required criterion is met or claimed; a claim waits on the judge")}`
+    );
+  }
+  for (const w of t.waitingOn ?? []) {
+    const reason = goalWord(WAITING_ON_REASON_LABELS, w.reason).toLowerCase();
+    console.log(`    ${chalk.dim(`Waiting on ${reason}${w.count > 1 ? ` (${w.count})` : ""}`)}`);
+  }
+  if (t.loop?.on) console.log(`    ${chalk.dim(`Loop on — up to ${t.loop.perWeek ?? 3} sessions a week`)}`);
+  for (const p of t.participants ?? []) {
+    const who = p.displayName ?? "someone (name unknown)";
+    const state = goalWord(TRACK_COMMITMENT_STATE_LABELS, p.commitmentState);
+    const commit = p.commitment ? ` — ${p.commitment}${state ? ` [${state}]` : ""}` : "";
+    console.log(`    ${chalk.dim(`${goalWord(TRACK_PARTICIPANT_ROLE_LABELS, p.role)}:`)} ${who}${commit}`);
+  }
   for (const s of t.stages ?? []) {
     const mark = STAGE_MARK[s.position] ?? chalk.dim("·");
     const domain = s.domain ? chalk.dim(`  in ${s.domain}`) : "";
@@ -123,34 +298,42 @@ export function parseParamPairs(pairs: string[]): Json {
 }
 
 export async function listTracks(
-  opts: BaseOpts & { project?: string; all?: boolean }
+  opts: BaseOpts & {
+    project?: string;
+    all?: boolean;
+    everywhere?: boolean;
+    limit?: string;
+    cursor?: string;
+  }
 ): Promise<void> {
   await run(async () => {
     const cfg = await resolveHubConfig(opts);
-    const projectId = opts.project || cfg.projectId;
-    if (!projectId) {
-      console.error(
-        chalk.red("Error: no project in scope — pass --project <id> or set one with 'synap project use'")
-      );
-      process.exit(1);
-      return;
-    }
+    // A project in scope lists that project's goals; none (or --everywhere)
+    // lists every goal on the pod, newest first, paged.
+    const projectId = opts.everywhere ? undefined : opts.project || cfg.projectId;
     const res = (await hubGet(
       "/tracks",
-      { projectId, includeArchived: opts.all ? "true" : undefined },
+      {
+        projectId,
+        includeArchived: opts.all ? "true" : undefined,
+        ...(projectId ? {} : { limit: opts.limit, cursor: opts.cursor }),
+      },
       cfg
-    )) as { items?: TrackRow[] };
+    )) as { items?: TrackRow[]; nextCursor?: string | null };
     const items = res?.items ?? [];
     if (opts.json) {
-      console.log(JSON.stringify(items, null, 2));
+      console.log(JSON.stringify(projectId ? items : res, null, 2));
       return;
     }
     if (items.length === 0) {
-      log.info("This project runs no track yet.");
-      log.dim("Start a method: synap track start --playbook <id>");
+      log.info(projectId ? "This project has no goal yet." : "No goal on this pod yet.");
+      log.dim('Start one: synap track start --name "Grow the newsletter"');
       return;
     }
     for (const t of items) printTrack(t);
+    if (!projectId && res.nextCursor) {
+      log.dim(`More: synap track list --cursor ${res.nextCursor}`);
+    }
   });
 }
 
@@ -171,14 +354,15 @@ export async function showTrack(id: string, opts: BaseOpts): Promise<void> {
 }
 
 export async function startTrack(
-  opts: BaseOpts & {
-    playbook?: string;
-    project?: string;
-    name?: string;
-    direction?: string;
-    param?: string[];
-    reason?: string;
-  }
+  opts: BaseOpts &
+    GoalContentOpts & {
+      playbook?: string;
+      project?: string;
+      name?: string;
+      direction?: string;
+      param?: string[];
+      reason?: string;
+    }
 ): Promise<void> {
   await run(async () => {
     const cfg = await resolveHubConfig(opts);
@@ -202,6 +386,7 @@ export async function startTrack(
     if (opts.name) body.name = opts.name;
     if (opts.direction) body.direction = opts.direction;
     if (opts.param?.length) body.params = parseParamPairs(opts.param);
+    Object.assign(body, goalContentBody(opts));
     if (opts.reason) body.reasoning = opts.reason;
     const r = (await hubPost("/tracks", body, cfg)) as Json;
     if (opts.json) {
@@ -263,12 +448,14 @@ export async function advanceTrack(
 export async function setTrackStatus(
   id: string,
   status: string,
-  opts: BaseOpts & { reason?: string }
+  opts: BaseOpts & { reason?: string; verdict?: string; verdictReason?: string }
 ): Promise<void> {
   await run(async () => {
     const cfg = await resolveHubConfig(opts);
     const body: Json = { status };
     if (opts.reason) body.reasoning = opts.reason;
+    if (opts.verdict) body.verdict = opts.verdict;
+    if (opts.verdictReason) body.verdictReason = opts.verdictReason;
     const r = (await hubPatch(trackPath(id), body, cfg)) as Json;
     if (opts.json) {
       console.log(JSON.stringify(r, null, 2));
@@ -277,6 +464,33 @@ export async function setTrackStatus(
     if (isProposed(r)) printProposed(r, "Changing this track's status");
     else if (r.status === "unchanged") log.info(`The track is already ${status}.`);
     else log.success(`Track is now ${status}.`);
+  });
+}
+
+/** A closed or dropped goal comes back as a NEW version — never moved back. */
+export async function reopenTrack(
+  id: string,
+  opts: BaseOpts & { name?: string; reason?: string }
+): Promise<void> {
+  await run(async () => {
+    const cfg = await resolveHubConfig(opts);
+    const body: Json = {};
+    if (opts.name) body.name = opts.name;
+    if (opts.reason) body.reasoning = opts.reason;
+    const r = (await hubPost(trackPath(id, "/reopen"), body, cfg)) as Json;
+    if (opts.json) {
+      console.log(JSON.stringify(r, null, 2));
+      return;
+    }
+    if (isProposed(r)) {
+      printProposed(r, "Reopening this goal");
+      return;
+    }
+    const t = r.track as TrackRow;
+    if (r.status === "exists") log.info(`The new version is already live: ${t.name}`);
+    else log.success(`Goal reopened as a new version: ${chalk.bold(t.name)}`);
+    console.log(`  ID: ${chalk.bold(t.id)}`);
+    log.dim(`Work in it: synap session start --track ${t.id} "<goal>"`);
   });
 }
 
@@ -343,5 +557,95 @@ export async function startStep(
       if (session.id) log.dim(`Attach it: synap session attach ${session.id}`);
     }
     printDomainNote(r);
+  });
+}
+
+/** Set where a goal is heading, its KPI and what it holds (PATCH /tracks/:id/direction). */
+export async function updateTrack(
+  id: string,
+  opts: BaseOpts &
+    GoalContentOpts & {
+      direction?: string;
+      kpiCurrent?: string;
+      kpiTarget?: string;
+      reason?: string;
+    }
+): Promise<void> {
+  await run(async () => {
+    const cfg = await resolveHubConfig(opts);
+    const body: Json = goalContentBody(opts);
+    if (opts.direction !== undefined) body.direction = opts.direction;
+    const kpi: Json = {};
+    if (opts.kpiCurrent !== undefined) kpi.current = Number(opts.kpiCurrent);
+    if (opts.kpiTarget !== undefined) kpi.target = Number(opts.kpiTarget);
+    if (Object.values(kpi).some((n) => Number.isNaN(n))) {
+      throw new Error("--kpi-current and --kpi-target take a number.");
+    }
+    if (Object.keys(kpi).length) body.kpi = kpi;
+    if (Object.keys(body).length === 0) {
+      throw new Error("Nothing to change — pass --direction, --end-state, --criterion, --kind, …");
+    }
+    if (opts.reason) body.reasoning = opts.reason;
+    const r = (await hubPatch(trackPath(id, "/direction"), body, cfg)) as Json;
+    if (opts.json) {
+      console.log(JSON.stringify(r, null, 2));
+      return;
+    }
+    if (isProposed(r)) printProposed(r, "Changing this goal");
+    else if (r.status === "unchanged") log.info("Nothing changed.");
+    else log.success("Goal updated.");
+  });
+}
+
+/** The goal's JUDGE decides a claimed criterion (a person's act — an agent key is refused). */
+export async function acceptCriterion(
+  id: string,
+  key: string,
+  decision: string,
+  opts: BaseOpts & { note?: string }
+): Promise<void> {
+  await run(async () => {
+    const cfg = await resolveHubConfig(opts);
+    const body: Json = { decision };
+    if (opts.note) body.note = opts.note;
+    const r = (await hubPost(
+      trackPath(id, `/criteria/${encodeURIComponent(key)}/acceptance`),
+      body,
+      cfg
+    )) as Json;
+    if (opts.json) {
+      console.log(JSON.stringify(r, null, 2));
+      return;
+    }
+    if (r.status === "unchanged") log.info(`Criterion ${key} is already ${decision}.`);
+    else log.success(`Criterion ${key}: ${decision}.`);
+  });
+}
+
+/** "Make it a goal" — a goal / objective / okr entity becomes a goal, once. */
+export async function convertToGoal(
+  entityId: string,
+  opts: BaseOpts & { project?: string; name?: string; reason?: string }
+): Promise<void> {
+  await run(async () => {
+    const cfg = await resolveHubConfig(opts);
+    const body: Json = { entityId };
+    if (opts.project) body.projectId = opts.project;
+    if (opts.name) body.name = opts.name;
+    if (opts.reason) body.reasoning = opts.reason;
+    const r = (await hubPost("/tracks/convert", body, cfg)) as Json;
+    if (opts.json) {
+      console.log(JSON.stringify(r, null, 2));
+      return;
+    }
+    if (isProposed(r)) {
+      printProposed(r, "Making this a goal");
+      return;
+    }
+    const t = r.track as TrackRow;
+    log.success(`Now a goal: ${chalk.bold(t.name)}`);
+    console.log(`  ID: ${chalk.bold(t.id)}`);
+    const notCarried = r.notCarried as string[] | undefined;
+    if (notCarried?.length) log.dim(`Not carried over: ${notCarried.join(", ")}`);
   });
 }
