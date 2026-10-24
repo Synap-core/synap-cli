@@ -87,7 +87,7 @@ jobs:
       id-token: write
     steps:
       - name: Checkout synap-cli
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: cli
           # `actions/checkout` defaults to a DETACHED HEAD at the triggering
@@ -119,7 +119,7 @@ jobs:
           permission-contents: read
 
       - name: Checkout synap-backend (sibling — hub-rest-client + skills)
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # The repo is `Synap-core/backend`. The old `Synap-core/synap-backend`
           # 404s, which is why the only run before 2026-10-16 failed here.
