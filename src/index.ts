@@ -216,7 +216,8 @@ program
   .option("--json", "Output as JSON")
   .option("--fix", "Fix key problems: finish a pending approval, give this computer its own key, or rewrite stale copies — then verify over MCP")
   .option("-v, --verbose", "Every check with its details, ids and addresses")
-  .action(async (opts: { json?: boolean; fix?: boolean; verbose?: boolean }) => {
+  .option("--pod-url <url>", "Probe this pod URL (works with no pod configured)")
+  .action(async (opts: { json?: boolean; fix?: boolean; verbose?: boolean; podUrl?: string }) => {
     const { doctor } = await import("./commands/doctor.js");
     await doctor(opts);
   });

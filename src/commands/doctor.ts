@@ -25,6 +25,7 @@
 
 import chalk from "chalk";
 import { log } from "../utils/logger.js";
+import { reachChecklist } from "../lib/pod-reach.js";
 import { getActivePodConfig, getActiveWorkspaceId, getActiveProjectId, listPodProfiles, checkPodHealth, findPodNameByUrl } from "../lib/pod.js";
 import { resolveHubConfig, hubGet, HubError, type HubConfig } from "../lib/hub-client.js";
 import { formatKeySource, resolveKeySource } from "../lib/key-source.js";
@@ -157,6 +158,8 @@ interface DoctorOpts {
   verbose?: boolean;
   /** Perform the one right action per key problem, then verify with a real MCP initialize. */
   fix?: boolean;
+  /** Probe this pod URL instead of the configured one (works with no pod configured). */
+  podUrl?: string;
 }
 
 interface CheckResult {
@@ -339,7 +342,7 @@ export async function doctor(opts: DoctorOpts = {}): Promise<void> {
   // ── (a) Host resolves — the pod is actually served at this URL ───────────
   const localConfig = getActivePodConfig();
   const podUrl =
-    cfgResolved?.podUrl ?? localConfig?.podUrl ?? process.env.SYNAP_POD_URL;
+    opts.podUrl ?? cfgResolved?.podUrl ?? localConfig?.podUrl ?? process.env.SYNAP_POD_URL;
 
   if (!podUrl) {
     checks.push({
@@ -374,13 +377,25 @@ export async function doctor(opts: DoctorOpts = {}): Promise<void> {
       // The classic failure this check exists for: a saved profile URL that no
       // longer resolves to a live pod — most often a stale/migrated domain, not
       // a transient network blip (checkPodHealth already retried the timeout).
+      const f = health.failure;
+      const networkSide = f?.kind === "proxy" || f?.kind === "network";
       checks.push({
         name: "Pod host resolves",
         ok: false,
-        detail: `${podUrl} did not answer /health`,
-        fix: `Your profile URL may be stale. Run: synap pods list   (see saved pods) — or: synap pods update ${activeName} <new-url>`,
+        detail: f
+          ? `${podUrl}: ${f.detail}${f.proxy ? ` — via ${f.proxy.env}=${f.proxy.url}` : ""}`
+          : `${podUrl} did not answer /health`,
+        fix: networkSide
+          ? reachChecklist(f).join("\n")
+          : `Your profile URL may be stale. Run: synap pods list   (see saved pods) — or: synap pods update ${activeName} <new-url>`,
       });
     }
+  }
+
+  // An explicit --pod-url is a reachability probe of THAT pod: the configured
+  // key and lens belong to another pod, so do not judge them against it.
+  if (opts.podUrl) {
+    return finish(checks, opts, { podUrl, workspaceId: undefined, projectId: undefined, podVersion: names.podVersion }, undefined, undefined, podMove);
   }
 
   // ── (b) Key authenticates against this pod ────────────────────────────────
