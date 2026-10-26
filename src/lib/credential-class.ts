@@ -103,7 +103,7 @@ export async function resolveAgentUserId(cfg: HubConfig): Promise<string> {
   if (cfg.agentUserId) return cfg.agentUserId;
   const cached = agentUserIdCache.get(cfg.apiKey);
   if (cached) return cached;
-  const owner = (await fetchAuthStatus(cfg)).userId;
+  const owner = (await fetchEffectiveIdentity(cfg)).id;
   if (!owner) throw new Error("The pod did not say who owns this key (GET /auth/status has no userId).");
   agentUserIdCache.set(cfg.apiKey, owner);
   return owner;
