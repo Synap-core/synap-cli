@@ -178,6 +178,42 @@ interface CheckResult {
 }
 
 /**
+ * `GET /users/me` `principal` (pod ≥ D1): who HOLDS the key — `id` beside it
+ * is the human it acts for — and the computer it runs on. Absent on older pods.
+ */
+export interface KeyPrincipal {
+  id: string;
+  kind: "human" | "agent" | "machine" | "app" | "service";
+  name: string | null;
+  hostUserId: string | null;
+  hostName: string | null;
+}
+
+/**
+ * "Claude Code on devbox": who holds this key and on which computer, from the
+ * pod's own answer. Null when the pod does not say (older pod): no line.
+ * An AI on NO computer is named as such (revoking a computer does not stop
+ * it), with the way to bind it to this one.
+ */
+export function keyHolderCheck(me: unknown): CheckResult | null {
+  const p = (me as { principal?: KeyPrincipal | null } | null)?.principal;
+  if (!p || typeof p.id !== "string") return null;
+  const who = p.name ?? p.id;
+  if (p.kind === "machine")
+    return { name: "Key holder", ok: true, detail: `this computer's key (${who})` };
+  if (p.kind === "human") return { name: "Key holder", ok: true, detail: `a person's own key (${who})` };
+  if (p.hostUserId)
+    return { name: "Key holder", ok: true, detail: `${who} on ${p.hostName ?? p.hostUserId}` };
+  return {
+    name: "Key holder",
+    ok: true,
+    detail:
+      `${who}, on no computer: revoking a computer does not stop it` +
+      (p.kind === "agent" ? ". To tie it to this computer, run: synap init" : ""),
+  };
+}
+
+/**
  * What the pod's dependency probe says about the Intelligence Service.
  *
  * Mirrors the pod's own three states rather than flattening them to a boolean
@@ -411,9 +447,11 @@ export async function doctor(opts: DoctorOpts = {}): Promise<void> {
     try {
       const cfg = cfgResolved ?? (await resolveHubConfig());
       cfgResolved = cfg;
-      await hubGet("/users/me", {}, cfg);
+      const me = await hubGet("/users/me", {}, cfg);
       keyValid = true;
       checks.push({ name: "API key authenticates", ok: true, detail: "key accepted" });
+      const holder = keyHolderCheck(me);
+      if (holder) checks.push(holder);
     } catch (err) {
       const is401 = err instanceof HubError ? err.status === 401 : false;
       // Say WHY — awaiting approval, replaced, expired — never a guess.
