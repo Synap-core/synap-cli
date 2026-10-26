@@ -4,6 +4,7 @@
 
 import { readJsonStrict, writeFileAtomic, ensureSecretDir } from "./atomic-file.js";
 import { PodMovedError, podFetch } from "./pod-moved.js";
+import { classifyFetchError, classifyHttpStatus, type ReachFailure } from "./pod-reach.js";
 import { execSync } from "child_process";
 import fs from "node:fs";
 import path from "node:path";
@@ -617,6 +618,8 @@ export interface PodStatus {
    * (pod-moved.ts). Never followed; `synap doctor` asks the Control Plane.
    */
   moved?: boolean;
+  /** Why the probe failed, when it did (network / proxy / pod). Absent when healthy or moved. */
+  failure?: ReachFailure;
 }
 
 /**
@@ -633,10 +636,13 @@ export async function checkPodHealth(podUrl: string): Promise<PodStatus> {
       status.healthy = true;
       const data = (await res.json()) as Record<string, unknown>;
       status.version = data.version as string | undefined;
+    } else {
+      status.failure = classifyHttpStatus(res.status, podUrl);
     }
   } catch (err) {
     // pod unreachable — or it answered with a redirect to another host
     if (err instanceof PodMovedError) status.moved = true;
+    else status.failure = classifyFetchError(err, podUrl);
   }
 
   return status;
