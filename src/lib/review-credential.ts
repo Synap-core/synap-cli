@@ -85,7 +85,9 @@ export function resolveReviewConfig(opts: { podUrl?: string } = {}): ReviewCrede
     config: {
       podUrl: opts.podUrl ?? profile.podUrl,
       apiKey: profile.hubApiKey,
-      userId: profile.agentUserId,
+      // Acting user asked of the pod; the key's agent id rides apart (HubConfig.userId).
+      userId: "cli",
+      agentUserId: profile.agentUserId?.trim() || undefined,
       workspaceId: profile.workspaceId,
     } as HubConfig,
   };

@@ -13,8 +13,10 @@
  * first, with the flag that fixes it.
  */
 
-/** Mirrors `TITLE_HARD_MAX` (`@synap-core/types/titles`); the pod refuses longer. */
-export const TITLE_HARD_MAX = 200;
+import { TITLE_HARD_MAX } from "@synap-core/types/titles";
+
+/** The pod's hard cap (`@synap-core/types/titles`); it refuses longer. */
+export { TITLE_HARD_MAX };
 
 export type KnowledgeTitleResult =
   | { ok: true; title: string }

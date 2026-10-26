@@ -1,4 +1,5 @@
 import chalk from "chalk";
+import { shortenTitle } from "@synap-core/types/titles";
 import { log } from "../utils/logger.js";
 import { resolveHubConfig, hubGet, hubPost, renderHubError } from "../lib/hub-client.js";
 import { unwrapList } from "../lib/unwrapList.js";
@@ -44,7 +45,7 @@ export async function observeWrite(
       "/entities",
       {
         profileSlug: "user_observation",
-        title: text.slice(0, 80),
+        title: shortenTitle(text),
         properties: {
           uo_observation: text,
           uo_category: category,
