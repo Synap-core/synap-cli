@@ -286,7 +286,7 @@ export function buildWorkerPrompt(p: {
     ...(p.design ? [`This is a DESIGN run: the deliverable is a design made with the Artifact tool.`] : []),
     ``,
     `Protocol:`,
-    `1. Read: synap_get_session {sessionId} for the goal, outcomes and channelId (the room); then synap_get_thread_context {threadId: <channelId>} for what was said so far.`,
+    `1. Read: synap_get_session {sessionId} for the goal, outcomes and channelId (the room); then synap_get_thread_context {threadId: <channelId>} for what was said so far. Read the session's subject too (subjectEntityId, and its kind: the work type). If it has none and the goal names an existing issue, feature or task by id or URL, anchor it: synap_update_session {sessionId, subjectEntityId}. Never create an entity to fill the slot.`,
     `2. Claim: synap_post_message to the room (kind "update"), one line: you picked it up and what you will do first.`,
     `3. Work in ${p.cwd}, or in the directory the session goal names (e.g. a new site under ~/sites). Shared-tree rules: never commit on a shared clone's main; for code changes in an existing repo use a git worktree on a branch named devbox/${short}-<slug>; never push to main, never run git checkout --, restore, stash or reset --hard on a shared clone. You may push that branch and open a DRAFT pull request (gh pr create --draft); never merge one. Never deploy to production or change a domain; a preview deploy only when the session goal asks for one.`,
     ...(p.design
@@ -295,7 +295,7 @@ export function buildWorkerPrompt(p: {
         ]
       : []),
     `4. Need help or a decision: post in the room starting with "QUESTION:" — kind "update" when the orchestrating AI can answer it, kind "question" only for a decision only the person can make. Then wait for the reply: read synap_get_thread_context about every 60 seconds (Bash "sleep 60" between reads), up to 30 minutes, and use the first reply posted after your question. No reply: state your assumption in the room and continue, or stop and say what is blocked.`,
-    `5. Record EVERY deliverable as a session output: synap_update_session {sessionId, outcomes:[{key, label, kind, ref:{url}}]}, then completeOutput <key> for each — the draft PR (ref = its URL), the branch, the gate summary path (name both in the label)${p.design ? `, and the design (the outcome of kind "design", ref = the artifact's claude.ai URL); also put that URL on the session's subject entity (synap_update_entity)` : ""}. Do not close the session; the owner does.`,
+    `5. Record EVERY deliverable as a session output: synap_update_session {sessionId, outcomes:[{key, label, kind, ref:{url}}]}, then completeOutput <key> for each — the draft PR (ref = its URL), the branch, the gate summary path (name both in the label)${p.design ? `, and the design (the outcome of kind "design", ref = the artifact's claude.ai URL); if the session has a subject, also put that URL on the session's subject entity (synap_update_entity)` : ""}. Do not close the session; the owner does.`,
     `6. Report: post ONE paragraph in the room starting "Look at first:" — what changed, where (PR, branch${p.design ? ", artifact URL" : ""}), and the first thing to check.`,
     `7. End your final message with one line: WORKER-RESULT: done | blocked | failed — <one sentence>.`,
   ].join("\n");

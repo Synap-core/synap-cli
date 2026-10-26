@@ -390,6 +390,15 @@ describe("the night protocol in the prompt", () => {
     expect(d).toContain("subject entity");
     expect(p()).not.toContain("quickstart");
   });
+  it("every run reads the session's subject, anchors one the goal names, and never creates one", () => {
+    expect(p()).toContain("Read the session's subject too (subjectEntityId, and its kind: the work type)");
+    expect(p()).toContain("anchor it: synap_update_session {sessionId, subjectEntityId}");
+    expect(p()).toContain("Never create an entity to fill the slot.");
+  });
+  it("a design run writes the artifact URL on the subject only if the session has one", () => {
+    expect(p(true)).toContain("if the session has a subject, also put that URL on the session's subject entity");
+    expect(p()).not.toContain("put that URL on the session's subject entity");
+  });
 });
 
 describe("workerEnv with an account", () => {
