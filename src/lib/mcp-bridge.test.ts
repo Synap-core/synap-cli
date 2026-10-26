@@ -8,8 +8,8 @@
  */
 import { PassThrough } from "node:stream";
 import { describe, expect, it } from "vitest";
-import { runMcpBridge, sseEvents } from "./mcp-bridge.js";
-import { conversationHeaders, claudeCodeConversation } from "./conversation-headers.js";
+import { runMcpBridge, sseEvents, withConversationMeta } from "./mcp-bridge.js";
+import { conversationHeaders, claudeCodeConversation, cliConversation } from "./conversation-headers.js";
 
 const SID = "8c34a72b-b1c1-4c37-9c1f-02920b69ccb2";
 
@@ -101,7 +101,15 @@ describe("conversation headers", () => {
   it("only a real Claude Code UUID names a conversation", () => {
     expect(claudeCodeConversation(SID.toUpperCase())).toBe(`claude-code:${SID}`);
     expect(claudeCodeConversation("not-a-uuid")).toBeUndefined();
-    expect(conversationHeaders(undefined, "/x")).toEqual({});
+  });
+
+  it("outside Claude Code the run names itself: one id per process, SYNAP_RUN_ID wins", () => {
+    const a = conversationHeaders(undefined, "/x")["X-Synap-Conversation"]!;
+    expect(a).toMatch(/^synap-cli:[0-9a-f-]{36}$/);
+    expect(conversationHeaders(undefined, "/y")["X-Synap-Conversation"]).toBe(a);
+    expect(conversationHeaders(undefined, "/x")).not.toHaveProperty("X-Synap-Conversation-Cwd");
+    expect(cliConversation({ SYNAP_RUN_ID: "nightly-42" })).toBe("synap-cli:nightly-42");
+    expect(cliConversation({ SYNAP_RUN_ID: "bad id" })).toBe(a);
   });
 
   it("a non-ASCII cwd is dropped, the conversation still sent", () => {
@@ -110,5 +118,33 @@ describe("conversation headers", () => {
 
   it("sseEvents keeps an incomplete event for the next chunk", () => {
     expect(sseEvents("data: a\n\ndata: b")).toEqual({ events: ["a"], rest: "data: b" });
+  });
+});
+
+describe("conversation in _meta", () => {
+  const conv = conversationHeaders(SID, "/Users/a/code");
+
+  it("every forwarded request carries live.synap/conversation (and the cwd) in params._meta", async () => {
+    const { seen } = await drive(
+      [
+        { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "t", _meta: { keep: 1 } } },
+        { jsonrpc: "2.0", id: 2, method: "tools/list" },
+      ],
+      (b) => json({ jsonrpc: "2.0", id: b.id, result: {} }),
+      conv
+    );
+    const bodies = seen.map((s) => JSON.parse(s.body));
+    for (const b of bodies) {
+      expect(b.params._meta["live.synap/conversation"]).toBe(`claude-code:${SID}`);
+      expect(b.params._meta["live.synap/conversationCwd"]).toBe("/Users/a/code");
+    }
+    expect(bodies.find((b) => b.id === 1).params).toMatchObject({ name: "t", _meta: { keep: 1 } });
+  });
+
+  it("leaves responses and header-less bridges untouched", () => {
+    const resp = { jsonrpc: "2.0", id: 1, result: {} };
+    expect(withConversationMeta(resp, conv)).toEqual(resp);
+    const req = { jsonrpc: "2.0", id: 1, method: "ping" };
+    expect(withConversationMeta(req, {})).toBe(req);
   });
 });
