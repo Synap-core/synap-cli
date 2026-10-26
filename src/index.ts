@@ -1224,7 +1224,7 @@ session
   .option("--workspace <id>", "Workspace that owns the session")
   .option("--project <id>", "Project that owns the session (defaults to the active project lens; the pod accepts a workspace OR a project)")
   .option("--task-id <id>", "Link session to an existing task entity")
-  .option("--track <id>", "Born inside a track (a project's lasting goal) — implies its project")
+  .option("--track <id>", "Born inside a track (a project's goal) — implies its project")
   .option("--template <id>", "Start from a playbook (seeds currentStage from its stages)")
   .option("--no-template", "Opt out of auto-matching a playbook — start ad-hoc")
   .option("--parent <id>", "Push from another session — records session --spawned_from--> session (the parent stays open)")
@@ -1409,19 +1409,24 @@ playbookCmd
   });
 
 // ─── track ────────────────────────────────────────────────────────────────────
-// A LASTING goal inside a project, worked in sessions (`session start --track`).
-// Legacy tracks also run a method with steps. Writes are governed —
+// A goal inside a project, worked in sessions (`session start --track`); a
+// person closes it with a verdict. Legacy tracks also run a method with steps. Writes are governed —
 // "queued for your review" is success.
 
 const track = program
   .command("track")
-  .description("Manage tracks — the lasting goals a project pursues");
+  .description("Manage tracks — the goals a project pursues");
 
 track
   .command("list")
-  .description("List a project's tracks (defaults to the active project lens)")
+  .description(
+    "List a project's goals (the active project lens); with no project in scope, every goal on the pod"
+  )
   .option("--project <id>", "Project id (defaults to the active project lens)")
-  .option("--all", "Include archived tracks")
+  .option("--everywhere", "List every goal on the pod, ignoring the project lens")
+  .option("--limit <n>", "Pod-wide: page size (default 50)")
+  .option("--cursor <cursor>", "Pod-wide: the next page (printed under the last one)")
+  .option("--all", "Include dropped (archived) tracks")
   .option("--json", "Output as JSON")
   .option("--pod-url <url>", "Pod URL override")
   .option("--api-key <key>", "API key override")
@@ -1443,12 +1448,26 @@ track
 
 track
   .command("start")
-  .description("Start a track — a lasting goal — on a project")
+  .description("Start a track — a goal — on a project")
   .option("--name <name>", "The track's name (required without --playbook)")
   .option("--direction <text>", "Where it is heading, one line")
   .option("--playbook <id>", "Legacy: a track template (project-scoped playbook with steps)")
   .option("--project <id>", "Project id (defaults to the active project lens)")
   .option("--param <key=value>", "Answer a declared param (repeatable)", collect, [])
+  .option("--end-state <text>", "What done looks like, in your words")
+  .option(
+    "--criterion <text>",
+    "How it is judged done — '[measured|judged|handed_over|learning|decided_outside|certified:] statement'; give 0 or 2-5 (repeatable)",
+    collect,
+    []
+  )
+  .option("--drop-condition <text>", "When to stop pursuing it (repeatable, at most 5)", collect, [])
+  .option(
+    "--kind <kind>",
+    "Kind of work: project|flow|operation|investigation|incident|commission|pathway (a proposal until you confirm)"
+  )
+  .option("--uncertainty <level>", "How well the way is known: clear|complicated|complex|chaotic|unknown")
+  .option("--loop <on|off|n>", "Let the goal propose its next session: on, off, or n sessions a week")
   .option("--reason <text>", "Why — shown to the reviewer")
   .option("--json", "Output as JSON")
   .option("--pod-url <url>", "Pod URL override")
@@ -1456,6 +1475,49 @@ track
   .action(async (opts) => {
     const { startTrack } = await import("./commands/tracks.js");
     await startTrack(opts);
+  });
+
+track
+  .command("update <id>")
+  .description("Set a goal's direction, KPI and what it holds (each field is written whole; kpi is merged)")
+  .option("--direction <text>", "Where it is heading, one line")
+  .option("--kpi-current <n>", "The KPI's latest value (stated, never measured)")
+  .option("--kpi-target <n>", "Move the KPI's target")
+  .option("--end-state <text>", "What done looks like, in your words")
+  .option(
+    "--criterion <text>",
+    "How it is judged done — '[measured|judged|handed_over|learning|decided_outside|certified:] statement'; give 0 or 2-5 (repeatable)",
+    collect,
+    []
+  )
+  .option("--drop-condition <text>", "When to stop pursuing it (repeatable, at most 5)", collect, [])
+  .option(
+    "--kind <kind>",
+    "Kind of work: project|flow|operation|investigation|incident|commission|pathway (a proposal until you confirm)"
+  )
+  .option("--uncertainty <level>", "How well the way is known: clear|complicated|complex|chaotic|unknown")
+  .option("--loop <on|off|n>", "Let the goal propose its next session: on, off, or n sessions a week")
+  .option("--reason <text>", "Why — shown to the reviewer")
+  .option("--json", "Output as JSON")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (id: string, opts) => {
+    const { updateTrack } = await import("./commands/tracks.js");
+    await updateTrack(id, opts);
+  });
+
+track
+  .command("accept <id> <criterion> <decision>")
+  .description(
+    "The goal's judge decides a claimed criterion: accepted | changes_asked | rejected (a person's act)"
+  )
+  .option("--note <text>", "What to change, or why it was rejected")
+  .option("--json", "Output as JSON")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (id: string, criterion: string, decision: string, opts) => {
+    const { acceptCriterion } = await import("./commands/tracks.js");
+    await acceptCriterion(id, criterion, decision, opts);
   });
 
 track
@@ -1472,7 +1534,14 @@ track
 
 track
   .command("status <id> <status>")
-  .description("Pause, resume or archive a track (active|paused|archived)")
+  .description(
+    "Move a track: proposed|agreed|ready|active|paused|completed (Closed)|archived (Dropped). " +
+      "Closing needs --verdict met|partly_met|not_met (an operation closes retired, and only one does); dropping should carry " +
+      "no_longer_needed|impossible|replaced|mistake (impossible and replaced need --verdict-reason). " +
+      "Both are final — reopen makes a new version."
+  )
+  .option("--verdict <verdict>", "How the goal ended (required to close; advised to drop)")
+  .option("--verdict-reason <text>", "Why — required for impossible and replaced")
   .option("--reason <text>", "Why — shown to the reviewer")
   .option("--json", "Output as JSON")
   .option("--pod-url <url>", "Pod URL override")
@@ -1480,6 +1549,37 @@ track
   .action(async (id: string, status: string, opts) => {
     const { setTrackStatus } = await import("./commands/tracks.js");
     await setTrackStatus(id, status, opts);
+  });
+
+track
+  .command("reopen <id>")
+  .description("Reopen a closed or dropped goal as a NEW version (the old one keeps its verdict)")
+  .option("--name <name>", "A new name (default: the old one's)")
+  .option("--reason <text>", "Why — shown to the reviewer")
+  .option("--json", "Output as JSON")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (id: string, opts) => {
+    const { reopenTrack } = await import("./commands/tracks.js");
+    await reopenTrack(id, opts);
+  });
+
+const goal = program
+  .command("goal")
+  .description("Goals — what people call a track");
+
+goal
+  .command("convert <entityId>")
+  .description("Make a goal, objective or OKR entity a goal (once; the entity is kept and linked)")
+  .option("--project <id>", "The goal's project — only when the entity is filed in none or several")
+  .option("--name <name>", "A name other than the entity's title")
+  .option("--reason <text>", "Why — shown to the reviewer")
+  .option("--json", "Output as JSON")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (entityId: string, opts) => {
+    const { convertToGoal } = await import("./commands/tracks.js");
+    await convertToGoal(entityId, opts);
   });
 
 track
