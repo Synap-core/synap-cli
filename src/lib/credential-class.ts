@@ -89,6 +89,26 @@ export async function fetchAuthStatus(cfg: HubConfig, apiKey?: string): Promise<
   return (await hubGet("/auth/status", {}, apiKey ? { ...cfg, apiKey } : cfg)) as AuthStatus;
 }
 
+const agentUserIdCache = new Map<string, string>();
+
+/**
+ * WHO this key is — the agent principal, for recognising the agent's OWN
+ * posts (a room message carries it as `routedTeammateId`). Never the acting
+ * user sent to the pod: that is `resolveUserId` (/users/me), which for an
+ * agent key answers the linked HUMAN. The id recorded with the key
+ * (`cfg.agentUserId`) wins; else the pod's key-owner answer (/auth/status),
+ * cached per key. For a person's own key both questions answer the person.
+ */
+export async function resolveAgentUserId(cfg: HubConfig): Promise<string> {
+  if (cfg.agentUserId) return cfg.agentUserId;
+  const cached = agentUserIdCache.get(cfg.apiKey);
+  if (cached) return cached;
+  const owner = (await fetchAuthStatus(cfg)).userId;
+  if (!owner) throw new Error("The pod did not say who owns this key (GET /auth/status has no userId).");
+  agentUserIdCache.set(cfg.apiKey, owner);
+  return owner;
+}
+
 /**
  * Shape of `GET /api/hub/users/me` (`hub-protocol/rest/users.ts:36-46`).
  *
