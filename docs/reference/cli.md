@@ -4,7 +4,7 @@
 
 Synap CLI — connect AI agents to your data pod
 
-220 commands. Hidden commands and hidden options are omitted here (5 hidden commands); `cli.json` lists them with `"hidden": true`.
+225 commands. Hidden commands and hidden options are omitted here (5 hidden commands); `cli.json` lists them with `"hidden": true`.
 
 Every command also accepts `-h, --help`.
 
@@ -101,14 +101,19 @@ Every command also accepts `-h, --help`.
   - [`synap session wait`](#synap-session-wait) — Block until the human replies in the session room, then print the reply. Exit 0 replied · 1 timeout · 2 failure (auth/network/broken read)
 - [`synap playbook`](#synap-playbook) — Run playbooks — governed, reusable processes
   - [`synap playbook run`](#synap-playbook-run) — Run a playbook by name or id, optionally on a subject entity
-- [`synap track`](#synap-track) — Manage tracks — the lasting goals a project pursues
-  - [`synap track list`](#synap-track-list) — List a project's tracks (defaults to the active project lens)
+- [`synap track`](#synap-track) — Manage tracks — the goals a project pursues
+  - [`synap track list`](#synap-track-list) — List a project's goals (the active project lens); with no project in scope, every goal on the pod
   - [`synap track show`](#synap-track-show) — Show one track: its steps and where it stands
-  - [`synap track start`](#synap-track-start) — Start a track — a lasting goal — on a project
+  - [`synap track start`](#synap-track-start) — Start a track — a goal — on a project
+  - [`synap track update`](#synap-track-update) — Set a goal's direction, KPI and what it holds (each field is written whole; kpi is merged)
+  - [`synap track accept`](#synap-track-accept) — The goal's judge decides a claimed criterion: accepted \| changes_asked \| rejected (a person's act)
   - [`synap track advance`](#synap-track-advance) — Legacy (tracks with steps): move a track to a step; prints the session that step offers
-  - [`synap track status`](#synap-track-status) — Pause, resume or archive a track (active\|paused\|archived)
+  - [`synap track status`](#synap-track-status) — Move a track: proposed\|agreed\|ready\|active\|paused\|completed (Closed)\|archived (Dropped). Closing needs --verdict met\|partly_met\|not_met (an operation closes retired, and only one does); dropping should carry no_longer_needed\|impossible\|replaced\|mistake (impossible and replaced need --verdict-reason). Both are final — reopen makes a new version.
+  - [`synap track reopen`](#synap-track-reopen) — Reopen a closed or dropped goal as a NEW version (the old one keeps its verdict)
   - [`synap track params`](#synap-track-params) — Answer the method's params as key=value (merged; key=null clears one)
   - [`synap track start-step`](#synap-track-start-step) — Legacy (tracks with steps): start one step's session — on a track with no steps, use 'session start --track'
+- [`synap goal`](#synap-goal) — Goals — what people call a track
+  - [`synap goal convert`](#synap-goal-convert) — Make a goal, objective or OKR entity a goal (once; the entity is kept and linked)
 - [`synap skill`](#synap-skill) — Execute a skill in an autonomous workspace session
   - [`synap skill gather-context`](#synap-skill-gather-context) — Gather pod KG + local context (CLAUDE.md, .claude/kg-verify) for a session
   - [`synap skill suggest`](#synap-skill-suggest) — Search the skill knowledge base by topic or keyword
@@ -429,6 +434,7 @@ Coherence preflight: pod host resolves, key authenticates, workspace/project exi
 | `--json` | Output as JSON |  |
 | `--fix` | Fix key problems: finish a pending approval, give this computer its own key, or rewrite stale copies — then verify over MCP |  |
 | `-v, --verbose` | Every check with its details, ids and addresses |  |
+| `--pod-url <url>` | Probe this pod URL (works with no pod configured) |  |
 
 ## `synap versions`
 
@@ -1503,7 +1509,7 @@ Start a new focus session and return its ID
 | `--workspace <id>` | Workspace that owns the session |  |
 | `--project <id>` | Project that owns the session (defaults to the active project lens; the pod accepts a workspace OR a project) |  |
 | `--task-id <id>` | Link session to an existing task entity |  |
-| `--track <id>` | Born inside a track (a project's lasting goal) — implies its project |  |
+| `--track <id>` | Born inside a track (a project's goal) — implies its project |  |
 | `--template <id>` | Start from a playbook (seeds currentStage from its stages) |  |
 | `--no-template` | Opt out of auto-matching a playbook — start ad-hoc |  |
 | `--parent <id>` | Push from another session — records session --spawned_from--> session (the parent stays open) |  |
@@ -1734,9 +1740,9 @@ Run a playbook by name or id, optionally on a subject entity
 synap track [options] [command]
 ```
 
-Manage tracks — the lasting goals a project pursues
+Manage tracks — the goals a project pursues
 
-Subcommands: [`list`](#synap-track-list), [`show`](#synap-track-show), [`start`](#synap-track-start), [`advance`](#synap-track-advance), [`status`](#synap-track-status), [`params`](#synap-track-params), [`start-step`](#synap-track-start-step)
+Subcommands: [`list`](#synap-track-list), [`show`](#synap-track-show), [`start`](#synap-track-start), [`update`](#synap-track-update), [`accept`](#synap-track-accept), [`advance`](#synap-track-advance), [`status`](#synap-track-status), [`reopen`](#synap-track-reopen), [`params`](#synap-track-params), [`start-step`](#synap-track-start-step)
 
 ## `synap track list`
 
@@ -1744,12 +1750,15 @@ Subcommands: [`list`](#synap-track-list), [`show`](#synap-track-show), [`start`]
 synap track list [options]
 ```
 
-List a project's tracks (defaults to the active project lens)
+List a project's goals (the active project lens); with no project in scope, every goal on the pod
 
 | Option | Description | Default |
 |---|---|---|
 | `--project <id>` | Project id (defaults to the active project lens) |  |
-| `--all` | Include archived tracks |  |
+| `--everywhere` | List every goal on the pod, ignoring the project lens |  |
+| `--limit <n>` | Pod-wide: page size (default 50) |  |
+| `--cursor <cursor>` | Pod-wide: the next page (printed under the last one) |  |
+| `--all` | Include dropped (archived) tracks |  |
 | `--json` | Output as JSON |  |
 | `--pod-url <url>` | Pod URL override |  |
 | `--api-key <key>` | API key override |  |
@@ -1778,7 +1787,7 @@ Show one track: its steps and where it stands
 synap track start [options]
 ```
 
-Start a track — a lasting goal — on a project
+Start a track — a goal — on a project
 
 | Option | Description | Default |
 |---|---|---|
@@ -1787,7 +1796,62 @@ Start a track — a lasting goal — on a project
 | `--playbook <id>` | Legacy: a track template (project-scoped playbook with steps) |  |
 | `--project <id>` | Project id (defaults to the active project lens) |  |
 | `--param <key=value>` | Answer a declared param (repeatable) | `[]` |
+| `--end-state <text>` | What done looks like, in your words |  |
+| `--criterion <text>` | How it is judged done — '[measured\|judged\|handed_over\|learning\|decided_outside\|certified:] statement'; give 0 or 2-5 (repeatable) | `[]` |
+| `--drop-condition <text>` | When to stop pursuing it (repeatable, at most 5) | `[]` |
+| `--kind <kind>` | Kind of work: project\|flow\|operation\|investigation\|incident\|commission\|pathway (a proposal until you confirm) |  |
+| `--uncertainty <level>` | How well the way is known: clear\|complicated\|complex\|chaotic\|unknown |  |
+| `--loop <on\|off\|n>` | Let the goal propose its next session: on, off, or n sessions a week |  |
 | `--reason <text>` | Why — shown to the reviewer |  |
+| `--json` | Output as JSON |  |
+| `--pod-url <url>` | Pod URL override |  |
+| `--api-key <key>` | API key override |  |
+
+## `synap track update`
+
+```
+synap track update [options] <id>
+```
+
+Set a goal's direction, KPI and what it holds (each field is written whole; kpi is merged)
+
+| Argument | Required | Description |
+|---|---|---|
+| `id` | yes |  |
+
+| Option | Description | Default |
+|---|---|---|
+| `--direction <text>` | Where it is heading, one line |  |
+| `--kpi-current <n>` | The KPI's latest value (stated, never measured) |  |
+| `--kpi-target <n>` | Move the KPI's target |  |
+| `--end-state <text>` | What done looks like, in your words |  |
+| `--criterion <text>` | How it is judged done — '[measured\|judged\|handed_over\|learning\|decided_outside\|certified:] statement'; give 0 or 2-5 (repeatable) | `[]` |
+| `--drop-condition <text>` | When to stop pursuing it (repeatable, at most 5) | `[]` |
+| `--kind <kind>` | Kind of work: project\|flow\|operation\|investigation\|incident\|commission\|pathway (a proposal until you confirm) |  |
+| `--uncertainty <level>` | How well the way is known: clear\|complicated\|complex\|chaotic\|unknown |  |
+| `--loop <on\|off\|n>` | Let the goal propose its next session: on, off, or n sessions a week |  |
+| `--reason <text>` | Why — shown to the reviewer |  |
+| `--json` | Output as JSON |  |
+| `--pod-url <url>` | Pod URL override |  |
+| `--api-key <key>` | API key override |  |
+
+## `synap track accept`
+
+```
+synap track accept [options] <id> <criterion> <decision>
+```
+
+The goal's judge decides a claimed criterion: accepted | changes_asked | rejected (a person's act)
+
+| Argument | Required | Description |
+|---|---|---|
+| `id` | yes |  |
+| `criterion` | yes |  |
+| `decision` | yes |  |
+
+| Option | Description | Default |
+|---|---|---|
+| `--note <text>` | What to change, or why it was rejected |  |
 | `--json` | Output as JSON |  |
 | `--pod-url <url>` | Pod URL override |  |
 | `--api-key <key>` | API key override |  |
@@ -1818,7 +1882,7 @@ Legacy (tracks with steps): move a track to a step; prints the session that step
 synap track status [options] <id> <status>
 ```
 
-Pause, resume or archive a track (active|paused|archived)
+Move a track: proposed|agreed|ready|active|paused|completed (Closed)|archived (Dropped). Closing needs --verdict met|partly_met|not_met (an operation closes retired, and only one does); dropping should carry no_longer_needed|impossible|replaced|mistake (impossible and replaced need --verdict-reason). Both are final — reopen makes a new version.
 
 | Argument | Required | Description |
 |---|---|---|
@@ -1827,6 +1891,28 @@ Pause, resume or archive a track (active|paused|archived)
 
 | Option | Description | Default |
 |---|---|---|
+| `--verdict <verdict>` | How the goal ended (required to close; advised to drop) |  |
+| `--verdict-reason <text>` | Why — required for impossible and replaced |  |
+| `--reason <text>` | Why — shown to the reviewer |  |
+| `--json` | Output as JSON |  |
+| `--pod-url <url>` | Pod URL override |  |
+| `--api-key <key>` | API key override |  |
+
+## `synap track reopen`
+
+```
+synap track reopen [options] <id>
+```
+
+Reopen a closed or dropped goal as a NEW version (the old one keeps its verdict)
+
+| Argument | Required | Description |
+|---|---|---|
+| `id` | yes |  |
+
+| Option | Description | Default |
+|---|---|---|
+| `--name <name>` | A new name (default: the old one's) |  |
 | `--reason <text>` | Why — shown to the reviewer |  |
 | `--json` | Output as JSON |  |
 | `--pod-url <url>` | Pod URL override |  |
@@ -1869,6 +1955,37 @@ Legacy (tracks with steps): start one step's session — on a track with no step
 | `--stage <key>` | Step key (defaults to the current step) |  |
 | `--title <text>` | Session name (defaults to the step's name) |  |
 | `--goal <text>` | Outcome (defaults to the step's goal) |  |
+| `--json` | Output as JSON |  |
+| `--pod-url <url>` | Pod URL override |  |
+| `--api-key <key>` | API key override |  |
+
+## `synap goal`
+
+```
+synap goal [options] [command]
+```
+
+Goals — what people call a track
+
+Subcommands: [`convert`](#synap-goal-convert)
+
+## `synap goal convert`
+
+```
+synap goal convert [options] <entityId>
+```
+
+Make a goal, objective or OKR entity a goal (once; the entity is kept and linked)
+
+| Argument | Required | Description |
+|---|---|---|
+| `entityId` | yes |  |
+
+| Option | Description | Default |
+|---|---|---|
+| `--project <id>` | The goal's project — only when the entity is filed in none or several |  |
+| `--name <name>` | A name other than the entity's title |  |
+| `--reason <text>` | Why — shown to the reviewer |  |
 | `--json` | Output as JSON |  |
 | `--pod-url <url>` | Pod URL override |  |
 | `--api-key <key>` | API key override |  |

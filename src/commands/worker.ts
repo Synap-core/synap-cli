@@ -38,10 +38,12 @@
  */
 
 import { execFile, spawn, type ChildProcess } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import { ensureSecretDir, writeSecretFile } from "../lib/atomic-file.js";
 import os from "node:os";
 import path from "node:path";
+import { CONVERSATION_HEADER, claudeCodeConversation } from "../lib/conversation-headers.js";
 import { resolveHubConfig } from "../lib/hub-client.js";
 import { resolveAgentUserId } from "../lib/credential-class.js";
 import { createMcpClient, type McpCallClient } from "../lib/mcp-call.js";
@@ -232,22 +234,28 @@ export function pickNew(
  */
 export const RUN_MCP_SERVER = "synap-worker";
 
-export function runMcpConfig(podUrl: string, apiKey: string): { mcpServers: Record<string, unknown> } {
+export function runMcpConfig(
+  podUrl: string,
+  apiKey: string,
+  /** The run's Claude session id: names the conversation to the pod, one id across resumes. */
+  claudeSessionId?: string
+): { mcpServers: Record<string, unknown> } {
+  const conversation = claudeCodeConversation(claudeSessionId);
   return {
     mcpServers: {
       [RUN_MCP_SERVER]: {
         type: "http",
         url: `${podUrl.replace(/\/+$/, "")}/mcp`,
-        headers: { Authorization: `Bearer ${apiKey}` },
+        headers: { Authorization: `Bearer ${apiKey}`, ...(conversation ? { [CONVERSATION_HEADER]: conversation } : {}) },
       },
     },
   };
 }
 
 /** Writes the run config owner-only (it holds the key) and returns its path. */
-export function writeRunMcpConfig(dir: string, config: { mcpServers: Record<string, unknown> }): string {
+export function writeRunMcpConfig(dir: string, config: { mcpServers: Record<string, unknown> }, name = "mcp.json"): string {
   ensureSecretDir(dir);
-  const file = path.join(dir, "mcp.json");
+  const file = path.join(dir, name);
   writeSecretFile(file, JSON.stringify(config, null, 2));
   return file;
 }
@@ -636,7 +644,6 @@ export function createWorker(opts: WorkerOptions, deps: WorkerDeps): Worker {
   const claudeBin = opts.claudeBin ?? "claude";
 
   const mcpServer = RUN_MCP_SERVER;
-  const mcpConfigPath = writeRunMcpConfig(stateDir(agent), runMcpConfig(deps.podUrl, deps.apiKey));
 
   const allowed = (opts.allowedTools ? opts.allowedTools.split(",") : DEFAULT_ALLOWED_TOOLS)
     .map((t) => t.trim())
@@ -717,6 +724,14 @@ export function createWorker(opts: WorkerOptions, deps: WorkerDeps): Worker {
   // ── launching ──
   const launch = async (item: HandedItem, how: How, design: boolean, account: AccountSpec | undefined): Promise<void> => {
     const resumeId = how.kind === "fresh" ? undefined : how.claudeSessionId;
+    // The run names its own Claude session up front (`--session-id`), so the pod sees ONE
+    // conversation per run, kept across resumes, instead of a new MCP transport id each launch.
+    const runSessionId = resumeId ?? randomUUID();
+    const mcpConfigPath = writeRunMcpConfig(
+      stateDir(agent),
+      runMcpConfig(deps.podUrl, deps.apiKey, runSessionId),
+      `mcp-${item.id}.json`
+    );
     const prompt =
       how.kind === "followUp"
         ? how.prompt
@@ -765,7 +780,7 @@ export function createWorker(opts: WorkerOptions, deps: WorkerDeps): Worker {
       // dontAsk: a tool outside the list is denied, never a prompt nobody answers.
       const args = [
         "--bg",
-        ...(resumeId ? ["--resume", resumeId] : []),
+        ...(resumeId ? ["--resume", resumeId] : ["--session-id", runSessionId]),
         prompt,
         "--strict-mcp-config",
         "--mcp-config",
@@ -778,7 +793,7 @@ export function createWorker(opts: WorkerOptions, deps: WorkerDeps): Worker {
         record.status = "done";
         record.result = `dry run: would launch ${claudeBin} --bg in ${cwd}${on}`;
         save();
-        log(`dry run — design session ${item.id}${on}: ${claudeBin} --bg <prompt> ${args.slice(2 + (resumeId ? 2 : 0)).join(" ")}`);
+        log(`dry run — design session ${item.id}${on}: ${claudeBin} --bg <prompt> ${args.slice(4).join(" ")}`);
         return;
       }
       save();
@@ -801,7 +816,7 @@ export function createWorker(opts: WorkerOptions, deps: WorkerDeps): Worker {
     }
 
     const args = ["-p", prompt, "--output-format", "stream-json", "--verbose", "--mcp-config", mcpConfigPath];
-    if (resumeId) args.push("--resume", resumeId);
+    args.push(...(resumeId ? ["--resume", resumeId] : ["--session-id", runSessionId]));
     if (opts.skipPermissions) args.push("--dangerously-skip-permissions");
     else args.push("--permission-mode", "acceptEdits", "--allowedTools", ...allowed);
 

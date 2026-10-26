@@ -25,6 +25,7 @@ import {
 } from "../lib/pod.js";
 import { CP_URL, login, isLoggedIn, listPods, podUrlOf, getStoredToken, waitForPodCallback } from "../lib/auth.js";
 import { detectAgents, type DetectableAgent } from "../lib/agent-detect.js";
+import { reachChecklist, unreachableMessage, type ReachFailure } from "../lib/pod-reach.js";
 import { createPodInBrowser } from "../lib/init-pod.js";
 import { buildPairLink, renderTerminalQr } from "../lib/pair-link.js";
 import { buildHandoff } from "../lib/init-handoff.js";
@@ -143,8 +144,8 @@ async function runInit(opts: InitOptions): Promise<InitSummary | null> {
       );
     }
     if (!probe.healthy) {
-      printUnreachablePodInstructions(opts.podUrl);
-      throw new InitExit(INIT_EXIT.noPod, `Pod at ${opts.podUrl} is not reachable.`, true);
+      printUnreachablePodInstructions(opts.podUrl, probe.failure);
+      throw new InitExit(INIT_EXIT.noPod, unreachableMessage(opts.podUrl, probe.failure), true);
     }
   }
 
@@ -258,8 +259,8 @@ async function noPodStep(): Promise<{ podUrl: string; podId?: string }> {
         await movedPodLine(url, (to) => `Run: synap init --pod-url ${to}`)
       );
     }
-    spinner.fail(`Pod not reachable at ${url}`);
-    throw new InitExit(INIT_EXIT.noPod, `Pod not reachable at ${url}`, true);
+    spinner.fail(unreachableMessage(url, health.failure));
+    throw new InitExit(INIT_EXIT.noPod, unreachableMessage(url, health.failure), true);
   }
 
   log.blank();
@@ -716,15 +717,12 @@ async function loginAndSelectPod(): Promise<{ url: string; podId: string } | nul
 // HELPERS
 // =============================================================================
 
-function printUnreachablePodInstructions(podUrl: string): void {
+function printUnreachablePodInstructions(podUrl: string, failure?: ReachFailure): void {
   console.log("");
-  log.error(`Pod at ${podUrl} is not reachable.`);
+  log.error(unreachableMessage(podUrl, failure));
   log.blank();
   log.info("Checklist:");
-  log.dim("  - Is the pod URL correct? (scheme + host + port)");
-  log.dim("  - Is the pod container running? On the server: ./synap health");
-  log.dim("  - Is there a firewall or reverse proxy in the way?");
-  log.dim("  - For localhost setups, did you start the stack? ./synap start");
+  for (const line of reachChecklist(failure)) log.dim(`  ${line}`);
   log.blank();
   log.info("Once the pod is reachable, re-run:");
   log.dim(`  npx @synap-core/cli init --pod-url ${podUrl}`);
