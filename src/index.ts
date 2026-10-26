@@ -133,10 +133,7 @@ program
   .option("--api-key <key>", "Hub Protocol API key")
   .option("--name <name>", "Pod profile to use (default: active pod)")
   .option("--list", "List what can be connected and exit")
-  .option(
-    "--with-mcp",
-    "Raycast only: also install the full 56-tool MCP server via mcp-remote (names overlap @synap)"
-  )
+  .addOption(new Option("--with-mcp", "deprecated, ignored: Raycast always gets the pod's MCP server").hideHelp())
   .option("--target <name>", "Legacy spelling of <thing>")
   .option("--pin-workspace <id>", "Legacy spelling of --workspace")
   .option("--pin-project <id>", "Legacy spelling of --project")
@@ -184,7 +181,7 @@ pods
   .option("--yes", "Non-interactive: skip prompts (won't recreate a rejected key)")
   .action(async (name: string, url: string | undefined, opts: { url?: string; yes?: boolean }) => {
     const { podsUpdate } = await import("./commands/pods.js");
-    await podsUpdate(name, url, { url: opts.url, yes: opts.yes });
+    if (!(await podsUpdate(name, url, { url: opts.url, yes: opts.yes }))) process.exitCode = 1;
   });
 
 pods
@@ -1198,6 +1195,10 @@ program
   .option("--max-parallel <n>", "Runs at the same time", "1")
   .option("--claude-bin <path>", "The claude binary", "claude")
   .option("--claude-config-dir <dir>", "CLAUDE_CONFIG_DIR for launched runs — picks which Claude subscription they use")
+  .option(
+    "--accounts <file>",
+    "Claude accounts to rotate across ({version:1, reserve, accounts:[{id,label,token,design?}]}, mode 600); default ~/.config/synap-worker/accounts.json when it exists, else the environment's login"
+  )
   .option("--allowed-tools <list>", "Comma-separated Claude tools allowed without asking (the pod MCP server is always added)")
   .option("--skip-permissions", "Launch with --dangerously-skip-permissions instead of an allow-list")
   .option("--dry-run", "Claim and log what would launch, without launching Claude")
@@ -1802,7 +1803,7 @@ agents
   .option("--role <role>", "Workspace role: admin | editor | viewer (default: editor)")
   .option("--workspace <id>", "Focus on one workspace (default: pod-wide)")
   .option("--project <id>", "Focus on one project (composable with --workspace)")
-  .option("--with-mcp", "Raycast only: also install the full MCP server via mcp-remote")
+  .addOption(new Option("--with-mcp", "deprecated, ignored: Raycast always gets the pod's MCP server").hideHelp())
   .option("--api-key <key>", "Register a key you already hold, on this machine only (mints nothing)")
   .option("--label <label>", "Human-readable description")
   .action(async (kind: string | undefined, opts) => {
@@ -3038,8 +3039,9 @@ sync
   });
 
 // ─── raycast (hidden power-user escape) ───────────────────────────────────────
-// Prefer the native Synap Raycast extension (@synap). Capability verbs there go
-// through list-actions / run-action. Script Commands are a per-verb escape hatch.
+// Prefer Raycast AI on the pod's MCP server (`synap connect raycast`), where
+// capability verbs run through synap_run_capability. Script Commands are a
+// per-verb escape hatch.
 
 const raycast = program
   .command("raycast", { hidden: true })
@@ -3050,7 +3052,7 @@ const raycast = program
 raycast
   .command("generate")
   .description(
-    "Power-user escape: emit a Script Command per enabled verb (extension uses list-actions/run-action)"
+    "Power-user escape: emit a Script Command per enabled verb (Raycast AI uses the pod's MCP server)"
   )
   .option("--out <dir>", "Output directory (default: ~/.synap/raycast-commands)")
   .option("--workspace <id>", "Workspace context")

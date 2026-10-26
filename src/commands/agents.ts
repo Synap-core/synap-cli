@@ -408,7 +408,6 @@ export interface AgentsAddOpts {
   apiKey?: string;
   label?: string;
   pod?: string;
-  withMcp?: boolean;
 }
 
 /**
@@ -428,7 +427,7 @@ export async function agentsAdd(kind: string | undefined, opts: AgentsAddOpts = 
 
   let ok: boolean;
   if (plan.mode === "known") {
-    ok = await connectKnownAgent(plan.target, pod, scope, { withMcp: opts.withMcp });
+    ok = await connectKnownAgent(plan.target, pod, scope);
   } else if (plan.mode === "custom") {
     ok = await createCustomAgent(
       pod,

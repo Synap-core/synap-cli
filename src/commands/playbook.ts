@@ -174,6 +174,14 @@ export async function runPlaybook(
       }
       return;
     }
+    if (r.status === "draft") {
+      if (!opts.json) {
+        const session = r.session as { id?: string } | null | undefined;
+        log.warn(`"${pb.name}" is waiting as a draft — it does not start until you accept it.`);
+        if (session?.id) log.hint(`Accept it in your sessions: synap open session ${session.id}`);
+      }
+      return;
+    }
     if (r.status === "blocked" || r.status === "skipped") {
       if (!opts.json) {
         log.error(typeof r.message === "string" ? r.message : `Nothing ran (${String(r.status)}).`);

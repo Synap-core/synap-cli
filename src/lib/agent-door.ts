@@ -236,13 +236,9 @@ function describeScope(scope: AgentScope): string {
 export async function connectKnownAgent(
   target: TargetName,
   pod: AgentPod,
-  scope: AgentScope,
-  opts: { withMcp?: boolean } = {}
+  scope: AgentScope
 ): Promise<boolean> {
   if (!(await podIsHealthy(pod.podUrl))) return false;
-  if (opts.withMcp && target !== "raycast") {
-    log.warn("--with-mcp is Raycast-only; ignored for this target.");
-  }
 
   log.heading(`Connecting ${TARGETS[target].label} → ${pod.podUrl}  ${chalk.dim(`(${describeScope(scope)})`)}`);
   const ok = await installForTarget(target, {
@@ -250,7 +246,6 @@ export async function connectKnownAgent(
     apiKey: pod.apiKey,
     workspaceId: scope.workspaceId,
     projectId: scope.projectId,
-    withMcp: opts.withMcp,
   }, NO_STAMP);
 
   log.blank();

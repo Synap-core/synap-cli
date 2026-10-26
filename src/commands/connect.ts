@@ -11,7 +11,7 @@
  *   synap connect gmail                   (anything else → synap cap connect gmail)
  *   synap connect gmail --tool            (force the tool reading when a name is both)
  *   synap connect claude-code --project <id>   (scope; default pod-wide)
- *   synap connect --target=raycast --with-mcp  (legacy flag, still accepted)
+ *   synap connect raycast                 (extension key + Raycast AI's HTTP MCP entry)
  *
  * Escape hatch for scripting:
  *   synap connect cursor --pod-url <url> --api-key <key>
@@ -37,8 +37,6 @@ interface ConnectOptions {
   /** Legacy spellings of --workspace / --project. */
   pinWorkspace?: string;
   pinProject?: string;
-  /** Raycast only: also install the full mcp-remote MCP server. */
-  withMcp?: boolean;
 }
 
 export type ConnectRoute =
@@ -109,6 +107,6 @@ export async function connect(thing: string | undefined, opts: ConnectOptions = 
 
   const pod = await resolveAgentPod({ podUrl: opts.podUrl, apiKey: opts.apiKey, profileName: opts.name });
   if (!pod) return;
-  const ok = await connectKnownAgent(route.target, pod, scope, { withMcp: opts.withMcp });
+  const ok = await connectKnownAgent(route.target, pod, scope);
   if (!ok) process.exitCode = 1;
 }

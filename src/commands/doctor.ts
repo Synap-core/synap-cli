@@ -148,8 +148,7 @@ async function fixPodMove(move: PodMove): Promise<boolean> {
     return false;
   }
   const { podsUpdate } = await import("./pods.js");
-  await podsUpdate(move.profileName, move.to);
-  return findPodNameByUrl(move.to) === move.profileName;
+  return (await podsUpdate(move.profileName, move.to)) && findPodNameByUrl(move.to) === move.profileName;
 }
 
 interface DoctorOpts {
