@@ -14,7 +14,7 @@
 
 /** `TRACK_STATUS_LABELS` */
 export const TRACK_STATUS_LABELS: Readonly<Record<string, string>> = {
-  proposed: "Proposed",
+  proposed: "Draft",
   agreed: "Agreed",
   ready: "Ready",
   active: "Active",
@@ -37,7 +37,7 @@ export const TRACK_VERDICT_LABELS: Readonly<Record<string, string>> = {
 
 /** `TRACK_WORK_KIND_LABELS` */
 export const TRACK_WORK_KIND_LABELS: Readonly<Record<string, string>> = {
-  project: "Project",
+  project: "Build",
   flow: "Flow",
   operation: "Operation",
   investigation: "Investigation",

@@ -1510,7 +1510,7 @@ track
   .option("--drop-condition <text>", "When to stop pursuing it (repeatable, at most 5)", collect, [])
   .option(
     "--kind <kind>",
-    "Kind of work: project|flow|operation|investigation|incident|commission|pathway (a proposal until you confirm)"
+    "Kind of work: project (Build)|flow|operation|investigation|incident|commission|pathway (a proposal until you confirm)"
   )
   .option("--uncertainty <level>", "How well the way is known: clear|complicated|complex|chaotic|unknown")
   .option("--loop <on|off|n>", "Let the goal propose its next session: on, off, or n sessions a week")
@@ -1539,7 +1539,7 @@ track
   .option("--drop-condition <text>", "When to stop pursuing it (repeatable, at most 5)", collect, [])
   .option(
     "--kind <kind>",
-    "Kind of work: project|flow|operation|investigation|incident|commission|pathway (a proposal until you confirm)"
+    "Kind of work: project (Build)|flow|operation|investigation|incident|commission|pathway (a proposal until you confirm)"
   )
   .option("--uncertainty <level>", "How well the way is known: clear|complicated|complex|chaotic|unknown")
   .option("--loop <on|off|n>", "Let the goal propose its next session: on, off, or n sessions a week")
@@ -1581,7 +1581,7 @@ track
 track
   .command("status <id> <status>")
   .description(
-    "Move a track: proposed|agreed|ready|active|paused|completed (Closed)|archived (Dropped). " +
+    "Move a track: proposed (Draft)|agreed|ready|active|paused|completed (Closed)|archived (Dropped). " +
       "Closing needs --verdict met|partly_met|not_met (an operation closes retired, and only one does); dropping should carry " +
       "no_longer_needed|impossible|replaced|mistake (impossible and replaced need --verdict-reason). " +
       "Both are final — reopen makes a new version."

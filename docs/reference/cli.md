@@ -111,7 +111,7 @@ Every command also accepts `-h, --help`.
   - [`synap track update`](#synap-track-update) — Set a goal's direction, KPI and what it holds (each field is written whole; kpi is merged)
   - [`synap track accept`](#synap-track-accept) — The goal's judge decides a claimed criterion: accepted \| changes_asked \| rejected (a person's act)
   - [`synap track advance`](#synap-track-advance) — Legacy (tracks with steps): move a track to a step; prints the session that step offers
-  - [`synap track status`](#synap-track-status) — Move a track: proposed\|agreed\|ready\|active\|paused\|completed (Closed)\|archived (Dropped). Closing needs --verdict met\|partly_met\|not_met (an operation closes retired, and only one does); dropping should carry no_longer_needed\|impossible\|replaced\|mistake (impossible and replaced need --verdict-reason). Both are final — reopen makes a new version.
+  - [`synap track status`](#synap-track-status) — Move a track: proposed (Draft)\|agreed\|ready\|active\|paused\|completed (Closed)\|archived (Dropped). Closing needs --verdict met\|partly_met\|not_met (an operation closes retired, and only one does); dropping should carry no_longer_needed\|impossible\|replaced\|mistake (impossible and replaced need --verdict-reason). Both are final — reopen makes a new version.
   - [`synap track reopen`](#synap-track-reopen) — Reopen a closed or dropped goal as a NEW version (the old one keeps its verdict)
   - [`synap track params`](#synap-track-params) — Answer the method's params as key=value (merged; key=null clears one)
   - [`synap track start-step`](#synap-track-start-step) — Legacy (tracks with steps): start one step's session — on a track with no steps, use 'session start --track'
@@ -1855,7 +1855,7 @@ Start a track — a goal — on a project
 | `--end-state <text>` | What done looks like, in your words |  |
 | `--criterion <text>` | How it is judged done — '[measured\|judged\|handed_over\|learning\|decided_outside\|certified:] statement'; give 0 or 2-5 (repeatable) | `[]` |
 | `--drop-condition <text>` | When to stop pursuing it (repeatable, at most 5) | `[]` |
-| `--kind <kind>` | Kind of work: project\|flow\|operation\|investigation\|incident\|commission\|pathway (a proposal until you confirm) |  |
+| `--kind <kind>` | Kind of work: project (Build)\|flow\|operation\|investigation\|incident\|commission\|pathway (a proposal until you confirm) |  |
 | `--uncertainty <level>` | How well the way is known: clear\|complicated\|complex\|chaotic\|unknown |  |
 | `--loop <on\|off\|n>` | Let the goal propose its next session: on, off, or n sessions a week |  |
 | `--reason <text>` | Why — shown to the reviewer |  |
@@ -1883,7 +1883,7 @@ Set a goal's direction, KPI and what it holds (each field is written whole; kpi 
 | `--end-state <text>` | What done looks like, in your words |  |
 | `--criterion <text>` | How it is judged done — '[measured\|judged\|handed_over\|learning\|decided_outside\|certified:] statement'; give 0 or 2-5 (repeatable) | `[]` |
 | `--drop-condition <text>` | When to stop pursuing it (repeatable, at most 5) | `[]` |
-| `--kind <kind>` | Kind of work: project\|flow\|operation\|investigation\|incident\|commission\|pathway (a proposal until you confirm) |  |
+| `--kind <kind>` | Kind of work: project (Build)\|flow\|operation\|investigation\|incident\|commission\|pathway (a proposal until you confirm) |  |
 | `--uncertainty <level>` | How well the way is known: clear\|complicated\|complex\|chaotic\|unknown |  |
 | `--loop <on\|off\|n>` | Let the goal propose its next session: on, off, or n sessions a week |  |
 | `--reason <text>` | Why — shown to the reviewer |  |
@@ -1938,7 +1938,7 @@ Legacy (tracks with steps): move a track to a step; prints the session that step
 synap track status [options] <id> <status>
 ```
 
-Move a track: proposed|agreed|ready|active|paused|completed (Closed)|archived (Dropped). Closing needs --verdict met|partly_met|not_met (an operation closes retired, and only one does); dropping should carry no_longer_needed|impossible|replaced|mistake (impossible and replaced need --verdict-reason). Both are final — reopen makes a new version.
+Move a track: proposed (Draft)|agreed|ready|active|paused|completed (Closed)|archived (Dropped). Closing needs --verdict met|partly_met|not_met (an operation closes retired, and only one does); dropping should carry no_longer_needed|impossible|replaced|mistake (impossible and replaced need --verdict-reason). Both are final — reopen makes a new version.
 
 | Argument | Required | Description |
 |---|---|---|

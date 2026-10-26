@@ -3854,7 +3854,7 @@
               {
                 "flags": "--kind <kind>",
                 "long": "--kind",
-                "description": "Kind of work: project|flow|operation|investigation|incident|commission|pathway (a proposal until you confirm)",
+                "description": "Kind of work: project (Build)|flow|operation|investigation|incident|commission|pathway (a proposal until you confirm)",
                 "takesValue": "required"
               },
               {
@@ -3951,7 +3951,7 @@
               {
                 "flags": "--kind <kind>",
                 "long": "--kind",
-                "description": "Kind of work: project|flow|operation|investigation|incident|commission|pathway (a proposal until you confirm)",
+                "description": "Kind of work: project (Build)|flow|operation|investigation|incident|commission|pathway (a proposal until you confirm)",
                 "takesValue": "required"
               },
               {
@@ -4094,7 +4094,7 @@
             "path": "synap track status",
             "name": "status",
             "usage": "[options] <id> <status>",
-            "description": "Move a track: proposed|agreed|ready|active|paused|completed (Closed)|archived (Dropped). Closing needs --verdict met|partly_met|not_met (an operation closes retired, and only one does); dropping should carry no_longer_needed|impossible|replaced|mistake (impossible and replaced need --verdict-reason). Both are final — reopen makes a new version.",
+            "description": "Move a track: proposed (Draft)|agreed|ready|active|paused|completed (Closed)|archived (Dropped). Closing needs --verdict met|partly_met|not_met (an operation closes retired, and only one does); dropping should carry no_longer_needed|impossible|replaced|mistake (impossible and replaced need --verdict-reason). Both are final — reopen makes a new version.",
             "hidden": false,
             "arguments": [
               {
