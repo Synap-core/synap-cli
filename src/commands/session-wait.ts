@@ -27,6 +27,7 @@ import chalk from "chalk";
 import { log } from "../utils/logger.js";
 import {
   resolveHubConfig,
+  resolveActiveSessionId,
   hubGet,
   renderHubError,
   type HubConfig,
@@ -226,12 +227,36 @@ export interface WaitSessionOpts extends BaseOpts {
   timeout?: string;
   interval?: string;
   limit?: string;
+  /** The change feed instead of answers only (`session-feed-wait.ts`). */
+  events?: string;
+  once?: boolean;
+  wakeOnly?: boolean;
+  peek?: boolean;
+  hook?: boolean;
 }
 
 export async function waitSessionCommand(
-  sessionId: string,
+  sessionIdArg: string | undefined,
   opts: WaitSessionOpts
 ): Promise<void> {
+  // The change feed and the Claude Code hook ride the long-poll feed door;
+  // the answer-only wait below keeps its own poll, unchanged.
+  if (opts.hook) {
+    const { waitSessionHookCommand } = await import("./session-feed-wait.js");
+    return waitSessionHookCommand(sessionIdArg, opts);
+  }
+  if (opts.events || opts.wakeOnly || opts.once || opts.peek) {
+    const { waitSessionFeedCommand } = await import("./session-feed-wait.js");
+    return waitSessionFeedCommand(sessionIdArg, opts);
+  }
+  const sessionId = sessionIdArg ?? resolveActiveSessionId();
+  if (!sessionId) {
+    console.error(
+      chalk.red("No session given and none attached to this terminal. Pass one, or run: synap session attach <id>")
+    );
+    process.exit(SESSION_WAIT_EXIT.FAILURE);
+    return;
+  }
   requireFullId(sessionId, "session", chalk, log);
 
   const timeoutMs = parseDuration(opts.timeout, DEFAULT_TIMEOUT_MS);

@@ -34,6 +34,7 @@ import { INIT_EXIT, InitExit } from "../lib/init-exit.js";
 import { askControlPlaneWherePodIs, podMovedMessage } from "../lib/pod-moved.js";
 import { reserveStdoutForJson } from "../lib/init-output.js";
 import { isManagedPod, keyChoices, type KeyChoice } from "../lib/init-flow.js";
+import { installWakeHookForProject } from "./hooks.js";
 import {
   computerKeyNeedsRenewal,
   deviceConnect,
@@ -169,6 +170,9 @@ async function desktopFlow(opts: InitOptions, agents?: DetectableAgent[]): Promi
     ? grant.agents.map((a) => a.agentType).filter((t): t is DetectableAgent => (AGENT_CHOICES as readonly string[]).includes(t))
     : agents;
   const outcome = await connectAgentsStep(pod.podUrl, humanKey, opts, picked);
+  // Claude Code connected: let another session's agent (or the person, in the
+  // room) wake this project's terminals — the asyncRewake Stop hook.
+  if (outcome.connected.includes("claude-code")) installWakeHookForProject();
   const pairLink = await pairPhoneStep(pod.podUrl);
   printClosing(outcome.connectedLabels);
   return {

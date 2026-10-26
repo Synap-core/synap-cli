@@ -1024,7 +1024,10 @@ async function hubFetchWithRetry(
 export async function hubGet(
   path: string,
   params: Record<string, string | number | undefined>,
-  cfg: HubConfig
+  cfg: HubConfig,
+  // Default 15s suits reads. A long-poll door (`/answers/wait`) holds the
+  // request open for its own `timeoutSeconds`; its caller passes more.
+  timeoutMs = 15_000
 ): Promise<unknown> {
   const url = new URL(`${cfg.podUrl}/api/hub${path}`);
   for (const [k, v] of Object.entries(params)) {
@@ -1034,10 +1037,10 @@ export async function hubGet(
     url.toString(),
     {
       headers: { Authorization: `Bearer ${cfg.apiKey}`, ...sessionHeaders(cfg) },
-      signal: AbortSignal.timeout(15_000),
+      signal: AbortSignal.timeout(timeoutMs),
     },
     `GET ${path}`,
-    15_000
+    timeoutMs
   );
   if (!res.ok) {
     const body = await res.text().catch(() => "");
