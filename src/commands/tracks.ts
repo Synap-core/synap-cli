@@ -448,7 +448,12 @@ export async function advanceTrack(
 export async function setTrackStatus(
   id: string,
   status: string,
-  opts: BaseOpts & { reason?: string; verdict?: string; verdictReason?: string }
+  opts: BaseOpts & {
+    reason?: string;
+    verdict?: string;
+    verdictReason?: string;
+    expected?: string;
+  }
 ): Promise<void> {
   await run(async () => {
     const cfg = await resolveHubConfig(opts);
@@ -456,6 +461,9 @@ export async function setTrackStatus(
     if (opts.reason) body.reasoning = opts.reason;
     if (opts.verdict) body.verdict = opts.verdict;
     if (opts.verdictReason) body.verdictReason = opts.verdictReason;
+    // The status the caller read: the pod refuses the move (409, nothing
+    // written) if the goal moved meanwhile. An agent must send it (D1).
+    if (opts.expected) body.expectedStatus = opts.expected;
     const r = (await hubPatch(trackPath(id), body, cfg)) as Json;
     if (opts.json) {
       console.log(JSON.stringify(r, null, 2));

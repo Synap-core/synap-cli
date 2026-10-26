@@ -1588,6 +1588,10 @@ track
   )
   .option("--verdict <verdict>", "How the goal ended (required to close; advised to drop)")
   .option("--verdict-reason <text>", "Why — required for impossible and replaced")
+  .option(
+    "--expected <status>",
+    "The status you read the goal in (synap track show) — refused, nothing written, if it moved meanwhile. Agents: always pass it"
+  )
   .option("--reason <text>", "Why — shown to the reviewer")
   .option("--json", "Output as JSON")
   .option("--pod-url <url>", "Pod URL override")
