@@ -557,6 +557,12 @@
             "short": "-v",
             "description": "Every check with its details, ids and addresses",
             "takesValue": "none"
+          },
+          {
+            "flags": "--pod-url <url>",
+            "long": "--pod-url",
+            "description": "Probe this pod URL (works with no pod configured)",
+            "takesValue": "required"
           }
         ],
         "subcommands": []

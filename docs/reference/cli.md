@@ -429,6 +429,7 @@ Coherence preflight: pod host resolves, key authenticates, workspace/project exi
 | `--json` | Output as JSON |  |
 | `--fix` | Fix key problems: finish a pending approval, give this computer its own key, or rewrite stale copies — then verify over MCP |  |
 | `-v, --verbose` | Every check with its details, ids and addresses |  |
+| `--pod-url <url>` | Probe this pod URL (works with no pod configured) |  |
 
 ## `synap versions`
 
