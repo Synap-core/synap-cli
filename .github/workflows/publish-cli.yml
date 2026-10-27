@@ -103,17 +103,17 @@ jobs:
       # sibling lands NEXT TO `cli/` rather than at a literal `../`. Running
       # every step from `cli/` makes `../synap-backend` resolve exactly as it
       # does on a developer's machine.
-      # Read of the sibling repo only: the Synap release App's token (scoped to
+      # Read of the sibling repo only: the Synap Reader App's token (scoped to
       # `backend`, contents: read). CROSS_REPO_TOKEN is the fallback until the App
-      # is live (SECURITY-RELEASE-RUNBOOK.md §5).
+      # is live (SECURITY-RELEASE-RUNBOOK.md §5.1).
       - name: Mint backend read token (GitHub App)
         id: app-token
-        if: ${{ vars.SYNAP_RELEASE_APP_ID != '' }}
+        if: ${{ vars.SYNAP_READER_APP_ID != '' }}
         continue-on-error: true
         uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         with:
-          app-id: ${{ vars.SYNAP_RELEASE_APP_ID }}
-          private-key: ${{ secrets.SYNAP_RELEASE_APP_KEY }}
+          app-id: ${{ vars.SYNAP_READER_APP_ID }}
+          private-key: ${{ secrets.SYNAP_READER_APP_KEY }}
           owner: Synap-core
           repositories: backend
           permission-contents: read
@@ -125,7 +125,7 @@ jobs:
           # 404s, which is why the only run before 2026-10-16 failed here.
           repository: Synap-core/backend
           # `backend` is public, so this run's own token can read it when
-          # neither the release App nor CROSS_REPO_TOKEN is configured. An empty
+          # neither the Reader App nor CROSS_REPO_TOKEN is configured. An empty
           # token is what failed the 2026-10-11 run ("Input required and not
           # supplied: token").
           token: ${{ steps.app-token.outputs.token || secrets.CROSS_REPO_TOKEN || github.token }}
