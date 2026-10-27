@@ -94,6 +94,14 @@ describe("the TASK protocol", () => {
     expect(p).toContain("Never edit files, never run code, never open a pull request");
     expect(p).not.toMatch(/git worktree|gh pr create|draft PR/i);
   });
+  it("reads the subject's role fields and keeps the pod's own signal (Month'Immo e2e, 27 Oct)", () => {
+    expect(p).toContain("read them there and use what they say");
+    expect(p).toContain("lead facet");
+  });
+  it("creates the records a process asks for with exact fields, never through free-text capture", () => {
+    expect(p).toContain("Never synap_capture a record the process asks you to create or change");
+    expect(p).toContain("synap_create_entity (its profileSlug and the exact property keys the goal names");
+  });
   it("asks with QUESTION: and waits through the pod, not a shell sleep", () => {
     expect(p).toContain('"QUESTION:"');
     expect(p).toContain("synap_wait_for_answer");
