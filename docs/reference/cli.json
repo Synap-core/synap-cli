@@ -3288,6 +3288,20 @@
                 "takesValue": "required"
               },
               {
+                "flags": "--withdraw <messageId=note>",
+                "long": "--withdraw",
+                "description": "An open question you asked that your work overtook, with why (repeatable)",
+                "takesValue": "required",
+                "default": []
+              },
+              {
+                "flags": "--keep-owed <messageId>",
+                "long": "--keep-owed",
+                "description": "An open question the person still owes you an answer to after this session (repeatable)",
+                "takesValue": "required",
+                "default": []
+              },
+              {
                 "flags": "--json",
                 "long": "--json",
                 "description": "Output full pack (or close result) as JSON",

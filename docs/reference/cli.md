@@ -1639,6 +1639,8 @@ End a focus session (proposal pack) and optionally attach a recap
 | `--workspace <id>` | Workspace hint (optional; not required for complete) |  |
 | `--recap <text>` | Short summary of what was accomplished (maps to summary) |  |
 | `--as <status>` | How it ended: closed (default, finished) \| cancelled (abandoned) \| failed (could not complete) |  |
+| `--withdraw <messageId=note>` | An open question you asked that your work overtook, with why (repeatable) | `[]` |
+| `--keep-owed <messageId>` | An open question the person still owes you an answer to after this session (repeatable) | `[]` |
 | `--json` | Output full pack (or close result) as JSON |  |
 | `--pod-url <url>` | Pod URL override |  |
 | `--api-key <key>` | API key override |  |
