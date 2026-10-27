@@ -18,7 +18,7 @@ import {
   writeLens,
   clearLensField,
 } from "./session-lens.js";
-import { conversationHeaders } from "./conversation-headers.js";
+import { clientHeader, conversationHeaders } from "./conversation-headers.js";
 import {
   effectiveDirectoryLens,
   resolveDirectoryLensForPod,
@@ -395,7 +395,12 @@ function hubError(
   });
 }
 
-/** Where to send users who hit a wall. */
+/**
+ * Where to send users who hit a wall. The support door is the ONE customer
+ * support entry point shared by every Synap surface (`from=cli` tells support
+ * which surface the person came from); Discord stays as the community option.
+ */
+export const SUPPORT_URL = "https://synap.live/support?from=cli";
 const DISCORD_INVITE_URL = "https://discord.gg/xhRdQ7hG5h";
 
 /** Wrap a URL in an OSC-8 terminal hyperlink so `label` is clickable. */
@@ -404,38 +409,41 @@ function osc8Link(url: string, label: string): string {
 }
 
 /**
- * Once-per-process guard for the Discord help footer. A single CLI invocation
+ * Once-per-process guard for the help footer. A single CLI invocation
  * runs one command; printing the footer at most once keeps it a footer, not a
  * per-error/per-line spam.
  */
-let _discordHelpShown = false;
+let _helpShown = false;
 
 /**
- * Append a one-line "need help?" footer with a clickable Discord invite. Prints
- * to stderr (same stream as the error it follows, so `2>/dev/null` hides both)
- * and only once per process. The invite is an OSC-8 hyperlink on an interactive
- * terminal, a plain URL when the stream is redirected/piped.
+ * Append a one-line "need help?" footer naming the support door (open a ticket)
+ * and the Discord invite. Prints to stderr (same stream as the error it
+ * follows, so `2>/dev/null` hides both) and only once per process. Each URL is
+ * an OSC-8 hyperlink on an interactive terminal, a plain URL when the stream is
+ * redirected/piped.
  */
-export function discordHelpLine(): void {
-  if (_discordHelpShown) return;
-  _discordHelpShown = true;
-  const link = process.stderr.isTTY
-    ? osc8Link(DISCORD_INVITE_URL, DISCORD_INVITE_URL)
-    : DISCORD_INVITE_URL;
-  console.error(chalk.dim(`    Need help? Join our Discord: ${link}`));
+export function helpFooterLine(): void {
+  if (_helpShown) return;
+  _helpShown = true;
+  const link = (url: string) => (process.stderr.isTTY ? osc8Link(url, url) : url);
+  console.error(
+    chalk.dim(
+      `    Need help? Open a ticket: ${link(SUPPORT_URL)} (or join our Discord: ${link(DISCORD_INVITE_URL)})`
+    )
+  );
 }
 
 /**
  * Print a failed Hub call: its humanized message plus a hint for the classes
  * where the cause is not obvious from the message alone. Lives here rather than
  * in utils/logger so the logger stays domain-agnostic and the taxonomy and its
- * presentation sit in one file. Always closes with the one-time Discord footer.
+ * presentation sit in one file. Always closes with the one-time help footer.
  */
 export function renderHubError(err: unknown): void {
   renderHubErrorBody(err);
   // ONE central place every failed Hub command flows through — append the help
   // footer here so it prints once per failed command (guarded), not per line.
-  discordHelpLine();
+  helpFooterLine();
 }
 
 function renderHubErrorBody(err: unknown): void {
@@ -583,7 +591,21 @@ function renderHubErrorBody(err: unknown): void {
 export interface HubConfig {
   podUrl: string;
   apiKey: string;
+  /**
+   * The ACTING identity sent to the pod (body/query/path `userId`). Only an
+   * explicit caller id (SYNAP_USER_ID) or the sentinel "cli"; read it through
+   * `resolveUserId`, which asks the pod (/users/me) for "cli". Never seed it
+   * with a recorded agent id: the pod acts an agent key as the human it is
+   * linked to and 403s the agent's own id ("userId does not match the
+   * authenticated identity", 2026-10-23). The agent's id is `agentUserId`.
+   */
   userId: string;
+  /**
+   * The agent principal recorded with this key, when one was — WHO the key
+   * is, not who the pod acts as. For recognising the agent's own posts
+   * (`resolveAgentUserId`), never sent as the acting user.
+   */
+  agentUserId?: string;
   /** Active workspace — from `synap use`, pod default, or env var. Undefined if none configured. */
   workspaceId?: string;
   /** Active project — from `synap project use`, pod default, or env var. Peer of workspaceId; independent. */
@@ -632,8 +654,9 @@ export async function resolveHubConfig(opts?: { podUrl?: string; apiKey?: string
     return {
       podUrl: podOverride.podUrl,
       apiKey: podOverride.hubApiKey,
-      // A profile's agentUserId may be empty; "cli" makes resolveUserId fetch /users/me.
-      userId: podOverride.agentUserId || "cli",
+      // "cli": resolveUserId asks the pod who this key acts as (see HubConfig.userId).
+      userId: "cli",
+      agentUserId: podOverride.agentUserId || undefined,
       workspaceId: safeWs,
       projectId: resolveProjectIdForPod(podOverride.podUrl, {}),
     };
@@ -656,10 +679,13 @@ export async function resolveHubConfig(opts?: { podUrl?: string; apiKey?: string
     return {
       podUrl,
       apiKey: agentOverride.apiKey,
-      // The AGENT's own id, recorded with its key. Never the pod profile name
-      // (it was, so `synap worker` never recognised its own room posts and
-      // resumed itself on them). Unrecorded → "cli": resolveUserId asks the pod.
-      userId: agentOverride.agentUserId || "cli",
+      // The acting user is asked of the pod ("cli" → /users/me): an agent key
+      // acts as its linked human, and the pod 403s the agent's own id.
+      userId: "cli",
+      // The AGENT's own id, recorded with its key — for `synap worker` to
+      // recognise its own room posts (resolveAgentUserId). Never the pod
+      // profile name (it once was, and the worker resumed itself on them).
+      agentUserId: agentOverride.agentUserId || undefined,
       scopes: envScopes ? envScopes.split(",") : undefined,
     };
   }
@@ -699,6 +725,7 @@ export async function resolveHubConfig(opts?: { podUrl?: string; apiKey?: string
     }
     const apiKey = preferred.apiKey;
     const userId = preferred.userId;
+    const agentUserId = preferred.agentUserId;
     // Per-Claude-session lens wins over the global env var, so concurrent
     // sessions can each be scoped to a different workspace — but ONLY when the
     // lens belongs to THIS pod. A lens stamped with another pod is ignored so
@@ -715,6 +742,7 @@ export async function resolveHubConfig(opts?: { podUrl?: string; apiKey?: string
       podUrl: envPod,
       apiKey,
       userId,
+      agentUserId,
       // The global-config fallback is resolved AGAINST THIS POD (envPod) —
       // never send a workspace that belongs to a different pod.
       workspaceId:
@@ -745,7 +773,10 @@ export async function resolveHubConfig(opts?: { podUrl?: string; apiKey?: string
   return {
     podUrl: config.podUrl,
     apiKey: config.hubApiKey,
-    userId: config.agentUserId,
+    // "cli": resolveUserId asks the pod. A profile's agentUserId is the key's
+    // principal (a computer or agent key), not who the pod acts as.
+    userId: "cli",
+    agentUserId: config.agentUserId || undefined,
     // session lens › directory lens › global config. (No env rung here: this
     // branch is only reached when SYNAP_POD_URL is unset.)
     workspaceId:
@@ -867,13 +898,18 @@ export function detachActiveSessionId(podUrl?: string): string | undefined {
 }
 
 /**
- * Per-request headers: the focus session this terminal is attached to, and the
+ * Per-request headers: which client calls (`synap-cli/<version>`), the focus
+ * session this terminal is attached to, and the
  * Claude Code conversation the call comes from (`conversation-headers.ts`) — so
  * the work it lands can be traced back to, and reopened in, that conversation.
  */
 function sessionHeaders(cfg?: HubConfig): Record<string, string> {
   const id = resolveActiveSessionId(cfg?.podUrl);
-  return { ...conversationHeaders(getClaudeSessionId()), ...(id ? { "X-Session-Id": id } : {}) };
+  return {
+    ...clientHeader("synap-cli"),
+    ...conversationHeaders(getClaudeSessionId()),
+    ...(id ? { "X-Session-Id": id } : {}),
+  };
 }
 
 /** Max 429 retries for bulk import (each waits up to the rate-limit window). */
@@ -1001,7 +1037,10 @@ async function hubFetchWithRetry(
 export async function hubGet(
   path: string,
   params: Record<string, string | number | undefined>,
-  cfg: HubConfig
+  cfg: HubConfig,
+  // Default 15s suits reads. A long-poll door (`/answers/wait`) holds the
+  // request open for its own `timeoutSeconds`; its caller passes more.
+  timeoutMs = 15_000
 ): Promise<unknown> {
   const url = new URL(`${cfg.podUrl}/api/hub${path}`);
   for (const [k, v] of Object.entries(params)) {
@@ -1011,10 +1050,10 @@ export async function hubGet(
     url.toString(),
     {
       headers: { Authorization: `Bearer ${cfg.apiKey}`, ...sessionHeaders(cfg) },
-      signal: AbortSignal.timeout(15_000),
+      signal: AbortSignal.timeout(timeoutMs),
     },
     `GET ${path}`,
-    15_000
+    timeoutMs
   );
   if (!res.ok) {
     const body = await res.text().catch(() => "");

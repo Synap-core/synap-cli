@@ -6,9 +6,8 @@
  * into the session room (`synap_post_message` / the room), then calls this
  * command instead of a hand-rolled sleep loop or a blind re-invocation. It
  * polls `GET /api/hub/focus-sessions/:id/answers` (owner-floored; `since`
- * exclusive; contract in
- * `~/.claude/projects/-Users-antoine-Documents-Code-synap/memory/
- * scratch-lane-answer-loop-2026-09-25.md`) and exits the moment a reply
+ * exclusive; contract in pod document
+ * `db390250-3a74-4707-bb29-5832a454d194`) and exits the moment a reply
  * arrives, printing it so the calling agent (Claude Code or any shell agent)
  * can read it back and continue.
  *
@@ -27,6 +26,7 @@ import chalk from "chalk";
 import { log } from "../utils/logger.js";
 import {
   resolveHubConfig,
+  resolveActiveSessionId,
   hubGet,
   renderHubError,
   type HubConfig,
@@ -226,12 +226,36 @@ export interface WaitSessionOpts extends BaseOpts {
   timeout?: string;
   interval?: string;
   limit?: string;
+  /** The change feed instead of answers only (`session-feed-wait.ts`). */
+  events?: string;
+  once?: boolean;
+  wakeOnly?: boolean;
+  peek?: boolean;
+  hook?: boolean;
 }
 
 export async function waitSessionCommand(
-  sessionId: string,
+  sessionIdArg: string | undefined,
   opts: WaitSessionOpts
 ): Promise<void> {
+  // The change feed and the Claude Code hook ride the long-poll feed door;
+  // the answer-only wait below keeps its own poll, unchanged.
+  if (opts.hook) {
+    const { waitSessionHookCommand } = await import("./session-feed-wait.js");
+    return waitSessionHookCommand(sessionIdArg, opts);
+  }
+  if (opts.events || opts.wakeOnly || opts.once || opts.peek) {
+    const { waitSessionFeedCommand } = await import("./session-feed-wait.js");
+    return waitSessionFeedCommand(sessionIdArg, opts);
+  }
+  const sessionId = sessionIdArg ?? resolveActiveSessionId();
+  if (!sessionId) {
+    console.error(
+      chalk.red("No session given and none attached to this terminal. Pass one, or run: synap session attach <id>")
+    );
+    process.exit(SESSION_WAIT_EXIT.FAILURE);
+    return;
+  }
   requireFullId(sessionId, "session", chalk, log);
 
   const timeoutMs = parseDuration(opts.timeout, DEFAULT_TIMEOUT_MS);

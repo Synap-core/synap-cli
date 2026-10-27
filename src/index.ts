@@ -133,10 +133,7 @@ program
   .option("--api-key <key>", "Hub Protocol API key")
   .option("--name <name>", "Pod profile to use (default: active pod)")
   .option("--list", "List what can be connected and exit")
-  .option(
-    "--with-mcp",
-    "Raycast only: also install the full 56-tool MCP server via mcp-remote (names overlap @synap)"
-  )
+  .addOption(new Option("--with-mcp", "deprecated, ignored: Raycast always gets the pod's MCP server").hideHelp())
   .option("--target <name>", "Legacy spelling of <thing>")
   .option("--pin-workspace <id>", "Legacy spelling of --workspace")
   .option("--pin-project <id>", "Legacy spelling of --project")
@@ -184,7 +181,7 @@ pods
   .option("--yes", "Non-interactive: skip prompts (won't recreate a rejected key)")
   .action(async (name: string, url: string | undefined, opts: { url?: string; yes?: boolean }) => {
     const { podsUpdate } = await import("./commands/pods.js");
-    await podsUpdate(name, url, { url: opts.url, yes: opts.yes });
+    if (!(await podsUpdate(name, url, { url: opts.url, yes: opts.yes }))) process.exitCode = 1;
   });
 
 pods
@@ -219,7 +216,8 @@ program
   .option("--json", "Output as JSON")
   .option("--fix", "Fix key problems: finish a pending approval, give this computer its own key, or rewrite stale copies — then verify over MCP")
   .option("-v, --verbose", "Every check with its details, ids and addresses")
-  .action(async (opts: { json?: boolean; fix?: boolean; verbose?: boolean }) => {
+  .option("--pod-url <url>", "Probe this pod URL (works with no pod configured)")
+  .action(async (opts: { json?: boolean; fix?: boolean; verbose?: boolean; podUrl?: string }) => {
     const { doctor } = await import("./commands/doctor.js");
     await doctor(opts);
   });
@@ -1194,16 +1192,46 @@ program
   .requiredOption("--agent <name>", "The named agent this machine works as (its key comes from ~/.synap)")
   .option("--interval <dur>", "How often to check for handed sessions (e.g. 30s, 2m)", "30s")
   .option("--once", "Check once, run what is handed, wait for it, exit")
-  .option("--cwd <dir>", "Where the launched Claude Code works (default ~/Documents/Code/synap)")
+  .option("--cwd <dir>", "Where code sessions' Claude Code works (default ~/Documents/Code/synap)")
+  .option("--work-root <dir>", "Where playbook runs over pod data (no repo) get a folder each, <dir>/<session id> (default ~/synap-work)")
   .option("--max-parallel <n>", "Runs at the same time", "1")
   .option("--claude-bin <path>", "The claude binary", "claude")
   .option("--claude-config-dir <dir>", "CLAUDE_CONFIG_DIR for launched runs — picks which Claude subscription they use")
+  .option(
+    "--accounts <file>",
+    "Claude accounts to rotate across ({version:1, reserve, accounts:[{id,label,token,design?}]}, mode 600); default ~/.config/synap-worker/accounts.json when it exists, else the environment's login"
+  )
   .option("--allowed-tools <list>", "Comma-separated Claude tools allowed without asking (the pod MCP server is always added)")
   .option("--skip-permissions", "Launch with --dangerously-skip-permissions instead of an allow-list")
   .option("--dry-run", "Claim and log what would launch, without launching Claude")
   .action(async (opts: import("./commands/worker.js").WorkerOptions) => {
     const { workerCommand } = await import("./commands/worker.js");
     await workerCommand(opts);
+  });
+
+// ─── box ──────────────────────────────────────────────────────────────────────
+// Run THIS computer as a run box provisioner: lease the box runs queued on the
+// pod, run each in a fresh isolated LXC, hand back the evidence. See src/commands/box.ts.
+
+const box = program.command("box").description("Run scripts in fresh isolated boxes on this computer (run box provisioner)");
+
+box
+  .command("serve")
+  .description("Lease queued box runs from the pod and run each in a fresh box")
+  .option("--config <file>", "Provisioner config", "/etc/synap-box/config.json")
+  .option("--once", "Lease at most one run, work it, exit")
+  .action(async (opts: import("./commands/box.js").BoxOptions) => {
+    const { boxServeCommand } = await import("./commands/box.js");
+    await boxServeCommand(opts);
+  });
+
+box
+  .command("reap")
+  .description("Destroy every box no run holds (after a crash)")
+  .option("--config <file>", "Provisioner config", "/etc/synap-box/config.json")
+  .action(async (opts: import("./commands/box.js").BoxOptions) => {
+    const { boxReapCommand } = await import("./commands/box.js");
+    await boxReapCommand(opts);
   });
 
 // ─── session ──────────────────────────────────────────────────────────────────
@@ -1223,7 +1251,7 @@ session
   .option("--workspace <id>", "Workspace that owns the session")
   .option("--project <id>", "Project that owns the session (defaults to the active project lens; the pod accepts a workspace OR a project)")
   .option("--task-id <id>", "Link session to an existing task entity")
-  .option("--track <id>", "Born inside a track (a project's lasting goal) — implies its project")
+  .option("--track <id>", "Born inside a track (a project's goal) — implies its project")
   .option("--template <id>", "Start from a playbook (seeds currentStage from its stages)")
   .option("--no-template", "Opt out of auto-matching a playbook — start ad-hoc")
   .option("--parent <id>", "Push from another session — records session --spawned_from--> session (the parent stays open)")
@@ -1300,6 +1328,18 @@ session
     "--as <status>",
     "How it ended: closed (default, finished) | cancelled (abandoned) | failed (could not complete)"
   )
+  .option(
+    "--withdraw <messageId=note>",
+    "An open question you asked that your work overtook, with why (repeatable)",
+    collect,
+    [] as string[]
+  )
+  .option(
+    "--keep-owed <messageId>",
+    "An open question the person still owes you an answer to after this session (repeatable)",
+    collect,
+    [] as string[]
+  )
   .option("--json", "Output full pack (or close result) as JSON")
   .option("--pod-url <url>", "Pod URL override")
   .option("--api-key <key>", "API key override")
@@ -1365,23 +1405,68 @@ session
   });
 
 session
-  .command("wait <sessionId>")
+  .command("wait [sessionId]")
   .description(
-    "Block until the human replies in the session room, then print the reply. Exit 0 replied · 1 timeout · 2 failure (auth/network/broken read)"
+    "Block until the human replies in the session room (or, with --events, until the session changes), then print it. Session: the argument, else the one attached to this terminal. Exit 0 replied · 1 timeout · 2 failure (auth/network/broken read); with --hook: 2 wake · 0 anything else"
   )
   .option(
     "--since <iso>",
-    "Only answers strictly after this ISO timestamp (default: now — skips anything that predates this wait)"
+    "Only events strictly after this ISO timestamp (default: now — skips anything that predates this wait; with --events: the unread ones)"
   )
+  .option(
+    "--events <kinds>",
+    "Wait on the session change feed: comma list of answer, proposal_decided, stage_moved, owner_message, session_message (a message from another session's agent), or all"
+  )
+  .option("--wake-only", "Stop only on what should wake an agent: answers, owner messages, and agent messages the pod marked wake (the rest is read and skipped)")
+  .option("--once", "One read, no waiting loop")
+  .option("--peek", "Mark nothing picked up or read (a watcher that is not the agent doing the work)")
+  .option("--hook", "Run as a Claude Code asyncRewake Stop hook: wait for a wake-worthy event, print it on stderr, exit 2 (see: synap hooks install-wake)")
   .option("--timeout <duration>", "Give up after this long (e.g. 30m, 2h)", "30m")
-  .option("--interval <duration>", "Delay between checks (e.g. 10s)", "10s")
-  .option("--limit <n>", "Max answers per page, 1-100", "20")
-  .option("--json", "Output the reply(ies) — or the timeout — as JSON")
+  .option("--interval <duration>", "Delay between checks of the answer-only wait (e.g. 10s)", "10s")
+  .option("--limit <n>", "Max answers / events per page, 1-100", "20")
+  .option("--json", "Output the reply(ies) or events — or the timeout — as JSON")
   .option("--pod-url <url>", "Pod URL override")
   .option("--api-key <key>", "API key override")
-  .action(async (sessionId: string, opts) => {
+  .action(async (sessionId: string | undefined, opts) => {
     const { waitSessionCommand } = await import("./commands/session-wait.js");
     await waitSessionCommand(sessionId, opts);
+  });
+
+session
+  .command("post <toSessionId> <text...>")
+  .description(
+    "Message ANOTHER of your sessions' agent: blocked_on_you / handoff may wake it, done / fyi never do. Replying to a message that woke you? Pass its id as --cause. Exit 0 delivered · 1 pod does not deliver agent messages · 2 failure"
+  )
+  .option("--intent <intent>", "blocked_on_you | handoff | done | fyi", "fyi")
+  .option("--cause <messageId>", "The message that woke you (the id `synap session wait` printed), when this replies to it")
+  .option("--from <sessionId>", "Your session, when this terminal is not bound to it")
+  .option("--ref <kind:id[:label]>", "The state behind the message: session:<id>, blocked_by:<id>, proposal:<id>, slot:<sessionId>:<label> (repeatable)", collect, [])
+  .option("--json", "Output the pod's reply as JSON")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (toSessionId: string, text: string[], opts) => {
+    const { sessionPostCommand } = await import("./commands/session-post.js");
+    await sessionPostCommand(toSessionId, text, opts);
+  });
+
+// ─── hooks ────────────────────────────────────────────────────────────────────
+// Claude Code hooks the CLI owns. install-wake: the asyncRewake Stop hook that
+// lets another session's agent (or the person) wake an idle terminal.
+
+const hooksCmd = program
+  .command("hooks")
+  .description("Claude Code hooks that connect a terminal to its Synap session");
+
+hooksCmd
+  .command("install-wake")
+  .description("Add the wake hook (a Stop hook running `synap session wait --hook`) to this project's .claude/settings.json — idempotent, other hooks kept")
+  .option("--uninstall", "Remove the wake hook instead")
+  .option("--user", "Use ~/.claude/settings.json (every project) instead of the project's")
+  .option("--dir <path>", "The project directory (default: the current one)")
+  .option("--json", "Output the result as JSON")
+  .action(async (opts) => {
+    const { installWakeCommand } = await import("./commands/hooks.js");
+    installWakeCommand(opts);
   });
 
 // ─── playbook ─────────────────────────────────────────────────────────────────
@@ -1408,19 +1493,24 @@ playbookCmd
   });
 
 // ─── track ────────────────────────────────────────────────────────────────────
-// A LASTING goal inside a project, worked in sessions (`session start --track`).
-// Legacy tracks also run a method with steps. Writes are governed —
+// A goal inside a project, worked in sessions (`session start --track`); a
+// person closes it with a verdict. Legacy tracks also run a method with steps. Writes are governed —
 // "queued for your review" is success.
 
 const track = program
   .command("track")
-  .description("Manage tracks — the lasting goals a project pursues");
+  .description("Manage tracks — the goals a project pursues");
 
 track
   .command("list")
-  .description("List a project's tracks (defaults to the active project lens)")
+  .description(
+    "List a project's goals (the active project lens); with no project in scope, every goal on the pod"
+  )
   .option("--project <id>", "Project id (defaults to the active project lens)")
-  .option("--all", "Include archived tracks")
+  .option("--everywhere", "List every goal on the pod, ignoring the project lens")
+  .option("--limit <n>", "Pod-wide: page size (default 50)")
+  .option("--cursor <cursor>", "Pod-wide: the next page (printed under the last one)")
+  .option("--all", "Include dropped (archived) tracks")
   .option("--json", "Output as JSON")
   .option("--pod-url <url>", "Pod URL override")
   .option("--api-key <key>", "API key override")
@@ -1442,12 +1532,26 @@ track
 
 track
   .command("start")
-  .description("Start a track — a lasting goal — on a project")
+  .description("Start a track — a goal — on a project")
   .option("--name <name>", "The track's name (required without --playbook)")
   .option("--direction <text>", "Where it is heading, one line")
   .option("--playbook <id>", "Legacy: a track template (project-scoped playbook with steps)")
   .option("--project <id>", "Project id (defaults to the active project lens)")
   .option("--param <key=value>", "Answer a declared param (repeatable)", collect, [])
+  .option("--end-state <text>", "What done looks like, in your words")
+  .option(
+    "--criterion <text>",
+    "How it is judged done — '[measured|judged|handed_over|learning|decided_outside|certified:] statement'; give 0 or 2-5 (repeatable)",
+    collect,
+    []
+  )
+  .option("--drop-condition <text>", "When to stop pursuing it (repeatable, at most 5)", collect, [])
+  .option(
+    "--kind <kind>",
+    "Kind of work: project|flow|operation|investigation|incident|commission|pathway (a proposal until you confirm)"
+  )
+  .option("--uncertainty <level>", "How well the way is known: clear|complicated|complex|chaotic|unknown")
+  .option("--loop <on|off|n>", "Let the goal propose its next session: on, off, or n sessions a week")
   .option("--reason <text>", "Why — shown to the reviewer")
   .option("--json", "Output as JSON")
   .option("--pod-url <url>", "Pod URL override")
@@ -1455,6 +1559,49 @@ track
   .action(async (opts) => {
     const { startTrack } = await import("./commands/tracks.js");
     await startTrack(opts);
+  });
+
+track
+  .command("update <id>")
+  .description("Set a goal's direction, KPI and what it holds (each field is written whole; kpi is merged)")
+  .option("--direction <text>", "Where it is heading, one line")
+  .option("--kpi-current <n>", "The KPI's latest value (stated, never measured)")
+  .option("--kpi-target <n>", "Move the KPI's target")
+  .option("--end-state <text>", "What done looks like, in your words")
+  .option(
+    "--criterion <text>",
+    "How it is judged done — '[measured|judged|handed_over|learning|decided_outside|certified:] statement'; give 0 or 2-5 (repeatable)",
+    collect,
+    []
+  )
+  .option("--drop-condition <text>", "When to stop pursuing it (repeatable, at most 5)", collect, [])
+  .option(
+    "--kind <kind>",
+    "Kind of work: project|flow|operation|investigation|incident|commission|pathway (a proposal until you confirm)"
+  )
+  .option("--uncertainty <level>", "How well the way is known: clear|complicated|complex|chaotic|unknown")
+  .option("--loop <on|off|n>", "Let the goal propose its next session: on, off, or n sessions a week")
+  .option("--reason <text>", "Why — shown to the reviewer")
+  .option("--json", "Output as JSON")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (id: string, opts) => {
+    const { updateTrack } = await import("./commands/tracks.js");
+    await updateTrack(id, opts);
+  });
+
+track
+  .command("accept <id> <criterion> <decision>")
+  .description(
+    "The goal's judge decides a claimed criterion: accepted | changes_asked | rejected (a person's act)"
+  )
+  .option("--note <text>", "What to change, or why it was rejected")
+  .option("--json", "Output as JSON")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (id: string, criterion: string, decision: string, opts) => {
+    const { acceptCriterion } = await import("./commands/tracks.js");
+    await acceptCriterion(id, criterion, decision, opts);
   });
 
 track
@@ -1471,7 +1618,14 @@ track
 
 track
   .command("status <id> <status>")
-  .description("Pause, resume or archive a track (active|paused|archived)")
+  .description(
+    "Move a track: proposed|agreed|ready|active|paused|completed (Closed)|archived (Dropped). " +
+      "Closing needs --verdict met|partly_met|not_met (an operation closes retired, and only one does); dropping should carry " +
+      "no_longer_needed|impossible|replaced|mistake (impossible and replaced need --verdict-reason). " +
+      "Both are final — reopen makes a new version."
+  )
+  .option("--verdict <verdict>", "How the goal ended (required to close; advised to drop)")
+  .option("--verdict-reason <text>", "Why — required for impossible and replaced")
   .option("--reason <text>", "Why — shown to the reviewer")
   .option("--json", "Output as JSON")
   .option("--pod-url <url>", "Pod URL override")
@@ -1479,6 +1633,37 @@ track
   .action(async (id: string, status: string, opts) => {
     const { setTrackStatus } = await import("./commands/tracks.js");
     await setTrackStatus(id, status, opts);
+  });
+
+track
+  .command("reopen <id>")
+  .description("Reopen a closed or dropped goal as a NEW version (the old one keeps its verdict)")
+  .option("--name <name>", "A new name (default: the old one's)")
+  .option("--reason <text>", "Why — shown to the reviewer")
+  .option("--json", "Output as JSON")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (id: string, opts) => {
+    const { reopenTrack } = await import("./commands/tracks.js");
+    await reopenTrack(id, opts);
+  });
+
+const goal = program
+  .command("goal")
+  .description("Goals — what people call a track");
+
+goal
+  .command("convert <entityId>")
+  .description("Make a goal, objective or OKR entity a goal (once; the entity is kept and linked)")
+  .option("--project <id>", "The goal's project — only when the entity is filed in none or several")
+  .option("--name <name>", "A name other than the entity's title")
+  .option("--reason <text>", "Why — shown to the reviewer")
+  .option("--json", "Output as JSON")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (entityId: string, opts) => {
+    const { convertToGoal } = await import("./commands/tracks.js");
+    await convertToGoal(entityId, opts);
   });
 
 track
@@ -1652,7 +1837,7 @@ const observe = program
 observe
   .command("write <text>", { isDefault: true })
   .description("Record an observation about the user (pod-scoped, AI-maintained)")
-  .option("--category <cat>", "working_style | communication | focus | technical | preference", "preference")
+  .option("--category <cat>", "working_style | communication | focus | preferences | habits | technical", "preferences")
   .option("--confidence <n>", "Confidence score 0-1", "0.5")
   .option("--json", "Output as JSON")
   .option("--pod-url <url>", "Pod URL override")
@@ -1802,7 +1987,7 @@ agents
   .option("--role <role>", "Workspace role: admin | editor | viewer (default: editor)")
   .option("--workspace <id>", "Focus on one workspace (default: pod-wide)")
   .option("--project <id>", "Focus on one project (composable with --workspace)")
-  .option("--with-mcp", "Raycast only: also install the full MCP server via mcp-remote")
+  .addOption(new Option("--with-mcp", "deprecated, ignored: Raycast always gets the pod's MCP server").hideHelp())
   .option("--api-key <key>", "Register a key you already hold, on this machine only (mints nothing)")
   .option("--label <label>", "Human-readable description")
   .action(async (kind: string | undefined, opts) => {
@@ -3038,8 +3223,9 @@ sync
   });
 
 // ─── raycast (hidden power-user escape) ───────────────────────────────────────
-// Prefer the native Synap Raycast extension (@synap). Capability verbs there go
-// through list-actions / run-action. Script Commands are a per-verb escape hatch.
+// Prefer Raycast AI on the pod's MCP server (`synap connect raycast`), where
+// capability verbs run through synap_run_capability. Script Commands are a
+// per-verb escape hatch.
 
 const raycast = program
   .command("raycast", { hidden: true })
@@ -3050,7 +3236,7 @@ const raycast = program
 raycast
   .command("generate")
   .description(
-    "Power-user escape: emit a Script Command per enabled verb (extension uses list-actions/run-action)"
+    "Power-user escape: emit a Script Command per enabled verb (Raycast AI uses the pod's MCP server)"
   )
   .option("--out <dir>", "Output directory (default: ~/.synap/raycast-commands)")
   .option("--workspace <id>", "Workspace context")

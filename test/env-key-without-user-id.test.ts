@@ -91,7 +91,10 @@ describe("env pod + key without SYNAP_USER_ID", () => {
     const { hub, keySource } = await load();
     const cfg = await hub.resolveHubConfig();
     expect(cfg.apiKey).toBe("synap_hub_surface-key-bbbbbb");
-    expect(cfg.userId).toBe("agent-1");
+    // The surface's agent id is WHO the key is, not who it acts as: the acting
+    // user is asked of the pod (agent-key-acting-identity.test.ts).
+    expect(cfg.userId).toBe("cli");
+    expect(cfg.agentUserId).toBe("agent-1");
     expect(keySource.resolveKeySource().source).toBe("env-surface");
     stderr.mockRestore();
   });

@@ -78,6 +78,16 @@ describe("synap playbook run", () => {
     expect(exit).not.toHaveBeenCalled();
   });
 
+  it("a draft (an agent's held run) is not reported as started, and is not a failure", async () => {
+    hubGet.mockResolvedValueOnce({ playbooks: [d2i], nextCursor: null });
+    hubPost.mockResolvedValueOnce({ status: "draft", session: { id: "s-7" }, run: null });
+    await run(d2i.name, { param: [`design=${SUBJ}`] });
+    expect(printed()).not.toContain("Started");
+    expect(printed()).toContain("waiting as a draft");
+    expect(printed()).toContain("synap open session s-7");
+    expect(exit).not.toHaveBeenCalled();
+  });
+
   it("refuses an ambiguous name listing candidates, sending nothing", async () => {
     hubGet.mockResolvedValueOnce({ playbooks: [d2i, { ...d2i, id: PB2, workspaceId: "ws-2" }], nextCursor: null });
     await run(d2i.name);

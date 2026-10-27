@@ -56,6 +56,11 @@ import {
 import { unwrapList } from "../lib/unwrapList.js";
 import { pollForApproval } from "../lib/approval-poll.js";
 import { FLOW, renderNextSteps } from "../lib/next-steps.js";
+import {
+  fetchEffectiveIdentity,
+  isAgentReviewRejection,
+  proposalWebLink,
+} from "../lib/credential-class.js";
 import { formatLaneLine, resolveWorkspaceName, type LaneReport } from "../lib/capture-lane.js";
 import {
   isDegraded,
@@ -717,6 +722,12 @@ export interface ItemOutcome {
    * blob is still only a pending review.
    */
   sourceFile?: "stored" | "proposed" | "denied" | "failed";
+  /**
+   * Where a person reviews a `proposed` import (the pod's /open/<id> page).
+   * Present when the import was filed and NOT applied — an agent credential
+   * cannot approve, so its import stops at the proposal.
+   */
+  reviewUrl?: string;
   /** Present for the multi-file /import/* batch path. */
   batch?: {
     source: ImportSource;
@@ -1471,7 +1482,12 @@ async function processBatchImport(
 
   const source = sourceForBatchItems(mappedItems);
   const label = `batch:${source} (${mappedItems.length} files)`;
-  const workspaceId = wsOverride ?? cfg.workspaceId;
+  // Only an explicit --workspace pins an import. The saved default space is
+  // not a choice the person made for THIS import: sent as a pin it filed a
+  // 2,827-entity, all pod-wide contacts import under "Brand" (live 0728053b,
+  // 2026-10-22). Without a pin the pod places the graph by its kinds and
+  // roles (one space when they all point at it, else pod-wide).
+  const workspaceId = wsOverride;
 
   // Above CORPUS_THRESHOLD the synchronous door cannot finish inside the pod's
   // request timeout — hand the SAME mapped items (home-map already applied, caps
@@ -1585,6 +1601,21 @@ async function processBatchImport(
     };
   }
 
+  // Applying a NAMED import proposal is approving it, and approval is the
+  // human step: the pod refuses an agent credential (HTTP 403, correct
+  // governance). So an agent's import ends at the proposal — reported as
+  // `proposed` with the review link, never as `failed`. `/users/me` `isAgent`
+  // is the pod's own answer; when it is unknown the apply runs and a 403
+  // agent refusal is read the same way.
+  const filedProposalId = analyzeRes.proposalId ?? null;
+  if (filedProposalId && (await callerIsAgent(cfg))) {
+    return proposedForReview(label, filedProposalId, cfg, opts, {
+      workspaceId: analyzeRes.workspaceId ?? workspaceId ?? null,
+      projectId: projOverride ?? null,
+      batch: batchMeta,
+    });
+  }
+
   const applySessionId = analyzeRes.sessionId ?? sessionId;
   // Prefer analyze-resolved placement so apply lands where the proposal was filed.
   const applyWorkspaceId =
@@ -1605,12 +1636,24 @@ async function processBatchImport(
       : {}),
   };
 
-  const applyRes = (await hubPost(
-    "/import/apply",
-    applyBody,
-    cfg,
-    IMPORT_APPLY_TIMEOUT_MS
-  )) as ImportApplyResult;
+  let applyRes: ImportApplyResult;
+  try {
+    applyRes = (await hubPost(
+      "/import/apply",
+      applyBody,
+      cfg,
+      IMPORT_APPLY_TIMEOUT_MS
+    )) as ImportApplyResult;
+  } catch (e) {
+    if (filedProposalId && isAgentReviewRejection(e)) {
+      return proposedForReview(label, filedProposalId, cfg, opts, {
+        workspaceId: analyzeRes.workspaceId ?? workspaceId ?? null,
+        projectId: projOverride ?? null,
+        batch: batchMeta,
+      });
+    }
+    throw e;
+  }
 
   const created = applyRes.created ?? 0;
   const linked = applyRes.linked ?? 0;
@@ -1645,6 +1688,45 @@ async function processBatchImport(
     workspaceId: finalWs,
     projectId: projOverride ?? null,
     batch: { ...batchMeta, apply: applyRes },
+  };
+}
+
+/**
+ * Is the calling credential an agent? The pod's own `/users/me` `isAgent`.
+ * Unknown (older pod, network) is `false`: the apply then runs and the pod's
+ * 403 agent refusal is translated after the fact — never a guess that blocks
+ * a human.
+ */
+async function callerIsAgent(cfg: HubConfig): Promise<boolean> {
+  try {
+    return (await fetchEffectiveIdentity(cfg)).isAgent === true;
+  } catch {
+    return false;
+  }
+}
+
+/** The import was filed for review and not applied: say so, with the door. */
+function proposedForReview(
+  label: string,
+  proposalId: string,
+  cfg: HubConfig,
+  opts: ImportOpts,
+  rest: Pick<ItemOutcome, "workspaceId" | "projectId" | "batch">
+): ItemOutcome {
+  const reviewUrl = proposalWebLink(cfg.podUrl, proposalId);
+  if (!opts.json) {
+    log.info("  Proposed — waiting for your approval. Nothing is stored until a person approves it.");
+    log.dim(`    proposal: ${proposalId}`);
+    log.dim(`    review: ${reviewUrl}`);
+    log.dim(`    or run: synap open proposal ${proposalId}`);
+  }
+  return {
+    label,
+    status: "proposed",
+    entities: 0,
+    relations: 0,
+    reviewUrl,
+    ...rest,
   };
 }
 

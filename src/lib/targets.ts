@@ -188,6 +188,9 @@ export async function verifyMcpConnection(
   return { ok: true, toolCount };
 }
 
+/** `api_keys.tool_profile` on the pod (`POST /api/hub/setup/agent` `toolProfile`). */
+export type AgentKeyToolProfile = "entry" | "builder";
+
 export interface TargetConnectionConfig {
   podUrl: string;
   apiKey: string;
@@ -199,8 +202,6 @@ export interface TargetConnectionConfig {
   projectId?: string;
   agentUserId?: string;
   skills?: string[]; // defaults to all three
-  /** Raycast only: also merge the full mcp-remote MCP server into mcp-config.json. */
-  withMcp?: boolean;
   /**
    * Take the recommended answer instead of prompting (install mode, behaviour
    * template; governance is left to the pod default). Set by `synap init`, which connects several
@@ -250,42 +251,6 @@ function claudeDesktopBaseDir(): string {
   }
 }
 
-/** Raycast app-support root (macOS only — Raycast is macOS-only). */
-function raycastSupportDir(): string {
-  return path.join(
-    os.homedir(),
-    "Library",
-    "Application Support",
-    "com.raycast.macos"
-  );
-}
-
-/**
- * Locate Raycast's EXISTING `mcp-config.json`. Raycast stores all non-dev MCP
- * servers in ONE file inside the "Manage MCP Servers" extension's support
- * directory — an opaque UUID folder under `…/com.raycast.macos/extensions/`.
- * The folder name is only known to Raycast and the file is created lazily the
- * first time the user opens "Manage MCP Servers".
- *
- * We therefore scan the support dirs for an EXISTING `mcp-config.json` and
- * return its path (so we can merge into it). Returns `null` when none exists —
- * the caller then prints the block for the user to paste via Raycast's
- * "Show Config File in Finder" action (the only reliable first-time path).
- */
-function raycastMcpConfigPath(): string | null {
-  const extensionsDir = path.join(raycastSupportDir(), "extensions");
-  try {
-    for (const entry of fs.readdirSync(extensionsDir, { withFileTypes: true })) {
-      if (!entry.isDirectory()) continue;
-      const candidate = path.join(extensionsDir, entry.name, "mcp-config.json");
-      if (fs.existsSync(candidate)) return candidate;
-    }
-  } catch {
-    /* extensions dir missing — Raycast not installed or never opened */
-  }
-  return null;
-}
-
 export const TARGETS: Record<TargetName, TargetInfo> = {
   "claude-code": {
     name: "claude-code",
@@ -318,9 +283,11 @@ export const TARGETS: Record<TargetName, TargetInfo> = {
   },
   raycast: {
     name: "raycast",
-    keyStore: { format: "json", path: () => raycastMcpConfigPath() },
+    keyStore: {
+      none: "Raycast keeps its MCP sign-in in its own store; the commands' key is in ~/.synap/config.json",
+    },
     label: "Raycast",
-    description: "Native Synap extension (@synap) catalog — full MCP opt-in via --with-mcp",
+    description: "Synap extension commands + the pod's MCP server in Raycast AI (HTTP, OAuth)",
     supports: { skills: false, mcp: true },
   },
   openwebui: {
@@ -468,7 +435,7 @@ export function buildMcpUrl(
 async function prepareMcpSurface(
   cfg: TargetConnectionConfig,
   agentType: string,
-  opts?: { idempotent?: boolean }
+  opts?: { idempotent?: boolean; toolProfile?: AgentKeyToolProfile }
 ): Promise<{ effectiveApiKey: string; agentUserId: string; mcpUrl: string }> {
   // Idempotent by default: `synap connect` is re-runnable. Without it, every
   // connect mints a NEW inactive key + a fresh approval request on the pod,
@@ -480,7 +447,7 @@ async function prepareMcpSurface(
     cfg.podUrl,
     cfg.apiKey,
     agentType,
-    { idempotent: opts?.idempotent ?? true }
+    { idempotent: opts?.idempotent ?? true, toolProfile: opts?.toolProfile }
   );
   await enrollAgentIfNeeded(cfg.podUrl, cfg.apiKey, agentUserId, cfg.workspaceId);
   return { effectiveApiKey, agentUserId, mcpUrl: buildMcpUrl(cfg.podUrl, cfg.workspaceId, cfg.projectId) };
@@ -621,8 +588,8 @@ export async function installForTarget(
     case "generic":       result = await installGeneric(cfg); break;
   }
 
-  // Post-install: agent context wizard for MCP targets. Skip Raycast — native
-  // and --with-mcp use the extension catalog / opt-in MCP; CONTEXT.md has no Raycast consumer.
+  // Post-install: agent context wizard for MCP targets. Skip Raycast — its AI
+  // reads the pod's MCP instructions; CONTEXT.md has no Raycast consumer.
   if (result && info.supports.mcp && target !== "generic" && target !== "raycast") {
     const { getSurfaceAgentKey } = await import("./pod.js");
     const saved = getSurfaceAgentKey(target as import("./pod.js").SurfaceName);
@@ -927,7 +894,7 @@ export async function writeClaudeCodeEnv(
  * Server name is pod-derived (`mcpServerNameFromPodUrl`) so multi-pod setups
  * (perso + team) do not overwrite each other — same pattern as Grok/Cursor.
  */
-function registerClaudeCodeMcp(mcpUrl: string, apiKey: string, serverName: string): void {
+export function registerClaudeCodeMcp(mcpUrl: string, apiKey: string, serverName: string): void {
   const header = `Authorization: Bearer ${apiKey}`;
   const bridge = claudeCodeMcpTransport() === "bridge";
   try {
@@ -945,7 +912,9 @@ function registerClaudeCodeMcp(mcpUrl: string, apiKey: string, serverName: strin
         ? // Stdio: Claude Code hands a stdio server its own session id, which
           // the bridge forwards — see lib/mcp-bridge.ts. The key rides in the
           // server's env, as the header does for http.
-          ["mcp", "add", "--scope", "user", "-e", `SYNAP_MCP_API_KEY=${apiKey}`, serverName, "--", ...synapBridgeCommand(mcpUrl)]
+          // `-e` is variadic in Claude Code's CLI: the server name must come
+          // BEFORE it, or `-e` swallows it as an env var.
+          ["mcp", "add", "--scope", "user", serverName, "-e", `SYNAP_MCP_API_KEY=${apiKey}`, "--", ...synapBridgeCommand(mcpUrl)]
         : ["mcp", "add", "--transport", "http", serverName, mcpUrl, "--header", header, "--scope", "user"],
       { stdio: "ignore" }
     );
@@ -967,13 +936,23 @@ function registerClaudeCodeMcp(mcpUrl: string, apiKey: string, serverName: strin
     try {
       ensureSecretDir(path.dirname(keyFile));
       writeSecretFile(keyFile, `export SYNAP_MCP_KEY='${apiKey}'\n`);
-      log.dim("Could not run `claude mcp add` (is the claude CLI on PATH?). Register it by hand (the key is in a 0600 file, not on this screen):");
+      log.dim(
+        `Could not run \`claude mcp add\` (is the claude CLI on PATH?). The '${serverName}' MCP server may now be UNREGISTERED in Claude Code. Register it by hand (the key is in a 0600 file, not on this screen):`
+      );
       log.dim(`  source ${keyFile}`);
-      log.dim(`  claude mcp add --transport http ${serverName} ${mcpUrl} --header 'Authorization: Bearer \${SYNAP_MCP_KEY}' --scope user`);
+      log.dim(
+        bridge
+          ? `  claude mcp add --scope user ${serverName} -e SYNAP_MCP_API_KEY="$SYNAP_MCP_KEY" -- ${synapBridgeCommand(mcpUrl).map(shellQuote).join(" ")}`
+          : `  claude mcp add --transport http ${serverName} ${mcpUrl} --header 'Authorization: Bearer \${SYNAP_MCP_KEY}' --scope user`
+      );
     } catch {
       log.dim("Could not run `claude mcp add` (is the claude CLI on PATH?) and could not save the key file — run `synap mcp url` instead.");
     }
   }
+}
+
+function shellQuote(arg: string): string {
+  return /^[A-Za-z0-9_\-./:=@]+$/.test(arg) ? arg : `'${arg.replace(/'/g, `'\\''`)}'`;
 }
 
 /**
@@ -1102,6 +1081,7 @@ export async function provisionAgentKey(
     deferApproval = false,
     instanceId,
     fallbackCandidate,
+    toolProfile,
   }: {
     requireApproval?: boolean;
     idempotent?: boolean;
@@ -1119,6 +1099,13 @@ export async function provisionAgentKey(
     instanceId?: string;
     /** Another place this surface's key may be stored (a client's own config), tried when the CLI config has none. */
     fallbackCandidate?: string;
+    /**
+     * The MCP tool surface a NEWLY minted key lists (`entry` = the 9 essential
+     * tools, more loaded on demand; `builder` = every tool). Omitted: the pod's
+     * default (a first key `entry`, a re-mint keeps the agent's surface). A
+     * live key reused by `idempotent` keeps whatever it lists.
+     */
+    toolProfile?: AgentKeyToolProfile;
   } = {}
 ): Promise<{
   hubApiKey: string;
@@ -1192,6 +1179,7 @@ export async function provisionAgentKey(
         requireApproval,
         instanceId: instance,
         instanceLabel: machineInstanceLabel(),
+        ...(toolProfile ? { toolProfile } : {}),
       }),
       signal: AbortSignal.timeout(30000),
     });
@@ -1269,6 +1257,7 @@ export async function provisionAgentKey(
       surfaceName,
       deferApproval,
       instanceId: instance,
+      toolProfile,
     });
   }
   if (!body.hubApiKey) {
@@ -1546,10 +1535,20 @@ async function installCursor(
 
 // ─── Raycast ─────────────────────────────────────────────────────────────────
 
+/**
+ * Raycast has two halves (decision B1, 2026-10-21):
+ *   - the Synap extension's native COMMANDS (search, capture, review…) call Hub
+ *     REST with a dedicated `raycast` agent key, read from ~/.synap/config.json;
+ *   - Raycast AI talks to the pod's own MCP server over HTTP (Streamable HTTP),
+ *     signed in with OAuth, or with that same agent key in a header as the
+ *     fallback. The extension ships no AI tools of its own any more.
+ *
+ * Raycast keeps its MCP servers in its own store, filled through its "Install
+ * MCP Server" form; its file format for an HTTP server is not documented, so we
+ * print the form's fields rather than write a guessed shape into Raycast's
+ * config. The key is never printed: the fallback header lives in a 0600 file.
+ */
 async function installRaycast(cfg: TargetConnectionConfig): Promise<boolean> {
-  // Default path: native Synap extension (@synap) is the catalog. Persist
-  // workspace + provision a dedicated raycast agent key for extension writes.
-  // Full MCP (mcp-remote → mcp-config.json) is opt-in via cfg.withMcp.
   const { setActiveWorkspaceId, clearActiveWorkspaceId } = await import("./pod.js");
   if (cfg.workspaceId) {
     setActiveWorkspaceId(cfg.workspaceId);
@@ -1557,75 +1556,31 @@ async function installRaycast(cfg: TargetConnectionConfig): Promise<boolean> {
     clearActiveWorkspaceId();
   }
 
-  const { effectiveApiKey, agentUserId, mcpUrl } = await prepareMcpSurface(cfg, "raycast");
+  // A key minted here lists the 9-tool starter set on /mcp and loads more on
+  // demand (`entry`); an existing live key is reused as it is.
+  const { effectiveApiKey, agentUserId, mcpUrl } = await prepareMcpSurface(cfg, "raycast", {
+    toolProfile: "entry",
+  });
   const { setSurfaceAgentKey } = await import("./pod.js");
   setSurfaceAgentKey("raycast", { hubApiKey: effectiveApiKey, agentUserId, podUrl: cfg.podUrl });
+  const { writeMcpSnippetFiles } = await import("./mcp-snippets.js");
+  const files = writeMcpSnippetFiles(mcpUrl, effectiveApiKey, agentUserId);
 
-  log.success("Raycast agent key stored for the Synap extension (@synap).");
-  log.dim("The native extension is your catalog — open Synap in Raycast (or run Connect there) if needed.");
-  log.blank();
+  log.success("Raycast agent key stored for the Synap extension's commands.");
   log.dim(`   Pod: ${cfg.podUrl}`);
   log.dim(`   Scope: ${cfg.workspaceId ? `workspace ${cfg.workspaceId}` : "all workspaces (pod-wide)"}`);
-
-  if (!cfg.withMcp) {
-    log.blank();
-    log.dim("Full MCP (mcp-remote) is opt-in: synap connect --target=raycast --with-mcp");
-    return true;
-  }
-
-  // ── Opt-in power door: write Raycast MCP server config (merge, never clobber) ─
-  // Raycast's native MCP is stdio-only — bridge the HTTP /mcp endpoint with the
-  // `mcp-remote` npm package (npx spawns it). Same bridge as Claude Desktop/Zed.
-  // Tool names will overlap the @synap extension catalog.
   log.blank();
-  const raycastServerName = mcpServerNameFromPodUrl(cfg.podUrl);
-  log.info(`Installing full MCP power door via mcp-remote as '${raycastServerName}' — names overlap @synap.`);
-  const synapServerEntry = {
-    command: "npx",
-    args: ["-y", "mcp-remote", mcpUrl, "--header", "Authorization:${SYNAP_AUTH}"],
-    // Header value via env, not argv (see Claude Desktop above).
-    env: { SYNAP_AUTH: `Bearer ${effectiveApiKey}` },
-  };
 
-  // The mcp-config.json lives in an opaque UUID folder Raycast creates the first
-  // time "Manage MCP Servers" is opened. If it already exists we merge into it;
-  // otherwise we can't know the folder, so we print the block to paste.
-  const existingPath = raycastMcpConfigPath();
-  let wrote = false;
-  if (existingPath) {
-    try {
-      let mcpConfig: { mcpServers?: Record<string, unknown> } = {};
-      try {
-        mcpConfig = JSON.parse(fs.readFileSync(existingPath, "utf-8"));
-      } catch {
-        try { copySecretBackup(existingPath, `${existingPath}.bak`); } catch { /* best-effort */ }
-      }
-      mcpConfig.mcpServers = mcpConfig.mcpServers ?? {};
-      mcpConfig.mcpServers[raycastServerName] = synapServerEntry;
-      if (raycastServerName !== "synap") delete mcpConfig.mcpServers["synap"];
-      writeSecretFile(existingPath, JSON.stringify(mcpConfig, null, 2) + "\n", { mode: 0o600 });
-      wrote = true;
-      log.success(`Synap MCP server added to Raycast: ${existingPath}`);
-      log.dim(`Reopen Raycast → 'Manage MCP Servers' → '${raycastServerName}' is connected with all tools.`);
-      log.dim("First call spawns 'npx mcp-remote' (needs Node on PATH).");
-    } catch (err) {
-      log.warn(`Could not write Raycast MCP config: ${(err as Error).message}`);
-    }
-  }
-
-  if (!wrote) {
-    log.info("To add Synap to Raycast as an MCP server:");
-    log.dim("  1. Open Raycast → run 'Manage MCP Servers'");
-    log.dim("  2. Action 'Show Config File in Finder' → open mcp-config.json");
-    log.dim(`  3. Paste the '${raycastServerName}' entry below into "mcpServers", then save:`);
-    log.blank();
-    log.dim(
-      JSON.stringify({ mcpServers: { [raycastServerName]: synapServerEntry } }, null, 2)
-    );
-    log.blank();
-    log.dim("  (Re-running `synap connect --target=raycast --with-mcp` after step 2 writes it for you.)");
-  }
-
+  const serverName = mcpServerNameFromPodUrl(cfg.podUrl);
+  log.info("Add Synap to Raycast AI (one time, Raycast Pro):");
+  log.dim("  1. In Raycast, run “Install MCP Server”.");
+  log.dim(`  2. Name: ${serverName}   Transport: HTTP   URL: ${mcpUrl}`);
+  log.dim("  3. Authentication: OAuth → Dynamic → Sign In, then approve on your pod's consent page.");
+  log.dim("     Fallback, if Sign In fails: no OAuth; add the HTTP header");
+  log.dim(`     Authorization: Bearer ${redactKey(effectiveApiKey)}   (full value: ${files.jsonFile}, 0600)`);
+  log.dim("  4. Press “Install MCP Server” (⌘↵). In Raycast AI, mention the server and ask anything.");
+  log.blank();
+  log.dim("Raycast AI starts with the 9 essential Synap tools; it loads more when a task needs them.");
   return true;
 }
 
