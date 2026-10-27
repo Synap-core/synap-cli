@@ -15,7 +15,7 @@
  * Loops stay here deliberately: there is no durable loop row to reverse-
  * serialise (`createLoopFromDefinition` dissolves into playbooks + triggers).
  *
- * `TEMPLATE-DEV-GUIDE.md` used to assert, unqualified, that a
+ * The template guide used to assert, unqualified, that a
  * `PackageDefinition` "round-trips". It does not, in this direction, and the
  * consequence is the shape this repo keeps paying for: an author who built one
  * of the things below publishes their workspace, ships a thinner-than-expected
