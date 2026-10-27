@@ -1799,7 +1799,7 @@ const observe = program
 observe
   .command("write <text>", { isDefault: true })
   .description("Record an observation about the user (pod-scoped, AI-maintained)")
-  .option("--category <cat>", "working_style | communication | focus | technical | preference", "preference")
+  .option("--category <cat>", "working_style | communication | focus | preferences | habits | technical", "preferences")
   .option("--confidence <n>", "Confidence score 0-1", "0.5")
   .option("--json", "Output as JSON")
   .option("--pod-url <url>", "Pod URL override")
