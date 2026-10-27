@@ -101,6 +101,7 @@ describe("the TASK protocol", () => {
   it("creates the records a process asks for with exact fields, never through free-text capture", () => {
     expect(p).toContain("Never synap_capture a record the process asks you to create or change");
     expect(p).toContain("synap_create_entity (its profileSlug and the exact property keys the goal names");
+    expect(p).toContain("never put a company's website, domain or email on a person");
   });
   it("asks with QUESTION: and waits through the pod, not a shell sleep", () => {
     expect(p).toContain('"QUESTION:"');
