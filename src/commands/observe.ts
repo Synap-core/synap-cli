@@ -6,14 +6,24 @@ import { unwrapList } from "../lib/unwrapList.js";
 import { reportWrite } from "../lib/capture-lane.js";
 import { type BaseOpts, parseLimit } from "./data.js";
 
-type ObserveCategory = "working_style" | "communication" | "focus" | "technical" | "preference";
+// Mirrors the pod's `uo_category` enum (synap-backend
+// packages/api/src/services/knowledge/remember-fact.ts USER_OBSERVATION_CATEGORIES):
+// a value outside it is accepted here but fails when the proposal is approved.
+type ObserveCategory =
+  | "working_style"
+  | "communication"
+  | "focus"
+  | "preferences"
+  | "habits"
+  | "technical";
 
-const VALID_CATEGORIES: ObserveCategory[] = [
+export const VALID_CATEGORIES: ObserveCategory[] = [
   "working_style",
   "communication",
   "focus",
+  "preferences",
+  "habits",
   "technical",
-  "preference",
 ];
 
 // ─── observeWrite ─────────────────────────────────────────────────────────────
@@ -25,7 +35,7 @@ export async function observeWrite(
   try {
     const cfg = await resolveHubConfig(opts);
 
-    const category = (opts.category ?? "preference") as ObserveCategory;
+    const category = (opts.category ?? "preferences") as ObserveCategory;
     if (!VALID_CATEGORIES.includes(category)) {
       console.error(
         chalk.red(
@@ -111,7 +121,7 @@ export async function observeRecall(
 
     for (const e of entities) {
       const props = (e.properties ?? {}) as Record<string, unknown>;
-      const category = chalk.cyan(String(props.uo_category ?? "preference"));
+      const category = chalk.cyan(String(props.uo_category ?? "preferences"));
       const observation = String(props.uo_observation ?? e.title ?? "");
       const confidence = Number(props.uo_confidence ?? 0.5).toFixed(2);
       log.info(`${category}  ${chalk.dim(`conf:${confidence}`)}  ${observation}`);

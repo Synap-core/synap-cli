@@ -1192,7 +1192,8 @@ program
   .requiredOption("--agent <name>", "The named agent this machine works as (its key comes from ~/.synap)")
   .option("--interval <dur>", "How often to check for handed sessions (e.g. 30s, 2m)", "30s")
   .option("--once", "Check once, run what is handed, wait for it, exit")
-  .option("--cwd <dir>", "Where the launched Claude Code works (default ~/Documents/Code/synap)")
+  .option("--cwd <dir>", "Where code sessions' Claude Code works (default ~/Documents/Code/synap)")
+  .option("--work-root <dir>", "Where playbook runs over pod data (no repo) get a folder each, <dir>/<session id> (default ~/synap-work)")
   .option("--max-parallel <n>", "Runs at the same time", "1")
   .option("--claude-bin <path>", "The claude binary", "claude")
   .option("--claude-config-dir <dir>", "CLAUDE_CONFIG_DIR for launched runs — picks which Claude subscription they use")
@@ -1824,7 +1825,7 @@ const observe = program
 observe
   .command("write <text>", { isDefault: true })
   .description("Record an observation about the user (pod-scoped, AI-maintained)")
-  .option("--category <cat>", "working_style | communication | focus | technical | preference", "preference")
+  .option("--category <cat>", "working_style | communication | focus | preferences | habits | technical", "preferences")
   .option("--confidence <n>", "Confidence score 0-1", "0.5")
   .option("--json", "Output as JSON")
   .option("--pod-url <url>", "Pod URL override")

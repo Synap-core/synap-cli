@@ -1482,7 +1482,8 @@ Run Claude Code unattended here for the sessions handed to an agent
 | `--agent <name>` | The named agent this machine works as (its key comes from ~/.synap) (required) |  |
 | `--interval <dur>` | How often to check for handed sessions (e.g. 30s, 2m) | `"30s"` |
 | `--once` | Check once, run what is handed, wait for it, exit |  |
-| `--cwd <dir>` | Where the launched Claude Code works (default ~/Documents/Code/synap) |  |
+| `--cwd <dir>` | Where code sessions' Claude Code works (default ~/Documents/Code/synap) |  |
+| `--work-root <dir>` | Where playbook runs over pod data (no repo) get a folder each, <dir>/<session id> (default ~/synap-work) |  |
 | `--max-parallel <n>` | Runs at the same time | `"1"` |
 | `--claude-bin <path>` | The claude binary | `"claude"` |
 | `--claude-config-dir <dir>` | CLAUDE_CONFIG_DIR for launched runs — picks which Claude subscription they use |  |
@@ -2291,7 +2292,7 @@ Record an observation about the user (pod-scoped, AI-maintained)
 
 | Option | Description | Default |
 |---|---|---|
-| `--category <cat>` | working_style \| communication \| focus \| technical \| preference | `"preference"` |
+| `--category <cat>` | working_style \| communication \| focus \| preferences \| habits \| technical | `"preferences"` |
 | `--confidence <n>` | Confidence score 0-1 | `"0.5"` |
 | `--json` | Output as JSON |  |
 | `--pod-url <url>` | Pod URL override |  |
