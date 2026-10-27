@@ -158,13 +158,20 @@ describe("a run cut off by a usage limit resumes on the next account", () => {
     expect(runs).toHaveLength(2);
     expect(runs[0].token).toBe(TOK.a);
     expect(runs[0].argv).not.toContain("--resume");
+    // The run names its own Claude session; the config the run got names the same conversation.
+    const sid = runs[0].argv[runs[0].argv.indexOf("--session-id") + 1];
+    expect(sid).toMatch(/^[0-9a-f-]{36}$/);
+    expect(runs[1].argv).not.toContain("--session-id");
     expect(runs[1].token).toBe(TOK.b);
     expect(runs[1].argv.slice(runs[1].argv.indexOf("--resume"), runs[1].argv.indexOf("--resume") + 2)).toEqual(["--resume", CLAUDE_SID]);
     expect(runs[1].argv[1]).toBe(LIMIT_RESUME_PROMPT);
+    // A resume keeps the run's conversation: its config names the resumed session.
+    const cfg = JSON.parse(workerFiles("night").find((f) => f.file === `mcp-${S1}.json`)!.text);
+    expect(cfg.mcpServers["synap-worker"].headers["X-Synap-Conversation"]).toBe(`claude-code:${CLAUDE_SID}`);
 
     // No token anywhere the worker writes or prints.
     const files = workerFiles("night");
-    expect(files.map((f) => f.file).sort()).toEqual(["mcp.json", `runs/${S1}.jsonl`, "state.json"]);
+    expect(files.map((f) => f.file).sort()).toEqual([`mcp-${S1}.json`, `runs/${S1}.jsonl`, "state.json"]);
     expect(files.find((f) => f.file === "state.json")?.text).toContain('"accountId": "b"');
     for (const f of files) for (const t of Object.values(TOK)) expect(f.text, f.file).not.toContain(t);
     for (const t of Object.values(TOK)) expect(said.join("\n")).not.toContain(t);

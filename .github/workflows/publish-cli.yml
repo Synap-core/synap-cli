@@ -87,7 +87,7 @@ jobs:
       id-token: write
     steps:
       - name: Checkout synap-cli
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: cli
           # `actions/checkout` defaults to a DETACHED HEAD at the triggering
@@ -103,29 +103,29 @@ jobs:
       # sibling lands NEXT TO `cli/` rather than at a literal `../`. Running
       # every step from `cli/` makes `../synap-backend` resolve exactly as it
       # does on a developer's machine.
-      # Read of the sibling repo only: the Synap release App's token (scoped to
+      # Read of the sibling repo only: the Synap Reader App's token (scoped to
       # `backend`, contents: read). CROSS_REPO_TOKEN is the fallback until the App
-      # is live (SECURITY-RELEASE-RUNBOOK.md §5).
+      # is live (SECURITY-RELEASE-RUNBOOK.md §5.1).
       - name: Mint backend read token (GitHub App)
         id: app-token
-        if: ${{ vars.SYNAP_RELEASE_APP_ID != '' }}
+        if: ${{ vars.SYNAP_READER_APP_ID != '' }}
         continue-on-error: true
-        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         with:
-          app-id: ${{ vars.SYNAP_RELEASE_APP_ID }}
-          private-key: ${{ secrets.SYNAP_RELEASE_APP_KEY }}
+          app-id: ${{ vars.SYNAP_READER_APP_ID }}
+          private-key: ${{ secrets.SYNAP_READER_APP_KEY }}
           owner: Synap-core
           repositories: backend
           permission-contents: read
 
       - name: Checkout synap-backend (sibling — hub-rest-client + skills)
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # The repo is `Synap-core/backend`. The old `Synap-core/synap-backend`
           # 404s, which is why the only run before 2026-10-16 failed here.
           repository: Synap-core/backend
           # `backend` is public, so this run's own token can read it when
-          # neither the release App nor CROSS_REPO_TOKEN is configured. An empty
+          # neither the Reader App nor CROSS_REPO_TOKEN is configured. An empty
           # token is what failed the 2026-10-11 run ("Input required and not
           # supplied: token").
           token: ${{ steps.app-token.outputs.token || secrets.CROSS_REPO_TOKEN || github.token }}
@@ -136,7 +136,7 @@ jobs:
       # The package's own floor is unchanged (`engines.node >=20`): this is only
       # the toolchain that builds and publishes it, and the typecheck, the tests
       # and the build all run on this same Node.
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22.18.0"
           registry-url: "https://registry.npmjs.org"
@@ -155,7 +155,7 @@ jobs:
       # specified"), which silently broke that pipeline for two days. We are
       # setting up pnpm for the CHECKED-OUT SIBLING, whose package.json is read
       # from its own directory — so the pin is taken from there.
-      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
         with:
           package_json_file: synap-backend/package.json
 

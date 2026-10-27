@@ -331,7 +331,8 @@ async function useCrossPodProject(
     const cfg = {
       podUrl: target.config.podUrl,
       apiKey: target.config.hubApiKey,
-      userId: target.config.agentUserId || "cli",
+      userId: "cli",
+      agentUserId: target.config.agentUserId || undefined,
     };
     const res = await hubGet(`/projects?ids=${encodeURIComponent(project.projectId)}`, {}, cfg);
     const list = unwrapList<{ id: string; name?: string }>(res, ["projects"]);

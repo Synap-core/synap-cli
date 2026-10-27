@@ -583,7 +583,21 @@ function renderHubErrorBody(err: unknown): void {
 export interface HubConfig {
   podUrl: string;
   apiKey: string;
+  /**
+   * The ACTING identity sent to the pod (body/query/path `userId`). Only an
+   * explicit caller id (SYNAP_USER_ID) or the sentinel "cli"; read it through
+   * `resolveUserId`, which asks the pod (/users/me) for "cli". Never seed it
+   * with a recorded agent id: the pod acts an agent key as the human it is
+   * linked to and 403s the agent's own id ("userId does not match the
+   * authenticated identity", 2026-10-23). The agent's id is `agentUserId`.
+   */
   userId: string;
+  /**
+   * The agent principal recorded with this key, when one was — WHO the key
+   * is, not who the pod acts as. For recognising the agent's own posts
+   * (`resolveAgentUserId`), never sent as the acting user.
+   */
+  agentUserId?: string;
   /** Active workspace — from `synap use`, pod default, or env var. Undefined if none configured. */
   workspaceId?: string;
   /** Active project — from `synap project use`, pod default, or env var. Peer of workspaceId; independent. */
@@ -632,8 +646,9 @@ export async function resolveHubConfig(opts?: { podUrl?: string; apiKey?: string
     return {
       podUrl: podOverride.podUrl,
       apiKey: podOverride.hubApiKey,
-      // A profile's agentUserId may be empty; "cli" makes resolveUserId fetch /users/me.
-      userId: podOverride.agentUserId || "cli",
+      // "cli": resolveUserId asks the pod who this key acts as (see HubConfig.userId).
+      userId: "cli",
+      agentUserId: podOverride.agentUserId || undefined,
       workspaceId: safeWs,
       projectId: resolveProjectIdForPod(podOverride.podUrl, {}),
     };
@@ -656,10 +671,13 @@ export async function resolveHubConfig(opts?: { podUrl?: string; apiKey?: string
     return {
       podUrl,
       apiKey: agentOverride.apiKey,
-      // The AGENT's own id, recorded with its key. Never the pod profile name
-      // (it was, so `synap worker` never recognised its own room posts and
-      // resumed itself on them). Unrecorded → "cli": resolveUserId asks the pod.
-      userId: agentOverride.agentUserId || "cli",
+      // The acting user is asked of the pod ("cli" → /users/me): an agent key
+      // acts as its linked human, and the pod 403s the agent's own id.
+      userId: "cli",
+      // The AGENT's own id, recorded with its key — for `synap worker` to
+      // recognise its own room posts (resolveAgentUserId). Never the pod
+      // profile name (it once was, and the worker resumed itself on them).
+      agentUserId: agentOverride.agentUserId || undefined,
       scopes: envScopes ? envScopes.split(",") : undefined,
     };
   }
@@ -699,6 +717,7 @@ export async function resolveHubConfig(opts?: { podUrl?: string; apiKey?: string
     }
     const apiKey = preferred.apiKey;
     const userId = preferred.userId;
+    const agentUserId = preferred.agentUserId;
     // Per-Claude-session lens wins over the global env var, so concurrent
     // sessions can each be scoped to a different workspace — but ONLY when the
     // lens belongs to THIS pod. A lens stamped with another pod is ignored so
@@ -715,6 +734,7 @@ export async function resolveHubConfig(opts?: { podUrl?: string; apiKey?: string
       podUrl: envPod,
       apiKey,
       userId,
+      agentUserId,
       // The global-config fallback is resolved AGAINST THIS POD (envPod) —
       // never send a workspace that belongs to a different pod.
       workspaceId:
@@ -745,7 +765,10 @@ export async function resolveHubConfig(opts?: { podUrl?: string; apiKey?: string
   return {
     podUrl: config.podUrl,
     apiKey: config.hubApiKey,
-    userId: config.agentUserId,
+    // "cli": resolveUserId asks the pod. A profile's agentUserId is the key's
+    // principal (a computer or agent key), not who the pod acts as.
+    userId: "cli",
+    agentUserId: config.agentUserId || undefined,
     // session lens › directory lens › global config. (No env rung here: this
     // branch is only reached when SYNAP_POD_URL is unset.)
     workspaceId:
@@ -1001,7 +1024,10 @@ async function hubFetchWithRetry(
 export async function hubGet(
   path: string,
   params: Record<string, string | number | undefined>,
-  cfg: HubConfig
+  cfg: HubConfig,
+  // Default 15s suits reads. A long-poll door (`/answers/wait`) holds the
+  // request open for its own `timeoutSeconds`; its caller passes more.
+  timeoutMs = 15_000
 ): Promise<unknown> {
   const url = new URL(`${cfg.podUrl}/api/hub${path}`);
   for (const [k, v] of Object.entries(params)) {
@@ -1011,10 +1037,10 @@ export async function hubGet(
     url.toString(),
     {
       headers: { Authorization: `Bearer ${cfg.apiKey}`, ...sessionHeaders(cfg) },
-      signal: AbortSignal.timeout(15_000),
+      signal: AbortSignal.timeout(timeoutMs),
     },
     `GET ${path}`,
-    15_000
+    timeoutMs
   );
   if (!res.ok) {
     const body = await res.text().catch(() => "");

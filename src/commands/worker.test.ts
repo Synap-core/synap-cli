@@ -120,6 +120,15 @@ describe("the run's MCP server is pinned to the worker agent's own key", () => {
     });
   });
 
+  it("names the run's Claude session as the conversation, so the pod sees one run", () => {
+    const sid = "8c34a72b-b1c1-4c37-9c1f-02920b69ccb2";
+    const cfg = runMcpConfig("https://pod.example", "k", sid) as { mcpServers: Record<string, { headers: Record<string, string> }> };
+    expect(cfg.mcpServers[RUN_MCP_SERVER]!.headers).toEqual({
+      Authorization: "Bearer k",
+      "X-Synap-Conversation": `claude-code:${sid}`,
+    });
+  });
+
   it("writes it owner-only, replacing a wider file", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "worker-mcp-"));
     const file = path.join(dir, "mcp.json");

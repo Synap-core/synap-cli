@@ -190,7 +190,8 @@ export async function orient(
       },
       cfg
     )) as OrientResult;
-    const userId = String(res.me?.userId ?? cfg.userId);
+    // Never print the "cli" sentinel: ask the pod when orient did not say.
+    const userId = String(res.me?.userId ?? (await resolveUserId(cfg)));
     const projList = res.projects ?? [];
     const wsList = res.workspaces ?? [];
 

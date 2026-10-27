@@ -410,7 +410,8 @@ async function resolveAppCredentials(podUrl: string): Promise<HubConfig> {
       signal: AbortSignal.timeout(15_000),
     }).catch(() => null);
     if (res?.ok) {
-      return { podUrl: target, apiKey: saved.config.hubApiKey, userId: saved.config.agentUserId || "cli" };
+      // Acting user asked of the pod; the key's agent id rides apart (HubConfig.userId).
+      return { podUrl: target, apiKey: saved.config.hubApiKey, userId: "cli", agentUserId: saved.config.agentUserId || undefined };
     }
     if (res && (res.status === 401 || res.status === 403)) {
       log.warn(`Your saved key for ${target} no longer works.`);

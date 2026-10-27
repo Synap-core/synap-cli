@@ -216,7 +216,8 @@ program
   .option("--json", "Output as JSON")
   .option("--fix", "Fix key problems: finish a pending approval, give this computer its own key, or rewrite stale copies — then verify over MCP")
   .option("-v, --verbose", "Every check with its details, ids and addresses")
-  .action(async (opts: { json?: boolean; fix?: boolean; verbose?: boolean }) => {
+  .option("--pod-url <url>", "Probe this pod URL (works with no pod configured)")
+  .action(async (opts: { json?: boolean; fix?: boolean; verbose?: boolean; podUrl?: string }) => {
     const { doctor } = await import("./commands/doctor.js");
     await doctor(opts);
   });
@@ -1249,7 +1250,7 @@ session
   .option("--workspace <id>", "Workspace that owns the session")
   .option("--project <id>", "Project that owns the session (defaults to the active project lens; the pod accepts a workspace OR a project)")
   .option("--task-id <id>", "Link session to an existing task entity")
-  .option("--track <id>", "Born inside a track (a project's lasting goal) — implies its project")
+  .option("--track <id>", "Born inside a track (a project's goal) — implies its project")
   .option("--template <id>", "Start from a playbook (seeds currentStage from its stages)")
   .option("--no-template", "Opt out of auto-matching a playbook — start ad-hoc")
   .option("--parent <id>", "Push from another session — records session --spawned_from--> session (the parent stays open)")
@@ -1391,23 +1392,68 @@ session
   });
 
 session
-  .command("wait <sessionId>")
+  .command("wait [sessionId]")
   .description(
-    "Block until the human replies in the session room, then print the reply. Exit 0 replied · 1 timeout · 2 failure (auth/network/broken read)"
+    "Block until the human replies in the session room (or, with --events, until the session changes), then print it. Session: the argument, else the one attached to this terminal. Exit 0 replied · 1 timeout · 2 failure (auth/network/broken read); with --hook: 2 wake · 0 anything else"
   )
   .option(
     "--since <iso>",
-    "Only answers strictly after this ISO timestamp (default: now — skips anything that predates this wait)"
+    "Only events strictly after this ISO timestamp (default: now — skips anything that predates this wait; with --events: the unread ones)"
   )
+  .option(
+    "--events <kinds>",
+    "Wait on the session change feed: comma list of answer, proposal_decided, stage_moved, owner_message, session_message (a message from another session's agent), or all"
+  )
+  .option("--wake-only", "Stop only on what should wake an agent: answers, owner messages, and agent messages the pod marked wake (the rest is read and skipped)")
+  .option("--once", "One read, no waiting loop")
+  .option("--peek", "Mark nothing picked up or read (a watcher that is not the agent doing the work)")
+  .option("--hook", "Run as a Claude Code asyncRewake Stop hook: wait for a wake-worthy event, print it on stderr, exit 2 (see: synap hooks install-wake)")
   .option("--timeout <duration>", "Give up after this long (e.g. 30m, 2h)", "30m")
-  .option("--interval <duration>", "Delay between checks (e.g. 10s)", "10s")
-  .option("--limit <n>", "Max answers per page, 1-100", "20")
-  .option("--json", "Output the reply(ies) — or the timeout — as JSON")
+  .option("--interval <duration>", "Delay between checks of the answer-only wait (e.g. 10s)", "10s")
+  .option("--limit <n>", "Max answers / events per page, 1-100", "20")
+  .option("--json", "Output the reply(ies) or events — or the timeout — as JSON")
   .option("--pod-url <url>", "Pod URL override")
   .option("--api-key <key>", "API key override")
-  .action(async (sessionId: string, opts) => {
+  .action(async (sessionId: string | undefined, opts) => {
     const { waitSessionCommand } = await import("./commands/session-wait.js");
     await waitSessionCommand(sessionId, opts);
+  });
+
+session
+  .command("post <toSessionId> <text...>")
+  .description(
+    "Message ANOTHER of your sessions' agent: blocked_on_you / handoff may wake it, done / fyi never do. Replying to a message that woke you? Pass its id as --cause. Exit 0 delivered · 1 pod does not deliver agent messages · 2 failure"
+  )
+  .option("--intent <intent>", "blocked_on_you | handoff | done | fyi", "fyi")
+  .option("--cause <messageId>", "The message that woke you (the id `synap session wait` printed), when this replies to it")
+  .option("--from <sessionId>", "Your session, when this terminal is not bound to it")
+  .option("--ref <kind:id[:label]>", "The state behind the message: session:<id>, blocked_by:<id>, proposal:<id>, slot:<sessionId>:<label> (repeatable)", collect, [])
+  .option("--json", "Output the pod's reply as JSON")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (toSessionId: string, text: string[], opts) => {
+    const { sessionPostCommand } = await import("./commands/session-post.js");
+    await sessionPostCommand(toSessionId, text, opts);
+  });
+
+// ─── hooks ────────────────────────────────────────────────────────────────────
+// Claude Code hooks the CLI owns. install-wake: the asyncRewake Stop hook that
+// lets another session's agent (or the person) wake an idle terminal.
+
+const hooksCmd = program
+  .command("hooks")
+  .description("Claude Code hooks that connect a terminal to its Synap session");
+
+hooksCmd
+  .command("install-wake")
+  .description("Add the wake hook (a Stop hook running `synap session wait --hook`) to this project's .claude/settings.json — idempotent, other hooks kept")
+  .option("--uninstall", "Remove the wake hook instead")
+  .option("--user", "Use ~/.claude/settings.json (every project) instead of the project's")
+  .option("--dir <path>", "The project directory (default: the current one)")
+  .option("--json", "Output the result as JSON")
+  .action(async (opts) => {
+    const { installWakeCommand } = await import("./commands/hooks.js");
+    installWakeCommand(opts);
   });
 
 // ─── playbook ─────────────────────────────────────────────────────────────────
@@ -1434,19 +1480,24 @@ playbookCmd
   });
 
 // ─── track ────────────────────────────────────────────────────────────────────
-// A LASTING goal inside a project, worked in sessions (`session start --track`).
-// Legacy tracks also run a method with steps. Writes are governed —
+// A goal inside a project, worked in sessions (`session start --track`); a
+// person closes it with a verdict. Legacy tracks also run a method with steps. Writes are governed —
 // "queued for your review" is success.
 
 const track = program
   .command("track")
-  .description("Manage tracks — the lasting goals a project pursues");
+  .description("Manage tracks — the goals a project pursues");
 
 track
   .command("list")
-  .description("List a project's tracks (defaults to the active project lens)")
+  .description(
+    "List a project's goals (the active project lens); with no project in scope, every goal on the pod"
+  )
   .option("--project <id>", "Project id (defaults to the active project lens)")
-  .option("--all", "Include archived tracks")
+  .option("--everywhere", "List every goal on the pod, ignoring the project lens")
+  .option("--limit <n>", "Pod-wide: page size (default 50)")
+  .option("--cursor <cursor>", "Pod-wide: the next page (printed under the last one)")
+  .option("--all", "Include dropped (archived) tracks")
   .option("--json", "Output as JSON")
   .option("--pod-url <url>", "Pod URL override")
   .option("--api-key <key>", "API key override")
@@ -1468,12 +1519,26 @@ track
 
 track
   .command("start")
-  .description("Start a track — a lasting goal — on a project")
+  .description("Start a track — a goal — on a project")
   .option("--name <name>", "The track's name (required without --playbook)")
   .option("--direction <text>", "Where it is heading, one line")
   .option("--playbook <id>", "Legacy: a track template (project-scoped playbook with steps)")
   .option("--project <id>", "Project id (defaults to the active project lens)")
   .option("--param <key=value>", "Answer a declared param (repeatable)", collect, [])
+  .option("--end-state <text>", "What done looks like, in your words")
+  .option(
+    "--criterion <text>",
+    "How it is judged done — '[measured|judged|handed_over|learning|decided_outside|certified:] statement'; give 0 or 2-5 (repeatable)",
+    collect,
+    []
+  )
+  .option("--drop-condition <text>", "When to stop pursuing it (repeatable, at most 5)", collect, [])
+  .option(
+    "--kind <kind>",
+    "Kind of work: project|flow|operation|investigation|incident|commission|pathway (a proposal until you confirm)"
+  )
+  .option("--uncertainty <level>", "How well the way is known: clear|complicated|complex|chaotic|unknown")
+  .option("--loop <on|off|n>", "Let the goal propose its next session: on, off, or n sessions a week")
   .option("--reason <text>", "Why — shown to the reviewer")
   .option("--json", "Output as JSON")
   .option("--pod-url <url>", "Pod URL override")
@@ -1481,6 +1546,49 @@ track
   .action(async (opts) => {
     const { startTrack } = await import("./commands/tracks.js");
     await startTrack(opts);
+  });
+
+track
+  .command("update <id>")
+  .description("Set a goal's direction, KPI and what it holds (each field is written whole; kpi is merged)")
+  .option("--direction <text>", "Where it is heading, one line")
+  .option("--kpi-current <n>", "The KPI's latest value (stated, never measured)")
+  .option("--kpi-target <n>", "Move the KPI's target")
+  .option("--end-state <text>", "What done looks like, in your words")
+  .option(
+    "--criterion <text>",
+    "How it is judged done — '[measured|judged|handed_over|learning|decided_outside|certified:] statement'; give 0 or 2-5 (repeatable)",
+    collect,
+    []
+  )
+  .option("--drop-condition <text>", "When to stop pursuing it (repeatable, at most 5)", collect, [])
+  .option(
+    "--kind <kind>",
+    "Kind of work: project|flow|operation|investigation|incident|commission|pathway (a proposal until you confirm)"
+  )
+  .option("--uncertainty <level>", "How well the way is known: clear|complicated|complex|chaotic|unknown")
+  .option("--loop <on|off|n>", "Let the goal propose its next session: on, off, or n sessions a week")
+  .option("--reason <text>", "Why — shown to the reviewer")
+  .option("--json", "Output as JSON")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (id: string, opts) => {
+    const { updateTrack } = await import("./commands/tracks.js");
+    await updateTrack(id, opts);
+  });
+
+track
+  .command("accept <id> <criterion> <decision>")
+  .description(
+    "The goal's judge decides a claimed criterion: accepted | changes_asked | rejected (a person's act)"
+  )
+  .option("--note <text>", "What to change, or why it was rejected")
+  .option("--json", "Output as JSON")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (id: string, criterion: string, decision: string, opts) => {
+    const { acceptCriterion } = await import("./commands/tracks.js");
+    await acceptCriterion(id, criterion, decision, opts);
   });
 
 track
@@ -1497,7 +1605,14 @@ track
 
 track
   .command("status <id> <status>")
-  .description("Pause, resume or archive a track (active|paused|archived)")
+  .description(
+    "Move a track: proposed|agreed|ready|active|paused|completed (Closed)|archived (Dropped). " +
+      "Closing needs --verdict met|partly_met|not_met (an operation closes retired, and only one does); dropping should carry " +
+      "no_longer_needed|impossible|replaced|mistake (impossible and replaced need --verdict-reason). " +
+      "Both are final — reopen makes a new version."
+  )
+  .option("--verdict <verdict>", "How the goal ended (required to close; advised to drop)")
+  .option("--verdict-reason <text>", "Why — required for impossible and replaced")
   .option("--reason <text>", "Why — shown to the reviewer")
   .option("--json", "Output as JSON")
   .option("--pod-url <url>", "Pod URL override")
@@ -1505,6 +1620,37 @@ track
   .action(async (id: string, status: string, opts) => {
     const { setTrackStatus } = await import("./commands/tracks.js");
     await setTrackStatus(id, status, opts);
+  });
+
+track
+  .command("reopen <id>")
+  .description("Reopen a closed or dropped goal as a NEW version (the old one keeps its verdict)")
+  .option("--name <name>", "A new name (default: the old one's)")
+  .option("--reason <text>", "Why — shown to the reviewer")
+  .option("--json", "Output as JSON")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (id: string, opts) => {
+    const { reopenTrack } = await import("./commands/tracks.js");
+    await reopenTrack(id, opts);
+  });
+
+const goal = program
+  .command("goal")
+  .description("Goals — what people call a track");
+
+goal
+  .command("convert <entityId>")
+  .description("Make a goal, objective or OKR entity a goal (once; the entity is kept and linked)")
+  .option("--project <id>", "The goal's project — only when the entity is filed in none or several")
+  .option("--name <name>", "A name other than the entity's title")
+  .option("--reason <text>", "Why — shown to the reviewer")
+  .option("--json", "Output as JSON")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .action(async (entityId: string, opts) => {
+    const { convertToGoal } = await import("./commands/tracks.js");
+    await convertToGoal(entityId, opts);
   });
 
 track

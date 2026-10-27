@@ -22,6 +22,12 @@
  */
 
 import readline from "node:readline";
+import {
+  CONVERSATION_CWD_HEADER,
+  CONVERSATION_CWD_META_KEY,
+  CONVERSATION_HEADER,
+  CONVERSATION_META_KEY,
+} from "./conversation-headers.js";
 
 type JsonRpcId = string | number;
 type JsonRpcMessage = { jsonrpc?: string; id?: JsonRpcId | null; method?: string; result?: unknown };
@@ -47,6 +53,36 @@ function requestIds(msg: unknown): JsonRpcId[] {
     )
     .map((m) => m.id)
     .filter((id): id is JsonRpcId => typeof id === "string" || typeof id === "number");
+}
+
+/**
+ * The line with `params._meta["live.synap/conversation"]` (and the cwd) set on
+ * every request, from the same conversation the headers carry, for a path that
+ * cannot set headers. The header still wins at the pod. Responses, and a line
+ * that is not an object, pass through untouched.
+ */
+export function withConversationMeta(msg: unknown, headers: Record<string, string> | undefined): unknown {
+  const conversation = headers?.[CONVERSATION_HEADER];
+  if (!conversation) return msg;
+  const cwd = headers?.[CONVERSATION_CWD_HEADER];
+  const stamp = (m: unknown) => {
+    if (!m || typeof m !== "object" || typeof (m as JsonRpcMessage).method !== "string") return m;
+    const params = ((m as { params?: unknown }).params ?? {}) as Record<string, unknown>;
+    if (typeof params !== "object" || Array.isArray(params)) return m;
+    const meta = (params._meta ?? {}) as Record<string, unknown>;
+    return {
+      ...(m as object),
+      params: {
+        ...params,
+        _meta: {
+          ...meta,
+          [CONVERSATION_META_KEY]: conversation,
+          ...(cwd ? { [CONVERSATION_CWD_META_KEY]: cwd } : {}),
+        },
+      },
+    };
+  };
+  return Array.isArray(msg) ? msg.map(stamp) : stamp(msg);
 }
 
 /** Parse SSE text into the `data:` payload of each complete event. */
@@ -113,7 +149,7 @@ export async function runMcpBridge(opts: McpBridgeOptions): Promise<void> {
           ...(protocolVersion ? { "Mcp-Protocol-Version": protocolVersion } : {}),
           ...opts.headers,
         },
-        body: line,
+        body: JSON.stringify(withConversationMeta(msg, opts.headers)),
       });
       const minted = res.headers.get("mcp-session-id");
       if (minted) sessionId = minted;

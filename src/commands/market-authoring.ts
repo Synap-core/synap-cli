@@ -601,7 +601,7 @@ export async function marketPublish(
     );
     for (const w of dropWarnings) log.hint(`• ${w}`);
     log.hint(
-      "See TEMPLATE-DEV-GUIDE.md — `template ≡ installed` holds publish→install, not workspace→publish.",
+      "See the synap-market skill — `template ≡ installed` holds publish→install, not workspace→publish.",
     );
     if (opts.fromProject) {
       log.hint(
