@@ -102,6 +102,7 @@ describe("the TASK protocol", () => {
     expect(p).toContain("Never synap_capture a record the process asks you to create or change");
     expect(p).toContain("synap_create_entity (its profileSlug and the exact property keys the goal names");
     expect(p).toContain("never put a company's website, domain or email on a person");
+    expect(p).toContain("pass workspaceId = the session's workspaceId on every create");
   });
   it("asks with QUESTION: and waits through the pod, not a shell sleep", () => {
     expect(p).toContain('"QUESTION:"');
