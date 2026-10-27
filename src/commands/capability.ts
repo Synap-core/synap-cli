@@ -18,7 +18,7 @@ import ora from "ora";
 import prompts from "prompts";
 import { openExternalUrl } from "../lib/safe-open.js";
 import { readFileSync } from "node:fs";
-import { resolveHubConfig, hubGet, hubPost, hubDelete, HubError, renderHubError } from "../lib/hub-client.js";
+import { resolveHubConfig, hubGet, hubPost, hubPatch, hubDelete, HubError, renderHubError } from "../lib/hub-client.js";
 import { unwrapList } from "../lib/unwrapList.js";
 import { log } from "../utils/logger.js";
 
@@ -704,8 +704,9 @@ async function connectProviderOAuth(
 
 /**
  * Ensure a capability's required connection is satisfied. Provider (nango://) →
- * OAuth open + poll. Vault (vault://) → prompt for the key, POST /vault/secrets.
- * Returns true when the connection is (now) satisfied, false otherwise.
+ * OAuth open + poll. Vault (vault://) → rotate the linked secret in place, or
+ * apply the template with the key as a param. Returns true when the connection
+ * is (now) satisfied, false otherwise.
  */
 async function ensureConnection(
   cfg: HubCfg,
@@ -727,45 +728,34 @@ async function ensureConnection(
   // the remedy). Only OPENING A BROWSER is doomed, and that is already guarded
   // below. Short-circuiting on the card's cached state costs the real message.
 
-  // ── Vault credential — prompt + re-apply WITH params ──────────────────────
-  // The correct wiring: apply the template with the credential as a param, so the
-  // governed applier stores the secret AND links it into the connection tool's
-  // credentialRef (pod-wide, for a pod-scoped cap). A bare /vault/secrets write
-  // creates an orphan secret that is NOT linked to the tool — the old bug.
+  // ── Vault credential ──────────────────────────────────────────────────────
+  // Every write here must land on the secret the capability's tools actually
+  // read. A bare /vault/secrets write creates an orphan secret NOT linked to the
+  // tool's credentialRef: the CLI used to fall back to it and print success
+  // while every run kept the old key (unipile-linkedin, 2026-10-27).
   if (conn.kind === "vault") {
+    // Installed with a live key → rotate THAT secret in place. The tools keep
+    // their vault://<id>, so the new value is what the next run reads; no
+    // template re-apply, so optional install params are not blanked either.
+    if (card.id && conn.account && conn.state === "connected") {
+      return rotateLinkedSecret(cfg, card, card.id, conn.account);
+    }
+    // No live key yet → apply the template WITH params: the governed applier
+    // stores the secret AND links it into the tool's credentialRef.
     const hasParams = (card.installParams ?? []).some((p) => p.required);
     if (hasParams) {
       const collected = await collectInstallParams(card);
       if (!collected) return false;
       return applyTemplateWithParams(cfg, card, workspaceId, collected, "Connecting");
     }
-    // Fallback (older pod without install-params on the card): store the secret
-    // directly. May need manual linking if the tool's credentialRef doesn't match.
-    const service = conn.provider ?? card.key;
-    const answer = await prompts({
-      type: "password",
-      name: "value",
-      message: `Paste the ${chalk.bold(card.name)} credential (${service})`,
-    });
-    const value = answer.value as string | undefined;
-    if (!value) {
-      log.dim("Cancelled — no credential entered.");
-      return false;
-    }
-    const spinner = ora({ text: "Storing credential in the vault…", color: "cyan" }).start();
-    try {
-      await hubPost(
-        "/vault/secrets",
-        { name: `${card.name} credential`, value, service, type: "credential", workspaceId },
-        cfg
-      );
-      spinner.succeed(chalk.green(`Stored ${chalk.bold(service)} credential.`));
-      return true;
-    } catch (err) {
-      spinner.fail(chalk.red("Failed to store credential"));
-      renderHubError(err);
-      return false;
-    }
+    log.error(`Can't connect ${card.name} from here.`);
+    log.dim(
+      card.id
+        ? "The pod lists no install params for it and its tools point at no vault key that still exists."
+        : "The pod lists no install params for it."
+    );
+    log.dim(`Re-install it with its key:  synap cap add "${card.key}"`);
+    return false;
   }
 
   // ── Provider OAuth (nango://) — open + poll ───────────────────────────────
@@ -777,6 +767,41 @@ async function ensureConnection(
     cardName: card.name,
     forceReauth: forceReconnect,
   });
+}
+
+/**
+ * Replace the value of the vault secret a capability's tools point at
+ * (`secretId` = the card's `connection.account`, the id in their
+ * `vault://<id>`), through the capability credentials door. The row keeps its
+ * id, so every reference to it now resolves to the new value and no second
+ * secret is written.
+ */
+async function rotateLinkedSecret(
+  cfg: HubCfg,
+  card: CapabilityCard,
+  capabilityId: string,
+  secretId: string
+): Promise<boolean> {
+  const answer = await prompts({
+    type: "password",
+    name: "value",
+    message: `Paste the new ${chalk.bold(card.name)} key`,
+  });
+  const value = answer.value as string | undefined;
+  if (!value) {
+    log.dim("Cancelled — no key entered. The current key is unchanged.");
+    return false;
+  }
+  const spinner = ora({ text: `Replacing the ${chalk.bold(card.name)} key…`, color: "cyan" }).start();
+  try {
+    await hubPatch(`/capabilities/${capabilityId}/credentials/${secretId}`, { value }, cfg);
+    spinner.succeed(chalk.green(`Replaced the ${chalk.bold(card.name)} key. Its tools use the new one from the next run.`));
+    return true;
+  } catch (err) {
+    spinner.fail(chalk.red(`Couldn't replace the ${card.name} key — the current key is unchanged`));
+    renderHubError(err);
+    return false;
+  }
 }
 
 /**
@@ -1448,7 +1473,11 @@ export async function capabilityConnect(
 
   if (opts.reconnect) {
     log.heading(`Reconnecting ${card.name}`);
-    log.dim("Forcing a fresh sign-in — your previous access had expired or was revoked.");
+    log.dim(
+      card.connection.kind === "vault"
+        ? "Replacing the key its tools use."
+        : "Forcing a fresh sign-in — your previous access had expired or was revoked."
+    );
   }
   const ok = await ensureConnection(cfg, workspaceId, card, opts.reconnect ?? false);
   if (!ok) process.exit(1);
