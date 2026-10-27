@@ -1328,6 +1328,18 @@ session
     "--as <status>",
     "How it ended: closed (default, finished) | cancelled (abandoned) | failed (could not complete)"
   )
+  .option(
+    "--withdraw <messageId=note>",
+    "An open question you asked that your work overtook, with why (repeatable)",
+    collect,
+    [] as string[]
+  )
+  .option(
+    "--keep-owed <messageId>",
+    "An open question the person still owes you an answer to after this session (repeatable)",
+    collect,
+    [] as string[]
+  )
   .option("--json", "Output full pack (or close result) as JSON")
   .option("--pod-url <url>", "Pod URL override")
   .option("--api-key <key>", "API key override")
