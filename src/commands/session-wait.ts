@@ -6,9 +6,8 @@
  * into the session room (`synap_post_message` / the room), then calls this
  * command instead of a hand-rolled sleep loop or a blind re-invocation. It
  * polls `GET /api/hub/focus-sessions/:id/answers` (owner-floored; `since`
- * exclusive; contract in
- * `~/.claude/projects/-Users-antoine-Documents-Code-synap/memory/
- * scratch-lane-answer-loop-2026-09-25.md`) and exits the moment a reply
+ * exclusive; contract in pod document
+ * `db390250-3a74-4707-bb29-5832a454d194`) and exits the moment a reply
  * arrives, printing it so the calling agent (Claude Code or any shell agent)
  * can read it back and continue.
  *

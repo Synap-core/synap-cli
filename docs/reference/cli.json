@@ -2879,7 +2879,13 @@
           {
             "flags": "--cwd <dir>",
             "long": "--cwd",
-            "description": "Where the launched Claude Code works (default ~/Documents/Code/synap)",
+            "description": "Where code sessions' Claude Code works (default ~/Documents/Code/synap)",
+            "takesValue": "required"
+          },
+          {
+            "flags": "--work-root <dir>",
+            "long": "--work-root",
+            "description": "Where playbook runs over pod data (no repo) get a folder each, <dir>/<session id> (default ~/synap-work)",
             "takesValue": "required"
           },
           {
@@ -4763,9 +4769,9 @@
               {
                 "flags": "--category <cat>",
                 "long": "--category",
-                "description": "working_style | communication | focus | technical | preference",
+                "description": "working_style | communication | focus | preferences | habits | technical",
                 "takesValue": "required",
-                "default": "preference"
+                "default": "preferences"
               },
               {
                 "flags": "--confidence <n>",
