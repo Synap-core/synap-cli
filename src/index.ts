@@ -2011,10 +2011,11 @@ agents
 
 agents
   .command("rotate-key <name-or-id>")
-  .description("Rotate the Hub Protocol API key for an agent (local cache only)")
-  .action(async (nameOrId: string) => {
+  .description("Re-mint an agent's key through the agent door (replaces this computer's key once approved)")
+  .option("--show-key", "Print the new key in full (it is saved to the local agent config either way)")
+  .action(async (nameOrId: string, opts: { showKey?: boolean }) => {
     const { agentsRotateKey } = await import("./commands/agents.js");
-    await agentsRotateKey(nameOrId);
+    await agentsRotateKey(nameOrId, { showKey: opts.showKey });
   });
 
 agents
@@ -3310,6 +3311,48 @@ keys
   .action(async (opts: { showKey?: boolean }) => {
     const { keysRotate } = await import("./commands/keys.js");
     await keysRotate({ showKey: opts.showKey });
+  });
+
+keys
+  .command("templates")
+  .description("List the templates a key can be requested from")
+  .option("--json", "Output as JSON")
+  .action(async (opts: { json?: boolean }) => {
+    const { keysTemplates } = await import("./commands/keys.js");
+    await keysTemplates(opts);
+  });
+
+keys
+  .command("create")
+  .description("Ask your pod for a key made from a template: you approve it on pod-admin, the CLI receives it once")
+  .requiredOption("--template <id>", "Template id (see: synap keys templates)")
+  .option("--name <name>", "Name of the key (default: the template's)")
+  .option("--ttl <days|never>", "Lifetime in days, or never (default: the template's)")
+  .option("--space <id>", "Keep the key to one space (workspace id)")
+  .option("--env-file <path>", "Write the key into this file as NAME=key (0600); it is never printed")
+  .option("--env-name <name>", "Variable name used in the saved file (default SYNAP_API_KEY)")
+  .option("--show-key", "Print the key once instead of saving it to ~/.synap/keys/")
+  .option("--json", "Output as JSON (the key itself only with --show-key)")
+  .action(async (opts: { template: string; name?: string; ttl?: string; space?: string; envFile?: string; envName?: string; showKey?: boolean; json?: boolean }) => {
+    const { keysCreate } = await import("./commands/keys.js");
+    await keysCreate(opts);
+  });
+
+keys
+  .command("list")
+  .description("List the keys this computer requested (your other keys are on pod-admin)")
+  .option("--json", "Output as JSON")
+  .action(async (opts: { json?: boolean }) => {
+    const { keysList } = await import("./commands/keys.js");
+    await keysList(opts);
+  });
+
+keys
+  .command("revoke <key-id>")
+  .description("Revoke a key this computer requested")
+  .action(async (keyId: string) => {
+    const { keysRevoke } = await import("./commands/keys.js");
+    await keysRevoke(keyId);
   });
 
 // Resolve a global `--pod <name>` before commander parses (it isn't registered

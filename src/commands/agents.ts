@@ -8,7 +8,7 @@
  *   synap agents create            deprecated alias of `add`
  *   synap agents remove <name>     remove from local cache only
  *   synap agents info <name>       show local cache details only
- *   synap agents rotate-key <n>    rotate key using local cache only
+ *   synap agents rotate-key <n>    re-mint an agent's key through the agent door
  */
 
 import chalk from "chalk";
@@ -33,6 +33,7 @@ import {
   resolveAgentPod,
 } from "../lib/agent-door.js";
 import { provisionAgentKey } from "../lib/targets.js";
+import { redactKey } from "../lib/mcp-snippets.js";
 import { connectionLines, type PodConnection } from "../lib/agent-connections.js";
 import { thisComputerInstanceIds } from "../lib/machine-instance.js";
 
@@ -446,38 +447,9 @@ export async function agentsCreate(opts: Omit<AgentsAddOpts, "apiKey"> = {}): Pr
   await agentsAdd(opts.template && opts.template !== "custom" ? undefined : "custom", opts);
 }
 
-interface TrpcResponse<T> {
-  result?: { data?: T };
-  error?: { message: string; code?: string };
-}
-
-async function trpcMutation<T>(
-  podUrl: string,
-  apiKey: string,
-  procedure: string,
-  input: unknown
-): Promise<T> {
-  const url = `${podUrl}/trpc/${procedure}`;
-  const res = await fetch(url, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ json: input }),
-    signal: AbortSignal.timeout(15_000),
-  });
-  const body = (await res.json()) as TrpcResponse<T>;
-  if (!res.ok || body.error) {
-    throw new Error(body.error?.message ?? `HTTP ${res.status}`);
-  }
-  if (!body.result?.data) throw new Error("Unexpected empty response from tRPC");
-  return body.result.data;
-}
-
 // ─── rotate-key ───────────────────────────────────────────────────────────────
 
-export async function agentsRotateKey(nameOrId: string): Promise<void> {
+export async function agentsRotateKey(nameOrId: string, opts: { showKey?: boolean } = {}): Promise<void> {
   // Look up agent locally by name or agentUserId
   const all = listAgents();
   const match = all.find(
@@ -524,67 +496,32 @@ export async function agentsRotateKey(nameOrId: string): Promise<void> {
     return;
   }
 
-  const spinner = ora("Finding active key and rotating...").start();
+  // The agent's key belongs to the agent principal, so it is re-minted through
+  // the agent door, which replaces this computer's earlier key once approved.
+  // Never `/trpc` (keys plan D-7): it needs a person's session, so a Bearer key
+  // is 401 there, and its key list is the PERSON's keys, not the agent's.
+  const spinner = ora("Re-minting the agent's key...").start();
 
   try {
-    // Find the active API key for this agent user
-    // We list keys owned by the caller and find one matching the agent
-    // The key was created with the agent's userId — but we minted it as the
-    // caller, so it's under the caller's keys. We look up by prefix match.
-    const keysResult = await fetch(`${podProfile.config.podUrl}/trpc/apiKeys.list`, {
-      method: "GET",
-      headers: { Authorization: `Bearer ${cfg.apiKey}` },
-      signal: AbortSignal.timeout(10_000),
-    });
-
-    let activeKeyId: string | undefined;
-
-    if (keysResult.ok) {
-      const keysBody = (await keysResult.json()) as TrpcResponse<Array<{ id: string; keyPrefix: string; keyName: string; isActive: boolean }>>;
-      const keys = keysBody.result?.data ?? [];
-      // Match by keyName pattern used in agentsCreate
-      const agentKeyName = profile.label ?? name;
-      const match = keys.find(
-        (k) => k.isActive && k.keyName.startsWith(agentKeyName)
-      );
-      activeKeyId = match?.id;
-    }
-
-    if (!activeKeyId) {
-      // Re-mint through the agent door: the key belongs to the AGENT and
-      // carries its own access, never a key of yours relabelled as the agent's.
-      const agentType = profile.agentUserId
-        ? unwrapList<PodAgentRow>(await hubGet("/agent-users?mine=1", {}, cfg)).find(
-            (row) => row.id === profile.agentUserId
-          )?.agentType
-        : undefined;
-      if (!agentType) {
-        spinner.fail("Could not find this agent on the pod.");
-        log.dim(`Add it again: synap agents add --name "${profile.label ?? name}"`);
-        return;
-      }
-      spinner.warn("Could not find an active key record — minting a fresh agent key instead.");
-      const { hubApiKey } = await provisionAgentKey(
-        podProfile.config.podUrl,
-        cfg.apiKey,
-        agentType
-      );
-      displayNewKey(hubApiKey);
-      updateLocalKey(name, profile, hubApiKey);
+    const agentType = profile.agentUserId
+      ? unwrapList<PodAgentRow>(await hubGet("/agent-users?mine=1", {}, cfg)).find(
+          (row) => row.id === profile.agentUserId
+        )?.agentType
+      : undefined;
+    if (!agentType) {
+      spinner.fail("Could not find this agent on the pod.");
+      log.dim(`Add it again: synap agents add --name "${profile.label ?? name}"`);
       return;
     }
-
-    // Rotate the found key
-    const rotated = await trpcMutation<{ id: string; key: string; status: string }>(
+    spinner.stop();
+    const { hubApiKey } = await provisionAgentKey(
       podProfile.config.podUrl,
       cfg.apiKey,
-      "apiKeys.rotate",
-      { keyId: activeKeyId }
+      agentType
     );
-
-    spinner.succeed("Key rotated successfully.");
-    displayNewKey(rotated.key);
-    updateLocalKey(name, profile, rotated.key);
+    log.success(`New key ${redactKey(hubApiKey)} minted for ${profile.label ?? name}.`);
+    if (opts.showKey) displayNewKey(hubApiKey);
+    updateLocalKey(name, profile, hubApiKey);
   } catch (err) {
     spinner.fail("Key rotation failed.");
     log.error(err instanceof Error ? err.message : String(err));
