@@ -27,6 +27,11 @@
  * into the run's environment only. A run cut off by a usage limit marks that
  * account full and is RESUMED (same Claude conversation) on the next account.
  *
+ * Three protocols (`classifySession`): CODE (worktree, draft PR, the owner
+ * closes the session), TASK (a session that follows a non-code playbook, e.g.
+ * the CRM's "Score a list": pod tools and the web only, no shell or files, and
+ * it closes the session itself when nothing is left for the person), DESIGN.
+ *
  * A DESIGN run (the session declares an outcome of kind "design") launches as
  * `claude --bg` — the only mode that has the Artifact tool — on the account
  * flagged `design`, and is watched through `claude agents --json` and its
@@ -96,6 +101,8 @@ export interface RunRecord {
   accountId?: string;
   /** `print` = `claude -p` (default); `bg` = `claude --bg`, a design run. */
   mode?: "print" | "bg";
+  /** A print run's protocol (see `classifySession`); absent on records written before it existed = "code". */
+  protocol?: "code" | "task";
   /** The short id `claude --bg` printed (what `claude agents|stop` take). */
   bgId?: string;
   /** When the latest launch (first or resumed) started. */
@@ -265,6 +272,67 @@ export const DEFAULT_ALLOWED_TOOLS = ["Read", "Edit", "Write", "Glob", "Grep", "
 /** The tools a design run adds: the claude.ai Artifact tool (and the search that loads deferred tools). */
 export const DESIGN_EXTRA_TOOLS = ["Artifact", "ToolSearch"];
 
+/**
+ * A TASK run (see `classifySession`) writes ONLY through the pod: its tools are
+ * the pod MCP server plus the web (research needs it). No shell, no file tool.
+ * The list is fixed: `--allowed-tools` and `--dangerously-skip-permissions`
+ * apply to code runs only.
+ */
+export const TASK_ALLOWED_TOOLS = ["WebSearch", "WebFetch"];
+/** Denied outright on a TASK run, on top of `dontAsk` (which already denies anything not allowed). */
+export const TASK_DISALLOWED_TOOLS = ["Bash", "Edit", "Write", "NotebookEdit"];
+
+/**
+ * The permission flags of a print (`claude -p`) run. A code run keeps today's
+ * flags. A task run is `dontAsk` — never `acceptEdits`, which would auto-accept
+ * file edits — with the task tools allowed and the file and shell tools denied.
+ */
+export function printRunPermissionArgs(
+  protocol: "code" | "task",
+  p: { codeAllowed: string[]; mcpServer: string; skipPermissions?: boolean }
+): string[] {
+  if (protocol === "task") {
+    return [
+      "--permission-mode",
+      "dontAsk",
+      "--allowedTools",
+      [...TASK_ALLOWED_TOOLS, `mcp__${p.mcpServer}`].join(","),
+      "--disallowedTools",
+      TASK_DISALLOWED_TOOLS.join(","),
+    ];
+  }
+  if (p.skipPermissions) return ["--dangerously-skip-permissions"];
+  return ["--permission-mode", "acceptEdits", "--allowedTools", ...p.codeAllowed];
+}
+
+/**
+ * The protocol for a TASK session: a process whose work happens in the pod
+ * (score a list, draft a message, qualify a lead). It writes through pod tools
+ * only, marks its outcomes, and closes the session itself when nothing is left
+ * for the person.
+ */
+export function buildTaskPrompt(p: { sessionId: string; goal: string | null; agentName: string; mcpServer: string }): string {
+  return [
+    `You are the Synap agent "${p.agentName}", an unattended Claude Code worker on this machine.`,
+    `A person or an orchestrating AI handed you ONE Synap focus session that follows a process whose work happens in the pod, not in code. Work it end to end, then close it.`,
+    `Synap tools are on the MCP server "${p.mcpServer}" (mcp__${p.mcpServer}__synap_*).`,
+    ``,
+    `Session: ${p.sessionId}`,
+    `Goal as handed: ${p.goal ?? "(read it from the session)"}`,
+    `This is a TASK run: you have the pod tools, WebSearch and WebFetch. No shell, no files.`,
+    ``,
+    `Protocol:`,
+    `1. Read: synap_get_session {sessionId} for the goal, the process instructions and params (metadata.prompt, metadata.params), the stages and currentStage, the subject, the outcomes with their owner, and channelId (the room); then synap_get_thread_context {threadId: <channelId>} for what was said so far. Read the subject and every entity the params name (synap_get_entity) before you write.`,
+    `2. Claim: synap_post_message to the room (kind "update"), one line: you picked it up and what you will do first.`,
+    `3. Work: follow the goal and the process instructions stage by stage; when a stage is done, move the session on (synap_update_session currentStage <stage key>; a stage that moves the subject's status moves the subject, with expectedStatus). Research with WebSearch and WebFetch, public sources only, and keep each source URL with the fact it supports. Write ONLY through the pod tools: entities and their fields (synap_update_entity, synap_create_entity), facets (synap_attach_facet), relations (synap_link_entities), documents (synap_create_document, synap_update_document). Never edit files, never run code, never open a pull request. A write that comes back "proposed" is success: keep going, never retry it. If the goal turns out to need a code change or files, stop: say so in the room and end with WORKER-RESULT: blocked — this session needs a code run (an outcome of kind "pull-request").`,
+    `4. Need help or a decision: post in the room starting with "QUESTION:" — kind "update" when the orchestrating AI can answer it, kind "question" only for a decision only the person can make (with slotLabel and an ask: choose, your recommendation marked). Then wait with synap_wait_for_answer {sessionId} (call it again with since = nextSince), up to 30 minutes in all. No reply: state your assumption in the room and continue, or stop and say what is blocked.`,
+    `5. Mark each outcome you produced: synap_update_session {sessionId, completeOutput: <key>} for every agent-owned outcome you delivered, with its evidence when it has none yet (outcomes:[{key, ref:{kind, id}}] naming the entity or document you wrote). For outcomes of kind "fact", call synap_evaluate_session {sessionId} once the work is written.`,
+    `6. Report: post ONE paragraph in the room starting "Look at first:" — what you wrote (each entity or document by name), what is left, and the first thing to check.`,
+    `7. Close: read synap_get_session again. When every required agent-owned outcome is met and nothing waits on the person (no owner "human" outcome pending, no question unanswered, no stage gate waiting), complete the session: synap_complete_session {sessionId, terminalStatus: "closed", summary: <one sentence of what was done>}. Proposals your writes created do not keep it open: closing hands them to the person's review. Otherwise leave the session open and say in the room which outcome or answer it waits on.`,
+    `8. End your final message with one line: WORKER-RESULT: done | blocked | failed — <one sentence>. done = you closed the session; blocked = it waits on the person or on a code run.`,
+  ].join("\n");
+}
+
 /** The protocol the launched Claude Code follows for one handed session. */
 export function buildWorkerPrompt(p: {
   sessionId: string;
@@ -424,20 +492,82 @@ export const LIMIT_RESUME_PROMPT =
  */
 export const DESIGN_OUTCOME_KIND = "design";
 
-export function isDesignSession(getSessionText: string): boolean {
+interface SessionRead {
+  session?: { playbookId?: unknown; templateId?: unknown } | null;
+  outcomes: Array<{ kind?: unknown }>;
+}
+
+/** `synap_get_session` text → the fields the worker decides on. A failed or partial read THROWS. */
+function readSessionForProtocol(getSessionText: string): SessionRead {
   let data: unknown;
   try {
     data = JSON.parse(getSessionText);
   } catch {
     throw new Error(`get_session did not return JSON: ${getSessionText.slice(0, 160)}`);
   }
-  const d = data as { error?: unknown; outcomes?: { status?: string; outcomes?: Array<{ kind?: unknown }> } };
+  const d = data as {
+    error?: unknown;
+    session?: SessionRead["session"];
+    outcomes?: { status?: string; outcomes?: Array<{ kind?: unknown }> };
+  };
   if (typeof d?.error === "string") throw new Error(`get_session: ${d.error}`);
   const o = d?.outcomes;
   if (!o || o.status !== "ok" || !Array.isArray(o.outcomes)) {
     throw new Error(`get_session could not read the session's outcomes (${o?.status ?? "missing"})`);
   }
-  return o.outcomes.some((x) => x?.kind === DESIGN_OUTCOME_KIND);
+  return { session: d.session, outcomes: o.outcomes };
+}
+
+export function isDesignSession(getSessionText: string): boolean {
+  return readSessionForProtocol(getSessionText).outcomes.some((x) => x?.kind === DESIGN_OUTCOME_KIND);
+}
+
+/**
+ * The outcome kinds that declare CODE work: a pull request (`pull-request` in
+ * the night-shift playbooks' expectedOutputs, `pull_request` in the work-units
+ * rule), `code` (an orchestrator's hand-off), a branch or a commit.
+ */
+export const CODE_OUTCOME_KINDS: ReadonlySet<string> = new Set(["code", "pull-request", "pull_request", "branch", "commit"]);
+
+/**
+ * Which protocol a handed session gets. Only structured fields of
+ * `synap_get_session` decide it; the goal text is never read for it.
+ *
+ *   design — an outcome of kind "design" (see `isDesignSession`).
+ *   code   — an outcome whose kind is in CODE_OUTCOME_KINDS; or a session that
+ *            follows NO playbook (`session.playbookId` and `session.templateId`
+ *            both null): a free-form hand-off, which is how an orchestrating AI
+ *            hands repo work today, so it keeps today's protocol unchanged.
+ *   task   — a session that FOLLOWS a playbook and declares no code outcome:
+ *            a process whose work happens in the pod (CRM "Score a list",
+ *            "Draft a first message", "Qualify a lead", a morning brief). It
+ *            writes through pod tools only and closes itself.
+ *
+ * Why outcomes and not the playbook's space or name: the pod has no "dev
+ * process" marker on a playbook, and a space id is one pod's, not a rule. What a
+ * process must YIELD is the declaration it makes: a process that yields a pull
+ * request is code work. The known gap, measured on the founder's pod
+ * (2026-10-27): the Builder playbooks "Bugfix", "Quick change", "AI Dev
+ * Session" and "Design to implementation" declare no outcome at all, so a run
+ * of one classifies TASK; the task prompt then stops it `blocked`, saying the
+ * session needs a code outcome. Those playbooks should declare
+ * `expectedOutputs: [{kind: "pull-request"}]`.
+ *
+ * A session block with neither `playbookId` nor `templateId` THROWS: a read
+ * that cannot say whether the session follows a playbook is not "it does not".
+ */
+export type SessionProtocol = "design" | "code" | "task";
+
+export function classifySession(getSessionText: string): SessionProtocol {
+  const r = readSessionForProtocol(getSessionText);
+  if (r.outcomes.some((x) => x?.kind === DESIGN_OUTCOME_KIND)) return "design";
+  if (r.outcomes.some((x) => typeof x?.kind === "string" && CODE_OUTCOME_KINDS.has(x.kind))) return "code";
+  const s = r.session;
+  if (!s || typeof s !== "object" || (!("playbookId" in s) && !("templateId" in s))) {
+    throw new Error("get_session did not say whether the session follows a playbook (no playbookId/templateId)");
+  }
+  const followsPlaybook = typeof s.playbookId === "string" || typeof s.templateId === "string";
+  return followsPlaybook ? "task" : "code";
 }
 
 /** The short id `claude --bg` prints ("backgrounded · fd009109"). */
@@ -722,7 +852,8 @@ export function createWorker(opts: WorkerOptions, deps: WorkerDeps): Worker {
   };
 
   // ── launching ──
-  const launch = async (item: HandedItem, how: How, design: boolean, account: AccountSpec | undefined): Promise<void> => {
+  const launch = async (item: HandedItem, how: How, protocol: SessionProtocol, account: AccountSpec | undefined): Promise<void> => {
+    const design = protocol === "design";
     const resumeId = how.kind === "fresh" ? undefined : how.claudeSessionId;
     // The run names its own Claude session up front (`--session-id`), so the pod sees ONE
     // conversation per run, kept across resumes, instead of a new MCP transport id each launch.
@@ -737,7 +868,9 @@ export function createWorker(opts: WorkerOptions, deps: WorkerDeps): Worker {
         ? how.prompt
         : how.kind === "limitResume" && how.claudeSessionId
           ? LIMIT_RESUME_PROMPT
-          : buildWorkerPrompt({ sessionId: item.id, goal: item.goal, agentName: agent, cwd, mcpServer, design });
+          : protocol === "task"
+            ? buildTaskPrompt({ sessionId: item.id, goal: item.goal, agentName: agent, mcpServer })
+            : buildWorkerPrompt({ sessionId: item.id, goal: item.goal, agentName: agent, cwd, mcpServer, design });
 
     const prior = state.runs[item.id];
     const base = {
@@ -745,6 +878,7 @@ export function createWorker(opts: WorkerOptions, deps: WorkerDeps): Worker {
       exitCode: undefined,
       accountId: account?.id,
       mode: design ? ("bg" as const) : ("print" as const),
+      protocol: design ? undefined : protocol,
       launchedAt: iso(),
       blockedSince: undefined,
     };
@@ -771,7 +905,7 @@ export function createWorker(opts: WorkerOptions, deps: WorkerDeps): Worker {
         : how.kind === "followUp"
           ? `resumed (follow-up #${record.resumes})`
           : `resumed after a usage limit (#${record.limitResumes})`;
-    const on = account ? ` on account ${account.id}` : "";
+    const on = `${account ? ` on account ${account.id}` : ""}${protocol === "task" ? " · task protocol" : ""}`;
     const env = workerEnv(process.env, opts.claudeConfigDir, account?.token);
 
     if (design) {
@@ -817,8 +951,7 @@ export function createWorker(opts: WorkerOptions, deps: WorkerDeps): Worker {
 
     const args = ["-p", prompt, "--output-format", "stream-json", "--verbose", "--mcp-config", mcpConfigPath];
     args.push(...(resumeId ? ["--resume", resumeId] : ["--session-id", runSessionId]));
-    if (opts.skipPermissions) args.push("--dangerously-skip-permissions");
-    else args.push("--permission-mode", "acceptEdits", "--allowedTools", ...allowed);
+    args.push(...printRunPermissionArgs(protocol, { codeAllowed: allowed, mcpServer, skipPermissions: opts.skipPermissions }));
 
     if (opts.dryRun) {
       record.status = "done";
@@ -976,18 +1109,20 @@ export function createWorker(opts: WorkerOptions, deps: WorkerDeps): Worker {
     return followUpsSince(messages, since, deps.selfAgentId);
   };
 
-  /** Whether a handed session is a design run; `undefined` when that could not be read (not launched this tick). */
-  const readDesign = async (sessionId: string): Promise<boolean | undefined> => {
+  /** Which protocol a handed session gets; `undefined` when that could not be read (not launched this tick). */
+  const readProtocol = async (sessionId: string): Promise<SessionProtocol | undefined> => {
     try {
       const s = await deps.mcp.call("synap_get_session", { sessionId });
       if (s.isError) throw new Error(`refused: ${s.text.slice(0, 160)}`);
-      return isDesignSession(s.text);
+      return classifySession(s.text);
     } catch (err) {
       const msg = (err as Error).message;
-      sayOnce(`design:${sessionId}:${msg}`, `session ${sessionId}: could not read whether it is a design run (${msg}) — not launched; retried every tick`);
+      sayOnce(`protocol:${sessionId}:${msg}`, `session ${sessionId}: could not read which protocol it needs (${msg}) — not launched; retried every tick`);
       return undefined;
     }
   };
+  /** The protocol a run was launched under: a resume keeps it. */
+  const recordedProtocol = (rec: RunRecord): SessionProtocol => (rec.mode === "bg" ? "design" : (rec.protocol ?? "code"));
 
   const tick = async () => {
     measuredThisTick = false;
@@ -1011,21 +1146,21 @@ export function createWorker(opts: WorkerOptions, deps: WorkerDeps): Worker {
         log(`session ${rec.sessionId}: ${rec.result}`);
         continue;
       }
-      const design = rec.mode === "bg";
-      const account = await pick(design);
+      const protocol = recordedProtocol(rec);
+      const account = await pick(protocol === "design");
       if (account === null) continue;
-      await launch(item, { kind: "limitResume", claudeSessionId: rec.claudeSessionId }, design, account);
+      await launch(item, { kind: "limitResume", claudeSessionId: rec.claudeSessionId }, protocol, account);
       launched++;
     }
 
     // 2. Sessions never launched (or due a relaunch).
     for (const item of pickNew(items, state, items.length, now())) {
       if (free() <= 0) break;
-      const design = await readDesign(item.id);
-      if (design === undefined) continue;
-      const account = await pick(design);
+      const protocol = await readProtocol(item.id);
+      if (protocol === undefined) continue;
+      const account = await pick(protocol === "design");
       if (account === null) continue;
-      await launch(item, { kind: "fresh" }, design, account);
+      await launch(item, { kind: "fresh" }, protocol, account);
       launched++;
     }
 
@@ -1037,10 +1172,10 @@ export function createWorker(opts: WorkerOptions, deps: WorkerDeps): Worker {
       if ((rec.resumes ?? 0) >= MAX_RESUMES) continue;
       const follow = await roomFollowUps(item.id, rec.finishedAt);
       if (!follow.length) continue;
-      const design = rec.mode === "bg";
-      const account = await pick(design);
+      const protocol = recordedProtocol(rec);
+      const account = await pick(protocol === "design");
       if (account === null) continue;
-      await launch(item, { kind: "followUp", claudeSessionId: rec.claudeSessionId, prompt: buildFollowUpPrompt(follow) }, design, account);
+      await launch(item, { kind: "followUp", claudeSessionId: rec.claudeSessionId, prompt: buildFollowUpPrompt(follow) }, protocol, account);
       launched++;
     }
     return { handed: items.length, launched };

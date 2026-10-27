@@ -2911,13 +2911,13 @@
           {
             "flags": "--allowed-tools <list>",
             "long": "--allowed-tools",
-            "description": "Comma-separated Claude tools allowed without asking (the pod MCP server is always added)",
+            "description": "Comma-separated Claude tools a CODE run may use without asking (the pod MCP server is always added; a task run always gets the pod MCP server + WebSearch + WebFetch)",
             "takesValue": "required"
           },
           {
             "flags": "--skip-permissions",
             "long": "--skip-permissions",
-            "description": "Launch with --dangerously-skip-permissions instead of an allow-list",
+            "description": "Launch code runs with --dangerously-skip-permissions instead of an allow-list (task runs keep their fixed tools)",
             "takesValue": "none"
           },
           {

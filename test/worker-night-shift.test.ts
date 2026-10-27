@@ -91,7 +91,8 @@ function stubPod(sessions: Record<string, { goal: string; outcomes: unknown }>):
       }
       if (tool === "synap_get_session") {
         const s = sessions[args.sessionId as string];
-        return { isError: false, text: JSON.stringify({ session: { id: args.sessionId, channelId: null }, outcomes: s.outcomes }) };
+        // A free-form hand-off (no playbook), as the pod spells it: these runs keep the code/design protocols.
+        return { isError: false, text: JSON.stringify({ session: { id: args.sessionId, channelId: null, playbookId: null, templateId: null }, outcomes: s.outcomes }) };
       }
       throw new Error(`unexpected tool ${tool}`);
     },
