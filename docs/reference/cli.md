@@ -4,7 +4,7 @@
 
 Synap CLI — connect AI agents to your data pod
 
-231 commands. Hidden commands and hidden options are omitted here (5 hidden commands); `cli.json` lists them with `"hidden": true`.
+235 commands. Hidden commands and hidden options are omitted here (5 hidden commands); `cli.json` lists them with `"hidden": true`.
 
 Every command also accepts `-h, --help`.
 
@@ -145,7 +145,7 @@ Every command also accepts `-h, --help`.
   - [`synap agents list`](#synap-agents-list) — List your agents on this pod (one per type). Use --local for ~/.synap cache only.
   - [`synap agents add`](#synap-agents-add) — Bring an agent into the pod: a client (claude-code, cursor, codex, …), your own (--name → URL + key), or pick from this machine (no kind)
   - [`synap agents create`](#synap-agents-create) — Deprecated — use `synap agents add` (same flags)
-  - [`synap agents rotate-key`](#synap-agents-rotate-key) — Rotate the Hub Protocol API key for an agent (local cache only)
+  - [`synap agents rotate-key`](#synap-agents-rotate-key) — Re-mint an agent's key through the agent door (replaces this computer's key once approved)
   - [`synap agents remove`](#synap-agents-remove) — Remove a named agent identity (local cache only)
   - [`synap agents info`](#synap-agents-info) — Show details for a named agent identity (local cache only)
 - [`synap agent`](#synap-agent) — Run autonomous agent loops against the IS, or schedule recurring goals
@@ -241,6 +241,10 @@ Every command also accepts `-h, --help`.
   - [`synap providers list-keys`](#synap-providers-list-keys) — List user/workspace-level provider key overrides
 - [`synap keys`](#synap-keys) — Manage pod API keys
   - [`synap keys rotate`](#synap-keys-rotate) — Rotate your CLI key to pick up the latest scope set
+  - [`synap keys templates`](#synap-keys-templates) — List the templates a key can be requested from
+  - [`synap keys create`](#synap-keys-create) — Ask your pod for a key made from a template: you approve it on pod-admin, the CLI receives it once
+  - [`synap keys list`](#synap-keys-list) — List the keys this computer requested (your other keys are on pod-admin)
+  - [`synap keys revoke`](#synap-keys-revoke) — Revoke a key this computer requested
 
 ## `synap`
 
@@ -2495,11 +2499,15 @@ Deprecated — use `synap agents add` (same flags)
 synap agents rotate-key [options] <name-or-id>
 ```
 
-Rotate the Hub Protocol API key for an agent (local cache only)
+Re-mint an agent's key through the agent door (replaces this computer's key once approved)
 
 | Argument | Required | Description |
 |---|---|---|
 | `name-or-id` | yes |  |
+
+| Option | Description | Default |
+|---|---|---|
+| `--show-key` | Print the new key in full (it is saved to the local agent config either way) |  |
 
 ## `synap agents remove`
 
@@ -4121,7 +4129,7 @@ synap keys [options] [command]
 
 Manage pod API keys
 
-Subcommands: [`rotate`](#synap-keys-rotate)
+Subcommands: [`rotate`](#synap-keys-rotate), [`templates`](#synap-keys-templates), [`create`](#synap-keys-create), [`list`](#synap-keys-list), [`revoke`](#synap-keys-revoke)
 
 ## `synap keys rotate`
 
@@ -4134,3 +4142,58 @@ Rotate your CLI key to pick up the latest scope set
 | Option | Description | Default |
 |---|---|---|
 | `--show-key` | Print the new key in full if it could not be saved to the config |  |
+
+## `synap keys templates`
+
+```
+synap keys templates [options]
+```
+
+List the templates a key can be requested from
+
+| Option | Description | Default |
+|---|---|---|
+| `--json` | Output as JSON |  |
+
+## `synap keys create`
+
+```
+synap keys create [options]
+```
+
+Ask your pod for a key made from a template: you approve it on pod-admin, the CLI receives it once
+
+| Option | Description | Default |
+|---|---|---|
+| `--template <id>` | Template id (see: synap keys templates) (required) |  |
+| `--name <name>` | Name of the key (default: the template's) |  |
+| `--ttl <days\|never>` | Lifetime in days, or never (default: the template's) |  |
+| `--space <id>` | Keep the key to one space (workspace id) |  |
+| `--env-file <path>` | Write the key into this file as NAME=key (0600); it is never printed |  |
+| `--env-name <name>` | Variable name used in the saved file (default SYNAP_API_KEY) |  |
+| `--show-key` | Print the key once instead of saving it to ~/.synap/keys/ |  |
+| `--json` | Output as JSON (the key itself only with --show-key) |  |
+
+## `synap keys list`
+
+```
+synap keys list [options]
+```
+
+List the keys this computer requested (your other keys are on pod-admin)
+
+| Option | Description | Default |
+|---|---|---|
+| `--json` | Output as JSON |  |
+
+## `synap keys revoke`
+
+```
+synap keys revoke [options] <key-id>
+```
+
+Revoke a key this computer requested
+
+| Argument | Required | Description |
+|---|---|---|
+| `key-id` | yes |  |
