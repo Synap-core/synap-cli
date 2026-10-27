@@ -18,7 +18,7 @@ import {
   writeLens,
   clearLensField,
 } from "./session-lens.js";
-import { conversationHeaders } from "./conversation-headers.js";
+import { clientHeader, conversationHeaders } from "./conversation-headers.js";
 import {
   effectiveDirectoryLens,
   resolveDirectoryLensForPod,
@@ -890,13 +890,18 @@ export function detachActiveSessionId(podUrl?: string): string | undefined {
 }
 
 /**
- * Per-request headers: the focus session this terminal is attached to, and the
+ * Per-request headers: which client calls (`synap-cli/<version>`), the focus
+ * session this terminal is attached to, and the
  * Claude Code conversation the call comes from (`conversation-headers.ts`) — so
  * the work it lands can be traced back to, and reopened in, that conversation.
  */
 function sessionHeaders(cfg?: HubConfig): Record<string, string> {
   const id = resolveActiveSessionId(cfg?.podUrl);
-  return { ...conversationHeaders(getClaudeSessionId()), ...(id ? { "X-Session-Id": id } : {}) };
+  return {
+    ...clientHeader("synap-cli"),
+    ...conversationHeaders(getClaudeSessionId()),
+    ...(id ? { "X-Session-Id": id } : {}),
+  };
 }
 
 /** Max 429 retries for bulk import (each waits up to the rate-limit window). */
