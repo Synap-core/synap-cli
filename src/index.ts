@@ -1192,7 +1192,8 @@ program
   .requiredOption("--agent <name>", "The named agent this machine works as (its key comes from ~/.synap)")
   .option("--interval <dur>", "How often to check for handed sessions (e.g. 30s, 2m)", "30s")
   .option("--once", "Check once, run what is handed, wait for it, exit")
-  .option("--cwd <dir>", "Where the launched Claude Code works (default ~/Documents/Code/synap)")
+  .option("--cwd <dir>", "Where code sessions' Claude Code works (default ~/Documents/Code/synap)")
+  .option("--work-root <dir>", "Where playbook runs over pod data (no repo) get a folder each, <dir>/<session id> (default ~/synap-work)")
   .option("--max-parallel <n>", "Runs at the same time", "1")
   .option("--claude-bin <path>", "The claude binary", "claude")
   .option("--claude-config-dir <dir>", "CLAUDE_CONFIG_DIR for launched runs — picks which Claude subscription they use")
@@ -1206,6 +1207,31 @@ program
   .action(async (opts: import("./commands/worker.js").WorkerOptions) => {
     const { workerCommand } = await import("./commands/worker.js");
     await workerCommand(opts);
+  });
+
+// ─── box ──────────────────────────────────────────────────────────────────────
+// Run THIS computer as a run box provisioner: lease the box runs queued on the
+// pod, run each in a fresh isolated LXC, hand back the evidence. See src/commands/box.ts.
+
+const box = program.command("box").description("Run scripts in fresh isolated boxes on this computer (run box provisioner)");
+
+box
+  .command("serve")
+  .description("Lease queued box runs from the pod and run each in a fresh box")
+  .option("--config <file>", "Provisioner config", "/etc/synap-box/config.json")
+  .option("--once", "Lease at most one run, work it, exit")
+  .action(async (opts: import("./commands/box.js").BoxOptions) => {
+    const { boxServeCommand } = await import("./commands/box.js");
+    await boxServeCommand(opts);
+  });
+
+box
+  .command("reap")
+  .description("Destroy every box no run holds (after a crash)")
+  .option("--config <file>", "Provisioner config", "/etc/synap-box/config.json")
+  .action(async (opts: import("./commands/box.js").BoxOptions) => {
+    const { boxReapCommand } = await import("./commands/box.js");
+    await boxReapCommand(opts);
   });
 
 // ─── session ──────────────────────────────────────────────────────────────────

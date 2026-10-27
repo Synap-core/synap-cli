@@ -496,7 +496,7 @@ export async function mcpUiSetup(
  */
 export async function mcpBridge(opts: { url?: string }): Promise<void> {
   const { runMcpBridge } = await import("../lib/mcp-bridge.js");
-  const { conversationHeaders } = await import("../lib/conversation-headers.js");
+  const { mcpBridgeHeaders } = await import("../lib/conversation-headers.js");
   const fromEnv = process.env.SYNAP_MCP_API_KEY || process.env.SYNAP_HUB_API_KEY;
   const cfg = fromEnv && opts.url ? null : await resolveHubConfig();
   const apiKey = fromEnv || cfg?.apiKey;
@@ -509,7 +509,7 @@ export async function mcpBridge(opts: { url?: string }): Promise<void> {
   await runMcpBridge({
     url,
     apiKey,
-    headers: conversationHeaders(process.env.CLAUDE_CODE_SESSION_ID),
+    headers: mcpBridgeHeaders(process.env.CLAUDE_CODE_SESSION_ID),
   });
 }
 

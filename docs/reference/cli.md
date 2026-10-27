@@ -4,7 +4,7 @@
 
 Synap CLI — connect AI agents to your data pod
 
-228 commands. Hidden commands and hidden options are omitted here (5 hidden commands); `cli.json` lists them with `"hidden": true`.
+231 commands. Hidden commands and hidden options are omitted here (5 hidden commands); `cli.json` lists them with `"hidden": true`.
 
 Every command also accepts `-h, --help`.
 
@@ -87,6 +87,9 @@ Every command also accepts `-h, --help`.
   - [`synap proposals reject`](#synap-proposals-reject) — Reject a pending proposal
   - [`synap proposals await`](#synap-proposals-await) — Block until a proposal is decided. Exit 0 approved · 1 rejected/expired/withdrawn · 2 timeout
 - [`synap worker`](#synap-worker) — Run Claude Code unattended here for the sessions handed to an agent
+- [`synap box`](#synap-box) — Run scripts in fresh isolated boxes on this computer (run box provisioner)
+  - [`synap box serve`](#synap-box-serve) — Lease queued box runs from the pod and run each in a fresh box
+  - [`synap box reap`](#synap-box-reap) — Destroy every box no run holds (after a crash)
 - [`synap session`](#synap-session) — Manage focus sessions (goal-bound AI work rooms)
   - [`synap session start`](#synap-session-start) — Start a new focus session and return its ID
   - [`synap session list`](#synap-session-list) — List focus sessions in the active workspace
@@ -1479,7 +1482,8 @@ Run Claude Code unattended here for the sessions handed to an agent
 | `--agent <name>` | The named agent this machine works as (its key comes from ~/.synap) (required) |  |
 | `--interval <dur>` | How often to check for handed sessions (e.g. 30s, 2m) | `"30s"` |
 | `--once` | Check once, run what is handed, wait for it, exit |  |
-| `--cwd <dir>` | Where the launched Claude Code works (default ~/Documents/Code/synap) |  |
+| `--cwd <dir>` | Where code sessions' Claude Code works (default ~/Documents/Code/synap) |  |
+| `--work-root <dir>` | Where playbook runs over pod data (no repo) get a folder each, <dir>/<session id> (default ~/synap-work) |  |
 | `--max-parallel <n>` | Runs at the same time | `"1"` |
 | `--claude-bin <path>` | The claude binary | `"claude"` |
 | `--claude-config-dir <dir>` | CLAUDE_CONFIG_DIR for launched runs — picks which Claude subscription they use |  |
@@ -1487,6 +1491,41 @@ Run Claude Code unattended here for the sessions handed to an agent
 | `--allowed-tools <list>` | Comma-separated Claude tools allowed without asking (the pod MCP server is always added) |  |
 | `--skip-permissions` | Launch with --dangerously-skip-permissions instead of an allow-list |  |
 | `--dry-run` | Claim and log what would launch, without launching Claude |  |
+
+## `synap box`
+
+```
+synap box [options] [command]
+```
+
+Run scripts in fresh isolated boxes on this computer (run box provisioner)
+
+Subcommands: [`serve`](#synap-box-serve), [`reap`](#synap-box-reap)
+
+## `synap box serve`
+
+```
+synap box serve [options]
+```
+
+Lease queued box runs from the pod and run each in a fresh box
+
+| Option | Description | Default |
+|---|---|---|
+| `--config <file>` | Provisioner config | `"/etc/synap-box/config.json"` |
+| `--once` | Lease at most one run, work it, exit |  |
+
+## `synap box reap`
+
+```
+synap box reap [options]
+```
+
+Destroy every box no run holds (after a crash)
+
+| Option | Description | Default |
+|---|---|---|
+| `--config <file>` | Provisioner config | `"/etc/synap-box/config.json"` |
 
 ## `synap session`
 
@@ -2253,7 +2292,7 @@ Record an observation about the user (pod-scoped, AI-maintained)
 
 | Option | Description | Default |
 |---|---|---|
-| `--category <cat>` | working_style \| communication \| focus \| technical \| preference | `"preference"` |
+| `--category <cat>` | working_style \| communication \| focus \| preferences \| habits \| technical | `"preferences"` |
 | `--confidence <n>` | Confidence score 0-1 | `"0.5"` |
 | `--json` | Output as JSON |  |
 | `--pod-url <url>` | Pod URL override |  |

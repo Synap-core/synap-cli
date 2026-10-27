@@ -8,9 +8,30 @@
  * this process's own run (`synap-cli:<uuid>`, or `SYNAP_RUN_ID` to span a script).
  */
 import { randomUUID } from "node:crypto";
+import { cliBuild } from "./cli-build.js";
 
 export const CONVERSATION_HEADER = "X-Synap-Conversation";
 export const CONVERSATION_CWD_HEADER = "X-Synap-Conversation-Cwd";
+
+/**
+ * Which CLIENT program makes the call, `<name>/<version>`: `synap-cli/<v>` for
+ * the CLI's Hub calls, `synap-cli-mcp/<v>` for the stdio MCP bridge (and
+ * `synap-bridge/<v>` from the Claude Code mod). The pod counts calls per client
+ * in its usage telemetry, so two programs sharing one key and one conversation
+ * can be told apart. Never an identity: it only labels the count.
+ */
+export const CLIENT_HEADER = "X-Synap-Client";
+export type SynapClientName = "synap-cli" | "synap-cli-mcp";
+
+/** `{ "X-Synap-Client": "<name>/<version>" }`; the version is the package's. */
+export function clientHeader(
+  name: SynapClientName,
+  version: string = cliBuild().version
+): Record<string, string> {
+  // A header value must be visible ASCII; an odd version never fails the call.
+  const v = /^[\x21-\x7E]{1,64}$/.test(version) ? version : "unknown";
+  return { [CLIENT_HEADER]: `${name}/${v}` };
+}
 
 /** The same two values in a request's `params._meta` (reverse-DNS vendor keys; `io.modelcontextprotocol/` is reserved). */
 export const CONVERSATION_META_KEY = "live.synap/conversation";
@@ -58,3 +79,11 @@ export function conversationHeaders(
     : { [CONVERSATION_HEADER]: conversation };
 }
 
+
+/** Every header the stdio MCP bridge sends: its client name plus the conversation. */
+export function mcpBridgeHeaders(
+  sessionId: string | undefined,
+  cwd: string = process.cwd()
+): Record<string, string> {
+  return { ...clientHeader("synap-cli-mcp"), ...conversationHeaders(sessionId, cwd) };
+}
