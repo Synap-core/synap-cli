@@ -1209,6 +1209,31 @@ program
     await workerCommand(opts);
   });
 
+// ─── box ──────────────────────────────────────────────────────────────────────
+// Run THIS computer as a run box provisioner: lease the box runs queued on the
+// pod, run each in a fresh isolated LXC, hand back the evidence. See src/commands/box.ts.
+
+const box = program.command("box").description("Run scripts in fresh isolated boxes on this computer (run box provisioner)");
+
+box
+  .command("serve")
+  .description("Lease queued box runs from the pod and run each in a fresh box")
+  .option("--config <file>", "Provisioner config", "/etc/synap-box/config.json")
+  .option("--once", "Lease at most one run, work it, exit")
+  .action(async (opts: import("./commands/box.js").BoxOptions) => {
+    const { boxServeCommand } = await import("./commands/box.js");
+    await boxServeCommand(opts);
+  });
+
+box
+  .command("reap")
+  .description("Destroy every box no run holds (after a crash)")
+  .option("--config <file>", "Provisioner config", "/etc/synap-box/config.json")
+  .action(async (opts: import("./commands/box.js").BoxOptions) => {
+    const { boxReapCommand } = await import("./commands/box.js");
+    await boxReapCommand(opts);
+  });
+
 // ─── session ──────────────────────────────────────────────────────────────────
 // Focus sessions — goal-bound work rooms tracked on the pod.
 // AI agents: use start_session to begin, update_session to report progress,
