@@ -6,9 +6,12 @@
  * silent drop hangs Claude Code); SSE and JSON bodies both come through; a
  * notification (no id) gets no invented reply.
  */
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { PassThrough } from "node:stream";
 import { describe, expect, it } from "vitest";
-import { runMcpBridge, sseEvents, withConversationMeta } from "./mcp-bridge.js";
+import { runMcpBridge, sseEvents, toolsListCachePath, withConversationMeta } from "./mcp-bridge.js";
 import { conversationHeaders, claudeCodeConversation, cliConversation } from "./conversation-headers.js";
 
 const SID = "8c34a72b-b1c1-4c37-9c1f-02920b69ccb2";
@@ -146,5 +149,118 @@ describe("conversation in _meta", () => {
     expect(withConversationMeta(resp, conv)).toEqual(resp);
     const req = { jsonrpc: "2.0", id: 1, method: "ping" };
     expect(withConversationMeta(req, {})).toBe(req);
+  });
+});
+
+describe("tools/list cache (an account switch must not drop the tools)", () => {
+  const list = (names: string[], id = 1) => ({
+    jsonrpc: "2.0",
+    id,
+    result: { tools: names.map((name) => ({ name })) },
+  });
+  const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), "synap-bridge-cache-"));
+
+  /** One bridge process: sends `tools/list`, the pod answers with `pod`. */
+  async function run(
+    cacheDir: string,
+    pod: (init: RequestInit) => Promise<Response>,
+    extra: { apiKey?: string; waitMs?: number; maxAgeMs?: number; params?: unknown } = {}
+  ) {
+    const input = new PassThrough();
+    const output = new PassThrough();
+    const chunks: string[] = [];
+    output.on("data", (c) => chunks.push(String(c)));
+    const fetchImpl = ((_u: string, init: RequestInit) => pod(init)) as unknown as typeof fetch;
+    const done = runMcpBridge({
+      url: "https://pod/mcp",
+      apiKey: extra.apiKey ?? "k",
+      input,
+      output,
+      fetchImpl,
+      log: () => {},
+      cacheDir,
+      toolsListWaitMs: extra.waitMs ?? 30,
+      toolsListMaxAgeMs: extra.maxAgeMs,
+    });
+    input.write(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: extra.params }) + "\n");
+    input.end();
+    await done;
+    return chunks.join("").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+  }
+  const ok = (names: string[]) => async () => json(list(names));
+  const down = async () => new Response("bad gateway", { status: 502 });
+
+  it("a good list is cached, then answers when the pod fails", async () => {
+    const dir = tmp();
+    expect(await run(dir, ok(["a", "b"]))).toEqual([list(["a", "b"])]);
+    expect(await run(dir, down)).toEqual([list(["a", "b"])]);
+  });
+
+  it("a pod that does not answer in time is answered from the cache, once; a changed list is announced", async () => {
+    const dir = tmp();
+    await run(dir, ok(["a"]));
+    const late = async () => {
+      await new Promise((r) => setTimeout(r, 120));
+      return json(list(["a", "c"]));
+    };
+    const out = await run(dir, late);
+    expect(out).toEqual([list(["a"]), { jsonrpc: "2.0", method: "notifications/tools/list_changed" }]);
+    // the refresh was kept: the next outage serves the NEW list
+    expect(await run(dir, down)).toEqual([list(["a", "c"])]);
+  });
+
+  it("a late, identical list sends no notification", async () => {
+    const dir = tmp();
+    await run(dir, ok(["a"]));
+    const late = async () => {
+      await new Promise((r) => setTimeout(r, 120));
+      return json(list(["a"]));
+    };
+    expect(await run(dir, late)).toEqual([list(["a"])]);
+  });
+
+  it("no cache yet: the failure and the slow pod behave as before", async () => {
+    const out = await run(tmp(), down);
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatchObject({ id: 1, error: { code: -32000 } });
+    const slow = async () => {
+      await new Promise((r) => setTimeout(r, 120));
+      return json(list(["a"]));
+    };
+    expect(await run(tmp(), slow)).toEqual([list(["a"])]);
+  });
+
+  it("a JSON-RPC error from the pod is not cached and the cache answers it", async () => {
+    const dir = tmp();
+    const err = async () => json({ jsonrpc: "2.0", id: 1, error: { code: -32603, message: "boom" } });
+    expect((await run(dir, err))[0]).toMatchObject({ error: { message: "boom" } });
+    await run(dir, ok(["a"]));
+    expect(await run(dir, err)).toEqual([list(["a"])]);
+  });
+
+  it("a paged list is neither cached nor intercepted", async () => {
+    const dir = tmp();
+    const paged = async () => json({ jsonrpc: "2.0", id: 1, result: { tools: [{ name: "a" }], nextCursor: "p2" } });
+    await run(dir, paged);
+    expect(fs.readdirSync(dir)).toEqual([]);
+    await run(dir, ok(["a"]));
+    // a request carrying a cursor goes straight to the pod, even when it fails
+    const out = await run(dir, down, { params: { cursor: "p2" } });
+    expect(out[0]).toMatchObject({ id: 1, error: { code: -32000 } });
+  });
+
+  it("the cache belongs to a key: another key never gets this key's tools", async () => {
+    const dir = tmp();
+    await run(dir, ok(["a"]), { apiKey: "key-1" });
+    expect(toolsListCachePath(dir, "https://pod/mcp", "key-1")).not.toBe(toolsListCachePath(dir, "https://pod/mcp", "key-2"));
+    expect((await run(dir, down, { apiKey: "key-2" }))[0]).toMatchObject({ error: { code: -32000 } });
+    expect(fs.readFileSync(toolsListCachePath(dir, "https://pod/mcp", "key-1"), "utf8")).not.toContain("key-1");
+  });
+
+  it("a cache older than the max age is not served", async () => {
+    const dir = tmp();
+    await run(dir, ok(["a"]));
+    await new Promise((r) => setTimeout(r, 20));
+    expect((await run(dir, down, { maxAgeMs: 5 }))[0]).toMatchObject({ error: { code: -32000 } });
   });
 });
