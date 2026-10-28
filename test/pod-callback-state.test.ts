@@ -37,6 +37,7 @@ const settled = (p: Promise<unknown>) =>
 
 function hit(callback: URL, params: Record<string, string>, keepState = true): Promise<Response> {
   const u = new URL(callback.toString());
+  u.hostname = "127.0.0.1"; // the server binds the IPv4 loopback; `localhost` may resolve to ::1 first
   if (!keepState) u.searchParams.delete("state");
   for (const [k, v] of Object.entries(params)) u.searchParams.set(k, v);
   return fetch(u);
