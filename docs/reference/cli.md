@@ -53,7 +53,7 @@ Every command also accepts `-h, --help`.
   - [`synap project purge`](#synap-project-purge) — HARD teardown: delete a project + its pod-wide-exclusive entities (owner-only, irreversible)
 - [`synap lens`](#synap-lens) — Show the effective lens (workspace + project + focus session) and WHICH rung set each one
 - [`synap ask`](#synap-ask) — Ask your pod anything — returns a synthesized answer with its sources
-- [`synap capture`](#synap-capture) — Capture knowledge: smart `capture "<free text>"` (AI structures it). For canonical typed Knowledge, use `create entity --profile=knowledge --props='{"knowledgeForm":"insight\|caution"}'`.
+- [`synap capture`](#synap-capture) — Capture knowledge: smart `capture "<free text>"` (AI structures it). For canonical typed Knowledge, use `create entity --profile=knowledge --props='{"knowledgeForm":"fact\|caution\|convention"}'`.
 - [`synap import`](#synap-import) — Import files, folders, or URLs into the pod (AI capture pipeline, or Superwhisper store-first)
 - [`synap upload`](#synap-upload) — Upload a file to the pod as an entity (>10MB goes direct to storage: video ≤500MB, audio ≤100MB, zip ≤200MB)
 - [`synap subscribe`](#synap-subscribe) — Stream pod events as NDJSON (long-poll)
@@ -886,7 +886,7 @@ Ask your pod anything — returns a synthesized answer with its sources
 synap capture [options] [text]
 ```
 
-Capture knowledge: smart `capture "<free text>"` (AI structures it). For canonical typed Knowledge, use `create entity --profile=knowledge --props='{"knowledgeForm":"insight|caution"}'`.
+Capture knowledge: smart `capture "<free text>"` (AI structures it). For canonical typed Knowledge, use `create entity --profile=knowledge --props='{"knowledgeForm":"fact|caution|convention"}'`.
 
 | Argument | Required | Description |
 |---|---|---|

@@ -598,6 +598,15 @@ async function buildSmartLaneReport(
 
 // ─── Legacy engineering-memory capture ────────────────────────────────────────
 
+/**
+ * The `knowledgeForm` a legacy `--type` stands for. The pod's forms are
+ * fact | caution | convention; `insight` was retired (0326) and is only read
+ * as `fact` for old clients, so a new write names the form itself.
+ */
+export function knowledgeFormForType(type: string | undefined): "caution" | "fact" {
+  return type === "gotcha" ? "caution" : "fact";
+}
+
 export async function captureKnowledge(opts: CaptureOpts): Promise<void> {
   try {
     // Mutual exclusion: smart mode (positional text) and typed mode (--type/--claim)
@@ -711,7 +720,7 @@ export async function captureKnowledge(opts: CaptureOpts): Promise<void> {
       ...(sessionId ? { sessionId } : {}),
       ...(projectId ? { projectId } : {}),
       properties: {
-        knowledgeForm: opts.type === "gotcha" ? "caution" : "insight",
+        knowledgeForm: knowledgeFormForType(opts.type),
         ek_type: opts.type,
         ek_claim: opts.claim,
         ...(opts.why ? { ek_why: opts.why } : {}),

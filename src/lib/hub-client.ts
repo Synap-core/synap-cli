@@ -918,6 +918,12 @@ const HUB_429_MAX_RETRIES = 12;
 const HUB_429_DEFAULT_WAIT_MS = 62_000;
 /** Never sleep more than this on a single 429 (proxies sometimes send 180+). */
 const HUB_429_MAX_WAIT_MS = 75_000;
+/**
+ * Never wait more than this in total on one request. 12 waits of up to 75s
+ * was ~15 minutes of a terminal that looked hung; past this budget the call
+ * fails and says so.
+ */
+export const HUB_429_MAX_TOTAL_WAIT_MS = 150_000;
 
 /**
  * Client-side request budget — stay UNDER the server limit so we rarely 429.
@@ -968,25 +974,76 @@ async function acquireHubSlot(): Promise<void> {
 }
 
 /**
- * Parse Retry-After from headers or a Hub 429 body. Caps at 75s so a bad
- * proxy header never parks the importer for 3 minutes.
+ * The wait (ms) a pod 429 asks for, capped at 75s so a bad proxy header never
+ * parks the importer. The pod sends the wait in three shapes, and this reads
+ * all of them: the `Retry-After` header (seconds), a JSON body's numeric
+ * `retryAfter` (hub commands door) or `cause.retryAfterSec`, and the text
+ * "Retry after 60s." the key limiter writes into its message.
  */
-function retryAfterMs(res: Response, bodyText: string): number {
+export function retryAfterMs(res: Response, bodyText: string): number {
+  const cap = (sec: number) =>
+    Math.min(Math.max(sec * 1000, 1_000), HUB_429_MAX_WAIT_MS);
+  const positive = (n: unknown): n is number =>
+    typeof n === "number" && Number.isFinite(n) && n > 0;
   const h = res.headers.get("retry-after");
   if (h) {
     const sec = parseInt(h, 10);
-    if (Number.isFinite(sec) && sec > 0) {
-      return Math.min(Math.max(sec * 1000, 1_000), HUB_429_MAX_WAIT_MS);
+    if (positive(sec)) return cap(sec);
+  }
+  try {
+    const body = JSON.parse(bodyText) as Record<string, unknown> | null;
+    const cause = body?.cause as Record<string, unknown> | undefined;
+    for (const v of [body?.retryAfter, body?.retryAfterSec, cause?.retryAfterSec]) {
+      if (positive(v)) return cap(v);
     }
+  } catch {
+    // not JSON: fall through to the text shape
   }
   const m = bodyText.match(/retry after\s+(\d+)\s*s/i);
   if (m) {
     const sec = parseInt(m[1], 10);
-    if (Number.isFinite(sec) && sec > 0) {
-      return Math.min(Math.max(sec * 1000, 1_000), HUB_429_MAX_WAIT_MS);
-    }
+    if (positive(sec)) return cap(sec);
   }
   return HUB_429_DEFAULT_WAIT_MS;
+}
+
+interface RateLimitState {
+  attempt: number;
+  waitedMs: number;
+}
+
+/**
+ * After a 429: say what is happening, sleep the pod's wait, or give up with a
+ * plain error once the retry count or the total wait budget is spent. Both
+ * the JSON and the multipart doors use it, so they cannot drift.
+ */
+async function waitOutRateLimit(
+  res: Response,
+  state: RateLimitState,
+  method: string,
+  path: string,
+  label: string
+): Promise<void> {
+  state.attempt++;
+  const bodyText = await res.text().catch(() => "");
+  if (state.attempt > HUB_429_MAX_RETRIES) {
+    throw hubError(method, path, 429, bodyText, `after ${HUB_429_MAX_RETRIES} retries`);
+  }
+  const wait = retryAfterMs(res, bodyText);
+  if (state.waitedMs + wait > HUB_429_MAX_TOTAL_WAIT_MS) {
+    throw hubError(
+      method,
+      path,
+      429,
+      bodyText,
+      `after waiting ${Math.round(state.waitedMs / 1000)}s (rate-limited; the pod is up, try again in a minute)`
+    );
+  }
+  console.error(
+    `[hub] rate-limited; the pod is up; retrying in ${Math.ceil(wait / 1000)}s (${label}, retry ${state.attempt}/${HUB_429_MAX_RETRIES})`
+  );
+  state.waitedMs += wait;
+  await sleep(wait);
 }
 
 /**
@@ -1003,7 +1060,7 @@ async function hubFetchWithRetry(
 ): Promise<Response> {
   const [labelMethod, ...labelRest] = label.split(" ");
   const labelPath = labelRest.join(" ");
-  let attempt = 0;
+  const rl: RateLimitState = { attempt: 0, waitedMs: 0 };
   for (;;) {
     await acquireHubSlot();
     let res: Response;
@@ -1014,23 +1071,7 @@ async function hubFetchWithRetry(
       throw networkError(err, url, labelMethod, labelPath, timeoutMs);
     }
     if (res.status !== 429) return res;
-    attempt++;
-    if (attempt > HUB_429_MAX_RETRIES) {
-      const bodyText = await res.text().catch(() => "");
-      throw hubError(
-        labelMethod,
-        labelPath,
-        429,
-        bodyText,
-        `after ${HUB_429_MAX_RETRIES} retries`
-      );
-    }
-    const bodyText = await res.text().catch(() => "");
-    const wait = retryAfterMs(res, bodyText);
-    console.error(
-      `[hub] 429 rate limit on ${label} — waiting ${Math.ceil(wait / 1000)}s (retry ${attempt}/${HUB_429_MAX_RETRIES})`
-    );
-    await sleep(wait);
+    await waitOutRateLimit(res, rl, labelMethod, labelPath, label);
   }
 }
 
@@ -1150,7 +1191,7 @@ export async function hubPostMultipartRetryable(
   cfg: HubConfig,
   timeoutMs = 120_000
 ): Promise<unknown> {
-  let attempt = 0;
+  const rl: RateLimitState = { attempt: 0, waitedMs: 0 };
   for (;;) {
     await acquireHubSlot();
     const form = buildForm();
@@ -1174,23 +1215,7 @@ export async function hubPostMultipartRetryable(
       }
       return res.json();
     }
-    attempt++;
-    if (attempt > HUB_429_MAX_RETRIES) {
-      const bodyText = await res.text().catch(() => "");
-      throw hubError(
-        "POST multipart",
-        path,
-        429,
-        bodyText,
-        `after ${HUB_429_MAX_RETRIES} retries`
-      );
-    }
-    const bodyText = await res.text().catch(() => "");
-    const wait = retryAfterMs(res, bodyText);
-    console.error(
-      `[hub] 429 rate limit on POST multipart ${path} — waiting ${Math.ceil(wait / 1000)}s (retry ${attempt}/${HUB_429_MAX_RETRIES})`
-    );
-    await sleep(wait);
+    await waitOutRateLimit(res, rl, "POST multipart", path, `POST multipart ${path}`);
   }
 }
 
