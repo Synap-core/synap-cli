@@ -187,6 +187,28 @@ export function isAgentReviewRejection(err: unknown): boolean {
   return haystack.includes("agent credential") && haystack.includes("proposal");
 }
 
+/**
+ * Did the pod refuse this approve because it must be reviewed on its page?
+ *
+ * `proposals.approve` answers a page-only proposal (one whose approval turns a
+ * skill, automation or rule on) with CONFLICT, which the Hub door sends as a
+ * bare 409 `{ error: <sentence> }` and no machine code. So: 409, and the
+ * sentence is the pod's own ("Open it to approve: …"), shown as it came.
+ */
+export function isReviewOnItsPageRefusal(err: unknown): boolean {
+  return err instanceof HubError && err.status === 409;
+}
+
+/** Say the pod's sentence and print the page that can approve it, never the raw 409. */
+export function renderReviewOnItsPage(id: string, cfg: HubConfig, err: HubError): void {
+  const detail = err.message.replace(/^[^:]*\(HTTP 409\):\s*/, "");
+  log.warn(`This proposal is approved on its page, not from here.`);
+  log.dim(`  ${detail}`);
+  log.blank();
+  log.info(`  ${proposalWebLink(cfg.podUrl, id)}`);
+  log.dim(`  or: synap open proposal ${id}`);
+}
+
 /** The `synap://` deep link the desktop app registers — `synap open proposal <id>` sends exactly this (open.ts:36-38). */
 export function proposalDeepLink(id: string): string {
   return openAppUrl("proposal", id);

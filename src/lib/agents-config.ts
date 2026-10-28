@@ -59,6 +59,27 @@ export function removeAgent(name: string): void {
   writeConfig(cfg);
 }
 
+/** Every agent name this machine has a key for: `synap agents create` plus connected surfaces. */
+export function savedAgentNames(): string[] {
+  const cfg = readConfig();
+  return [...new Set([...Object.keys(cfg.agents ?? {}), ...Object.keys(cfg.agentKeys ?? {})])].sort();
+}
+
+/**
+ * Why `name` cannot be used as an agent, or null when it can. A name with no
+ * saved key must be refused by whoever asked for it: `resolveAgentOverride`
+ * answers null for it and `resolveHubConfig` then falls through to the next
+ * key it finds, so a typo would quietly run as another identity.
+ */
+export function unknownAgentMessage(name: string): string | null {
+  const cfg = readConfig();
+  if (cfg.agents?.[name] || cfg.agentKeys?.[name]?.hubApiKey) return null;
+  const saved = savedAgentNames();
+  return saved.length
+    ? `No saved agent named "${name}". Saved agents: ${saved.join(", ")}.`
+    : `No saved agent named "${name}", and none are saved on this machine. Create one with \`synap agents create\`.`;
+}
+
 /** Resolve agent config from SYNAP_AGENT env var. Returns null if not set.
  * cfg.agents holds named agents (synap agents create). cfg.agentKeys holds
  * surface-provisioned identities (synap connect --target=<surface>). Both represent

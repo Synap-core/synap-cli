@@ -1444,7 +1444,7 @@
         "path": "synap capture",
         "name": "capture",
         "usage": "[options] [text]",
-        "description": "Capture knowledge: smart `capture \"<free text>\"` (AI structures it). For canonical typed Knowledge, use `create entity --profile=knowledge --props='{\"knowledgeForm\":\"insight|caution\"}'`.",
+        "description": "Capture knowledge: smart `capture \"<free text>\"` (AI structures it). For canonical typed Knowledge, use `create entity --profile=knowledge --props='{\"knowledgeForm\":\"fact|caution|convention\"}'`.",
         "hidden": false,
         "arguments": [
           {

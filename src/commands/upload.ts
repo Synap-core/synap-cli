@@ -64,6 +64,18 @@ const MIME: Record<string, string> = {
   ".md": "text/markdown",
   ".markdown": "text/markdown",
   ".txt": "text/plain",
+  // Plain text under another name. The upload door's allow-list holds text/plain
+  // (and csv, markdown, html) but not octet-stream, so these map here or 415.
+  ".cube": "text/plain",
+  ".log": "text/plain",
+  ".yaml": "text/plain",
+  ".yml": "text/plain",
+  ".toml": "text/plain",
+  ".ini": "text/plain",
+  ".conf": "text/plain",
+  ".tsv": "text/plain",
+  ".srt": "text/plain",
+  ".vtt": "text/plain",
   ".csv": "text/csv",
   ".json": "application/json",
   ".html": "text/html",

@@ -1,11 +1,13 @@
 import chalk from "chalk";
 import { log } from "../utils/logger.js";
-import { resolveHubConfig, hubPost, renderHubError } from "../lib/hub-client.js";
+import { resolveHubConfig, hubPost, renderHubError, type HubError } from "../lib/hub-client.js";
 import { requireFullId } from "../lib/id.js";
 import {
   classifyActiveCredential,
   isAgentReviewRejection,
+  isReviewOnItsPageRefusal,
   renderCannotReview,
+  renderReviewOnItsPage,
 } from "../lib/credential-class.js";
 import {
   resolveReviewConfig,
@@ -258,6 +260,12 @@ export async function approveProposal(
     // message rather than dumping a raw "(HTTP 403)".
     if (isAgentReviewRejection(e)) {
       renderCannotReview(id, cfg, "approve");
+      process.exit(1);
+    }
+    // A page-only proposal: the pod's 409 is a refusal to approve from here,
+    // so print the page that can, not the raw status.
+    if (isReviewOnItsPageRefusal(e)) {
+      renderReviewOnItsPage(id, cfg, e as HubError);
       process.exit(1);
     }
     renderHubError(e);

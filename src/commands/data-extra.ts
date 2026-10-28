@@ -159,6 +159,30 @@ export function proposalStatusLabel(status: ProposalStatusFilter): string {
   return status === "all" ? "" : status.replace(/_/g, "-");
 }
 
+/**
+ * The list heading. The pod answers one page (`limit`, default 20) plus a real
+ * `total` and `hasMore`; a heading that says only the page size reads as the
+ * whole queue ("20 proposals" over a queue of 57). When there is more, say it
+ * is the first page, how many there are, and the one flag that shows more.
+ */
+export function proposalListHeading(
+  shown: number,
+  noun: string,
+  page: { total?: unknown; hasMore?: unknown },
+  limit: number
+): { heading: string; more?: string } {
+  const plural = `${noun}${shown !== 1 ? "s" : ""}`;
+  const total = typeof page.total === "number" ? page.total : undefined;
+  if (page.hasMore !== true && !(total !== undefined && total > shown)) {
+    return { heading: `${shown} ${plural}` };
+  }
+  const ofTotal = total !== undefined ? `${shown} of ${total} ${noun}s` : `${shown} ${plural}`;
+  return {
+    heading: `${ofTotal} (first page)`,
+    more: `  There are more. Show them with: synap proposals list --limit ${Math.min(Math.max(limit * 3, 50), 100)}`,
+  };
+}
+
 /** Compact age for a list row. Returns "" for a missing/unparseable date. */
 function relativeAge(value: unknown): string {
   if (typeof value !== "string" && typeof value !== "number") return "";
@@ -211,7 +235,13 @@ export async function listProposals(
       // Echo the filter that produced this list: a consumer reading an empty
       // `proposals` array otherwise cannot tell "nothing pending" from "asked
       // for a status this pod doesn't populate".
-      console.log(JSON.stringify({ status, proposals }, null, 2));
+      console.log(
+        JSON.stringify(
+          { status, proposals, total: res.total, hasMore: res.hasMore },
+          null,
+          2
+        )
+      );
       return;
     }
 
@@ -228,7 +258,9 @@ export async function listProposals(
       return;
     }
 
-    log.heading(`${proposals.length} ${noun}${proposals.length !== 1 ? "s" : ""}`);
+    const head = proposalListHeading(proposals.length, noun, res, limit);
+    log.heading(head.heading);
+    if (head.more) log.dim(head.more);
     log.blank();
 
     // Group by the session that produced them. One agent run emits many

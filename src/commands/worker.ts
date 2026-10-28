@@ -51,6 +51,7 @@ import os from "node:os";
 import path from "node:path";
 import { CONVERSATION_HEADER, claudeCodeConversation } from "../lib/conversation-headers.js";
 import { resolveHubConfig } from "../lib/hub-client.js";
+import { unknownAgentMessage } from "../lib/agents-config.js";
 import { resolveAgentUserId } from "../lib/credential-class.js";
 import { createMcpClient, type McpCallClient } from "../lib/mcp-call.js";
 import {
@@ -1216,6 +1217,10 @@ export function createWorker(opts: WorkerOptions, deps: WorkerDeps): Worker {
 
 export async function workerCommand(opts: WorkerOptions): Promise<void> {
   const agent = opts.agent;
+  // An unknown name would otherwise resolve to the next key in the ladder and
+  // the worker would claim another agent's sessions.
+  const unknown = unknownAgentMessage(agent);
+  if (unknown) throw new Error(unknown);
   // The named agent's own key and pod (SYNAP_AGENT is the CLI's one door for it).
   process.env.SYNAP_AGENT = agent;
   const cfg = await resolveHubConfig();
