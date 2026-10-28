@@ -127,11 +127,21 @@ Agents self-discover entity types and views at runtime — no hardcoding.
 
 Run the pod on your own machine or server ([backend repo](https://github.com/Synap-core/backend)), then connect to it:
 
+On the server (Linux, a domain pointing at it; the installer needs root to set up Docker):
+
 ```bash
-git clone https://github.com/Synap-core/backend synap && cd synap
-curl -fsSL https://raw.githubusercontent.com/Synap-core/backend/main/install.sh | bash
-synap init --pod-url https://<your-pod-domain>
+curl -fsSLo synap-install.sh https://github.com/synap-core/backend/releases/download/channel-stable/install.sh
+less synap-install.sh   # read it first
+sudo bash synap-install.sh --domain <pod.your-domain.com> --email <you@your-domain.com>
 ```
+
+Then, on your computer:
+
+```bash
+synap init --pod-url https://<pod.your-domain.com>
+```
+
+Full guide: [deploy/README.md](https://github.com/Synap-core/backend/blob/main/deploy/README.md).
 
 ### Managed pod (private beta)
 

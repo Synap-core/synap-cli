@@ -5,7 +5,6 @@
 import { readJsonStrict, writeFileAtomic, ensureSecretDir } from "./atomic-file.js";
 import { PodMovedError, podFetch } from "./pod-moved.js";
 import { classifyFetchError, classifyHttpStatus, type ReachFailure } from "./pod-reach.js";
-import { execSync } from "child_process";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
@@ -648,12 +647,3 @@ export async function checkPodHealth(podUrl: string): Promise<PodStatus> {
   return status;
 }
 
-/**
- * Install Docker and start a self-hosted Synap pod.
- */
-export function startSelfHostedPod(): void {
-  execSync(
-    'curl -fsSL https://raw.githubusercontent.com/Synap-core/backend/main/install.sh | bash',
-    { stdio: "inherit" }
-  );
-}
