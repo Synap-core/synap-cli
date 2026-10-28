@@ -2201,9 +2201,12 @@ export interface ProviderInstallConfig {
 
 type ProviderWithKey = ProviderInfo & { apiKey: string | null; baseUrl: string };
 
-async function fetchCredentials(podUrl: string, apiKey: string): Promise<ProviderWithKey[]> {
+async function fetchCredentials(
+  podUrl: string,
+  apiKey: string
+): Promise<{ providers: ProviderWithKey[]; masked: boolean }> {
   const { fetchPodCredentials } = await import("../commands/providers.js");
-  return fetchPodCredentials(podUrl, apiKey) as Promise<ProviderWithKey[]>;
+  return fetchPodCredentials(podUrl, apiKey);
 }
 
 /** Prompt the user to pick a provider from the pod and return it with its resolved key. */
@@ -2214,8 +2217,15 @@ async function pickProvider(
   const spinner = ora("Fetching providers from pod vault...").start();
   let providers: ProviderWithKey[];
   try {
-    providers = await fetchCredentials(podUrl, apiKey);
+    const creds = await fetchCredentials(podUrl, apiKey);
     spinner.stop();
+    if (creds.masked) {
+      // A masked key written into a tool's config would fail on its first call.
+      log.warn("This pod gives provider keys only to its own services, not to an agent key.");
+      log.dim("Point the tool at the pod's OpenAI-compatible endpoint instead: synap providers pull --target show");
+      return null;
+    }
+    providers = creds.providers;
   } catch (err) {
     spinner.fail(`Could not fetch providers: ${(err as Error).message}`);
     return null;
