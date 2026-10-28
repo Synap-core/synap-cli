@@ -188,6 +188,16 @@ describe("synap track status / reopen", () => {
     expect(hubPatch.mock.calls[0]![1]).toEqual({ status: "paused" });
   });
 
+  it("--expected sends the status the caller read as expectedStatus (D1)", async () => {
+    hubPatch.mockResolvedValueOnce({ status: "updated", track: { id: "t-1" } });
+    const { setTrackStatus } = await import("../src/commands/tracks.js");
+    await setTrackStatus("t-1", "paused", { expected: "active" });
+    expect(hubPatch.mock.calls[0]![1]).toEqual({
+      status: "paused",
+      expectedStatus: "active",
+    });
+  });
+
   it("reopen POSTs /tracks/:id/reopen and prints a proposal as queued", async () => {
     hubPost.mockResolvedValueOnce({
       status: "proposed",

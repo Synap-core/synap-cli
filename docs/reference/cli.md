@@ -1990,6 +1990,7 @@ Move a track: proposed (Draft)|agreed|ready|active|paused|completed (Closed)|arc
 |---|---|---|
 | `--verdict <verdict>` | How the goal ended (required to close; advised to drop) |  |
 | `--verdict-reason <text>` | Why — required for impossible and replaced |  |
+| `--expected <status>` | The status you read the goal in (synap track show) — refused, nothing written, if it moved meanwhile. Agents: always pass it |  |
 | `--reason <text>` | Why — shown to the reviewer |  |
 | `--json` | Output as JSON |  |
 | `--pod-url <url>` | Pod URL override |  |

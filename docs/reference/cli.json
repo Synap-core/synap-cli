@@ -4195,6 +4195,12 @@
                 "takesValue": "required"
               },
               {
+                "flags": "--expected <status>",
+                "long": "--expected",
+                "description": "The status you read the goal in (synap track show) — refused, nothing written, if it moved meanwhile. Agents: always pass it",
+                "takesValue": "required"
+              },
+              {
                 "flags": "--reason <text>",
                 "long": "--reason",
                 "description": "Why — shown to the reviewer",
