@@ -52,6 +52,26 @@ export function writeMcpSnippetFiles(
   return { envFile, jsonFile };
 }
 
+/**
+ * The ONE mcp-remote every stdio-only client entry runs (Claude Desktop, Zed,
+ * the printed snippets). `npx -y` executes whatever npm serves for this spec,
+ * with the pod agent key in its environment, at every client launch, so it is
+ * an EXACT version, never `@latest` or bare. 0.1.38 is the last release
+ * published by the original author (geelen, 2026-02-05; the package changed
+ * maintainer in 2026-08, 20+ releases since) and is past CVE-2025-6514
+ * (fixed in 0.1.16). Tested 2026-10-28: initialize + tools/list against a
+ * live pod with the header from env. Bump only after the same test.
+ */
+export const MCP_REMOTE_PACKAGE = "mcp-remote@0.1.38";
+
+/**
+ * `npx` args for the stdio bridge. The header VALUE comes from env
+ * (`SYNAP_AUTH`), so the key never sits in argv where `ps` can read it.
+ */
+export function mcpRemoteArgs(url: string): string[] {
+  return ["-y", MCP_REMOTE_PACKAGE, url, "--header", "Authorization:${SYNAP_AUTH}"];
+}
+
 /** Native-HTTP and mcp-remote blocks. `key` is real (file) or redacted (screen). */
 export function mcpClientBlocks(url: string, key: string) {
   return {
@@ -64,7 +84,7 @@ export function mcpClientBlocks(url: string, key: string) {
       mcpServers: {
         synap: {
           command: "npx",
-          args: ["-y", "mcp-remote", url, "--header", "Authorization:${SYNAP_AUTH}"],
+          args: mcpRemoteArgs(url),
           env: { SYNAP_AUTH: `Bearer ${key}` },
         },
       },

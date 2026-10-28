@@ -14,6 +14,7 @@
  */
 
 import http from "node:http";
+import { randomBytes, timingSafeEqual } from "node:crypto";
 import { openExternalUrl } from "./safe-open.js";
 import fs from "node:fs";
 import { ensureSecretDir, writeSecretFile } from "./atomic-file.js";
@@ -283,23 +284,61 @@ export async function login(): Promise<StoredCredentials | null> {
 // pod on synap.live. The CLI opens:
 //   https://synap.live/account/pod/provision?cli_callback=http://localhost:PORT/callback
 // The landing page redirects back to:
-//   http://localhost:PORT/callback?podUrl=https://...&workspaceId=...
+//   http://localhost:PORT/callback?state=…&podUrl=https://...&workspaceId=...
+// (it keeps the callback's own query and sets podUrl/workspaceId on it).
 
 export interface PodCallbackResult {
   podUrl: string;
   workspaceId?: string;
 }
 
+export type PodCallbackVerdict =
+  | { ok: true; result: PodCallbackResult }
+  | { ok: false; status: 400 | 403; reason: string };
+
+/**
+ * Judge one hit on the loopback `/callback`. The URL it carries becomes THE pod
+ * this CLI signs in to and writes into every agent config, and anything that
+ * reaches 127.0.0.1:<port> during the wait can hit it (a local process, or a
+ * web page that finds the port). So it must carry the `state` this CLI put in
+ * `cli_callback` (only the provision page it opened has it), and the pod URL
+ * must be https. A refused hit does not end the wait.
+ */
+export function judgePodCallback(url: URL, expectedState: string): PodCallbackVerdict {
+  const state = url.searchParams.get("state") ?? "";
+  const a = Buffer.from(state);
+  const b = Buffer.from(expectedState);
+  if (a.length !== b.length || !timingSafeEqual(a, b)) {
+    return { ok: false, status: 403, reason: "This link was not opened by the Synap CLI waiting here." };
+  }
+  let pod: URL;
+  try {
+    pod = new URL(url.searchParams.get("podUrl") ?? "");
+  } catch {
+    return { ok: false, status: 400, reason: "The pod address is missing or not a URL." };
+  }
+  if (pod.protocol !== "https:" || pod.username || pod.password) {
+    return { ok: false, status: 400, reason: "The pod address must be a plain https URL." };
+  }
+  const workspaceId = url.searchParams.get("workspaceId") ?? undefined;
+  return { ok: true, result: { podUrl: pod.origin, workspaceId } };
+}
+
 export async function waitForPodCallback(
   timeoutMs = 300_000 // 5-minute window
 ): Promise<PodCallbackResult | null> {
+  const expectedState = randomBytes(24).toString("base64url");
   return new Promise((resolve) => {
     const server = http.createServer((req, res) => {
       const url = new URL(req.url ?? "/", `http://localhost`);
 
       if (url.pathname === "/callback") {
-        const podUrl = url.searchParams.get("podUrl");
-        const workspaceId = url.searchParams.get("workspaceId") ?? undefined;
+        const verdict = judgePodCallback(url, expectedState);
+        if (!verdict.ok) {
+          res.writeHead(verdict.status, { "Content-Type": "text/plain; charset=utf-8" });
+          res.end(verdict.reason);
+          return; // keep waiting for the real one
+        }
 
         res.writeHead(200, { "Content-Type": "text/html" });
         res.end(`<!DOCTYPE html>
@@ -314,11 +353,7 @@ export async function waitForPodCallback(
 </html>`);
 
         cleanup();
-        if (podUrl) {
-          resolve({ podUrl, workspaceId });
-        } else {
-          resolve(null);
-        }
+        resolve(verdict.result);
       } else {
         res.writeHead(404);
         res.end();
@@ -334,7 +369,7 @@ export async function waitForPodCallback(
       }
 
       const port = addr.port;
-      const callbackUrl = `http://localhost:${port}/callback`;
+      const callbackUrl = `http://localhost:${port}/callback?state=${expectedState}`;
       const provisionUrl = `${LANDING_URL}/account/pod/provision?cli_callback=${encodeURIComponent(callbackUrl)}`;
 
       console.log(`\n  Open this link to create your pod:\n`);

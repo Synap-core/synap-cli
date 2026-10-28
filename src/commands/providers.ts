@@ -23,52 +23,17 @@ export interface PodProvider extends ProviderInfo {
 }
 
 /**
- * Fetch enabled providers (model IDs only, no keys) from the pod.
- * Used for display / listing.
+ * The pod's provider routes (synap-backend `routers/hub-protocol/rest/ai-providers.ts`).
+ * The CLI once called `/api/hub/providers/models` and `/providers/credentials`,
+ * which never existed: every `synap providers list` and opencode/aider install
+ * ended in "Pod returned HTTP 404".
  */
-export async function fetchPodProviders(
-  podUrl: string,
-  apiKey: string
-): Promise<PodProvider[]> {
-  let res: Response;
-  try {
-    res = await fetch(
-      `${podUrl.replace(/\/$/, "")}/api/hub/providers/models`,
-      {
-        headers: { Authorization: `Bearer ${apiKey}` },
-        signal: AbortSignal.timeout(8000),
-      }
-    );
-  } catch (err) {
-    throw new Error(`Could not reach pod at ${podUrl}: ${(err as Error).message}`);
-  }
-  if (res.status === 401 || res.status === 403) {
-    throw new Error(`Credentials rejected by pod (HTTP ${res.status}) — check your API key.`);
-  }
-  if (!res.ok) {
-    throw new Error(`Pod returned HTTP ${res.status} for /api/hub/providers/models.`);
-  }
-  const data = (await res.json()) as { providers?: PodProvider[] };
-  return data.providers ?? [];
-}
+export const AI_PROVIDERS_PATH = "/api/hub/ai-providers";
 
-/**
- * Fetch enabled providers WITH decrypted API keys from the pod vault.
- * The pod resolves: user-level override > workspace > pod-wide key.
- * Used by local tool installers (opencode, aider, etc.) that need real keys.
- */
-export async function fetchPodCredentials(
-  podUrl: string,
-  apiKey: string,
-  workspaceId?: string
-): Promise<Array<PodProvider & { apiKey: string | null }>> {
-  const base = podUrl.replace(/\/$/, "");
-  const url = workspaceId
-    ? `${base}/api/hub/providers/credentials?workspaceId=${encodeURIComponent(workspaceId)}`
-    : `${base}/api/hub/providers/credentials`;
+async function hubJson<T>(podUrl: string, apiKey: string, pathAndQuery: string): Promise<T> {
   let res: Response;
   try {
-    res = await fetch(url, {
+    res = await fetch(`${podUrl.replace(/\/$/, "")}${pathAndQuery}`, {
       headers: { Authorization: `Bearer ${apiKey}` },
       signal: AbortSignal.timeout(8000),
     });
@@ -79,12 +44,67 @@ export async function fetchPodCredentials(
     throw new Error(`Credentials rejected by pod (HTTP ${res.status}) — check your API key.`);
   }
   if (!res.ok) {
-    throw new Error(`Pod returned HTTP ${res.status} for /api/hub/providers/credentials.`);
+    throw new Error(`Pod returned HTTP ${res.status} for ${pathAndQuery.split("?")[0]}.`);
   }
-  const data = (await res.json()) as {
-    providers?: Array<PodProvider & { apiKey: string | null }>;
+  return (await res.json()) as T;
+}
+
+/**
+ * Fetch enabled providers (model IDs only, no keys) from the pod.
+ * Used for display / listing.
+ */
+export async function fetchPodProviders(
+  podUrl: string,
+  apiKey: string
+): Promise<PodProvider[]> {
+  const data = await hubJson<{ providers?: Array<Partial<PodProvider>> }>(podUrl, apiKey, AI_PROVIDERS_PATH);
+  return (data.providers ?? [])
+    .filter((p) => p.enabled !== false && typeof p.providerId === "string")
+    .map((p) => ({
+      providerId: p.providerId as string,
+      name: p.name ?? (p.providerId as string),
+      baseUrl: p.baseUrl ?? "",
+      enabled: p.enabled ?? true,
+      priority: p.priority ?? 10,
+      tags: Array.isArray(p.tags) ? p.tags : [],
+      models: Array.isArray(p.models) ? p.models : [],
+    }));
+}
+
+export interface PodCredentials {
+  providers: Array<PodProvider & { apiKey: string | null }>;
+  /**
+   * True when the pod sent masked keys. A pod gives plaintext provider keys
+   * only to its own services (the IS and the pod-admin key), never to an
+   * agent key (backend `ai-providers.credentials-leak.test.ts`), so a tool
+   * installed with an agent key cannot be pointed at a provider directly.
+   */
+  masked: boolean;
+}
+
+/**
+ * Enabled providers with the key the pod resolves for this caller
+ * (user override > workspace > pod-wide), joined on `providerId`.
+ */
+export async function fetchPodCredentials(
+  podUrl: string,
+  apiKey: string,
+  workspaceId?: string
+): Promise<PodCredentials> {
+  const query = workspaceId ? `?workspaceId=${encodeURIComponent(workspaceId)}` : "";
+  const [listed, creds] = await Promise.all([
+    fetchPodProviders(podUrl, apiKey),
+    hubJson<{ providers?: Array<{ providerId: string; apiKey: string | null }>; masked?: boolean }>(
+      podUrl,
+      apiKey,
+      `${AI_PROVIDERS_PATH}/credentials${query}`
+    ),
+  ]);
+  const keyOf = new Map((creds.providers ?? []).map((p) => [p.providerId, p.apiKey ?? null]));
+  return {
+    masked: creds.masked === true,
+    providers: listed.map((p) => ({ ...p, apiKey: keyOf.get(p.providerId) ?? null })),
   };
-  return data.providers ?? [];
 }
 
 // ─── Commands ────────────────────────────────────────────────────────────────
