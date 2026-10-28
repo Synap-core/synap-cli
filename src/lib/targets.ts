@@ -26,7 +26,7 @@ import {
   writeClientConfig,
   clientConfigBackupPath,
 } from "./atomic-file.js";
-import { redactKey } from "./mcp-snippets.js";
+import { redactKey, mcpRemoteArgs, MCP_REMOTE_PACKAGE } from "./mcp-snippets.js";
 import { installSkills, getDeliverableSkills } from "./skills-installer.js";
 import { TARGET_KEY_MINT, takePreApprovedKey } from "./batch-approval.js";
 import { agentTypeOfSurface, machineInstanceId, machineInstanceLabel } from "./machine-instance.js";
@@ -1437,7 +1437,7 @@ async function installClaudeDesktop(
     command: "npx",
     // The header value rides in env (this file is 0600), never in the
     // mcp-remote process's argv where any local `ps` can read it.
-    args: ["-y", "mcp-remote", desktopMcpUrl, "--header", "Authorization:${SYNAP_AUTH}"],
+    args: mcpRemoteArgs(desktopMcpUrl),
     env: { SYNAP_AUTH: `Bearer ${effectiveApiKey}` },
   });
   if (desktopServerName !== "synap") removeMcpServerEntry(mcpPath, "synap");
@@ -1855,7 +1855,7 @@ async function installZed(cfg: TargetConnectionConfig): Promise<boolean> {
     source: "custom",
     command: {
       path: "npx",
-      args: ["-y", "mcp-remote@latest", mcpUrl, "--header", "Authorization:${SYNAP_AUTH}"],
+      args: mcpRemoteArgs(mcpUrl),
       env: { SYNAP_AUTH: `Bearer ${effectiveApiKey}` },
     },
     settings: {},
@@ -2049,7 +2049,7 @@ async function installGeneric(cfg: TargetConnectionConfig): Promise<boolean> {
   log.dim(`headers = { Authorization = "Bearer ${shown}" }`);
   log.blank();
   log.info("stdio bridge (mcp-remote) — key via env, not argv:");
-  log.dim(`  command: npx -y mcp-remote ${mcpUrl} --header "Authorization:\${SYNAP_AUTH}"`);
+  log.dim(`  command: npx -y ${MCP_REMOTE_PACKAGE} ${mcpUrl} --header "Authorization:\${SYNAP_AUTH}"`);
   log.dim(`  env:     SYNAP_AUTH="Bearer ${shown}"`);
   log.dim("  Real key: ~/.synap/mcp-config.json (0600).");
   log.blank();

@@ -22,7 +22,7 @@ import {
   enrollAgentIfNeeded,
 } from "../lib/targets.js";
 import { log } from "../utils/logger.js";
-import { printMcpConnection, redactKey, writeMcpSnippetFiles, MCP_KEY_ENV } from "../lib/mcp-snippets.js";
+import { printMcpConnection, redactKey, writeMcpSnippetFiles, MCP_KEY_ENV, mcpRemoteArgs } from "../lib/mcp-snippets.js";
 
 interface McpBaseOpts {
   podUrl?: string;
@@ -424,7 +424,7 @@ export async function mcpUiSetup(
         fields: {
           "Config file": "~/Library/Application Support/Claude/claude_desktop_config.json (macOS)",
           "mcpServers.synap.command": "npx",
-          "mcpServers.synap.args": `-y mcp-remote ${url} --header "Authorization:\${SYNAP_AUTH}"`,
+          "mcpServers.synap.args": mcpRemoteArgs(url).join(" "),
           "mcpServers.synap.env.SYNAP_AUTH": `Bearer ${keyShown} (real value: "mcpRemote" block in ${snippetFiles.jsonFile})`,
         },
         notes: [
