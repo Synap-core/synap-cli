@@ -66,10 +66,12 @@ import {
   createInstallationTokenSource,
   defaultGithubAppFile,
   githubAppFilesTooOpen,
-  githubTokenEnv,
+  githubRunEnv,
+  type GithubRunEnv,
   loadGithubAppConfig,
   type InstallationTokenSource,
 } from "./worker-github-app.js";
+import { findOnPath, startTokenBroker, writeGithubHelpers, type TokenBroker } from "./worker-github-broker.js";
 import { ensureTreeFolder, sweepTreeFolder, treeFolderFor, type GitFn } from "./worker-worktrees.js";
 
 export interface WorkerOptions {
@@ -370,27 +372,37 @@ export function buildWorkFolderPrompt(p: {
   ].join("\n");
 }
 
+export const RUN_ENV_ALLOWLIST: RegExp[] = [
+  /^(PATH|HOME|USER|LOGNAME|SHELL|LANG|TERM|TMPDIR|TZ|COLORTERM)$/,
+  /^LC_[A-Z_]+$/,
+  /^(HTTPS?_PROXY|NO_PROXY|http_proxy|https_proxy|no_proxy|SSL_CERT_FILE|SSL_CERT_DIR|NODE_EXTRA_CA_CERTS)$/,
+  /^PNPM_HOME$/,
+  // What the Claude CLI needs; the ANTHROPIC_* key, auth token and base url are not here.
+  /^CLAUDE_[A-Z_]+$/,
+  // The pod vars (SYNAP_AGENT, SYNAP_POD_URL, …).
+  /^SYNAP_[A-Z_]+$/,
+];
+
 /**
- * The launched environment: the subscription, never a stray API key. With an
- * account picked, its token REPLACES any token the worker inherited.
+ * The launched environment, built from an ALLOWLIST: a secret in the worker's
+ * own environment (its env file holds deploy tokens) never reaches a run's
+ * Bash. The subscription, never a stray API key. With an account picked, its
+ * token REPLACES any token the worker inherited. GitHub: only the App's.
  */
 export function workerEnv(
   base: NodeJS.ProcessEnv,
   claudeConfigDir?: string,
   oauthToken?: string,
-  /** A GitHub App installation token: `gh` and `git push` then act as the App. */
-  githubToken?: string
+  github?: GithubRunEnv
 ): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { ...base };
-  delete env.ANTHROPIC_API_KEY;
-  delete env.ANTHROPIC_AUTH_TOKEN;
-  delete env.ANTHROPIC_BASE_URL;
+  const env: NodeJS.ProcessEnv = {};
+  for (const [k, v] of Object.entries(base)) if (v !== undefined && RUN_ENV_ALLOWLIST.some((re) => re.test(k))) env[k] = v;
   if (claudeConfigDir) env.CLAUDE_CONFIG_DIR = claudeConfigDir;
   if (oauthToken) {
     env.CLAUDE_CODE_OAUTH_TOKEN = oauthToken;
     delete env.CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR;
   }
-  if (githubToken) Object.assign(env, githubTokenEnv(githubToken));
+  if (github) Object.assign(env, githubRunEnv(github, env.PATH));
   return env;
 }
 
@@ -835,7 +847,20 @@ export function createWorker(opts: WorkerOptions, deps: WorkerDeps): Worker {
   const save = () => saveState(agent, state);
 
   const runsDir = path.join(stateDir(agent), "runs");
-  const treesRoot = path.join(stateDir(agent), "trees");
+  // Under --cwd, so Claude Code finds that folder's CLAUDE.md and .claude/rules from a run's cwd
+  // (it reads them from every parent directory; checked on 2.1.312).
+  const treesRoot = path.join(cwd, ".worker-trees");
+  // The runs' GitHub helpers and the broker they ask for tokens (a token lasts 1 h; a run can last longer).
+  let broker: TokenBroker | undefined;
+  let githubRun: Omit<GithubRunEnv, "token"> | undefined;
+  if (githubToken) {
+    const binDir = path.join(stateDir(agent), "bin");
+    const ghConfigDir = path.join(stateDir(agent), "gh-config");
+    fs.mkdirSync(ghConfigDir, { recursive: true, mode: 0o700 });
+    const { gitHelper } = writeGithubHelpers(binDir, { realGh: findOnPath("gh", process.env.PATH, binDir) });
+    broker = startTokenBroker(githubToken);
+    githubRun = { sock: broker.sock, binDir, gitHelper, ghConfigDir };
+  }
   const appendRunLog = (sessionId: string, line: Record<string, unknown>) => {
     fs.mkdirSync(runsDir, { recursive: true, mode: 0o700 });
     fs.appendFileSync(path.join(runsDir, `${sessionId}.jsonl`), `${JSON.stringify({ ...line, at: iso() })}\n`, { mode: 0o600 });
@@ -899,6 +924,7 @@ export function createWorker(opts: WorkerOptions, deps: WorkerDeps): Worker {
     if (githubToken) {
       try {
         ghToken = await githubToken.get();
+        await broker?.ready;
       } catch (err) {
         log(`session ${item.id}: no GitHub App token (${(err as Error).message}) — not launching; retrying next tick`);
         return;
@@ -969,7 +995,12 @@ export function createWorker(opts: WorkerOptions, deps: WorkerDeps): Worker {
           ? `resumed (follow-up #${record.resumes})`
           : `resumed after a usage limit (#${record.limitResumes})`;
     const on = account ? ` on account ${account.id}` : "";
-    const env = workerEnv(process.env, opts.claudeConfigDir, account?.token, ghToken);
+    const env = workerEnv(
+      process.env,
+      opts.claudeConfigDir,
+      account?.token,
+      ghToken && githubRun ? { ...githubRun, token: ghToken } : undefined
+    );
 
     if (design) {
       // `claude --bg` is the mode that has the Artifact tool. --strict-mcp-config: a
@@ -1026,7 +1057,11 @@ export function createWorker(opts: WorkerOptions, deps: WorkerDeps): Worker {
     }
 
     if (workDir) fs.mkdirSync(workDir, { recursive: true, mode: 0o700 });
-    if (treeDir) ensureTreeFolder(treeDir);
+    if (treeDir) {
+      ensureTreeFolder(treeDir);
+      // `cwd` may itself be a repo: keep the runs' folders out of its git status.
+      fs.writeFileSync(path.join(treesRoot, ".gitignore"), "*\n");
+    }
     fs.mkdirSync(runsDir, { recursive: true, mode: 0o700 });
     const out = fs.createWriteStream(path.join(runsDir, `${item.id}.jsonl`), { flags: "a", mode: 0o600 });
     const child = spawn(claudeBin, args, { cwd: runCwd, env, stdio: ["ignore", "pipe", "pipe"] });
@@ -1283,6 +1318,7 @@ export function createWorker(opts: WorkerOptions, deps: WorkerDeps): Worker {
       await Promise.all([...sweeps]);
     },
     stop: () => {
+      broker?.close();
       for (const c of children.values()) c.kill("SIGTERM");
     },
   };

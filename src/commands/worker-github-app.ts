@@ -156,20 +156,36 @@ export function createInstallationTokenSource(
   };
 }
 
+export interface GithubRunEnv {
+  /** A token valid at launch: what a caller that skips the helpers (an absolute /usr/bin/gh) gets for its first hour. */
+  token: string;
+  /** The worker's token broker socket (worker-github-broker.ts). */
+  sock: string;
+  /** Holds the `gh` wrapper and the git credential helper; first on the run's PATH. */
+  binDir: string;
+  gitHelper: string;
+  /** An EMPTY folder: `gh` never reads the person's hosts.yml. */
+  ghConfigDir: string;
+}
+
 /**
- * The environment that makes `gh` AND `git push` (https) act as the token: the
+ * The environment that makes `gh` AND `git push` (https) act as the App for
+ * the whole run: both ask the broker for a fresh token each time, and the
  * credential-helper list is reset first, so a helper holding a person's login
  * is never asked.
  */
-export function githubTokenEnv(token: string): NodeJS.ProcessEnv {
+export function githubRunEnv(g: GithubRunEnv, basePath: string | undefined): NodeJS.ProcessEnv {
   return {
-    GH_TOKEN: token,
-    GITHUB_TOKEN: token,
+    PATH: [g.binDir, basePath].filter(Boolean).join(path.delimiter),
+    SYNAP_GH_SOCK: g.sock,
+    GH_CONFIG_DIR: g.ghConfigDir,
+    GH_TOKEN: g.token,
+    GITHUB_TOKEN: g.token,
     GIT_TERMINAL_PROMPT: "0",
     GIT_CONFIG_COUNT: "2",
     GIT_CONFIG_KEY_0: "credential.helper",
     GIT_CONFIG_VALUE_0: "",
     GIT_CONFIG_KEY_1: "credential.helper",
-    GIT_CONFIG_VALUE_1: "!gh auth git-credential",
+    GIT_CONFIG_VALUE_1: `!${g.gitHelper}`,
   };
 }

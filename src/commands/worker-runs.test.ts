@@ -19,6 +19,13 @@ let root: string;
 let repo: string;
 let out: string;
 let claude: string;
+const workers: Array<{ stop(): void }> = [];
+
+/** The nearest CLAUDE.md on the path above `dir` (Claude Code reads every CLAUDE.md on its cwd's parent path). */
+const claudeMdOnParentPath = (dir: string): string | undefined => {
+  for (let d = dir; d !== path.dirname(d); d = path.dirname(d)) if (fs.existsSync(path.join(d, "CLAUDE.md"))) return path.join(d, "CLAUDE.md");
+  return undefined;
+};
 
 const SIDS = {
   aaaaaaaa: "aaaaaaaa-0000-4000-8000-000000000001", // clean worktree
@@ -37,6 +44,7 @@ beforeEach(() => {
   git(root, "init", "-q", "--bare", origin);
   repo = path.join(root, "code", "repo");
   fs.mkdirSync(repo, { recursive: true });
+  fs.writeFileSync(path.join(root, "code", "CLAUDE.md"), "the safety rules");
   git(repo, "init", "-q", "-b", "main");
   fs.writeFileSync(path.join(repo, "f"), "1");
   git(repo, "add", "f");
@@ -50,7 +58,7 @@ beforeEach(() => {
     claude,
     `#!/bin/sh
 sid=$(printf '%s' "$2" | sed -n 's/^Session: \\(........\\).*/\\1/p')
-echo "$sid|$PWD|$GH_TOKEN" >> "${out}/runs.log"
+echo "$sid|$PWD|$GH_TOKEN|$VERCEL_TOKEN" >> "${out}/runs.log"
 git -C "${repo}" worktree add -q --no-track "$PWD/repo" -b "devbox/$sid-x" origin/main
 case "$sid" in
   bbbbbbbb) echo dirty > "$PWD/repo/dirty" ;;
@@ -64,6 +72,8 @@ sleep 1
 
 afterEach(() => {
   process.env.HOME = oldHome;
+  delete process.env.VERCEL_TOKEN;
+  for (const w of workers.splice(0)) w.stop();
 });
 
 const handed = (...ids: string[]) =>
@@ -86,11 +96,13 @@ const mk = (ids: string[], deps: { githubToken?: { get(): Promise<string> } } = 
       ...deps,
     }
   );
+  workers.push(worker);
   return { worker, lines };
 };
 
 describe("a code run gets a tree folder of its own", () => {
   it("two runs at once work in different folders, as the App token; clean trees go, unpushed or dirty ones stay and are named", async () => {
+    process.env.VERCEL_TOKEN = "vercel-secret";
     const { worker, lines } = mk(Object.values(SIDS), { githubToken: { get: async () => "ghs_app_token" } });
     expect((await worker.tick()).launched).toBe(3);
     await worker.waitForChildren();
@@ -98,11 +110,13 @@ describe("a code run gets a tree folder of its own", () => {
     const runs = fs.readFileSync(path.join(out, "runs.log"), "utf8").trim().split("\n").map((l) => l.split("|"));
     const cwds = runs.map((r) => r[1]);
     expect(new Set(cwds).size).toBe(3);
-    for (const [sid, cwd, token] of runs) {
-      expect(cwd).toBe(path.join(home, ".synap", "worker", "w1-test", "trees", sid));
+    for (const [sid, cwd, token, vercel] of runs) {
+      expect(vercel).toBe(""); // the worker's own VERCEL_TOKEN never reaches a run
+      expect(cwd).toBe(path.join(root, "code", ".worker-trees", sid));
+      expect(claudeMdOnParentPath(cwd)).toBe(path.join(root, "code", "CLAUDE.md"));
       expect(token).toBe("ghs_app_token");
     }
-    const trees = path.join(home, ".synap", "worker", "w1-test", "trees");
+    const trees = path.join(root, "code", ".worker-trees");
     expect(fs.existsSync(path.join(trees, "aaaaaaaa"))).toBe(false); // clean: removed with its folder
     expect(fs.existsSync(path.join(trees, "bbbbbbbb", "repo", "dirty"))).toBe(true);
     expect(fs.existsSync(path.join(trees, "cccccccc", "repo", "c"))).toBe(true);

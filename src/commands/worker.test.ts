@@ -405,11 +405,59 @@ describe("a code run's own tree folder in the prompt", () => {
 });
 
 describe("workerEnv with a GitHub token", () => {
-  it("puts the App token in GH_TOKEN and GITHUB_TOKEN, over an inherited one", () => {
-    const env = workerEnv({ GH_TOKEN: "founder" }, undefined, undefined, "ghs_app");
+  const g = { token: "ghs_app", sock: "/s", binDir: "/bin-synap", gitHelper: "/bin-synap/h", ghConfigDir: "/c" };
+  it("puts the App token in GH_TOKEN and the helpers first on PATH, over an inherited GH_TOKEN", () => {
+    const env = workerEnv({ GH_TOKEN: "founder", PATH: "/usr/bin" }, undefined, undefined, g);
     expect(env.GH_TOKEN).toBe("ghs_app");
     expect(env.GITHUB_TOKEN).toBe("ghs_app");
-    expect(workerEnv({ GH_TOKEN: "founder" }).GH_TOKEN).toBe("founder");
+    expect(env.PATH).toBe("/bin-synap:/usr/bin");
+  });
+  it("without the App, an inherited GH_TOKEN is NOT passed on", () => {
+    expect(workerEnv({ GH_TOKEN: "founder" }).GH_TOKEN).toBeUndefined();
+  });
+});
+
+describe("workerEnv is an allowlist: a secret in the worker's env never reaches a run", () => {
+  const worker = {
+    PATH: "/usr/bin",
+    HOME: "/h",
+    LANG: "C",
+    TERM: "xterm",
+    LC_ALL: "C",
+    CLAUDE_CODE_OAUTH_TOKEN: "oauth",
+    CLAUDE_CONFIG_DIR: "/cc",
+    SYNAP_AGENT: "a",
+    SYNAP_POD_URL: "https://pod",
+    VERCEL_TOKEN: "v",
+    VERCEL_ORG_ID: "o",
+    CLOUDFLARE_API_TOKEN: "c",
+    GH_TOKEN: "founder",
+    GITHUB_TOKEN: "founder",
+    NPM_TOKEN: "n",
+    AWS_SECRET_ACCESS_KEY: "a",
+    SSH_AUTH_SOCK: "/ssh",
+    ANTHROPIC_API_KEY: "sk",
+    ANTHROPIC_AUTH_TOKEN: "t",
+    ANTHROPIC_BASE_URL: "u",
+  };
+  it("VERCEL_*, CLOUDFLARE_*, GH_TOKEN, ANTHROPIC_* and any other secret are not visible to the run", () => {
+    const env = workerEnv(worker);
+    for (const k of ["VERCEL_TOKEN", "VERCEL_ORG_ID", "CLOUDFLARE_API_TOKEN", "GH_TOKEN", "GITHUB_TOKEN", "NPM_TOKEN", "AWS_SECRET_ACCESS_KEY", "SSH_AUTH_SOCK", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL"]) {
+      expect(env[k], k).toBeUndefined();
+    }
+  });
+  it("keeps what the run needs: PATH, HOME, locale, the Claude login and the pod vars", () => {
+    expect(workerEnv(worker)).toEqual({
+      PATH: "/usr/bin",
+      HOME: "/h",
+      LANG: "C",
+      TERM: "xterm",
+      LC_ALL: "C",
+      CLAUDE_CODE_OAUTH_TOKEN: "oauth",
+      CLAUDE_CONFIG_DIR: "/cc",
+      SYNAP_AGENT: "a",
+      SYNAP_POD_URL: "https://pod",
+    });
   });
 });
 

@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 import {
   createInstallationTokenSource,
   githubAppFilesTooOpen,
-  githubTokenEnv,
+  githubRunEnv,
   loadGithubAppConfig,
   parseEnvFile,
   signAppJwt,
@@ -108,12 +108,15 @@ describe("createInstallationTokenSource", () => {
   });
 });
 
-describe("githubTokenEnv", () => {
-  it("sets gh and git to the token and resets the credential helpers first", () => {
-    const e = githubTokenEnv("ghs_x");
+describe("githubRunEnv", () => {
+  const g = { token: "ghs_x", sock: "/s", binDir: "/b", gitHelper: "/b/git-credential-synap", ghConfigDir: "/c" };
+  it("puts the helpers first on PATH, gh on an empty config dir, and resets the credential helpers first", () => {
+    const e = githubRunEnv(g, "/usr/bin:/bin");
+    expect(e.PATH).toBe("/b:/usr/bin:/bin");
+    expect(e.GH_CONFIG_DIR).toBe("/c");
+    expect(e.SYNAP_GH_SOCK).toBe("/s");
     expect(e.GH_TOKEN).toBe("ghs_x");
-    expect(e.GITHUB_TOKEN).toBe("ghs_x");
     expect([e.GIT_CONFIG_KEY_0, e.GIT_CONFIG_VALUE_0]).toEqual(["credential.helper", ""]);
-    expect(e.GIT_CONFIG_VALUE_1).toBe("!gh auth git-credential");
+    expect(e.GIT_CONFIG_VALUE_1).toBe("!/b/git-credential-synap");
   });
 });
