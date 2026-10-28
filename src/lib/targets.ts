@@ -19,7 +19,13 @@ import chalk from "chalk";
 import ora from "ora";
 import prompts from "prompts";
 import { log } from "../utils/logger.js";
-import { writeSecretFile, copySecretBackup, ensureSecretDir } from "./atomic-file.js";
+import {
+  writeSecretFile,
+  ensureSecretDir,
+  readClientConfig,
+  writeClientConfig,
+  clientConfigBackupPath,
+} from "./atomic-file.js";
 import { redactKey } from "./mcp-snippets.js";
 import { installSkills, getDeliverableSkills } from "./skills-installer.js";
 import { TARGET_KEY_MINT, takePreApprovedKey } from "./batch-approval.js";
@@ -777,12 +783,10 @@ export async function writeClaudeCodeEnv(
   const settingsPath = path.join(os.homedir(), ".claude", "settings.json");
   const settingsDir = path.dirname(settingsPath);
 
-  let settings: Record<string, unknown> = {};
-  if (fs.existsSync(settingsPath)) {
-    try {
-      settings = JSON.parse(fs.readFileSync(settingsPath, "utf-8")) as Record<string, unknown>;
-    } catch { /* start fresh */ }
-  }
+  // Throws when the file exists but cannot be parsed: an unreadable
+  // settings.json is never rewritten as `{}` (it holds every hook, permission
+  // and env the person set).
+  const settings = readClientConfig(settingsPath);
 
   // ── Resolve human user ID and provision an agent-owned API key ──────────
   // SYNAP_USER_ID = human user (for entity attribution)
@@ -870,7 +874,7 @@ export async function writeClaudeCodeEnv(
   if (!fs.existsSync(settingsDir)) {
     fs.mkdirSync(settingsDir, { recursive: true });
   }
-  writeSecretFile(settingsPath, JSON.stringify(settings, null, 2) + "\n", { mode: 0o600 });
+  writeClientConfig(settingsPath, settings);
 
   // ── Register the MCP server where Claude Code actually reads it ───────────
   // The official `claude mcp add` writes to the user-scope registry that
@@ -980,12 +984,8 @@ export function claudeCodeMcpTransport(): "http" | "bridge" {
  */
 export function setClaudeCodeMcpTransport(transport: "http" | "bridge"): string | null {
   const settingsPath = path.join(os.homedir(), ".claude", "settings.json");
-  let settings: Record<string, unknown>;
-  try {
-    settings = JSON.parse(fs.readFileSync(settingsPath, "utf-8")) as Record<string, unknown>;
-  } catch {
-    return null;
-  }
+  // Missing → `{}` → no stored pod → null. Unreadable → throws (never rewritten).
+  const settings = readClientConfig(settingsPath);
   const env = (settings.env ?? {}) as Record<string, string>;
   const podUrl = env["SYNAP_POD_URL"];
   const apiKey = env["SYNAP_HUB_API_KEY"];
@@ -993,7 +993,7 @@ export function setClaudeCodeMcpTransport(transport: "http" | "bridge"): string 
   if (transport === "bridge") env["SYNAP_MCP_TRANSPORT"] = "bridge";
   else delete env["SYNAP_MCP_TRANSPORT"];
   settings.env = env;
-  writeSecretFile(settingsPath, JSON.stringify(settings, null, 2) + "\n", { mode: 0o600 });
+  writeClientConfig(settingsPath, settings);
   const serverName = mcpServerNameFromPodUrl(podUrl);
   registerClaudeCodeMcp(
     buildMcpUrl(podUrl, env["SYNAP_WORKSPACE_ID"], env["SYNAP_PROJECT_ID"]),
@@ -1842,18 +1842,10 @@ async function installZed(cfg: TargetConnectionConfig): Promise<boolean> {
 
   const { effectiveApiKey, agentUserId, mcpUrl } = await prepareMcpSurface(cfg, "zed");
 
-  let settings: Record<string, unknown> = {};
-  if (fs.existsSync(settingsPath)) {
-    try {
-      const raw = fs.readFileSync(settingsPath, "utf-8");
-      // Zed settings.json is JSONC — strip // line comments and /* block comments */
-      // before parsing. Comments will not be preserved in the rewritten file.
-      const stripped = raw
-        .replace(/\/\*[\s\S]*?\*\//g, "")
-        .replace(/\/\/[^\n]*/g, "");
-      settings = JSON.parse(stripped) as Record<string, unknown>;
-    } catch { /* malformed — start from scratch */ }
-  }
+  // Zed settings.json is JSONC. The strings-aware reader keeps the `//` of the
+  // URLs inside it (a regex strip ate them and the parse failure wiped the
+  // file); a file that still does not parse is refused, never replaced.
+  const settings = readClientConfig(settingsPath);
 
   const contextServers = (settings.context_servers ?? {}) as Record<string, unknown>;
   // Pod-derived name — a second pod must not overwrite the first.
@@ -1870,13 +1862,13 @@ async function installZed(cfg: TargetConnectionConfig): Promise<boolean> {
   };
   settings.context_servers = contextServers;
 
-  writeSecretFile(settingsPath, JSON.stringify(settings, null, 2) + "\n", { mode: 0o600 });
+  writeClientConfig(settingsPath, settings);
 
   const { setSurfaceAgentKey: save } = await import("./pod.js");
   save("zed", { hubApiKey: effectiveApiKey, agentUserId, podUrl: cfg.podUrl });
 
   log.success(`Zed settings updated: ${settingsPath}`);
-  log.dim("Note: Zed settings are JSONC — any existing // comments were removed during rewrite.");
+  log.dim(`Note: Zed settings are JSONC — comments are not kept in the rewrite. The previous file is at ${clientConfigBackupPath(settingsPath)}.`);
   log.dim("Reload Zed to pick up the new context server (mcp-remote bridge).");
   return true;
 }
@@ -1899,10 +1891,8 @@ async function installVSCode(cfg: TargetConnectionConfig): Promise<boolean> {
   const { effectiveApiKey, agentUserId, mcpUrl } = await prepareMcpSurface(cfg, "vscode");
 
   // VS Code 1.99+ global MCP format uses "servers" (not "mcpServers")
-  let existing: { servers?: Record<string, unknown> } = {};
-  if (fs.existsSync(mcpJsonPath)) {
-    try { existing = JSON.parse(fs.readFileSync(mcpJsonPath, "utf-8")) as typeof existing; } catch { /* ignore */ }
-  }
+  // VS Code's mcp.json is JSONC (comments, trailing commas). Unreadable → refused.
+  const existing = readClientConfig<{ servers?: Record<string, unknown> }>(mcpJsonPath);
 
   existing.servers = existing.servers ?? {};
   // Pod-derived name — a second pod must not overwrite the first.
@@ -1914,7 +1904,7 @@ async function installVSCode(cfg: TargetConnectionConfig): Promise<boolean> {
     headers: { Authorization: `Bearer ${effectiveApiKey}` },
   };
 
-  writeSecretFile(mcpJsonPath, JSON.stringify(existing, null, 2) + "\n", { mode: 0o600 });
+  writeClientConfig(mcpJsonPath, existing);
 
   const { setSurfaceAgentKey: save } = await import("./pod.js");
   save("vscode", { hubApiKey: effectiveApiKey, agentUserId, podUrl: cfg.podUrl });
@@ -2069,21 +2059,10 @@ async function installGeneric(cfg: TargetConnectionConfig): Promise<boolean> {
 
   const configFile = path.join(synapDir, "mcp-config.json");
   // Merge with existing so dual-pod generic installs don't clobber each other
-  let existing: Record<string, unknown> = {};
-  if (fs.existsSync(configFile)) {
-    try {
-      existing = JSON.parse(fs.readFileSync(configFile, "utf-8")) as Record<
-        string,
-        unknown
-      >;
-    } catch {
-      /* replace */
-    }
-  }
+  // Unreadable → refused: it may hold another pod's entry.
+  const existing = readClientConfig(configFile);
   const merged = { ...existing, ...httpConfig };
-  writeSecretFile(configFile, JSON.stringify(merged, null, 2) + "\n", {
-    mode: 0o600,
-  });
+  writeClientConfig(configFile, merged);
 
   const { setSurfaceAgentKey: save } = await import("./pod.js");
   save("generic", {
@@ -2292,15 +2271,8 @@ export async function installOpencode(cfg: ProviderInstallConfig & { workspaceId
     fs.mkdirSync(configDir, { recursive: true });
   }
 
-  let existing: Record<string, unknown> = {};
-  if (fs.existsSync(configPath)) {
-    try {
-      existing = JSON.parse(fs.readFileSync(configPath, "utf-8")) as Record<string, unknown>;
-    } catch {
-      copySecretBackup(configPath, `${configPath}.bak`);
-      log.warn("Existing opencode.json unreadable — backed up to opencode.json.bak");
-    }
-  }
+  // opencode.json is JSONC. Unreadable → refused, never replaced.
+  const existing = readClientConfig(configPath);
 
   const providerBlock = (existing.provider ?? {}) as Record<string, unknown>;
   providerBlock[provider.providerId] = {
@@ -2335,7 +2307,7 @@ export async function installOpencode(cfg: ProviderInstallConfig & { workspaceId
     ...(existing.model ? {} : { model: defaultModel }),
   };
 
-  writeSecretFile(configPath, JSON.stringify(updated, null, 2) + "\n", { mode: 0o600 });
+  writeClientConfig(configPath, updated);
 
   const { setSurfaceAgentKey: save } = await import("./pod.js");
   save("opencode", { hubApiKey: agentKey, agentUserId, podUrl: cfg.podUrl });
@@ -2397,39 +2369,25 @@ export function writeMcpServerEntry(
     fs.mkdirSync(dir, { recursive: true });
   }
 
-  let config: { mcpServers?: Record<string, McpServerConfig> } = {};
-  if (fs.existsSync(configPath)) {
-    try {
-      config = JSON.parse(fs.readFileSync(configPath, "utf-8")) as typeof config;
-    } catch {
-      // corrupt or unreadable — back up and start fresh
-      const backup = `${configPath}.bak-${Date.now()}`;
-      copySecretBackup(configPath, backup);
-      log.warn(`Existing config unreadable; backed up to ${path.basename(backup)}`);
-    }
-  }
+  // Unreadable → refused (it holds the person's other MCP servers), never
+  // "backed up and started fresh".
+  const config = readClientConfig<{ mcpServers?: Record<string, McpServerConfig> }>(configPath);
 
   config.mcpServers = config.mcpServers ?? {};
   config.mcpServers[serverName] = server;
 
-  writeSecretFile(configPath, JSON.stringify(config, null, 2) + "\n", {
-    mode: 0o600,
-  });
+  writeClientConfig(configPath, config);
 }
 
 /** Best-effort remove of a named MCP server entry (e.g. legacy `"synap"`). */
 function removeMcpServerEntry(configPath: string, serverName: string): void {
   if (!fs.existsSync(configPath)) return;
   try {
-    const config = JSON.parse(fs.readFileSync(configPath, "utf-8")) as {
-      mcpServers?: Record<string, McpServerConfig>;
-    };
+    const config = readClientConfig<{ mcpServers?: Record<string, McpServerConfig> }>(configPath);
     if (!config.mcpServers?.[serverName]) return;
     delete config.mcpServers[serverName];
     if (Object.keys(config.mcpServers).length === 0) delete config.mcpServers;
-    writeSecretFile(configPath, JSON.stringify(config, null, 2) + "\n", {
-      mode: 0o600,
-    });
+    writeClientConfig(configPath, config);
   } catch {
     /* leave config alone if unreadable */
   }

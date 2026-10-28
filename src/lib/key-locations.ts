@@ -29,6 +29,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import YAML from "yaml";
+import { stripJsonc } from "./atomic-file.js";
 
 export type KeyRole = "person" | "agent";
 
@@ -107,40 +108,8 @@ function readText(file: string): Read<string> {
   }
 }
 
-/** Strip // and /* *\/ comments and trailing commas OUTSIDE strings (JSONC). */
-export function stripJsonc(text: string): string {
-  let out = "";
-  let i = 0;
-  let inStr = false;
-  while (i < text.length) {
-    const c = text[i]!;
-    if (inStr) {
-      out += c;
-      if (c === "\\") {
-        out += text[i + 1] ?? "";
-        i += 2;
-        continue;
-      }
-      if (c === '"') inStr = false;
-      i++;
-      continue;
-    }
-    if (c === '"') {
-      inStr = true;
-      out += c;
-      i++;
-    } else if (c === "/" && text[i + 1] === "/") {
-      while (i < text.length && text[i] !== "\n") i++;
-    } else if (c === "/" && text[i + 1] === "*") {
-      const end = text.indexOf("*/", i + 2);
-      i = end < 0 ? text.length : end + 2;
-    } else {
-      out += c;
-      i++;
-    }
-  }
-  return out.replace(/,(\s*[}\]])/g, "$1");
-}
+/** JSONC → JSON (one implementation, shared with the config writers). */
+export { stripJsonc };
 
 function readJsonObject(file: string, jsonc = false): Read<Record<string, unknown>> {
   const t = readText(file);
