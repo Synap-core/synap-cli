@@ -3316,6 +3316,40 @@ keys
     await keysRotate({ showKey: opts.showKey });
   });
 
+keys
+  .command("request [template]")
+  .description("Ask the person for a scoped key; they approve it on one page, the key never goes through chat")
+  .option("--out <file>", "Write the key as env lines to this file (mode 0600)")
+  .option("--force", "Overwrite --out if it exists")
+  .option("--print", "Print the key on stdout (the only way to see it)")
+  .option("--name <name>", "Name of the key")
+  .option("--expires-days <n>", "Key lifetime in days (default: the template's)", (v) => parseInt(v, 10))
+  .option("--workspace <id>", "Limit the key to one workspace")
+  .option("--env-name <NAME>", "Variable name in --out (default SYNAP_HUB_API_KEY)")
+  .option("--wait <duration>", "How long to keep asking, e.g. 90s, 30m, 24h (default 24h)")
+  .option("--no-wait", "File the request, print the link and request id, and exit; the key is not collected")
+  .option("--list-templates", "List the templates a key can be requested from")
+  .action(async (template: string | undefined, opts: Record<string, unknown>) => {
+    const mod = await import("./commands/keys-request.js");
+    if (opts.listTemplates) return mod.keysListTemplates();
+    if (!template) {
+      console.error("Name a template (synap keys request --list-templates).");
+      process.exit(1);
+    }
+    await mod.keysRequest({
+      template,
+      out: opts.out as string | undefined,
+      force: opts.force as boolean | undefined,
+      print: opts.print as boolean | undefined,
+      name: opts.name as string | undefined,
+      expiresDays: opts.expiresDays as number | undefined,
+      workspace: opts.workspace as string | undefined,
+      envName: opts.envName as string | undefined,
+      wait: typeof opts.wait === "string" ? opts.wait : undefined,
+      noWait: opts.wait === false,
+    });
+  });
+
 // Resolve a global `--pod <name>` before commander parses (it isn't registered
 // per-command). Fails fast with a clear message on an unknown profile name.
 try {
