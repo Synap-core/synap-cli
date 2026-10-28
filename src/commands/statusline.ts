@@ -22,7 +22,7 @@
 
 import fs from "node:fs";
 import os from "node:os";
-import { execSync, spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { resolveHubConfig, hubGet } from "../lib/hub-client.js";
 import { resolveActiveLens } from "../lib/session-lens.js";
 import { describeLens } from "../lib/describe-lens.js";
@@ -363,11 +363,7 @@ function render(): void {
   const vimMode = (cc.vim as { mode?: string })?.mode;
   const cwd = (cc.cwd ?? "") as string;
 
-  let branch = "";
-  if (cwd) {
-    try { branch = execSync(`git -C ${JSON.stringify(cwd)} --no-optional-locks symbolic-ref --short HEAD`, { encoding: "utf-8", timeout: 1000, stdio: ["ignore", "pipe", "ignore"] }).trim(); }
-    catch { /* not a git repo */ }
-  }
+  const branch = cwd ? gitBranchOf(cwd) : "";
 
   // ── Session stats (local file) ───────────────────────────────────────
   let callCount = 0;
@@ -480,6 +476,26 @@ function render(): void {
 }
 
 // ── Entry ──────────────────────────────────────────────────────────────
+
+/**
+ * The checked-out branch of `cwd`, or "" when it is not a git repo.
+ *
+ * `cwd` comes from Claude Code's statusline JSON: any directory the person
+ * opened, cloned repos included. It goes to git as ONE argv word, no shell:
+ * a `JSON.stringify`-quoted path in a shell string still ran `$(…)` and
+ * backticks in a directory name, on every statusline refresh.
+ */
+export function gitBranchOf(cwd: string): string {
+  try {
+    return execFileSync("git", ["-C", cwd, "--no-optional-locks", "symbolic-ref", "--short", "HEAD"], {
+      encoding: "utf-8",
+      timeout: 1000,
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+  } catch {
+    return ""; // not a git repo (or git missing): the segment is left out
+  }
+}
 
 export async function statusline(opts?: { refresh?: boolean }): Promise<void> {
   if (opts?.refresh) {

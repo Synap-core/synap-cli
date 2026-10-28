@@ -18,7 +18,7 @@ import ora from "ora";
 import prompts from "prompts";
 import { openExternalUrl } from "../lib/safe-open.js";
 import { readFileSync } from "node:fs";
-import { resolveHubConfig, hubGet, hubPost, hubDelete, HubError, renderHubError } from "../lib/hub-client.js";
+import { resolveHubConfig, hubGet, hubPost, hubPatch, hubDelete, HubError, renderHubError } from "../lib/hub-client.js";
 import { unwrapList } from "../lib/unwrapList.js";
 import { log } from "../utils/logger.js";
 
@@ -704,8 +704,9 @@ async function connectProviderOAuth(
 
 /**
  * Ensure a capability's required connection is satisfied. Provider (nango://) →
- * OAuth open + poll. Vault (vault://) → prompt for the key, POST /vault/secrets.
- * Returns true when the connection is (now) satisfied, false otherwise.
+ * OAuth open + poll. Vault (vault://) → rotate the linked secret in place, or
+ * apply the template with the key as a param. Returns true when the connection
+ * is (now) satisfied, false otherwise.
  */
 async function ensureConnection(
   cfg: HubCfg,
@@ -727,45 +728,34 @@ async function ensureConnection(
   // the remedy). Only OPENING A BROWSER is doomed, and that is already guarded
   // below. Short-circuiting on the card's cached state costs the real message.
 
-  // ── Vault credential — prompt + re-apply WITH params ──────────────────────
-  // The correct wiring: apply the template with the credential as a param, so the
-  // governed applier stores the secret AND links it into the connection tool's
-  // credentialRef (pod-wide, for a pod-scoped cap). A bare /vault/secrets write
-  // creates an orphan secret that is NOT linked to the tool — the old bug.
+  // ── Vault credential ──────────────────────────────────────────────────────
+  // Every write here must land on the secret the capability's tools actually
+  // read. A bare /vault/secrets write creates an orphan secret NOT linked to the
+  // tool's credentialRef: the CLI used to fall back to it and print success
+  // while every run kept the old key (unipile-linkedin, 2026-10-27).
   if (conn.kind === "vault") {
+    // Installed with a live key → rotate THAT secret in place. The tools keep
+    // their vault://<id>, so the new value is what the next run reads; no
+    // template re-apply, so optional install params are not blanked either.
+    if (card.id && conn.account && conn.state === "connected") {
+      return rotateLinkedSecret(cfg, card, card.id, conn.account);
+    }
+    // No live key yet → apply the template WITH params: the governed applier
+    // stores the secret AND links it into the tool's credentialRef.
     const hasParams = (card.installParams ?? []).some((p) => p.required);
     if (hasParams) {
       const collected = await collectInstallParams(card);
       if (!collected) return false;
       return applyTemplateWithParams(cfg, card, workspaceId, collected, "Connecting");
     }
-    // Fallback (older pod without install-params on the card): store the secret
-    // directly. May need manual linking if the tool's credentialRef doesn't match.
-    const service = conn.provider ?? card.key;
-    const answer = await prompts({
-      type: "password",
-      name: "value",
-      message: `Paste the ${chalk.bold(card.name)} credential (${service})`,
-    });
-    const value = answer.value as string | undefined;
-    if (!value) {
-      log.dim("Cancelled — no credential entered.");
-      return false;
-    }
-    const spinner = ora({ text: "Storing credential in the vault…", color: "cyan" }).start();
-    try {
-      await hubPost(
-        "/vault/secrets",
-        { name: `${card.name} credential`, value, service, type: "credential", workspaceId },
-        cfg
-      );
-      spinner.succeed(chalk.green(`Stored ${chalk.bold(service)} credential.`));
-      return true;
-    } catch (err) {
-      spinner.fail(chalk.red("Failed to store credential"));
-      renderHubError(err);
-      return false;
-    }
+    log.error(`Can't connect ${card.name} from here.`);
+    log.dim(
+      card.id
+        ? "The pod lists no install params for it and its tools point at no vault key that still exists."
+        : "The pod lists no install params for it."
+    );
+    log.dim(`Re-install it with its key:  synap cap add "${card.key}"`);
+    return false;
   }
 
   // ── Provider OAuth (nango://) — open + poll ───────────────────────────────
@@ -777,6 +767,41 @@ async function ensureConnection(
     cardName: card.name,
     forceReauth: forceReconnect,
   });
+}
+
+/**
+ * Replace the value of the vault secret a capability's tools point at
+ * (`secretId` = the card's `connection.account`, the id in their
+ * `vault://<id>`), through the capability credentials door. The row keeps its
+ * id, so every reference to it now resolves to the new value and no second
+ * secret is written.
+ */
+async function rotateLinkedSecret(
+  cfg: HubCfg,
+  card: CapabilityCard,
+  capabilityId: string,
+  secretId: string
+): Promise<boolean> {
+  const answer = await prompts({
+    type: "password",
+    name: "value",
+    message: `Paste the new ${chalk.bold(card.name)} key`,
+  });
+  const value = answer.value as string | undefined;
+  if (!value) {
+    log.dim("Cancelled — no key entered. The current key is unchanged.");
+    return false;
+  }
+  const spinner = ora({ text: `Replacing the ${chalk.bold(card.name)} key…`, color: "cyan" }).start();
+  try {
+    await hubPatch(`/capabilities/${capabilityId}/credentials/${secretId}`, { value }, cfg);
+    spinner.succeed(chalk.green(`Replaced the ${chalk.bold(card.name)} key. Its tools use the new one from the next run.`));
+    return true;
+  } catch (err) {
+    spinner.fail(chalk.red(`Couldn't replace the ${card.name} key — the current key is unchanged`));
+    renderHubError(err);
+    return false;
+  }
 }
 
 /**
@@ -1337,29 +1362,46 @@ export async function capabilityConnect(
 
   const workspaceId = requireWorkspace(opts, cfg);
 
-  // No name → discovery picker: list connectable services (Nango providers) with
-  // their status, pick one, run the OAuth flow. `connect <name>` still connects a
-  // specific capability's provider.
+  // No name → discovery picker: the connectable services (Nango providers) AND
+  // the installed capabilities connected by an API key (vault://, e.g. Unipile).
+  // Nango never lists a keyed one, so before 28 Oct the picker hid them and
+  // `--reconnect` could not reach them. Pick an OAuth service → its OAuth flow;
+  // pick a keyed capability → the named path below (rotate the key in place).
   if (!name || !name.trim()) {
     const spin = ora({ text: "Fetching connectable services…", color: "cyan" }).start();
-    let providers: Array<{ id: string; provider: string; displayName?: string; connected: boolean }>;
+    let providers: Array<{ id: string; provider: string; displayName?: string; connected: boolean }> = [];
     let nangoStatus: "ok" | "error" | undefined;
     let nangoError: { reason?: string; message?: string } | undefined;
-    try {
-      const res = (await hubGet("/connectors/providers", {}, cfg)) as {
+    let providersFailed = false;
+    let keyed: CapabilityCard[] = [];
+    let keyedFailed = false;
+    const [provRes, catRes] = await Promise.allSettled([
+      hubGet("/connectors/providers", {}, cfg) as Promise<{
         providers?: typeof providers;
         nangoStatus?: "ok" | "error";
         nangoError?: { reason?: string; message?: string };
-      };
-      providers = res.providers ?? [];
-      nangoStatus = res.nangoStatus;
-      nangoError = res.nangoError;
-      spin.stop();
-    } catch (err) {
-      spin.stop();
-      renderHubError(err);
+      }>,
+      fetchCatalog(cfg, workspaceId),
+    ]);
+    spin.stop();
+    if (provRes.status === "fulfilled") {
+      providers = provRes.value.providers ?? [];
+      nangoStatus = provRes.value.nangoStatus;
+      nangoError = provRes.value.nangoError;
+    } else {
+      providersFailed = true;
+      renderHubError(provRes.reason);
       log.dim("Couldn't reach the pod's connector service.");
-      return;
+    }
+    if (catRes.status === "fulfilled") {
+      keyed = catRes.value.filter(
+        (c) => c.source === "installed" && c.connection?.required === true && c.connection.kind === "vault"
+      );
+    } else {
+      // A failed read is not "no keyed capabilities": say so, and name the door that still works.
+      keyedFailed = true;
+      log.warn("Couldn't list the capabilities connected by an API key.");
+      log.dim('Connect one by name:  synap cap connect "<name>"   (names: synap cap list)');
     }
     // Distinguish "couldn't check" from "checked, genuinely empty" — the same
     // fault-vs-absence signal the pod now returns. A guess ("may not be
@@ -1367,22 +1409,28 @@ export async function capabilityConnect(
     if (nangoStatus === "error") {
       log.warn(`Couldn't check connectors (${nangoError?.reason ?? "unknown"}) — connection state is unknown.`);
       if (nangoError?.message) log.dim(nangoError.message);
-      return;
+      providers = [];
+      providersFailed = true;
     }
-    if (providers.length === 0) {
+    if (providers.length === 0 && keyed.length === 0) {
+      if (providersFailed || keyedFailed) return;
       log.warn("No connectable services available on this pod.");
       log.dim("This pod's Nango declares no integrations. A pod admin declares them in the Nango dashboard.");
       return;
     }
+    const keyedConnected = (c: CapabilityCard) => c.connection?.state === "connected";
     const connectable = providers.filter((p) => !p.connected);
     const connected = providers.filter((p) => p.connected);
+    const keyedOpen = keyed.filter((c) => !keyedConnected(c));
+    const keyedDone = keyed.filter(keyedConnected);
     // --reconnect: the point is to re-auth an ALREADY-connected (but expired)
-    // service, so connected rows become selectable (a fresh OAuth) rather than
-    // disabled, and "everything already connected" is no longer a dead end.
-    if (connectable.length === 0 && !opts.reconnect) {
+    // service, so connected rows become selectable (a fresh OAuth, or a new key)
+    // rather than disabled, and "everything already connected" is no longer a dead end.
+    if (connectable.length === 0 && keyedOpen.length === 0 && !opts.reconnect) {
       log.heading("Everything connectable here is already connected.");
       for (const p of connected) log.dim(`  ${chalk.green("✓")} ${p.displayName ?? p.provider}`);
-      log.dim("Reconnect an expired one:  synap cap connect --reconnect");
+      for (const c of keyedDone) log.dim(`  ${chalk.green("✓")} ${c.name}`);
+      log.dim("Reconnect an expired one, or replace a key:  synap cap connect --reconnect");
       return;
     }
     const answer = await prompts({
@@ -1390,25 +1438,41 @@ export async function capabilityConnect(
       name: "id",
       message: `${opts.reconnect ? "Reconnect" : "Connect"} a service ${chalk.dim(`→ ${podHostLabel(cfg)}`)}`,
       // Connectable first; already-connected grouped at the end — disabled in the
-      // normal flow, but SELECTABLE (for a forced re-auth) under --reconnect.
+      // normal flow, but SELECTABLE (for a forced re-auth / a new key) under --reconnect.
       choices: [
         ...connectable.map((p) => ({
           title: p.displayName ?? p.provider,
-          value: p.id,
+          value: `oauth:${p.id}`,
+        })),
+        ...keyedOpen.map((c) => ({
+          title: c.name,
+          description: "API key",
+          value: `key:${c.name}`,
         })),
         ...connected.map((p) => ({
           title: `${p.displayName ?? p.provider} ${chalk.green("✓ connected")}`,
           description: opts.reconnect ? "re-authenticate" : "already connected",
-          value: p.id,
+          value: `oauth:${p.id}`,
+          disabled: !opts.reconnect,
+        })),
+        ...keyedDone.map((c) => ({
+          title: `${c.name} ${chalk.green("✓ connected")}`,
+          description: opts.reconnect ? "replace its API key" : "already connected",
+          value: `key:${c.name}`,
           disabled: !opts.reconnect,
         })),
       ],
     });
-    if (!answer.id) {
+    const picked = typeof answer.id === "string" ? answer.id : "";
+    if (!picked) {
       log.dim("Cancelled.");
       return;
     }
-    const chosen = providers.find((p) => p.id === answer.id)!;
+    if (picked.startsWith("key:")) {
+      await capabilityConnect(picked.slice("key:".length), opts);
+      return;
+    }
+    const chosen = providers.find((p) => p.id === picked.slice("oauth:".length))!;
     const ok = await connectProviderOAuth(cfg, chosen.id, workspaceId, {
       displayName: chosen.displayName ?? chosen.provider,
       forceReauth: opts.reconnect ?? false,
@@ -1448,7 +1512,11 @@ export async function capabilityConnect(
 
   if (opts.reconnect) {
     log.heading(`Reconnecting ${card.name}`);
-    log.dim("Forcing a fresh sign-in — your previous access had expired or was revoked.");
+    log.dim(
+      card.connection.kind === "vault"
+        ? "Replacing the key its tools use."
+        : "Forcing a fresh sign-in — your previous access had expired or was revoked."
+    );
   }
   const ok = await ensureConnection(cfg, workspaceId, card, opts.reconnect ?? false);
   if (!ok) process.exit(1);

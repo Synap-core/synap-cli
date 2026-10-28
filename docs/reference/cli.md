@@ -4,7 +4,7 @@
 
 Synap CLI — connect AI agents to your data pod
 
-228 commands. Hidden commands and hidden options are omitted here (5 hidden commands); `cli.json` lists them with `"hidden": true`.
+231 commands. Hidden commands and hidden options are omitted here (5 hidden commands); `cli.json` lists them with `"hidden": true`.
 
 Every command also accepts `-h, --help`.
 
@@ -87,6 +87,9 @@ Every command also accepts `-h, --help`.
   - [`synap proposals reject`](#synap-proposals-reject) — Reject a pending proposal
   - [`synap proposals await`](#synap-proposals-await) — Block until a proposal is decided. Exit 0 approved · 1 rejected/expired/withdrawn · 2 timeout
 - [`synap worker`](#synap-worker) — Run Claude Code unattended here for the sessions handed to an agent
+- [`synap box`](#synap-box) — Run scripts in fresh isolated boxes on this computer (run box provisioner)
+  - [`synap box serve`](#synap-box-serve) — Lease queued box runs from the pod and run each in a fresh box
+  - [`synap box reap`](#synap-box-reap) — Destroy every box no run holds (after a crash)
 - [`synap session`](#synap-session) — Manage focus sessions (goal-bound AI work rooms)
   - [`synap session start`](#synap-session-start) — Start a new focus session and return its ID
   - [`synap session list`](#synap-session-list) — List focus sessions in the active workspace
@@ -111,7 +114,7 @@ Every command also accepts `-h, --help`.
   - [`synap track update`](#synap-track-update) — Set a goal's direction, KPI and what it holds (each field is written whole; kpi is merged)
   - [`synap track accept`](#synap-track-accept) — The goal's judge decides a claimed criterion: accepted \| changes_asked \| rejected (a person's act)
   - [`synap track advance`](#synap-track-advance) — Legacy (tracks with steps): move a track to a step; prints the session that step offers
-  - [`synap track status`](#synap-track-status) — Move a track: proposed\|agreed\|ready\|active\|paused\|completed (Closed)\|archived (Dropped). Closing needs --verdict met\|partly_met\|not_met (an operation closes retired, and only one does); dropping should carry no_longer_needed\|impossible\|replaced\|mistake (impossible and replaced need --verdict-reason). Both are final — reopen makes a new version.
+  - [`synap track status`](#synap-track-status) — Move a track: proposed (Draft)\|agreed\|ready\|active\|paused\|completed (Closed)\|archived (Dropped). Closing needs --verdict met\|partly_met\|not_met (an operation closes retired, and only one does); dropping should carry no_longer_needed\|impossible\|replaced\|mistake (impossible and replaced need --verdict-reason). Both are final — reopen makes a new version.
   - [`synap track reopen`](#synap-track-reopen) — Reopen a closed or dropped goal as a NEW version (the old one keeps its verdict)
   - [`synap track params`](#synap-track-params) — Answer the method's params as key=value (merged; key=null clears one)
   - [`synap track start-step`](#synap-track-start-step) — Legacy (tracks with steps): start one step's session — on a track with no steps, use 'session start --track'
@@ -1479,7 +1482,8 @@ Run Claude Code unattended here for the sessions handed to an agent
 | `--agent <name>` | The named agent this machine works as (its key comes from ~/.synap) (required) |  |
 | `--interval <dur>` | How often to check for handed sessions (e.g. 30s, 2m) | `"30s"` |
 | `--once` | Check once, run what is handed, wait for it, exit |  |
-| `--cwd <dir>` | Where the launched Claude Code works (default ~/Documents/Code/synap) |  |
+| `--cwd <dir>` | Where code sessions' Claude Code works (default ~/Documents/Code/synap) |  |
+| `--work-root <dir>` | Where playbook runs over pod data (no repo) get a folder each, <dir>/<session id> (default ~/synap-work) |  |
 | `--max-parallel <n>` | Runs at the same time | `"1"` |
 | `--claude-bin <path>` | The claude binary | `"claude"` |
 | `--claude-config-dir <dir>` | CLAUDE_CONFIG_DIR for launched runs — picks which Claude subscription they use |  |
@@ -1487,6 +1491,41 @@ Run Claude Code unattended here for the sessions handed to an agent
 | `--allowed-tools <list>` | Comma-separated Claude tools allowed without asking (the pod MCP server is always added) |  |
 | `--skip-permissions` | Launch with --dangerously-skip-permissions instead of an allow-list |  |
 | `--dry-run` | Claim and log what would launch, without launching Claude |  |
+
+## `synap box`
+
+```
+synap box [options] [command]
+```
+
+Run scripts in fresh isolated boxes on this computer (run box provisioner)
+
+Subcommands: [`serve`](#synap-box-serve), [`reap`](#synap-box-reap)
+
+## `synap box serve`
+
+```
+synap box serve [options]
+```
+
+Lease queued box runs from the pod and run each in a fresh box
+
+| Option | Description | Default |
+|---|---|---|
+| `--config <file>` | Provisioner config | `"/etc/synap-box/config.json"` |
+| `--once` | Lease at most one run, work it, exit |  |
+
+## `synap box reap`
+
+```
+synap box reap [options]
+```
+
+Destroy every box no run holds (after a crash)
+
+| Option | Description | Default |
+|---|---|---|
+| `--config <file>` | Provisioner config | `"/etc/synap-box/config.json"` |
 
 ## `synap session`
 
@@ -1600,6 +1639,8 @@ End a focus session (proposal pack) and optionally attach a recap
 | `--workspace <id>` | Workspace hint (optional; not required for complete) |  |
 | `--recap <text>` | Short summary of what was accomplished (maps to summary) |  |
 | `--as <status>` | How it ended: closed (default, finished) \| cancelled (abandoned) \| failed (could not complete) |  |
+| `--withdraw <messageId=note>` | An open question you asked that your work overtook, with why (repeatable) | `[]` |
+| `--keep-owed <messageId>` | An open question the person still owes you an answer to after this session (repeatable) | `[]` |
 | `--json` | Output full pack (or close result) as JSON |  |
 | `--pod-url <url>` | Pod URL override |  |
 | `--api-key <key>` | API key override |  |
@@ -1855,7 +1896,7 @@ Start a track — a goal — on a project
 | `--end-state <text>` | What done looks like, in your words |  |
 | `--criterion <text>` | How it is judged done — '[measured\|judged\|handed_over\|learning\|decided_outside\|certified:] statement'; give 0 or 2-5 (repeatable) | `[]` |
 | `--drop-condition <text>` | When to stop pursuing it (repeatable, at most 5) | `[]` |
-| `--kind <kind>` | Kind of work: project\|flow\|operation\|investigation\|incident\|commission\|pathway (a proposal until you confirm) |  |
+| `--kind <kind>` | Kind of work: project (Build)\|flow\|operation\|investigation\|incident\|commission\|pathway (a proposal until you confirm) |  |
 | `--uncertainty <level>` | How well the way is known: clear\|complicated\|complex\|chaotic\|unknown |  |
 | `--loop <on\|off\|n>` | Let the goal propose its next session: on, off, or n sessions a week |  |
 | `--reason <text>` | Why — shown to the reviewer |  |
@@ -1883,7 +1924,7 @@ Set a goal's direction, KPI and what it holds (each field is written whole; kpi 
 | `--end-state <text>` | What done looks like, in your words |  |
 | `--criterion <text>` | How it is judged done — '[measured\|judged\|handed_over\|learning\|decided_outside\|certified:] statement'; give 0 or 2-5 (repeatable) | `[]` |
 | `--drop-condition <text>` | When to stop pursuing it (repeatable, at most 5) | `[]` |
-| `--kind <kind>` | Kind of work: project\|flow\|operation\|investigation\|incident\|commission\|pathway (a proposal until you confirm) |  |
+| `--kind <kind>` | Kind of work: project (Build)\|flow\|operation\|investigation\|incident\|commission\|pathway (a proposal until you confirm) |  |
 | `--uncertainty <level>` | How well the way is known: clear\|complicated\|complex\|chaotic\|unknown |  |
 | `--loop <on\|off\|n>` | Let the goal propose its next session: on, off, or n sessions a week |  |
 | `--reason <text>` | Why — shown to the reviewer |  |
@@ -1938,7 +1979,7 @@ Legacy (tracks with steps): move a track to a step; prints the session that step
 synap track status [options] <id> <status>
 ```
 
-Move a track: proposed|agreed|ready|active|paused|completed (Closed)|archived (Dropped). Closing needs --verdict met|partly_met|not_met (an operation closes retired, and only one does); dropping should carry no_longer_needed|impossible|replaced|mistake (impossible and replaced need --verdict-reason). Both are final — reopen makes a new version.
+Move a track: proposed (Draft)|agreed|ready|active|paused|completed (Closed)|archived (Dropped). Closing needs --verdict met|partly_met|not_met (an operation closes retired, and only one does); dropping should carry no_longer_needed|impossible|replaced|mistake (impossible and replaced need --verdict-reason). Both are final — reopen makes a new version.
 
 | Argument | Required | Description |
 |---|---|---|
@@ -2254,7 +2295,7 @@ Record an observation about the user (pod-scoped, AI-maintained)
 
 | Option | Description | Default |
 |---|---|---|
-| `--category <cat>` | working_style \| communication \| focus \| technical \| preference | `"preference"` |
+| `--category <cat>` | working_style \| communication \| focus \| preferences \| habits \| technical | `"preferences"` |
 | `--confidence <n>` | Confidence score 0-1 | `"0.5"` |
 | `--json` | Output as JSON |  |
 | `--pod-url <url>` | Pod URL override |  |

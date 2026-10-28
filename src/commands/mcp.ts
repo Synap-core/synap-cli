@@ -22,7 +22,7 @@ import {
   enrollAgentIfNeeded,
 } from "../lib/targets.js";
 import { log } from "../utils/logger.js";
-import { printMcpConnection, redactKey, writeMcpSnippetFiles, MCP_KEY_ENV } from "../lib/mcp-snippets.js";
+import { printMcpConnection, redactKey, writeMcpSnippetFiles, MCP_KEY_ENV, mcpRemoteArgs } from "../lib/mcp-snippets.js";
 
 interface McpBaseOpts {
   podUrl?: string;
@@ -424,7 +424,7 @@ export async function mcpUiSetup(
         fields: {
           "Config file": "~/Library/Application Support/Claude/claude_desktop_config.json (macOS)",
           "mcpServers.synap.command": "npx",
-          "mcpServers.synap.args": `-y mcp-remote ${url} --header "Authorization:\${SYNAP_AUTH}"`,
+          "mcpServers.synap.args": mcpRemoteArgs(url).join(" "),
           "mcpServers.synap.env.SYNAP_AUTH": `Bearer ${keyShown} (real value: "mcpRemote" block in ${snippetFiles.jsonFile})`,
         },
         notes: [
@@ -496,7 +496,7 @@ export async function mcpUiSetup(
  */
 export async function mcpBridge(opts: { url?: string }): Promise<void> {
   const { runMcpBridge } = await import("../lib/mcp-bridge.js");
-  const { conversationHeaders } = await import("../lib/conversation-headers.js");
+  const { mcpBridgeHeaders } = await import("../lib/conversation-headers.js");
   const fromEnv = process.env.SYNAP_MCP_API_KEY || process.env.SYNAP_HUB_API_KEY;
   const cfg = fromEnv && opts.url ? null : await resolveHubConfig();
   const apiKey = fromEnv || cfg?.apiKey;
@@ -509,7 +509,7 @@ export async function mcpBridge(opts: { url?: string }): Promise<void> {
   await runMcpBridge({
     url,
     apiKey,
-    headers: conversationHeaders(process.env.CLAUDE_CODE_SESSION_ID),
+    headers: mcpBridgeHeaders(process.env.CLAUDE_CODE_SESSION_ID),
   });
 }
 

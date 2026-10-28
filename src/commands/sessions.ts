@@ -12,6 +12,10 @@ import {
   HubError,
 } from "../lib/hub-client.js";
 import { type BaseOpts } from "./data.js";
+import {
+  closeQuestionDispositions,
+  openQuestionsRefusal,
+} from "./close-questions.js";
 import { readFileSync, existsSync } from "fs";
 import { resolve } from "path";
 
@@ -608,8 +612,19 @@ type CompletePackResult = {
  */
 export async function closeSession(
   id: string,
-  opts: BaseOpts & { workspace?: string; recap?: string; as?: string }
+  opts: BaseOpts & {
+    workspace?: string;
+    recap?: string;
+    as?: string;
+    withdraw?: string[];
+    keepOwed?: string[];
+  }
 ): Promise<void> {
+  const settled = closeQuestionDispositions(opts);
+  if (!settled.ok) {
+    console.error(chalk.red(`Error: ${settled.error}`));
+    process.exit(1);
+  }
   try {
     const cfg = await resolveHubConfig(opts);
     const wsId = opts.workspace || cfg.workspaceId;
@@ -626,6 +641,8 @@ export async function closeSession(
       // fails here with the three legal values, rather than reaching the pod
       // and being rejected by a zod enum the user cannot see.
       if (opts.as) body.terminalStatus = opts.as;
+      if (settled.dispositions.length > 0)
+        body.questionDispositions = settled.dispositions;
       pack = (await hubPost(
         `/focus-sessions/${id}/complete`,
         body,
@@ -711,6 +728,24 @@ export async function closeSession(
       }
     }
   } catch (e) {
+    const refusal = openQuestionsRefusal(e);
+    if (refusal) {
+      if (opts.json) {
+        console.log(JSON.stringify({ ok: false, status: "refused", ...refusal }, null, 2));
+      } else {
+        log.error("Not closed: questions you asked in this session are still open.");
+        for (const q of refusal.openQuestions) {
+          console.log(
+            `  ${chalk.white(q.shortId ?? q.messageId.slice(0, 8))}  ${q.text}  ${chalk.dim(q.messageId)}`
+          );
+        }
+        log.dim(
+          "  Relay the person's chat answer first (relay_answer), or close again with " +
+            "--withdraw <messageId>=<why> or --keep-owed <messageId> for each."
+        );
+      }
+      process.exit(1);
+    }
     renderHubError(e);
     process.exit(1);
   }

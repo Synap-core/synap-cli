@@ -18,7 +18,7 @@ import {
   writeLens,
   clearLensField,
 } from "./session-lens.js";
-import { conversationHeaders } from "./conversation-headers.js";
+import { clientHeader, conversationHeaders } from "./conversation-headers.js";
 import {
   effectiveDirectoryLens,
   resolveDirectoryLensForPod,
@@ -395,7 +395,12 @@ function hubError(
   });
 }
 
-/** Where to send users who hit a wall. */
+/**
+ * Where to send users who hit a wall. The support door is the ONE customer
+ * support entry point shared by every Synap surface (`from=cli` tells support
+ * which surface the person came from); Discord stays as the community option.
+ */
+export const SUPPORT_URL = "https://synap.live/support?from=cli";
 const DISCORD_INVITE_URL = "https://discord.gg/xhRdQ7hG5h";
 
 /** Wrap a URL in an OSC-8 terminal hyperlink so `label` is clickable. */
@@ -404,38 +409,41 @@ function osc8Link(url: string, label: string): string {
 }
 
 /**
- * Once-per-process guard for the Discord help footer. A single CLI invocation
+ * Once-per-process guard for the help footer. A single CLI invocation
  * runs one command; printing the footer at most once keeps it a footer, not a
  * per-error/per-line spam.
  */
-let _discordHelpShown = false;
+let _helpShown = false;
 
 /**
- * Append a one-line "need help?" footer with a clickable Discord invite. Prints
- * to stderr (same stream as the error it follows, so `2>/dev/null` hides both)
- * and only once per process. The invite is an OSC-8 hyperlink on an interactive
- * terminal, a plain URL when the stream is redirected/piped.
+ * Append a one-line "need help?" footer naming the support door (open a ticket)
+ * and the Discord invite. Prints to stderr (same stream as the error it
+ * follows, so `2>/dev/null` hides both) and only once per process. Each URL is
+ * an OSC-8 hyperlink on an interactive terminal, a plain URL when the stream is
+ * redirected/piped.
  */
-export function discordHelpLine(): void {
-  if (_discordHelpShown) return;
-  _discordHelpShown = true;
-  const link = process.stderr.isTTY
-    ? osc8Link(DISCORD_INVITE_URL, DISCORD_INVITE_URL)
-    : DISCORD_INVITE_URL;
-  console.error(chalk.dim(`    Need help? Join our Discord: ${link}`));
+export function helpFooterLine(): void {
+  if (_helpShown) return;
+  _helpShown = true;
+  const link = (url: string) => (process.stderr.isTTY ? osc8Link(url, url) : url);
+  console.error(
+    chalk.dim(
+      `    Need help? Open a ticket: ${link(SUPPORT_URL)} (or join our Discord: ${link(DISCORD_INVITE_URL)})`
+    )
+  );
 }
 
 /**
  * Print a failed Hub call: its humanized message plus a hint for the classes
  * where the cause is not obvious from the message alone. Lives here rather than
  * in utils/logger so the logger stays domain-agnostic and the taxonomy and its
- * presentation sit in one file. Always closes with the one-time Discord footer.
+ * presentation sit in one file. Always closes with the one-time help footer.
  */
 export function renderHubError(err: unknown): void {
   renderHubErrorBody(err);
   // ONE central place every failed Hub command flows through — append the help
   // footer here so it prints once per failed command (guarded), not per line.
-  discordHelpLine();
+  helpFooterLine();
 }
 
 function renderHubErrorBody(err: unknown): void {
@@ -890,13 +898,18 @@ export function detachActiveSessionId(podUrl?: string): string | undefined {
 }
 
 /**
- * Per-request headers: the focus session this terminal is attached to, and the
+ * Per-request headers: which client calls (`synap-cli/<version>`), the focus
+ * session this terminal is attached to, and the
  * Claude Code conversation the call comes from (`conversation-headers.ts`) — so
  * the work it lands can be traced back to, and reopened in, that conversation.
  */
 function sessionHeaders(cfg?: HubConfig): Record<string, string> {
   const id = resolveActiveSessionId(cfg?.podUrl);
-  return { ...conversationHeaders(getClaudeSessionId()), ...(id ? { "X-Session-Id": id } : {}) };
+  return {
+    ...clientHeader("synap-cli"),
+    ...conversationHeaders(getClaudeSessionId()),
+    ...(id ? { "X-Session-Id": id } : {}),
+  };
 }
 
 /** Max 429 retries for bulk import (each waits up to the rate-limit window). */

@@ -51,7 +51,7 @@ interface SkillRow {
 }
 
 /** One runnable unit flattened for script generation. */
-interface RunnableVerb {
+export interface RunnableVerb {
   toolName: string;
   verbId: string;
   label: string;
@@ -87,27 +87,53 @@ function slugify(name: string): string {
     .replace(/^-+|-+$/g, "") || "verb";
 }
 
-/** Render one Raycast Script Command. Returns the script body + a fallback flag. */
-function renderScript(verb: RunnableVerb): { content: string; usedFallback: boolean } {
+/**
+ * A verb id or parameter name that may appear in a generated script. They come
+ * from the pod's capability metadata (third-party marketplace vendors included)
+ * and land in an executable file the person launches, so anything else is
+ * refused rather than escaped into something that still looks like a flag.
+ */
+const SCRIPT_WORD = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
+
+/** One word for bash, single-quoted: nothing inside is expanded. */
+function shWord(s: string): string {
+  return `'${s.replace(/'/g, `'\\''`)}'`;
+}
+
+/** Free text for a `# @raycast.*` comment line: a newline would end the comment. */
+function commentText(s: string): string {
+  return s.replace(/[\u0000-\u001f\u007f\u2028\u2029]+/g, " ").trim();
+}
+
+export type RenderedScript =
+  | { content: string; usedFallback: boolean }
+  | { refused: string };
+
+/** Render one Raycast Script Command, or refuse a verb whose id or parameters are not plain words. */
+export function renderScript(verb: RunnableVerb): RenderedScript {
+  if (!SCRIPT_WORD.test(verb.verbId)) return { refused: `verb id ${JSON.stringify(verb.verbId)}` };
+  const badParam = verb.params.find((p) => !SCRIPT_WORD.test(p));
+  if (badParam !== undefined) return { refused: `parameter ${JSON.stringify(badParam)} of ${verb.verbId}` };
+
   const usedFallback = verb.params.length === 0;
   const params = usedFallback ? ["input"] : verb.params;
 
   const argLines = params.map(
     (p, i) =>
-      `# @raycast.argument${i + 1} { "type": "text", "placeholder": "${p}" }`
+      `# @raycast.argument${i + 1} ${JSON.stringify({ type: "text", placeholder: p })}`
   );
-  const flags = params.map((p, i) => `--${p} "$${i + 1}"`).join(" ");
+  const flags = params.map((p, i) => `${shWord(`--${p}`)} "$${i + 1}"`).join(" ");
 
   const content = [
     `#!/bin/bash`,
     `# @raycast.schemaVersion 1`,
-    `# @raycast.title ${verb.toolName} — ${verb.label}`,
+    `# @raycast.title ${commentText(`${verb.toolName} — ${verb.label}`)}`,
     `# @raycast.mode fullOutput`,
     `# @raycast.packageName Synap`,
     `# @raycast.icon 🧠`,
     ...argLines,
     ``,
-    `exec synap capability run ${verb.verbId} ${flags}`,
+    `exec synap capability run ${shWord(verb.verbId)} ${flags}`,
     ``,
   ].join("\n");
 
@@ -198,15 +224,21 @@ export async function raycastGenerate(opts: RaycastGenerateOpts): Promise<void> 
   }
 
   let fallbackCount = 0;
+  let written = 0;
   for (const verb of runnables) {
-    const { content, usedFallback } = renderScript(verb);
-    if (usedFallback) fallbackCount++;
+    const rendered = renderScript(verb);
+    if ("refused" in rendered) {
+      log.warn(`Skipped ${commentText(verb.toolName)}: its ${rendered.refused} is not a plain word, so no script was written for it.`);
+      continue;
+    }
+    if (rendered.usedFallback) fallbackCount++;
     const file = join(outDir, `${slugify(verb.verbId)}.sh`);
-    writeFileSync(file, content, "utf-8");
+    writeFileSync(file, rendered.content, "utf-8");
     chmodSync(file, 0o755);
+    written++;
   }
 
-  log.heading(`Generated ${runnables.length} Raycast Script Command${runnables.length === 1 ? "" : "s"}`);
+  log.heading(`Generated ${written} Raycast Script Command${written === 1 ? "" : "s"}`);
   console.log();
   log.dim(outDir);
   console.log();

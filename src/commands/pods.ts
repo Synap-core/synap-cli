@@ -34,6 +34,7 @@ import {
   writeClaudeCodeEnv,
 } from "../lib/targets.js";
 import { renderNextSteps, FLOW } from "../lib/next-steps.js";
+import { mcpRemoteArgs } from "../lib/mcp-snippets.js";
 
 
 // ─── list ─────────────────────────────────────────────────────────────────────
@@ -304,7 +305,9 @@ export async function podsUse(name: string, opts: { surface?: SurfaceName; json?
   if (desktopPath && fs.existsSync(desktopPath)) {
     writeMcpServerEntry(desktopPath, "synap", {
       command: "npx",
-      args: ["-y", "mcp-remote", `${podConfig.podUrl.replace(/\/$/, "")}/mcp`, "--header", `Authorization: Bearer ${podConfig.hubApiKey}`],
+      // Pinned bridge; the key rides in env (0600 file), never in argv.
+      args: mcpRemoteArgs(`${podConfig.podUrl.replace(/\/$/, "")}/mcp`),
+      env: { SYNAP_AUTH: `Bearer ${podConfig.hubApiKey}` },
     });
     updated.push("Claude Desktop");
   }
@@ -365,7 +368,8 @@ async function applySurfaceConfig(surface: SupportedUseSurface, podConfig: impor
       if (p && fs.existsSync(p)) {
         writeMcpServerEntry(p, "synap", {
           command: "npx",
-          args: ["-y", "mcp-remote", `${podConfig.podUrl.replace(/\/$/, "")}/mcp`, "--header", `Authorization: Bearer ${podConfig.hubApiKey}`],
+          args: mcpRemoteArgs(`${podConfig.podUrl.replace(/\/$/, "")}/mcp`),
+          env: { SYNAP_AUTH: `Bearer ${podConfig.hubApiKey}` },
         });
         log.success("Claude Desktop MCP config updated.");
         log.dim("Quit + relaunch Claude Desktop to apply.");

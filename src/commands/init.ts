@@ -35,6 +35,7 @@ import { askControlPlaneWherePodIs, podMovedMessage } from "../lib/pod-moved.js"
 import { reserveStdoutForJson } from "../lib/init-output.js";
 import { isManagedPod, keyChoices, type KeyChoice } from "../lib/init-flow.js";
 import { installWakeHookForProject } from "./hooks.js";
+import { selfHostInstallCommands, SELF_HOST_DOCS_URL } from "../lib/self-host.js";
 import {
   computerKeyNeedsRenewal,
   deviceConnect,
@@ -268,8 +269,9 @@ async function noPodStep(): Promise<{ podUrl: string; podId?: string }> {
   }
 
   log.blank();
-  log.info("On your server, run:");
-  console.log(chalk.cyan("\n  curl -fsSL https://synap.live/install.sh | bash\n"));
+  log.info("On your server (Linux, Docker-capable, a domain pointing at it), run:");
+  console.log(chalk.cyan("\n" + selfHostInstallCommands().map((l) => `  ${l}`).join("\n") + "\n"));
+  log.dim(`Guide: ${SELF_HOST_DOCS_URL}`);
   log.info("Then here: " + chalk.cyan("npx @synap-core/cli init --pod-url <your-pod-url>"));
   throw new InitExit(INIT_EXIT.noPod, "No pod yet: self-host one, then run init with --pod-url.", true);
 }

@@ -400,3 +400,121 @@ describe("workerEnv with an account", () => {
     expect(workerEnv({ CLAUDE_CODE_OAUTH_TOKEN: "inherited" }).CLAUDE_CODE_OAUTH_TOKEN).toBe("inherited");
   });
 });
+
+// ─── protocols: code vs work folder ──────────────────────────────────────────
+
+import {
+  ASK_WAIT_MINUTES,
+  buildWorkFolderPrompt,
+  CODE_OUTPUT_KINDS,
+  REPO_PARAM_KEYS,
+  sessionProtocol,
+  workFolderFor,
+} from "./worker.js";
+
+describe("sessionProtocol: which protocol a handed session gets", () => {
+  const read = (session: Record<string, unknown>) =>
+    JSON.stringify({ session: { id: "s", goal: "g", ...session }, outcomes: { status: "ok", outcomes: [] } });
+  // The shape of a Produce Content run (content-os.yaml): params post/platform/format, a
+  // document at Script, a content-composition at Draft.
+  const produceContent = {
+    playbookId: "pb-produce-content",
+    subjectEntityId: "post-1",
+    metadata: { prompt: "Produce content for instagram…", params: { post: "post-1", platform: "instagram", format: "video" } },
+    expectedOutputs: [],
+    stages: [
+      { key: "brief", name: "Brief" },
+      { key: "script", expectedOutputs: [{ kind: "document", label: "Script" }] },
+      { key: "draft", expectedOutputs: [{ kind: "content-composition", label: "Composition" }] },
+    ],
+  };
+
+  it("a playbook run over pod data gets the work folder, from its first stage", () => {
+    expect(sessionProtocol(read(produceContent))).toBe("work-folder");
+    expect(sessionProtocol(read({ playbookId: "pb", metadata: {}, stages: [] }))).toBe("work-folder");
+  });
+
+  it("an ad-hoc hand-off (no playbook) keeps the code protocol, whatever it declares", () => {
+    expect(sessionProtocol(read({ playbookId: null }))).toBe("code");
+    expect(sessionProtocol(read({}))).toBe("code");
+    expect(sessionProtocol(read({ playbookId: null, expectedOutputs: [{ kind: "document", label: "Report" }] }))).toBe("code");
+  });
+
+  it("a playbook run whose params name a repo or a branch is code (the keys the dispatch path mounts)", () => {
+    expect([...REPO_PARAM_KEYS]).toEqual(["repo", "repos", "branch"]);
+    for (const params of [{ repo: "Synap-core/backend" }, { repos: ["Synap-core/synap-cli"] }, { branch: "fix/x" }]) {
+      expect(sessionProtocol(read({ ...produceContent, metadata: { params } })), JSON.stringify(params)).toBe("code");
+    }
+    // Blank values name nothing.
+    expect(sessionProtocol(read({ ...produceContent, metadata: { params: { repo: " ", repos: [] } } }))).toBe("work-folder");
+  });
+
+  it("a playbook run declaring a code deliverable — on the session or on ANY stage — is code", () => {
+    for (const kind of CODE_OUTPUT_KINDS) {
+      expect(sessionProtocol(read({ ...produceContent, expectedOutputs: [{ kind, label: "x" }] })), kind).toBe("code");
+      const stages = [...produceContent.stages, { key: "ship", expectedOutputs: [{ kind, label: "x" }] }];
+      expect(sessionProtocol(read({ ...produceContent, stages })), `stage ${kind}`).toBe("code");
+    }
+  });
+
+  it("the goal and the instruction are never read for it", () => {
+    const codey = { ...produceContent, goal: "open a pull request on the repo", metadata: { prompt: "git worktree, branch, PR" } };
+    expect(sessionProtocol(read(codey))).toBe("work-folder");
+  });
+
+  it("an unreadable session THROWS — never 'a code session'", () => {
+    expect(() => sessionProtocol("Error: pod down")).toThrow(/did not return JSON/);
+    expect(() => sessionProtocol(JSON.stringify({ error: "Focus session x not found" }))).toThrow(/not found/);
+    expect(() => sessionProtocol(JSON.stringify({ session: null, message: "You have no open focus session." }))).toThrow(/no session/);
+  });
+});
+
+describe("the work-folder protocol in the prompt", () => {
+  const sid = "8c34a72b-b1c1-4c37-9c1f-02920b69ccb2";
+  const p = buildWorkFolderPrompt({ sessionId: sid, goal: "Produce Content for a post", agentName: "mac", workDir: `/Users/x/synap-work/${sid}`, mcpServer: "synap-worker" });
+
+  it("works in the session's folder, with no git", () => {
+    expect(workFolderFor("/Users/x/synap-work", sid)).toBe(`/Users/x/synap-work/${sid}`);
+    expect(p).toContain(`Work folder: /Users/x/synap-work/${sid}`);
+    expect(p).toContain("No git, no branch, no repository, no pull request");
+    expect(p).not.toMatch(/worktree|devbox\/|gh pr/);
+  });
+  it("reads the playbook's instruction, stage and subject", () => {
+    expect(p).toContain("session.metadata.prompt");
+    expect(p).toContain("session.currentStage");
+    expect(p).toContain("synap_get_entity");
+  });
+  it("names where a run's params are (the pod stores them on metadata.params)", () => {
+    expect(p).toContain("The run's params are in session.metadata.params, by param name");
+    expect(p).toContain("session.metadata.params.takes");
+  });
+  it("keeps a take's transcript in ONE shape: the content-asset Content Studio writes, found before it is made", () => {
+    expect(p).toContain("A transcript of a recording is never a new document");
+    expect(p).toContain("ONE content-asset (Kind script, File ID = the take's file id)");
+    expect(p).toContain('the readable text under a "## Transcript" heading');
+    expect(p).toContain('then a "## Words" heading followed by exactly one ```json block of word timings [{"text","start","end"}]');
+    expect(p).toContain("Find it before transcribing");
+    expect(p).toContain("reuse it and only fill the word timings");
+    expect(p).toContain("synap_link_entities type references");
+  });
+  it("asks through a human-owned slot and waits for the answer — never a room QUESTION:", () => {
+    expect(p).toContain('owner:"human"');
+    expect(p).toContain("ask:{mode:");
+    expect(p).toContain("synap_wait_for_answer");
+    expect(p).toContain(`up to ${ASK_WAIT_MINUTES} minutes`);
+    expect(p).toContain('never a room "QUESTION:" line');
+    expect(p).not.toMatch(/post in the room starting with "QUESTION:"/);
+  });
+  it("files every deliverable to the pod and records it on the declared slot", () => {
+    expect(p).toContain("synap upload <path> --json");
+    expect(p).toContain("synap_create_document");
+    expect(p).toContain("reuse the key of the slot already declared");
+    expect(p).toContain("completeOutput <key>");
+  });
+  it("never publishes outward nor works around a human gate, and reports the same way as a code run", () => {
+    expect(p).toContain("Publish nothing outward");
+    expect(p).toContain("never approve, skip or work around it");
+    expect(p).toContain('starting "Look at first:"');
+    expect(p).toContain("WORKER-RESULT: done | blocked | failed");
+  });
+});

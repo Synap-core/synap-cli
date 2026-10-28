@@ -1192,7 +1192,8 @@ program
   .requiredOption("--agent <name>", "The named agent this machine works as (its key comes from ~/.synap)")
   .option("--interval <dur>", "How often to check for handed sessions (e.g. 30s, 2m)", "30s")
   .option("--once", "Check once, run what is handed, wait for it, exit")
-  .option("--cwd <dir>", "Where the launched Claude Code works (default ~/Documents/Code/synap)")
+  .option("--cwd <dir>", "Where code sessions' Claude Code works (default ~/Documents/Code/synap)")
+  .option("--work-root <dir>", "Where playbook runs over pod data (no repo) get a folder each, <dir>/<session id> (default ~/synap-work)")
   .option("--max-parallel <n>", "Runs at the same time", "1")
   .option("--claude-bin <path>", "The claude binary", "claude")
   .option("--claude-config-dir <dir>", "CLAUDE_CONFIG_DIR for launched runs — picks which Claude subscription they use")
@@ -1206,6 +1207,31 @@ program
   .action(async (opts: import("./commands/worker.js").WorkerOptions) => {
     const { workerCommand } = await import("./commands/worker.js");
     await workerCommand(opts);
+  });
+
+// ─── box ──────────────────────────────────────────────────────────────────────
+// Run THIS computer as a run box provisioner: lease the box runs queued on the
+// pod, run each in a fresh isolated LXC, hand back the evidence. See src/commands/box.ts.
+
+const box = program.command("box").description("Run scripts in fresh isolated boxes on this computer (run box provisioner)");
+
+box
+  .command("serve")
+  .description("Lease queued box runs from the pod and run each in a fresh box")
+  .option("--config <file>", "Provisioner config", "/etc/synap-box/config.json")
+  .option("--once", "Lease at most one run, work it, exit")
+  .action(async (opts: import("./commands/box.js").BoxOptions) => {
+    const { boxServeCommand } = await import("./commands/box.js");
+    await boxServeCommand(opts);
+  });
+
+box
+  .command("reap")
+  .description("Destroy every box no run holds (after a crash)")
+  .option("--config <file>", "Provisioner config", "/etc/synap-box/config.json")
+  .action(async (opts: import("./commands/box.js").BoxOptions) => {
+    const { boxReapCommand } = await import("./commands/box.js");
+    await boxReapCommand(opts);
   });
 
 // ─── session ──────────────────────────────────────────────────────────────────
@@ -1301,6 +1327,18 @@ session
   .option(
     "--as <status>",
     "How it ended: closed (default, finished) | cancelled (abandoned) | failed (could not complete)"
+  )
+  .option(
+    "--withdraw <messageId=note>",
+    "An open question you asked that your work overtook, with why (repeatable)",
+    collect,
+    [] as string[]
+  )
+  .option(
+    "--keep-owed <messageId>",
+    "An open question the person still owes you an answer to after this session (repeatable)",
+    collect,
+    [] as string[]
   )
   .option("--json", "Output full pack (or close result) as JSON")
   .option("--pod-url <url>", "Pod URL override")
@@ -1510,7 +1548,7 @@ track
   .option("--drop-condition <text>", "When to stop pursuing it (repeatable, at most 5)", collect, [])
   .option(
     "--kind <kind>",
-    "Kind of work: project|flow|operation|investigation|incident|commission|pathway (a proposal until you confirm)"
+    "Kind of work: project (Build)|flow|operation|investigation|incident|commission|pathway (a proposal until you confirm)"
   )
   .option("--uncertainty <level>", "How well the way is known: clear|complicated|complex|chaotic|unknown")
   .option("--loop <on|off|n>", "Let the goal propose its next session: on, off, or n sessions a week")
@@ -1539,7 +1577,7 @@ track
   .option("--drop-condition <text>", "When to stop pursuing it (repeatable, at most 5)", collect, [])
   .option(
     "--kind <kind>",
-    "Kind of work: project|flow|operation|investigation|incident|commission|pathway (a proposal until you confirm)"
+    "Kind of work: project (Build)|flow|operation|investigation|incident|commission|pathway (a proposal until you confirm)"
   )
   .option("--uncertainty <level>", "How well the way is known: clear|complicated|complex|chaotic|unknown")
   .option("--loop <on|off|n>", "Let the goal propose its next session: on, off, or n sessions a week")
@@ -1581,7 +1619,7 @@ track
 track
   .command("status <id> <status>")
   .description(
-    "Move a track: proposed|agreed|ready|active|paused|completed (Closed)|archived (Dropped). " +
+    "Move a track: proposed (Draft)|agreed|ready|active|paused|completed (Closed)|archived (Dropped). " +
       "Closing needs --verdict met|partly_met|not_met (an operation closes retired, and only one does); dropping should carry " +
       "no_longer_needed|impossible|replaced|mistake (impossible and replaced need --verdict-reason). " +
       "Both are final — reopen makes a new version."
@@ -1803,7 +1841,7 @@ const observe = program
 observe
   .command("write <text>", { isDefault: true })
   .description("Record an observation about the user (pod-scoped, AI-maintained)")
-  .option("--category <cat>", "working_style | communication | focus | technical | preference", "preference")
+  .option("--category <cat>", "working_style | communication | focus | preferences | habits | technical", "preferences")
   .option("--confidence <n>", "Confidence score 0-1", "0.5")
   .option("--json", "Output as JSON")
   .option("--pod-url <url>", "Pod URL override")
