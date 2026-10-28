@@ -16,12 +16,26 @@
  * reply hangs the client). The pod is stateless, so there is no server→client
  * GET stream to hold open.
  *
+ * ONE method is not transparent: `tools/list`. Claude Code asks for it once per
+ * spawn and never retries a failure, so a bridge restarted in a herd (an account
+ * switch moves every session at once) that meets a slow pod leaves the synap
+ * tools absent for the process's whole life. The bridge keeps the last good list
+ * on disk per (pod URL, key) and, when the pod fails or has not answered within
+ * `toolsListWaitMs`, answers from it; the real call carries on in the background
+ * and a changed list is announced with `notifications/tools/list_changed` (the
+ * pod declares `tools.listChanged`). No cache yet = today's behaviour exactly.
+ *
  * Known edge: the id is fixed at spawn. After `/clear` Claude Code starts a new
  * session id, but MCP writes keep the pre-clear one (its transcript up to the
  * clear stays resumable). CLI calls send the live id (`hub-client.ts`).
  */
 
+import { createHash } from "node:crypto";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import readline from "node:readline";
+import { writeFileAtomic } from "./atomic-file.js";
 import {
   CONVERSATION_CWD_HEADER,
   CONVERSATION_CWD_META_KEY,
@@ -41,6 +55,44 @@ export interface McpBridgeOptions {
   output?: NodeJS.WritableStream;
   fetchImpl?: typeof fetch;
   log?: (line: string) => void;
+  /** Where the last good tools/list is kept. Default `~/.synap/cache`. */
+  cacheDir?: string;
+  /** How long a tools/list may wait for the pod before the cache answers. Default 5 s. */
+  toolsListWaitMs?: number;
+  /** How long a cached list may be served at all. Default 7 days. */
+  toolsListMaxAgeMs?: number;
+}
+
+const TOOLS_LIST_WAIT_MS = 5_000;
+const TOOLS_LIST_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+/** The background refresh after a cache answer must not hold the process open for ever. */
+const TOOLS_LIST_REFRESH_LIMIT_MS = 60_000;
+
+type ToolsListCache = { savedAt: number; result: { tools: unknown[] } };
+
+/** One file per (MCP URL, key): the list depends on the key's profile and the URL's lens. */
+export function toolsListCachePath(dir: string, url: string, apiKey: string): string {
+  const h = createHash("sha256").update(`${url}\n${apiKey}`).digest("hex").slice(0, 24);
+  return path.join(dir, `mcp-tools-${h}.json`);
+}
+
+/** A plain first-page tools/list REQUEST: the only shape the cache can stand in for. */
+function isPlainToolsList(msg: unknown): msg is { id: JsonRpcId; method: string; params?: { cursor?: unknown } } {
+  if (!msg || Array.isArray(msg) || typeof msg !== "object") return false;
+  const m = msg as JsonRpcMessage & { params?: { cursor?: unknown } };
+  return (
+    m.method === "tools/list" &&
+    (typeof m.id === "string" || typeof m.id === "number") &&
+    (m.params?.cursor === undefined || m.params.cursor === null)
+  );
+}
+
+/** The reply's `result.tools` when it is a complete (single-page) list, else undefined. */
+function completeToolsResult(payload: unknown): { tools: unknown[] } | undefined {
+  if (!payload || Array.isArray(payload) || typeof payload !== "object") return undefined;
+  const r = (payload as JsonRpcMessage).result as { tools?: unknown; nextCursor?: unknown } | undefined;
+  if (!r || !Array.isArray(r.tools) || r.nextCursor) return undefined;
+  return r as { tools: unknown[] };
 }
 
 /** Ids of the REQUESTS in a message (a batch may carry several). */
@@ -129,17 +181,37 @@ export async function runMcpBridge(opts: McpBridgeOptions): Promise<void> {
     for (const id of ids) write({ jsonrpc: "2.0", id, error: { code: -32000, message } });
   };
 
-  const forward = async (line: string) => {
-    let msg: unknown;
+  const cacheDir = opts.cacheDir ?? path.join(os.homedir(), ".synap", "cache");
+  const cacheFile = toolsListCachePath(cacheDir, opts.url, opts.apiKey);
+  const readCache = (): ToolsListCache | undefined => {
     try {
-      msg = JSON.parse(line);
+      const c = JSON.parse(fs.readFileSync(cacheFile, "utf8")) as ToolsListCache;
+      const fresh = Date.now() - c.savedAt <= (opts.toolsListMaxAgeMs ?? TOOLS_LIST_MAX_AGE_MS);
+      return fresh && completeToolsResult({ result: c.result }) ? c : undefined;
     } catch {
-      log("dropped a line that is not JSON");
-      return;
+      return undefined; // absent or unreadable: no cache, the pod answers alone
     }
-    const ids = requestIds(msg);
+  };
+  const writeCache = (result: { tools: unknown[] }) => {
+    try {
+      writeFileAtomic(cacheFile, JSON.stringify({ savedAt: Date.now(), result }));
+    } catch (err) {
+      log(`could not write the tools cache: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
+
+  /** POST one message to the pod; what comes back goes to `emit`, a failure to `onFail`. */
+  const send = async (
+    msg: unknown,
+    ids: JsonRpcId[],
+    emit: (payload: unknown) => void,
+    onFail: (ids: JsonRpcId[], message: string) => void,
+    signal?: AbortSignal
+  ) => {
+    const emitAll = (payload: unknown) => (Array.isArray(payload) ? payload.forEach(emit) : emit(payload));
     try {
       const res = await doFetch(opts.url, {
+        ...(signal ? { signal } : {}),
         method: "POST",
         headers: {
           Authorization: `Bearer ${opts.apiKey}`,
@@ -155,7 +227,7 @@ export async function runMcpBridge(opts: McpBridgeOptions): Promise<void> {
       if (minted) sessionId = minted;
       if (!res.ok) {
         const text = await res.text().catch(() => "");
-        fail(ids, `Synap pod answered HTTP ${res.status}${text ? `: ${text.slice(0, 300)}` : ""}`);
+        onFail(ids, `Synap pod answered HTTP ${res.status}${text ? `: ${text.slice(0, 300)}` : ""}`);
         return;
       }
       const type = res.headers.get("content-type") ?? "";
@@ -170,7 +242,7 @@ export async function runMcpBridge(opts: McpBridgeOptions): Promise<void> {
           buffer = rest;
           for (const data of events) {
             try {
-              writeAll(JSON.parse(data));
+              emitAll(JSON.parse(data));
             } catch {
               log("dropped an event that is not JSON");
             }
@@ -180,9 +252,84 @@ export async function runMcpBridge(opts: McpBridgeOptions): Promise<void> {
         return;
       }
       const text = await res.text();
-      if (text.trim()) writeAll(JSON.parse(text));
+      if (text.trim()) emitAll(JSON.parse(text));
     } catch (err) {
-      fail(ids, `Synap pod unreachable at ${opts.url}: ${err instanceof Error ? err.message : String(err)}`);
+      onFail(ids, `Synap pod unreachable at ${opts.url}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
+
+  const forward = async (line: string) => {
+    let msg: unknown;
+    try {
+      msg = JSON.parse(line);
+    } catch {
+      log("dropped a line that is not JSON");
+      return;
+    }
+    if (isPlainToolsList(msg)) return forwardToolsList(msg);
+    await send(msg, requestIds(msg), write, fail);
+  };
+
+  const sleep = (ms: number) => new Promise<"slow">((r) => setTimeout(() => r("slow"), ms).unref?.());
+
+  /**
+   * tools/list through the cache. The pod's reply is collected rather than
+   * written, so that exactly ONE reply per id reaches Claude Code: the pod's
+   * when it is good and in time, else the cache's (and the pod's late reply
+   * then only refreshes the cache).
+   */
+  const forwardToolsList = async (msg: { id: JsonRpcId }) => {
+    const collected: unknown[] = [];
+    let failure: { ids: JsonRpcId[]; message: string } | undefined;
+    const settled = send(
+      msg,
+      [msg.id],
+      (p) => collected.push(p),
+      (ids, message) => {
+        failure = { ids, message };
+      },
+      AbortSignal.timeout(TOOLS_LIST_REFRESH_LIMIT_MS)
+    ).then(() => "done" as const);
+    const first = await Promise.race([settled, sleep(opts.toolsListWaitMs ?? TOOLS_LIST_WAIT_MS)]);
+    const cached = readCache();
+    const goodResult = () =>
+      failure ? undefined : completeToolsResult(collected.find((c) => (c as JsonRpcMessage)?.id === msg.id));
+    const serveCache = (why: string) => {
+      log(`${why}: answering tools/list from the cache saved ${Math.round((Date.now() - cached!.savedAt) / 1000)}s ago`);
+      write({ jsonrpc: "2.0", id: msg.id, result: cached!.result });
+    };
+
+    if (first === "done") {
+      const fresh = goodResult();
+      if (fresh) {
+        writeCache(fresh);
+        collected.forEach(write);
+      } else if (cached) {
+        serveCache(failure ? failure.message : "the pod's tools/list was not a list");
+      } else if (failure) {
+        fail(failure.ids, failure.message);
+      } else {
+        collected.forEach(write);
+      }
+      return;
+    }
+
+    // The pod is slow. No cache: wait for it, exactly as without one.
+    if (!cached) {
+      await settled;
+      const fresh = goodResult();
+      if (fresh) writeCache(fresh);
+      if (failure) fail(failure.ids, failure.message);
+      else collected.forEach(write);
+      return;
+    }
+    serveCache(`the pod has not answered tools/list in ${opts.toolsListWaitMs ?? TOOLS_LIST_WAIT_MS}ms`);
+    await settled;
+    const fresh = goodResult();
+    if (!fresh) return; // still failing: the cached list stays what Claude Code has
+    writeCache(fresh);
+    if (JSON.stringify(fresh.tools) !== JSON.stringify(cached.result.tools)) {
+      write({ jsonrpc: "2.0", method: "notifications/tools/list_changed" });
     }
   };
 
