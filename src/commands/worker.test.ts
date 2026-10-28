@@ -392,6 +392,27 @@ describe("the night protocol in the prompt", () => {
   });
 });
 
+describe("a code run's own tree folder in the prompt", () => {
+  const p = (treeDir?: string) =>
+    buildWorkerPrompt({ sessionId: "c5a34b78-0000", goal: "g", agentName: "cc", cwd: "/w", mcpServer: "m", treeDir });
+  it("names the folder, a --no-track worktree there (concurrent adds race on the repo config), and forbids the shared clone", () => {
+    expect(p("/t/c5a34b78")).toContain("git -C /w/<repo> worktree add --no-track /t/c5a34b78/<repo> -b devbox/c5a34b78-<slug> origin/main");
+    expect(p("/t/c5a34b78")).toContain("never in /w/<repo> itself");
+  });
+  it("without a folder the prompt is what it was", () => {
+    expect(p()).not.toContain("worktree add");
+  });
+});
+
+describe("workerEnv with a GitHub token", () => {
+  it("puts the App token in GH_TOKEN and GITHUB_TOKEN, over an inherited one", () => {
+    const env = workerEnv({ GH_TOKEN: "founder" }, undefined, undefined, "ghs_app");
+    expect(env.GH_TOKEN).toBe("ghs_app");
+    expect(env.GITHUB_TOKEN).toBe("ghs_app");
+    expect(workerEnv({ GH_TOKEN: "founder" }).GH_TOKEN).toBe("founder");
+  });
+});
+
 describe("workerEnv with an account", () => {
   it("the chosen token REPLACES an inherited one", () => {
     const env = workerEnv({ CLAUDE_CODE_OAUTH_TOKEN: "inherited", CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR: "4" }, undefined, "chosen");

@@ -62,6 +62,15 @@ import {
   probeAccount,
   type AccountSpec,
 } from "./worker-accounts.js";
+import {
+  createInstallationTokenSource,
+  defaultGithubAppFile,
+  githubAppFilesTooOpen,
+  githubTokenEnv,
+  loadGithubAppConfig,
+  type InstallationTokenSource,
+} from "./worker-github-app.js";
+import { ensureTreeFolder, sweepTreeFolder, treeFolderFor, type GitFn } from "./worker-worktrees.js";
 
 export interface WorkerOptions {
   agent: string;
@@ -76,6 +85,8 @@ export interface WorkerOptions {
   dryRun?: boolean;
   /** The Claude accounts file (default ~/.config/synap-worker/accounts.json, used when it exists). */
   accounts?: string;
+  /** The GitHub App env file ({GITHUB_APP_ID, GITHUB_APP_PRIVATE_KEY_FILE}; default ~/.config/synap-agent-app.env when it exists). */
+  githubApp?: string;
   /** Where work-folder runs get their folder, one per session (default ~/synap-work). */
   workRoot?: string;
 }
@@ -117,6 +128,10 @@ export interface RunRecord {
   protocol?: WorkerProtocol;
   /** A work-folder run's folder: its cwd, which every resume reuses (Claude finds a conversation by its cwd). */
   workDir?: string;
+  /** A code run's own folder for its worktrees: its cwd, which every resume reuses. */
+  treeDir?: string;
+  /** Worktrees a finished run left because they hold unpushed or uncommitted work. */
+  keptTrees?: string[];
 }
 
 interface WorkerState {
@@ -290,6 +305,8 @@ export function buildWorkerPrompt(p: {
   mcpServer: string;
   /** A design run: the deliverable is a claude.ai Design artifact. */
   design?: boolean;
+  /** A code run's own folder: where its worktrees go, so two runs never share a checkout. */
+  treeDir?: string;
 }): string {
   const short = p.sessionId.slice(0, 8);
   return [
@@ -304,7 +321,7 @@ export function buildWorkerPrompt(p: {
     `Protocol:`,
     `1. Read: synap_get_session {sessionId} for the goal, outcomes and channelId (the room); then synap_get_thread_context {threadId: <channelId>} for what was said so far.`,
     `2. Claim: synap_post_message to the room (kind "update"), one line: you picked it up and what you will do first.`,
-    `3. Work in ${p.cwd}, or in the directory the session goal names (e.g. a new site under ~/sites). Shared-tree rules: never commit on a shared clone's main; for code changes in an existing repo use a git worktree on a branch named devbox/${short}-<slug>; never push to main, never run git checkout --, restore, stash or reset --hard on a shared clone. You may push that branch and open a DRAFT pull request (gh pr create --draft); never merge one. Never deploy to production or change a domain; a preview deploy only when the session goal asks for one.`,
+    `3. Work in ${p.cwd}, or in the directory the session goal names (e.g. a new site under ~/sites). Shared-tree rules: never commit on a shared clone's main; for code changes in an existing repo use a git worktree on a branch named devbox/${short}-<slug>${p.treeDir ? ` (your current directory, ${p.treeDir}, is yours alone: \`git -C ${p.cwd}/<repo> worktree add --no-track ${p.treeDir}/<repo> -b devbox/${short}-<slug> origin/main\`, and work only in that worktree, never in ${p.cwd}/<repo> itself)` : ""}; never push to main, never run git checkout --, restore, stash or reset --hard on a shared clone. You may push that branch and open a DRAFT pull request (gh pr create --draft); never merge one. Never deploy to production or change a domain; a preview deploy only when the session goal asks for one.`,
     ...(p.design
       ? [
           `3b. Design: call the Artifact tool with action "quickstart" and intent "design" FIRST, follow what it returns, then publish, and keep the claude.ai URL the publish returns.`,
@@ -357,7 +374,13 @@ export function buildWorkFolderPrompt(p: {
  * The launched environment: the subscription, never a stray API key. With an
  * account picked, its token REPLACES any token the worker inherited.
  */
-export function workerEnv(base: NodeJS.ProcessEnv, claudeConfigDir?: string, oauthToken?: string): NodeJS.ProcessEnv {
+export function workerEnv(
+  base: NodeJS.ProcessEnv,
+  claudeConfigDir?: string,
+  oauthToken?: string,
+  /** A GitHub App installation token: `gh` and `git push` then act as the App. */
+  githubToken?: string
+): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...base };
   delete env.ANTHROPIC_API_KEY;
   delete env.ANTHROPIC_AUTH_TOKEN;
@@ -367,6 +390,7 @@ export function workerEnv(base: NodeJS.ProcessEnv, claudeConfigDir?: string, oau
     env.CLAUDE_CODE_OAUTH_TOKEN = oauthToken;
     delete env.CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR;
   }
+  if (githubToken) Object.assign(env, githubTokenEnv(githubToken));
   return env;
 }
 
@@ -739,6 +763,10 @@ export interface WorkerDeps {
   fetchImpl?: typeof fetch;
   now?: () => number;
   say?: (line: string) => void;
+  /** The App's installation token (tests stub it); default: from the GitHub App file, when there is one. */
+  githubToken?: InstallationTokenSource;
+  /** `git` for the worktree sweep (tests stub it). */
+  git?: GitFn;
 }
 
 export interface Worker {
@@ -782,6 +810,17 @@ export function createWorker(opts: WorkerOptions, deps: WorkerDeps): Worker {
     log(`warning: the accounts file is readable by other users — chmod 600 ${opts.accounts ?? defaultAccountsFile()}`);
   }
 
+  const githubAppFile = opts.githubApp ?? defaultGithubAppFile();
+  const githubToken: InstallationTokenSource | undefined =
+    deps.githubToken ??
+    (() => {
+      const cfg = loadGithubAppConfig(githubAppFile);
+      return cfg ? createInstallationTokenSource(cfg, { fetchImpl: deps.fetchImpl, now }) : undefined;
+    })();
+  if (githubToken && !deps.githubToken) {
+    for (const f of githubAppFilesTooOpen(githubAppFile)) log(`warning: ${f} is readable by other users — chmod 600 it`);
+  }
+
   const state = loadState(agent);
   for (const r of Object.values(state.runs)) {
     // A print run dies with this process. A background run outlives it and is
@@ -796,19 +835,21 @@ export function createWorker(opts: WorkerOptions, deps: WorkerDeps): Worker {
   const save = () => saveState(agent, state);
 
   const runsDir = path.join(stateDir(agent), "runs");
+  const treesRoot = path.join(stateDir(agent), "trees");
   const appendRunLog = (sessionId: string, line: Record<string, unknown>) => {
     fs.mkdirSync(runsDir, { recursive: true, mode: 0o700 });
     fs.appendFileSync(path.join(runsDir, `${sessionId}.jsonl`), `${JSON.stringify({ ...line, at: iso() })}\n`, { mode: 0o600 });
   };
 
   const children = new Map<string, ChildProcess>();
+  const sweeps = new Set<Promise<void>>();
   const bgRunning = () => Object.values(state.runs).filter((r) => r.status === "running" && r.mode === "bg");
   const active = () => children.size + bgRunning().length;
 
   const who = accountsFile
     ? `accounts ${accountsFile.accounts.map((a) => `${a.id}${a.design ? " (design)" : ""}`).join(", ")} · reserve ${accountsFile.reserve}`
     : "the environment's Claude login";
-  log(`agent ${agent} → ${deps.podUrl} · MCP server "${mcpServer}" · cwd ${cwd} · work folders ${workRoot} · max ${maxParallel} parallel · ${who}`);
+  log(`agent ${agent} → ${deps.podUrl} · MCP server "${mcpServer}" · cwd ${cwd} · work folders ${workRoot} · max ${maxParallel} parallel · ${who} · GitHub as ${githubToken ? "the Synap Agent App" : "THE ENVIRONMENT'S LOGIN"}`);
 
   // ── accounts ──
   const saidOnce = new Set<string>();
@@ -853,13 +894,29 @@ export function createWorker(opts: WorkerOptions, deps: WorkerDeps): Worker {
     protocol: WorkerProtocol,
     account: AccountSpec | undefined
   ): Promise<void> => {
+    // Who `gh` and `git push` act as in this run: the App, or (loudly) the login the worker runs under.
+    let ghToken: string | undefined;
+    if (githubToken) {
+      try {
+        ghToken = await githubToken.get();
+      } catch (err) {
+        log(`session ${item.id}: no GitHub App token (${(err as Error).message}) — not launching; retrying next tick`);
+        return;
+      }
+    } else {
+      log(
+        `WARNING: session ${item.id} runs with the environment's GitHub login, not an App: ${githubAppFile} is missing. If that login is an org admin, this run can merge past the ruleset.`
+      );
+    }
     const resumeId = how.kind === "fresh" ? undefined : how.claudeSessionId;
     // A work-folder run works in its own folder; a resume reuses the folder it
     // was launched in (Claude finds the conversation by its cwd).
     const prior = state.runs[item.id];
     const workDir =
       protocol === "work-folder" ? (how.kind !== "fresh" && prior?.workDir) || workFolderFor(workRoot, item.id) : undefined;
-    const runCwd = workDir ?? cwd;
+    // A code run (not a design run) gets a folder of its own for its worktrees; a resume reuses it.
+    const treeDir = protocol === "code" && !design ? (prior?.treeDir ?? treeFolderFor(treesRoot, item.id)) : undefined;
+    const runCwd = workDir ?? treeDir ?? cwd;
     // The run names its own Claude session up front (`--session-id`), so the pod sees ONE
     // conversation per run, kept across resumes, instead of a new MCP transport id each launch.
     const runSessionId = resumeId ?? randomUUID();
@@ -875,7 +932,7 @@ export function createWorker(opts: WorkerOptions, deps: WorkerDeps): Worker {
           ? LIMIT_RESUME_PROMPT
           : workDir
             ? buildWorkFolderPrompt({ sessionId: item.id, goal: item.goal, agentName: agent, workDir, mcpServer })
-            : buildWorkerPrompt({ sessionId: item.id, goal: item.goal, agentName: agent, cwd, mcpServer, design });
+            : buildWorkerPrompt({ sessionId: item.id, goal: item.goal, agentName: agent, cwd, mcpServer, design, treeDir });
 
     const base = {
       status: "running" as const,
@@ -886,6 +943,7 @@ export function createWorker(opts: WorkerOptions, deps: WorkerDeps): Worker {
       blockedSince: undefined,
       protocol,
       workDir,
+      treeDir,
     };
     const record: RunRecord =
       how.kind !== "fresh" && prior
@@ -911,7 +969,7 @@ export function createWorker(opts: WorkerOptions, deps: WorkerDeps): Worker {
           ? `resumed (follow-up #${record.resumes})`
           : `resumed after a usage limit (#${record.limitResumes})`;
     const on = account ? ` on account ${account.id}` : "";
-    const env = workerEnv(process.env, opts.claudeConfigDir, account?.token);
+    const env = workerEnv(process.env, opts.claudeConfigDir, account?.token, ghToken);
 
     if (design) {
       // `claude --bg` is the mode that has the Artifact tool. --strict-mcp-config: a
@@ -968,13 +1026,14 @@ export function createWorker(opts: WorkerOptions, deps: WorkerDeps): Worker {
     }
 
     if (workDir) fs.mkdirSync(workDir, { recursive: true, mode: 0o700 });
+    if (treeDir) ensureTreeFolder(treeDir);
     fs.mkdirSync(runsDir, { recursive: true, mode: 0o700 });
     const out = fs.createWriteStream(path.join(runsDir, `${item.id}.jsonl`), { flags: "a", mode: 0o600 });
     const child = spawn(claudeBin, args, { cwd: runCwd, env, stdio: ["ignore", "pipe", "pipe"] });
     children.set(item.id, child);
     record.pid = child.pid;
     save();
-    log(`${what} ${protocol} session ${item.id} (pid ${child.pid})${on}${workDir ? ` in ${workDir}` : ""}`);
+    log(`${what} ${protocol} session ${item.id} (pid ${child.pid})${on}${workDir ? ` in ${workDir}` : ""}${treeDir ? ` in ${treeDir}` : ""}`);
 
     let buffered = "";
     let end: RunEnd = {};
@@ -1002,17 +1061,31 @@ export function createWorker(opts: WorkerOptions, deps: WorkerDeps): Worker {
       out.write(`synap-worker: could not start ${claudeBin}: ${err.message}\n`);
     });
     child.on("close", (code) => {
-      children.delete(item.id);
       out.end();
-      record.exitCode = code;
-      record.finishedAt = iso();
-      const hit = endedOnLimit(end);
-      if (!(hit && markLimited(record, hit))) {
-        record.result = workerVerdict(end.text) ?? (end.text ? end.text.slice(-300) : undefined);
-        record.status = code === 0 ? "done" : "failed";
-      }
-      save();
-      log(`session ${item.id} finished — exit ${code}${record.result ? ` · ${record.result}` : ""}`);
+      const finish = async () => {
+        // The run's clean worktrees go; one with unpushed or uncommitted work stays and is named.
+        if (treeDir) {
+          const swept = await sweepTreeFolder(treeDir, deps.git);
+          record.keptTrees = swept.kept.map((k) => `${k.dir} (${k.why})`);
+          if (swept.removed.length) log(`session ${item.id}: removed ${swept.removed.length} clean worktree(s)`);
+          if (!record.keptTrees.length) delete record.keptTrees;
+        }
+        children.delete(item.id);
+        record.exitCode = code;
+        record.finishedAt = iso();
+        const hit = endedOnLimit(end);
+        if (!(hit && markLimited(record, hit))) {
+          record.result = workerVerdict(end.text) ?? (end.text ? end.text.slice(-300) : undefined);
+          record.status = code === 0 ? "done" : "failed";
+        }
+        if (record.keptTrees) record.result = `${record.result ?? ""} · KEPT (unpushed work): ${record.keptTrees.join("; ")}`.trim();
+        save();
+        log(`session ${item.id} finished — exit ${code}${record.result ? ` · ${record.result}` : ""}`);
+      };
+      const p = finish()
+        .catch((err) => log(`session ${item.id}: finishing failed: ${(err as Error).message}`))
+        .finally(() => sweeps.delete(p));
+      sweeps.add(p);
     });
   };
 
@@ -1205,7 +1278,9 @@ export function createWorker(opts: WorkerOptions, deps: WorkerDeps): Worker {
     waitForChildren: async () => {
       while (children.size) {
         await Promise.all([...children.values()].map((c) => new Promise((r) => c.once("close", r))));
+        await Promise.all([...sweeps]);
       }
+      await Promise.all([...sweeps]);
     },
     stop: () => {
       for (const c of children.values()) c.kill("SIGTERM");
