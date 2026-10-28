@@ -4,7 +4,7 @@
 
 Synap CLI — connect AI agents to your data pod
 
-231 commands. Hidden commands and hidden options are omitted here (5 hidden commands); `cli.json` lists them with `"hidden": true`.
+232 commands. Hidden commands and hidden options are omitted here (5 hidden commands); `cli.json` lists them with `"hidden": true`.
 
 Every command also accepts `-h, --help`.
 
@@ -241,6 +241,7 @@ Every command also accepts `-h, --help`.
   - [`synap providers list-keys`](#synap-providers-list-keys) — List user/workspace-level provider key overrides
 - [`synap keys`](#synap-keys) — Manage pod API keys
   - [`synap keys rotate`](#synap-keys-rotate) — Rotate your CLI key to pick up the latest scope set
+  - [`synap keys request`](#synap-keys-request) — Ask the person for a scoped key; they approve it on one page, the key never goes through chat
 
 ## `synap`
 
@@ -4122,7 +4123,7 @@ synap keys [options] [command]
 
 Manage pod API keys
 
-Subcommands: [`rotate`](#synap-keys-rotate)
+Subcommands: [`rotate`](#synap-keys-rotate), [`request`](#synap-keys-request)
 
 ## `synap keys rotate`
 
@@ -4135,3 +4136,28 @@ Rotate your CLI key to pick up the latest scope set
 | Option | Description | Default |
 |---|---|---|
 | `--show-key` | Print the new key in full if it could not be saved to the config |  |
+
+## `synap keys request`
+
+```
+synap keys request [options] [template]
+```
+
+Ask the person for a scoped key; they approve it on one page, the key never goes through chat
+
+| Argument | Required | Description |
+|---|---|---|
+| `template` | no |  |
+
+| Option | Description | Default |
+|---|---|---|
+| `--out <file>` | Write the key as env lines to this file (mode 0600) |  |
+| `--force` | Overwrite --out if it exists |  |
+| `--print` | Print the key on stdout (the only way to see it) |  |
+| `--name <name>` | Name of the key |  |
+| `--expires-days <n>` | Key lifetime in days (default: the template's) |  |
+| `--workspace <id>` | Limit the key to one workspace |  |
+| `--env-name <NAME>` | Variable name in --out (default SYNAP_HUB_API_KEY) |  |
+| `--wait <duration>` | How long to keep asking, e.g. 90s, 30m, 24h (default 24h) |  |
+| `--no-wait` | File the request, print the link and request id, and exit; the key is not collected |  |
+| `--list-templates` | List the templates a key can be requested from |  |
