@@ -491,7 +491,8 @@ describe("the work-folder protocol in the prompt", () => {
   it("keeps a take's transcript in ONE shape: the content-asset Content Studio writes, found before it is made", () => {
     expect(p).toContain("A transcript of a recording is never a new document");
     expect(p).toContain("ONE content-asset (Kind script, File ID = the take's file id)");
-    expect(p).toContain('under a "## Words" heading, one ```json block of word timings [{"text","start","end"}]');
+    expect(p).toContain('the readable text under a "## Transcript" heading');
+    expect(p).toContain('then a "## Words" heading followed by exactly one ```json block of word timings [{"text","start","end"}]');
     expect(p).toContain("Find it before transcribing");
     expect(p).toContain("reuse it and only fill the word timings");
     expect(p).toContain("synap_link_entities type references");
