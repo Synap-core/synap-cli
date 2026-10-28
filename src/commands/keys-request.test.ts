@@ -156,11 +156,45 @@ describe("synap keys request", () => {
     expect(s.calls).toEqual([]);
   });
 
+  it("--no-wait without --out is refused", async () => {
+    const s = stub({ "/keys/requests": [], "/keys/requests/token": [] });
+    expect(await runKeysRequest({ template: "t", print: true, noWait: true }, s.deps)).toBe(EXIT_DENIED);
+    expect(s.calls).toEqual([]);
+  });
+
   it("--no-wait files once, prints the link, collects nothing", async () => {
+    const out = tmp();
     const s = stub({ "/keys/requests": [filed(1)], "/keys/requests/token": [] });
-    expect(await runKeysRequest({ template: "t", print: true, noWait: true }, s.deps)).toBe(EXIT_APPROVED);
+    expect(await runKeysRequest({ template: "t", out, noWait: true }, s.deps)).toBe(EXIT_APPROVED);
     expect(s.calls.map((c) => c.path)).toEqual(["/keys/requests"]);
     expect(s.logs.join("\n")).toContain("req-1");
+    expect(s.logs.join("\n")).not.toContain(filed(1).request_code);
+    expect(fs.statSync(`${out}.request`).mode & 0o777).toBe(0o600);
+  });
+
+  it("a rerun with the same --out resumes the saved request: no new POST, state deleted after", async () => {
+    const out = tmp();
+    const first = stub({ "/keys/requests": [filed(1)], "/keys/requests/token": [] });
+    await runKeysRequest({ template: "t", out, noWait: true }, first.deps);
+    const s = stub({ "/keys/requests": [], "/keys/requests/token": [approved] });
+    expect(await runKeysRequest({ template: "t", out }, s.deps)).toBe(EXIT_APPROVED);
+    expect(s.calls.map((c) => c.path)).toEqual(["/keys/requests/token"]);
+    expect((s.calls[0]!.body as { request_code: string }).request_code).toBe(filed(1).request_code);
+    expect(fs.existsSync(`${out}.request`)).toBe(false);
+    expect(fs.readFileSync(out, "utf8")).toContain(SECRET);
+    expect(s.logs.join("\n")).not.toContain(filed(1).request_code);
+  });
+
+  it("an expired saved request is filed again", async () => {
+    const out = tmp();
+    fs.writeFileSync(
+      `${out}.request`,
+      JSON.stringify({ requestId: "old", requestCode: "old-code-aaaaaaaaaaaa", reviewUrl: "u", interval: 5, expiresAt: -1, template: "t", podUrl: "https://pod.example" })
+    );
+    const s = stub({ "/keys/requests": [filed(2)], "/keys/requests/token": [approved] });
+    expect(await runKeysRequest({ template: "t", out }, s.deps)).toBe(EXIT_APPROVED);
+    expect(s.calls.map((c) => c.path)).toEqual(["/keys/requests", "/keys/requests/token"]);
+    expect((s.calls[1]!.body as { request_code: string }).request_code).toBe(filed(2).request_code);
   });
 
   it("parseDuration", () => {

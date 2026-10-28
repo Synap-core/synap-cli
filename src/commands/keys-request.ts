@@ -95,6 +95,38 @@ function errorField(err: HubError): string | undefined {
   return b && typeof b.error === "string" ? b.error : undefined;
 }
 
+/** A filed request, kept beside --out so a rerun collects it instead of filing a second one. */
+interface PendingRequest {
+  requestId: string;
+  requestCode: string;
+  reviewUrl: string;
+  interval: number;
+  expiresAt: number;
+  template: string;
+  podUrl: string;
+}
+
+export const statePath = (out: string) => `${out}.request`;
+
+function loadPending(out: string | undefined, opts: KeysRequestOpts, deps: KeysRequestDeps): PendingRequest | null {
+  if (!out) return null;
+  let p: PendingRequest;
+  try {
+    p = JSON.parse(fs.readFileSync(statePath(out), "utf8")) as PendingRequest;
+  } catch {
+    return null;
+  }
+  if (p.template !== opts.template || p.podUrl !== deps.podUrl || p.expiresAt <= deps.now()) {
+    dropPending(out);
+    return null;
+  }
+  return p;
+}
+
+function dropPending(out: string | undefined): void {
+  if (out) fs.rmSync(statePath(out), { force: true });
+}
+
 export function envLines(podUrl: string, envName: string, key: string): string {
   return `SYNAP_POD_URL=${podUrl}\n${envName}=${key}\n`;
 }
@@ -103,6 +135,9 @@ export function envLines(podUrl: string, envName: string, key: string): string {
 export function checkDestination(opts: KeysRequestOpts): string | null {
   if (!opts.out && !opts.print) {
     return "Say where the key goes: --out <file> (0600 env lines) or --print (stdout).";
+  }
+  if (opts.noWait && !opts.out) {
+    return "--no-wait needs --out: the pending request is saved beside it (<out>.request) so the same command can collect the key later.";
   }
   if (opts.out && fs.existsSync(opts.out) && !opts.force) {
     return `${opts.out} already exists. Pass --force to overwrite it.`;
@@ -124,32 +159,59 @@ export async function runKeysRequest(opts: KeysRequestOpts, deps: KeysRequestDep
   const deadline = deps.now() + waitMs;
 
   for (;;) {
-    // 1. FILE (retry while the pod or the network is down)
+    // 1. FILE, or resume the request saved beside --out
     let filed: KeyRequestFiled;
-    for (;;) {
-      try {
-        filed = (await deps.post("/keys/requests", {
+    const pending = loadPending(opts.out, opts, deps);
+    if (pending) {
+      filed = {
+        request_code: pending.requestCode,
+        request_id: pending.requestId,
+        review_url: pending.reviewUrl,
+        expires_in: 0,
+        interval: pending.interval,
+      };
+      deps.log(`Resuming request ${pending.requestId}.`);
+    } else {
+      for (;;) {
+        try {
+          filed = (await deps.post("/keys/requests", {
+            template: opts.template,
+            ...(opts.name ? { name: opts.name } : {}),
+            ...(opts.expiresDays ? { expiresInDays: opts.expiresDays } : {}),
+            ...(opts.workspace ? { workspaceId: opts.workspace } : {}),
+          })) as KeyRequestFiled;
+          break;
+        } catch (err) {
+          if (!isTransient(err)) {
+            deps.log(`The pod refused the request: ${(err as Error).message}`);
+            return EXIT_DENIED;
+          }
+          if (opts.noWait || deps.now() + RETRY_S * 1000 > deadline) {
+            deps.log(`The pod could not be reached: ${(err as Error).message}`);
+            return EXIT_TIMED_OUT;
+          }
+          await deps.sleep(RETRY_S * 1000);
+        }
+      }
+      if (opts.out) {
+        const state: PendingRequest = {
+          requestId: filed.request_id,
+          requestCode: filed.request_code,
+          reviewUrl: filed.review_url,
+          interval: filed.interval,
+          expiresAt: deps.now() + filed.expires_in * 1000,
           template: opts.template,
-          ...(opts.name ? { name: opts.name } : {}),
-          ...(opts.expiresDays ? { expiresInDays: opts.expiresDays } : {}),
-          ...(opts.workspace ? { workspaceId: opts.workspace } : {}),
-        })) as KeyRequestFiled;
-        break;
-      } catch (err) {
-        if (!isTransient(err)) {
-          deps.log(`The pod refused the request: ${(err as Error).message}`);
-          return EXIT_DENIED;
-        }
-        if (opts.noWait || deps.now() + RETRY_S * 1000 > deadline) {
-          deps.log(`The pod could not be reached: ${(err as Error).message}`);
-          return EXIT_TIMED_OUT;
-        }
-        await deps.sleep(RETRY_S * 1000);
+          podUrl: deps.podUrl,
+        };
+        writeFileAtomic(statePath(opts.out), JSON.stringify(state), { mode: 0o600 });
       }
     }
     deps.log(`Approve the key here: ${filed.review_url}`);
     deps.log(`Request ${filed.request_id}`);
-    if (opts.noWait) return EXIT_APPROVED;
+    if (opts.noWait) {
+      deps.log(`Saved to ${statePath(opts.out!)}. Run the same command to collect the key once it is approved.`);
+      return EXIT_APPROVED;
+    }
 
     // 2. COLLECT, polling until approved, denied or expired
     let interval = Math.max(MIN_POLL_S, Number(filed.interval) || MIN_POLL_S);
@@ -184,10 +246,12 @@ export async function runKeysRequest(opts: KeysRequestOpts, deps: KeysRequestDep
         }
         if (code === "expired_token") {
           deps.log("The request expired unanswered. Filing a new one.");
+          dropPending(opts.out);
           break; // back to the outer loop: file again
         }
         if (code === "access_denied") {
           deps.log("The request was denied.");
+          dropPending(opts.out);
           return EXIT_DENIED;
         }
         deps.log(`Stopped: ${(err as Error).message}`);
@@ -204,6 +268,7 @@ function deliver(opts: KeysRequestOpts, deps: KeysRequestDeps, key: KeyCollected
     });
     deps.log(`Key ${key.keyPrefix}… written to ${opts.out} (0600).`);
   }
+  dropPending(opts.out);
   if (opts.print) deps.printKey(key.apiKey);
   if (key.scopes?.length) deps.log(`Scopes: ${key.scopes.join(", ")}`);
   if (key.expiresAt) deps.log(`Expires: ${key.expiresAt}`);

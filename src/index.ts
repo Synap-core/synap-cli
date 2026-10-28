@@ -3327,7 +3327,7 @@ keys
   .option("--workspace <id>", "Limit the key to one workspace")
   .option("--env-name <NAME>", "Variable name in --out (default SYNAP_HUB_API_KEY)")
   .option("--wait <duration>", "How long to keep asking, e.g. 90s, 30m, 24h (default 24h)")
-  .option("--no-wait", "File the request, print the link and request id, and exit; the key is not collected")
+  .option("--no-wait", "File the request, save it beside --out (<out>.request), print the link and exit; run the same command later to collect the key")
   .option("--list-templates", "List the templates a key can be requested from")
   .action(async (template: string | undefined, opts: Record<string, unknown>) => {
     const mod = await import("./commands/keys-request.js");

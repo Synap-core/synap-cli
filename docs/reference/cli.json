@@ -8814,7 +8814,7 @@
               {
                 "flags": "--no-wait",
                 "long": "--no-wait",
-                "description": "File the request, print the link and request id, and exit; the key is not collected",
+                "description": "File the request, save it beside --out (<out>.request), print the link and exit; run the same command later to collect the key",
                 "takesValue": "none",
                 "negate": true
               },
