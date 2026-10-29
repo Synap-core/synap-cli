@@ -419,6 +419,12 @@ async function refreshConv(cfg: Cfg | null, prev: ConvCache | null, file: string
 
     const [session, project] = await Promise.allSettled([sessionReq, projectReq]);
 
+    // The session read is this cache's liveness signal (as `/workspaces` is the
+    // shared one's): a 429 or a 5xx keeps the last good values (the catch
+    // stamps the attempt). Only a 404 on the bound session means it is gone.
+    const sessionGone = session.status === "rejected" && (session.reason as { status?: number })?.status === 404;
+    if (session.status === "rejected" && !sessionGone) throw session.reason;
+
     // Bound session — either the by-id fetch (object) or the active-list fallback.
     let sessionGoal = prev?.sessionGoal ?? "";
     let sessionId = prev?.sessionId ?? "";

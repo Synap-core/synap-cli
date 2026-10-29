@@ -107,6 +107,8 @@ export function waitItem(w: WaitRecord, now: number, alive: (pid: number) => boo
   const name = clip(w.label || `${w.kind} ${w.ref.replace(/^Synap-core\//, "")}`, 40);
   const try3 = w.attempt >= 3 ? ` ${A}· ${ordinal(w.attempt)} try${X}` : "";
   const detail = w.detail ? ` ${clip(w.detail, 48)}` : "";
+  // "queued 2nd (light)" already says its state: never "queued queued 2nd".
+  const said = w.detail.startsWith(w.state) ? clip(w.detail, 48) : `${w.state}${detail}`;
   if (isFinal(w)) {
     const since = now - (w.finishedAt ?? w.probedAt);
     if (w.state === "passed") {
@@ -121,13 +123,13 @@ export function waitItem(w: WaitRecord, now: number, alive: (pid: number) => boo
   }
   const waited = ` ${D}${age(now - w.startedAt)}${X}`;
   if (now - w.changedAt > STALE_AFTER_MS) {
-    return `${A}${name} ${w.state}${detail} · no change ${age(now - w.changedAt)}${X}${try3}`;
+    return `${A}${name} ${said} · no change ${age(now - w.changedAt)}${X}${try3}`;
   }
   if (w.state === "error" || w.state === "timeout" || w.state === "infra" || w.state === "failed") {
-    return `${R}${name} ${w.state}${detail}${X}${waited}${try3}`;
+    return `${R}${name} ${said}${X}${waited}${try3}`;
   }
-  if (w.state === "running") return `${C}${name} running${detail}${X}${waited}${try3}`;
-  return `${D}${name} ${w.state}${detail}${X}${waited}${try3}`; // queued, pending
+  if (w.state === "running") return `${C}${name} ${said}${X}${waited}${try3}`;
+  return `${D}${name} ${said}${X}${waited}${try3}`; // queued, pending
 }
 
 /** A background task is the typed wait it runs when its command is `synap wait …` for that wait's target. */

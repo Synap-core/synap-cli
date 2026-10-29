@@ -99,7 +99,8 @@ describe("background tasks open and close", () => {
       toolUse("toolu_6", "Agent", { description: "Draft the plan" }),
       toolResult("toolu_6", { status: "async_launched", agentId: "a48ea" }),
       notification(["a48ea"], "completed", 100),
-      toolUse("toolu_7", "SendMessage", { to: "a48ea", message: "one more thing" }, 200),
+      // Addressed by name: only the result's `resumedAgentId` says which task this is.
+      toolUse("toolu_7", "SendMessage", { to: "drafter", message: "one more thing" }, 200),
       toolResult("toolu_7", { success: true, message: "Resuming agent a48ea", resumedAgentId: "a48ea" }, "ok", 201),
     ]);
     expect(idx.open.a48ea).toMatchObject({ kind: "agent", description: "Draft the plan", startedAt: T0 + 201_000 });
