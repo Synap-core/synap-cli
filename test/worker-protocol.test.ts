@@ -24,7 +24,7 @@ let fakeClaude: string;
 const FAKE = `#!/usr/bin/env node
 const fs = require("fs");
 const argv = process.argv.slice(2);
-fs.appendFileSync(process.env.FAKE_CLAUDE_LOG, JSON.stringify({ argv, cwd: process.cwd() }) + "\\n");
+fs.appendFileSync(process.env.SYNAP_FAKE_CLAUDE_LOG, JSON.stringify({ argv, cwd: process.cwd() }) + "\\n");
 const out = (o) => process.stdout.write(JSON.stringify(o) + "\\n");
 const r = argv.indexOf("--resume");
 out({ type: "system", subtype: "init", session_id: r >= 0 ? argv[r + 1] : "${CLAUDE_SID}" });
@@ -75,7 +75,7 @@ beforeEach(() => {
   fakeClaude = path.join(tmp, "fake-claude.cjs");
   fs.writeFileSync(fakeClaude, FAKE, { mode: 0o755 });
   fs.rmSync(path.join(os.homedir(), ".synap"), { recursive: true, force: true });
-  vi.stubEnv("FAKE_CLAUDE_LOG", fakeLog);
+  vi.stubEnv("SYNAP_FAKE_CLAUDE_LOG", fakeLog);
 });
 
 afterEach(() => {
@@ -98,9 +98,10 @@ describe("the worker picks the protocol per session", () => {
     expect(runs).toHaveLength(2);
     const byPrompt = (s: string) => runs.find((r) => r.argv[1].includes(`Session: ${s}`))!;
 
-    // The ad-hoc hand-off: the code protocol, exactly as before.
+    // The ad-hoc hand-off: the code protocol, in a folder of its own under the
+    // repo (#41: one worktree folder per code run, removed when it ends clean).
     const c = byPrompt(CODE);
-    expect(fs.realpathSync(c.cwd)).toBe(fs.realpathSync(code));
+    expect(c.cwd).toBe(path.join(fs.realpathSync(code), ".worker-trees", CODE.slice(0, 8)));
     expect(c.argv[1]).toContain(`git worktree on a branch named devbox/${CODE.slice(0, 8)}-<slug>`);
     expect(c.argv).not.toContain("Skill");
     expect(w.state.runs[CODE]).toMatchObject({ protocol: "code" });
