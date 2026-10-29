@@ -64,7 +64,7 @@ describe("the four states", () => {
 
   it("waiting on n: idle (turn over) with open waits, typed waits first", () => {
     const out = line({ registry: reg("shell"), open: [task("Serve the build", 10)], waits: [wait({})] });
-    expect(out).toBe("⏳ waiting on 2 · devbox w7-regen running be-file · 2/4 done 6m · Serve the build 10m");
+    expect(out).toBe("⏳ waiting on 2 · devbox w7-regen running (be-file · 2/4 done) 6m · Serve the build 10m");
   });
 
   it("stopped: idle with nothing open, and how long since", () => {
@@ -90,7 +90,7 @@ describe("which background tasks count", () => {
   it("a background task that runs `synap wait` for a typed wait is shown once, as the typed wait", () => {
     const t = task("Wait for w7", 7, { command: "synap wait devbox w7-regen --label w7" });
     const out = line({ registry: reg("shell"), open: [t], waits: [wait({})] });
-    expect(out).toBe("⏳ waiting on 1 · devbox w7-regen running be-file · 2/4 done 6m");
+    expect(out).toBe("⏳ waiting on 1 · devbox w7-regen running (be-file · 2/4 done) 6m");
   });
 
   it("a `synap wait` task for ANOTHER target is still its own item", () => {
@@ -111,14 +111,14 @@ describe("typed wait states", () => {
 
   it("passed shows green ✓ for 10 min after it finished, then goes", () => {
     const passed = { state: "passed" as const, detail: "4 gates green", exitCode: 0 };
-    expect(one({ ...passed, finishedAt: min(3) })).toBe("⏳ waiting on 1 · ✓ devbox w7-regen passed 3m ago");
+    expect(one({ ...passed, finishedAt: min(3) })).toBe("■ stopped · nothing running · 4m · ✓ devbox w7-regen passed 3m ago");
     expect(raw({ ...passed, finishedAt: min(3) })).toContain("\x1b[32m✓");
     expect(one({ ...passed, finishedAt: min(11) })).toBe("■ stopped · nothing running · 4m");
   });
 
   it("failed shows red ✗ with its detail", () => {
     const out = one({ state: "failed", detail: "red: be-file (3 tests)", exitCode: 1, finishedAt: min(1) });
-    expect(out).toBe("⏳ waiting on 1 · ✗ devbox w7-regen failed red: be-file (3 tests)");
+    expect(out).toBe("■ stopped · nothing running · 4m · ✗ devbox w7-regen failed (red: be-file (3 tests))");
     expect(raw({ state: "failed", detail: "x", exitCode: 1, finishedAt: min(1) })).toContain("\x1b[31m✗");
   });
 
@@ -129,6 +129,12 @@ describe("typed wait states", () => {
     expect(raw({ state: "error", detail: "probe failed 3× in a row" })).toContain("\x1b[31mdevbox w7-regen error");
   });
 
+  it("a result is not something waited on: an open wait is counted, a finished one only shown", () => {
+    const out = line({ registry: reg("shell"), waits: [wait({ id: "a" }), wait({ id: "b", ref: "w8", state: "failed", detail: "red: x", exitCode: 1, finishedAt: min(1) })] });
+    expect(out).toBe("⏳ waiting on 1 · devbox w7-regen running (be-file · 2/4 done) 6m · ✗ devbox w8 failed (red: x)");
+    expect(line({ registry: reg("busy"), waits: [wait({ state: "passed", exitCode: 0, finishedAt: min(1) })] })).toBe("▶ working · 4m · ✓ devbox w7-regen passed 1m ago");
+  });
+
   it("stale: a non-final state that has not changed for 30 min is amber, with how long", () => {
     const out = raw({ state: "queued", detail: "queued 1st (heavy)", changedAt: min(34) });
     expect(out).toContain("\x1b[33mdevbox w7-regen queued");
@@ -136,7 +142,7 @@ describe("typed wait states", () => {
   });
 
   it("died: a non-final state whose process is gone is red", () => {
-    expect(one({ state: "running" }, dead)).toBe("⏳ waiting on 1 · ✗ devbox w7-regen died (the wait stopped at running)");
+    expect(one({ state: "running" }, dead)).toBe("■ stopped · nothing running · 4m · ✗ devbox w7-regen died (the wait stopped at running)");
   });
 
   it("the 3rd try on one target is called out in amber", () => {
@@ -147,7 +153,7 @@ describe("typed wait states", () => {
 
   it("a PR wait drops the Synap-core owner from its name", () => {
     expect(one({ kind: "pr", ref: "Synap-core/backend#412", state: "running", detail: "Release gate running · 2/4 done" })).toContain(
-      "pr backend#412 running Release gate running · 2/4 done"
+      "pr backend#412 Release gate running · 2/4 done"
     );
   });
 });

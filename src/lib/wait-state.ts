@@ -132,3 +132,18 @@ export function pidAlive(pid: number): boolean {
     return (e as NodeJS.ErrnoException).code === "EPERM";
   }
 }
+
+/** How a wait is named on screen: its label, else kind + target without the Synap-core owner. */
+export function waitName(w: Pick<WaitRecord, "kind" | "ref" | "label">): string {
+  return w.label || `${w.kind} ${w.ref.replace(/^Synap-core\//, "")}`;
+}
+
+/**
+ * A state and its detail in one phrase, never saying the state twice:
+ * "running (be-file · 1/2 done)", but "queued 2nd (light)" and
+ * "Release gate running · 2/4 done" as they are.
+ */
+export function stateAndDetail(state: string, detail: string): string {
+  if (!detail) return state;
+  return new RegExp(`\\b${state}\\b`).test(detail) ? detail : `${state} (${detail})`;
+}

@@ -16,7 +16,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { OpenTask } from "./transcript-index.js";
-import { isFinal, type WaitRecord } from "./wait-state.js";
+import { isFinal, stateAndDetail, waitName, type WaitRecord } from "./wait-state.js";
 
 const G = "\x1b[32m"; // green
 const R = "\x1b[31m"; // red
@@ -102,34 +102,37 @@ function clip(s: string, max: number): string {
 
 // ── Items ──────────────────────────────────────────────────────────────
 
+export interface Item {
+  text: string;
+  /** Still waited on (counts in "waiting on n"); false = a result (✓ / ✗) shown for a while. */
+  open: boolean;
+}
+
 /** How one typed wait shows, or null when it is no longer worth a place. */
-export function waitItem(w: WaitRecord, now: number, alive: (pid: number) => boolean): string | null {
-  const name = clip(w.label || `${w.kind} ${w.ref.replace(/^Synap-core\//, "")}`, 40);
+export function waitItem(w: WaitRecord, now: number, alive: (pid: number) => boolean): Item | null {
+  const name = clip(waitName(w), 40);
   const try3 = w.attempt >= 3 ? ` ${A}· ${ordinal(w.attempt)} try${X}` : "";
-  const detail = w.detail ? ` ${clip(w.detail, 48)}` : "";
   // "queued 2nd (light)" already says its state: never "queued queued 2nd".
-  const said = w.detail.startsWith(w.state) ? clip(w.detail, 48) : `${w.state}${detail}`;
+  const said = clip(stateAndDetail(w.state, w.detail), 56);
   if (isFinal(w)) {
     const since = now - (w.finishedAt ?? w.probedAt);
     if (w.state === "passed") {
-      return since <= PASSED_VISIBLE_MS ? `${G}✓ ${name} passed${X} ${D}${age(since)} ago${X}${try3}` : null;
+      return since <= PASSED_VISIBLE_MS ? { text: `${G}✓ ${name} passed${X} ${D}${age(since)} ago${X}${try3}`, open: false } : null;
     }
     if (since > FAILED_VISIBLE_MS) return null;
-    return `${R}✗ ${name} ${w.state}${detail}${X}${try3}`;
+    return { text: `${R}✗ ${name} ${said}${X}${try3}`, open: false };
   }
   if (!alive(w.pid)) {
     if (now - w.probedAt > FAILED_VISIBLE_MS) return null;
-    return `${R}✗ ${name} died${X} ${D}(the wait stopped at ${w.state})${X}${try3}`;
+    return { text: `${R}✗ ${name} died${X} ${D}(the wait stopped at ${w.state})${X}${try3}`, open: false };
   }
   const waited = ` ${D}${age(now - w.startedAt)}${X}`;
   if (now - w.changedAt > STALE_AFTER_MS) {
-    return `${A}${name} ${said} · no change ${age(now - w.changedAt)}${X}${try3}`;
+    return { text: `${A}${name} ${said} · no change ${age(now - w.changedAt)}${X}${try3}`, open: true };
   }
-  if (w.state === "error" || w.state === "timeout" || w.state === "infra" || w.state === "failed") {
-    return `${R}${name} ${said}${X}${waited}${try3}`;
-  }
-  if (w.state === "running") return `${C}${name} ${said}${X}${waited}${try3}`;
-  return `${D}${name} ${said}${X}${waited}${try3}`; // queued, pending
+  if (w.state === "error") return { text: `${R}${name} ${said}${X}${waited}${try3}`, open: true };
+  if (w.state === "running") return { text: `${C}${name} ${said}${X}${waited}${try3}`, open: true };
+  return { text: `${D}${name} ${said}${X}${waited}${try3}`, open: true }; // queued, pending
 }
 
 /** A background task is the typed wait it runs when its command is `synap wait …` for that wait's target. */
@@ -152,17 +155,14 @@ export interface NowInput {
   alive: (pid: number) => boolean;
 }
 
-/** Every item worth showing, typed waits first, as display strings. */
-export function nowItems(input: NowInput): string[] {
+/** Every item worth showing: what is still open (typed waits first), then recent results. */
+export function nowItems(input: NowInput): { open: string[]; done: string[] } {
   const { now, registry, open, waits, alive } = input;
   const items: string[] = [];
-  const shownWaits: WaitRecord[] = [];
+  const done: string[] = [];
   for (const w of [...waits].sort((a, b) => a.startedAt - b.startedAt)) {
-    const s = waitItem(w, now, alive);
-    if (s) {
-      items.push(s);
-      shownWaits.push(w);
-    }
+    const it = waitItem(w, now, alive);
+    if (it) (it.open ? items : done).push(it.text);
   }
   // A task launched by an earlier Claude Code process died with it (Claude
   // Code marks it stopped on resume): only this process's tasks are open.
@@ -179,7 +179,7 @@ export function nowItems(input: NowInput): string[] {
     if (waits.some((w) => runsWait(t, w))) continue; // shown once, as its typed wait
     items.push(`${clip(t.description || t.kind, 40)} ${D}${age(now - t.startedAt)}${X}`);
   }
-  return items;
+  return { open: items, done };
 }
 
 function capped(head: string, items: string[], width: number): string {
@@ -200,7 +200,8 @@ function capped(head: string, items: string[], width: number): string {
 export function buildNowLine(input: NowInput): string {
   const { now, registry } = input;
   const width = input.width && input.width > 20 ? input.width : DEFAULT_WIDTH;
-  const items = nowItems(input);
+  const { open, done } = nowItems(input);
+  const all = [...open, ...done];
   const status = registry?.status;
   const since = registry?.statusUpdatedAt ?? input.lastActivityAt;
 
@@ -209,10 +210,12 @@ export function buildNowLine(input: NowInput): string {
   }
   if (status === "busy") {
     const head = `${C}▶ working${X}${since ? ` ${D}· ${age(now - since)}${X}` : ""}`;
-    return items.length ? capped(`${head} ${D}·${X} ⏳ ${items.length}`, items, width) : head;
+    return capped(open.length ? `${head} ${D}·${X} ⏳ ${open.length}` : head, all, width);
   }
-  if (items.length) return capped(`${Y}⏳ waiting on ${items.length}${X}`, items, width);
-  if (!registry) return `${D}○ no session status${X}`;
+  if (open.length) return capped(`${Y}⏳ waiting on ${open.length}${X}`, all, width);
+  // Nothing open: the turn is over and nothing will wake it — the cue to prompt.
+  // A recent result (✓ / ✗) follows, so the person sees what came back.
+  if (!registry) return capped(`${D}○ no session status${X}`, done, width);
   // idle, shell (a turn ended) and any status this CLI does not know yet
-  return `${A}■ stopped${X} ${D}· nothing running${since ? ` · ${age(now - since)}` : ""}${X}`;
+  return capped(`${A}■ stopped${X} ${D}· nothing running${since ? ` · ${age(now - since)}` : ""}${X}`, done, width);
 }

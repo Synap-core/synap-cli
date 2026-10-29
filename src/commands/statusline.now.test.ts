@@ -209,7 +209,7 @@ describe("render touches no network", () => {
 
       expect(fetchSpy).not.toHaveBeenCalled();
       expect(out).toHaveLength(4);
-      expect(out[3]).toBe("⏳ waiting on 2 · devbox w7 running be-file · 1/2 done 2m · Review the diff 5m");
+      expect(out[3]).toBe("⏳ waiting on 2 · devbox w7 running (be-file · 1/2 done) 2m · Review the diff 5m");
       // The index it built is on disk for the next render.
       expect(JSON.parse(fs.readFileSync(path.join(home, ".synap", "statusline", `${conv}.json`), "utf-8")).open.a1).toBeDefined();
     } finally {

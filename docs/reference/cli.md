@@ -4,7 +4,7 @@
 
 Synap CLI — connect AI agents to your data pod
 
-232 commands. Hidden commands and hidden options are omitted here (5 hidden commands); `cli.json` lists them with `"hidden": true`.
+233 commands. Hidden commands and hidden options are omitted here (5 hidden commands); `cli.json` lists them with `"hidden": true`.
 
 Every command also accepts `-h, --help`.
 
@@ -24,6 +24,7 @@ Every command also accepts `-h, --help`.
 - [`synap doctor`](#synap-doctor) — Coherence preflight: pod host resolves, key authenticates, workspace/project exist on THIS pod, and why each configured key does or does not work — catches config drift in one call
 - [`synap versions`](#synap-versions) — Show LOCAL vs NPM vs CONTROL-PLANE vs POD version drift for workspace-templates, api-types, and capabilities
 - [`synap whoami`](#synap-whoami) — Show key owner vs EFFECTIVE user (+ isAgent), scopes/workspace, and flag env-vs-surface key divergence
+- [`synap wait`](#synap-wait) — Wait for a devbox job, a PR's checks or merge, or an Actions run; the status line shows the wait
 - [`synap update`](#synap-update) — Show how to update the CLI
 - [`synap switch`](#synap-switch) — Switch active pod (interactive picker if no name given)
 - [`synap connections`](#synap-connections) — Show everything connected: which pod each agent points at, and which tools the pod has connected
@@ -466,6 +467,50 @@ Show key owner vs EFFECTIVE user (+ isAgent), scopes/workspace, and flag env-vs-
 | Option | Description | Default |
 |---|---|---|
 | `--json` | Output as JSON |  |
+
+## `synap wait`
+
+```
+synap wait [options] <kind> <target>
+```
+
+Wait for a devbox job, a PR's checks or merge, or an Actions run; the status line shows the wait
+
+| Argument | Required | Description |
+|---|---|---|
+| `kind` | yes | devbox \| pr \| run |
+| `target` | yes | devbox: <job>   pr: <owner/repo\|repo>#<n>   run: <run-url\|run-id> |
+
+| Option | Description | Default |
+|---|---|---|
+| `--interval <duration>` | Time between probes (default devbox 30s, pr/run 60s) |  |
+| `--timeout <duration>` | Give up after this long: exit 2 (default 4h) |  |
+| `--label <text>` | What the status line calls this wait |  |
+| `--for <what>` | pr: checks (default) or merged |  |
+| `--checks <names>` | pr --for checks: only these checks, comma-separated (default: all) |  |
+| `-R, --repo <owner/repo>` | run: the repository of a bare run id |  |
+| `--host <host>` | devbox: the ssh host (default devbox) |  |
+| `--since <duration>` | devbox: also accept a run that finished this long before the wait started (default 2m) |  |
+
+```text
+What each kind waits for:
+  devbox <job>      the devbox job of that name (gate.sh, q.sh, runlocked.sh) to finish a
+                    run that ended after the wait started (see --since). Reads
+                    `ssh devbox python3 ~/wt/devbox-status.py --name <job>` every 30 s.
+  pr <repo>#<n>     --for checks (default): every check on the PR (or the --checks list) to
+                    complete. --for merged: the PR to be merged or closed. A bare repo name
+                    means Synap-core/<repo>. Reads `gh pr view` every 60 s.
+  run <url|id>      a GitHub Actions run to complete. Reads `gh run view` every 60 s.
+
+It prints one line per state change and a final summary, and keeps its state in
+~/.synap/waits/<conversation>/<id>.json, which the Claude Code status line shows.
+
+Exit codes:
+  0  passed (devbox green; every check success/skipped/neutral; merged; run success)
+  1  failed (a red gate; a failed or cancelled check; closed unmerged; run failed)
+  2  timeout (--timeout, default 4h)
+  3  infra (devbox infra / died / refused / NOT-RUN), or the probe kept failing until the timeout
+```
 
 ## `synap update`
 

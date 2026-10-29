@@ -243,7 +243,7 @@ describe("waitLoop", () => {
       "devbox w7-regen: queued 2nd (light)",
       "devbox w7-regen: queued 2nd (light) → running (tsc · 0/2 done)",
       "devbox w7-regen: running (tsc · 0/2 done) → passed (2 gates green)",
-      "devbox w7-regen: passed after 2 min · 2 gates green · exit 0",
+      "devbox w7-regen: passed after 1m · 2 gates green · exit 0",
     ]);
     const [rec] = readWaits("conv-1");
     expect(rec).toMatchObject({ kind: "devbox", ref: "w7-regen", state: "passed", exitCode: 0, attempt: 1, probeErrors: 0, pid: process.pid });
@@ -303,8 +303,8 @@ describe("waitLoop", () => {
       probe: scripted([{ state: "queued", detail: "queued 9th (heavy)" }]),
     });
     expect(code).toBe(2);
-    expect(readWaits("conv-1")[0]).toMatchObject({ state: "timeout", exitCode: 2, detail: "gave up after 2 min at queued 9th (heavy)" });
-    expect(lines.at(-1)).toMatch(/timeout \(gave up after 2 min at queued 9th \(heavy\)\) · exit 2$/);
+    expect(readWaits("conv-1")[0]).toMatchObject({ state: "timeout", exitCode: 2, detail: "gave up after 2m at queued 9th (heavy)" });
+    expect(lines.at(-1)).toMatch(/timeout \(gave up after 2m at queued 9th \(heavy\)\) · exit 2$/);
   });
 
   it("attempt counts the earlier waits on the same target in this conversation; finished ones older than 24 h are pruned", async () => {

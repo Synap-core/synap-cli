@@ -18,11 +18,13 @@
 import { execFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { parseDuration } from "./proposals-await.js";
-import { ordinal } from "../lib/now-line.js";
+import { age, ordinal } from "../lib/now-line.js";
 import {
   attemptFor,
   pruneWaits,
   readWaits,
+  stateAndDetail,
+  waitName,
   writeWait,
   type WaitKind,
   type WaitRecord,
@@ -144,7 +146,7 @@ export function mapDevbox(d: DevboxDetail, startedAt: number, graceMs: number): 
   }
   switch (status) {
     case "green":
-      return { state: "passed", detail: `${done.length} gates green`, exitCode: WAIT_EXIT.PASSED };
+      return { state: "passed", detail: `${done.length} gate${done.length === 1 ? "" : "s"} green`, exitCode: WAIT_EXIT.PASSED };
     case "done":
       return { state: "passed", detail: "finished (this kind of job records no verdict)", exitCode: WAIT_EXIT.PASSED };
     case "red":
@@ -225,7 +227,7 @@ export function mapPrChecks(pr: GhPr, wanted: string[] | null): ProbeResult {
   if (completed.length === checks.length) {
     return failed.length
       ? { state: "failed", detail: `failed: ${failed.slice(0, 3).map((c) => `${c.name} (${c.conclusion || "?"})`).join(", ")}`, exitCode: WAIT_EXIT.FAILED }
-      : { state: "passed", detail: `${checks.length} checks green`, exitCode: WAIT_EXIT.PASSED };
+      : { state: "passed", detail: `${checks.length} check${checks.length === 1 ? "" : "s"} green`, exitCode: WAIT_EXIT.PASSED };
   }
   const running = checks.filter((c) => c.status === "in_progress");
   const progress = `${completed.length}/${checks.length} done`;
@@ -350,10 +352,6 @@ export interface WaitLoopOptions {
 
 const MAX_PROBE_ERRORS = 3;
 
-function describe(state: WaitState, detail: string): string {
-  if (!detail) return state;
-  return detail.startsWith(state) ? detail : `${state} (${detail})`;
-}
 
 /** Poll until the probe says the target is finished, or the timeout. Returns the exit code. */
 export async function waitLoop(o: WaitLoopOptions): Promise<number> {
@@ -362,7 +360,7 @@ export async function waitLoop(o: WaitLoopOptions): Promise<number> {
   const print = o.print ?? ((l: string) => console.log(l));
   pruneWaits(o.sessionId, now());
   const startedAt = now();
-  const head = o.label || `${o.kind} ${o.ref}`;
+  const head = waitName({ kind: o.kind, ref: o.ref, label: o.label ?? "" });
   const rec: WaitRecord = {
     id: `${startedAt.toString(36)}-${randomBytes(3).toString("hex")}`,
     kind: o.kind,
@@ -402,31 +400,31 @@ export async function waitLoop(o: WaitLoopOptions): Promise<number> {
     const t = now();
     rec.probedAt = t;
     if (next && (first || next.state !== rec.state || next.detail !== rec.detail)) {
-      const was = describe(rec.state, rec.detail);
+      const was = stateAndDetail(rec.state, rec.detail);
       rec.state = next.state;
       rec.detail = next.detail;
       rec.changedAt = t;
-      print(first ? `${hhmm(t)} ${head}: ${describe(rec.state, rec.detail)}` : `${hhmm(t)} ${head}: ${was} → ${describe(rec.state, rec.detail)}`);
+      print(first ? `${hhmm(t)} ${head}: ${stateAndDetail(rec.state, rec.detail)}` : `${hhmm(t)} ${head}: ${was} → ${stateAndDetail(rec.state, rec.detail)}`);
       first = false;
     }
     if (next?.exitCode !== undefined) {
       rec.exitCode = next.exitCode;
       rec.finishedAt = t;
       save();
-      print(`${hhmm(t)} ${head}: ${rec.state} after ${Math.round((t - startedAt) / 60_000)} min${rec.detail ? ` · ${rec.detail}` : ""} · exit ${rec.exitCode}`);
+      print(`${hhmm(t)} ${head}: ${rec.state} after ${age(t - startedAt)}${rec.detail ? ` · ${rec.detail}` : ""} · exit ${rec.exitCode}`);
       return rec.exitCode;
     }
     if (t - startedAt >= o.timeoutMs) {
       const endedOnError = rec.state === "error";
       if (!endedOnError) {
-        rec.detail = `gave up after ${Math.round(o.timeoutMs / 60_000)} min at ${describe(rec.state, rec.detail)}`;
+        rec.detail = `gave up after ${age(t - startedAt)} at ${stateAndDetail(rec.state, rec.detail)}`;
         rec.state = "timeout";
       }
       rec.exitCode = endedOnError ? WAIT_EXIT.INFRA : WAIT_EXIT.TIMEOUT;
       rec.finishedAt = t;
       rec.changedAt = t;
       save();
-      print(`${hhmm(t)} ${head}: ${describe(rec.state, rec.detail)} · exit ${rec.exitCode}`);
+      print(`${hhmm(t)} ${head}: ${stateAndDetail(rec.state, rec.detail)} · exit ${rec.exitCode}`);
       return rec.exitCode;
     }
     save();
