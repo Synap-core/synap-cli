@@ -38,10 +38,13 @@ vi.mock("node:fs", () => {
   return { default: fs, ...fs };
 });
 
-const spawn = vi.fn(() => ({ unref: () => {} }));
+// Records the command and argv only: the third argument carries the whole
+// process env, which a failing assertion would print (tokens included).
+const spawn = vi.fn((_cmd: string, _args: string[]) => ({ unref: () => {} }));
 vi.mock("node:child_process", () => ({
-  spawn: (...args: unknown[]) => spawn(...(args as [])),
+  spawn: (cmd: string, args: string[]) => spawn(cmd, args),
   execSync: () => "",
+  execFileSync: () => "",
 }));
 
 const hubGet = vi.fn();
@@ -56,7 +59,12 @@ vi.mock("../lib/describe-lens.js", () => ({
 }));
 vi.mock("../lib/pod.js", () => ({ getSurfaceAgentKey: () => null, SURFACE_NAMES: [] }));
 
-const { statusline } = await import("./statusline.js");
+const { statusline, convCacheFile } = await import("./statusline.js");
+
+// No Claude session in these tests: the conversation cache is the `_nosession` one.
+vi.stubEnv("CLAUDE_CODE_SESSION_ID", "");
+vi.stubEnv("SYNAP_LENS_SESSION", "");
+const CONV_FILE = convCacheFile(undefined);
 
 const readCache = () => JSON.parse(files.get(CACHE_FILE) ?? "{}");
 const TTL_MS = 120_000;
@@ -100,6 +108,7 @@ describe("render respects the attempt clock", () => {
       CACHE_FILE,
       JSON.stringify({ ts: Date.now() - 10 * TTL_MS, attemptedTs: Date.now() - 1_000, ok: false, workspaces: [] })
     );
+    files.set(CONV_FILE, JSON.stringify({ ts: Date.now() - 10 * TTL_MS, attemptedTs: Date.now() - 1_000, ok: false }));
 
     await statusline();
 
@@ -111,6 +120,7 @@ describe("render respects the attempt clock", () => {
       CACHE_FILE,
       JSON.stringify({ ts: Date.now() - 10 * TTL_MS, attemptedTs: Date.now() - 3 * TTL_MS, ok: false, workspaces: [] })
     );
+    files.set(CONV_FILE, JSON.stringify({ ts: Date.now(), attemptedTs: Date.now(), ok: true }));
 
     await statusline();
 
@@ -119,6 +129,7 @@ describe("render respects the attempt clock", () => {
 
   it("an older cache with no attempt clock falls back to the success time", async () => {
     files.set(CACHE_FILE, JSON.stringify({ ts: Date.now() - 3 * TTL_MS, ok: true, workspaces: [] }));
+    files.set(CONV_FILE, JSON.stringify({ ts: Date.now(), attemptedTs: Date.now(), ok: true }));
 
     await statusline();
 

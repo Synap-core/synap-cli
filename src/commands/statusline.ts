@@ -1,18 +1,31 @@
 /**
- * synap statusline — full 3-line ANSI status for the Claude Code statusLine.
+ * synap statusline — full 4-line ANSI status for the Claude Code statusLine.
  *
  * Two modes, both via `synap statusline`:
  *
  *   RENDER (default)   Parse the Claude Code JSON from stdin, read the pod
- *                      cache file (NO network), compose 3 ANSI lines, print,
- *                      exit. Always instant. If the cache is stale it spawns a
- *                      detached refresh (fire-and-forget) so the NEXT render is
- *                      fresh — this render never blocks on the network.
+ *                      cache files and local state (NO network), compose 4
+ *                      ANSI lines, print, exit. Always instant. If a cache is
+ *                      stale it spawns a detached refresh (fire-and-forget) so
+ *                      the NEXT render is fresh — this render never blocks on
+ *                      the network.
  *
- *   REFRESH (--refresh) Fetch pod data in a single parallel burst and write the
- *                      cache. Lock-guarded so only one refresh runs at a time.
- *                      On error/429, the last good cache is preserved (the dot
- *                      goes stale, not blank).
+ *   REFRESH (--refresh) Fetch pod data in parallel bursts and write the caches.
+ *                      Lock-guarded so only one refresh of each cache runs at a
+ *                      time. On error/429, the last good cache is preserved
+ *                      (the dot goes stale, not blank). Also catches the
+ *                      conversation's transcript index up (local, no network).
+ *
+ * Two pod caches: the pod-WIDE fields (workspaces, skills, proposals, identity,
+ * entity totals) in ONE shared file, refreshed at most once per REFRESH_TTL
+ * whatever the number of conversations; the CONVERSATION's own fields (its lens
+ * workspace, bound session, project) in a file per Claude Code session id, so
+ * a conversation never shows the session another conversation refreshed last
+ * (each one used to, when all of it lived in the one shared file).
+ *
+ * The 4th line (lib/now-line.ts) says what the conversation is doing now and
+ * what it waits on, from Claude Code's process registry, the transcript index
+ * (lib/transcript-index.ts) and `synap wait` state files — all local files.
  *
  * Why: Claude Code calls the statusline on every render (debounced ~300ms +
  * periodic refresh). Fetching live pod data synchronously per render hammers
@@ -22,14 +35,37 @@
 
 import fs from "node:fs";
 import os from "node:os";
+import path from "node:path";
 import { execFileSync, spawn } from "node:child_process";
 import { resolveHubConfig, hubGet } from "../lib/hub-client.js";
 import { resolveActiveLens } from "../lib/session-lens.js";
 import { describeLens } from "../lib/describe-lens.js";
 import { getSurfaceAgentKey, SURFACE_NAMES } from "../lib/pod.js";
+import { buildNowLine, readRegistry } from "../lib/now-line.js";
+import {
+  defaultTranscriptPath,
+  indexLockPath,
+  loadIndex,
+  saveIndex,
+  updateIndex,
+  type TranscriptIndex,
+} from "../lib/transcript-index.js";
+import { pidAlive, pruneWaits, readWaits } from "../lib/wait-state.js";
 
-const CACHE_FILE = "/tmp/synap-statusline-cache.json";
+const CACHE_FILE = "/tmp/synap-statusline-cache.json"; // pod-wide fields, shared by every conversation
 const LOCK_FILE = "/tmp/synap-statusline-refresh.lock";
+/** A session id as a file-name part. */
+function convKey(claudeSessionId: string | undefined): string {
+  return (claudeSessionId ?? "").replace(/[^A-Za-z0-9_-]/g, "") || "_nosession";
+}
+export function convCacheFile(claudeSessionId: string | undefined): string {
+  return `/tmp/synap-statusline-conv-${convKey(claudeSessionId)}.json`;
+}
+function convLockFile(claudeSessionId: string | undefined): string {
+  return `/tmp/synap-statusline-conv-${convKey(claudeSessionId)}.lock`;
+}
+/** Render reads at most this many new transcript bytes; more is left to the detached refresh. */
+const RENDER_TRANSCRIPT_BYTES = 2 * 1024 * 1024;
 // The pod sits behind a strict edge rate-limiter (15-min window) shared with
 // the agent's own traffic on the same key. Keep statusline cost minimal:
 // refresh at most once per 120s; the burst is ~4-6 GETs (workspaces, skills,
@@ -108,6 +144,15 @@ interface PodCache {
   identityMismatch: boolean; // true iff we have an expected identity AND the acting one diverges from it
 }
 
+/** The conversation's own fields, cached per Claude Code session id. */
+type ConvField = "activeWorkspaceId" | "projectName" | "projectId" | "sessionGoal" | "sessionId";
+type SharedCache = Omit<PodCache, ConvField>;
+interface ConvCache extends Pick<PodCache, ConvField | "ts" | "attemptedTs" | "ok" | "podUrl"> {}
+
+function emptyConv(): ConvCache {
+  return { ts: 0, attemptedTs: 0, ok: false, podUrl: "", activeWorkspaceId: "", projectName: "", projectId: "", sessionGoal: "", sessionId: "" };
+}
+
 function emptyCache(): PodCache {
   return {
     ts: 0, attemptedTs: 0, ok: false, podUrl: "", activeWorkspaceId: "", workspaces: [], projectName: "", projectId: "",
@@ -124,33 +169,52 @@ function findSurfaceLabelForKey(hubApiKey: string): string | null {
   return null;
 }
 
-function readCache(): PodCache | null {
+function readJson<T>(file: string): T | null {
   try {
-    return JSON.parse(fs.readFileSync(CACHE_FILE, "utf-8")) as PodCache;
+    return JSON.parse(fs.readFileSync(file, "utf-8")) as T;
   } catch {
     return null;
   }
 }
 
+/** Missing, or its last attempt is older than the TTL. The backoff clock is the last ATTEMPT, not the last success (see PodCache). */
+function isDue(c: { ts: number; attemptedTs?: number } | null): boolean {
+  return !c || Date.now() - (c.attemptedTs ?? c.ts) > REFRESH_TTL_MS;
+}
+
 // ── Detached refresh trigger (fire-and-forget) ─────────────────────────
 
-function lockIsFresh(): boolean {
+function lockIsFresh(file = LOCK_FILE): boolean {
   try {
-    return Date.now() - fs.statSync(LOCK_FILE).mtimeMs < LOCK_STALE_MS;
+    return Date.now() - fs.statSync(file).mtimeMs < LOCK_STALE_MS;
   } catch {
     return false;
   }
 }
 
-function triggerRefresh(claudeSessionId?: string): void {
-  if (lockIsFresh()) return; // a refresh is already running
+function takeLock(file: string): boolean {
+  if (lockIsFresh(file)) return false; // another refresh owns the window
+  try {
+    fs.writeFileSync(file, String(process.pid));
+  } catch {
+    /* ignore */
+  }
+  return true;
+}
+
+function dropLock(file: string): void {
+  try { fs.unlinkSync(file); } catch {}
+}
+
+function triggerRefresh(claudeSessionId: string | undefined, transcriptPath: string): void {
   try {
     const entry = process.argv[1]; // the CLI entry script
     // The detached refresh has no Claude env of its own — forward the session
-    // id (from stdin) so its resolveHubConfig/lens picks the right workspace.
-    const env = claudeSessionId
-      ? { ...process.env, SYNAP_LENS_SESSION: claudeSessionId }
-      : process.env;
+    // id (from stdin) so its resolveHubConfig/lens picks the right workspace,
+    // and the transcript path so it can catch the index up.
+    const env: NodeJS.ProcessEnv = { ...process.env };
+    if (claudeSessionId) env.SYNAP_LENS_SESSION = claudeSessionId;
+    if (transcriptPath) env.SYNAP_STATUSLINE_TRANSCRIPT = transcriptPath;
     const child = spawn(process.execPath, [entry, "statusline", "--refresh"], {
       detached: true,
       stdio: "ignore",
@@ -164,45 +228,68 @@ function triggerRefresh(claudeSessionId?: string): void {
 
 // ── REFRESH mode: fetch pod, write cache (lock-guarded) ────────────────
 
-async function refresh(): Promise<void> {
-  if (lockIsFresh()) return; // another refresh owns the window
-  try {
-    fs.writeFileSync(LOCK_FILE, String(process.pid));
-  } catch {
-    /* ignore */
-  }
+/** The conversation this process serves: forwarded by render as SYNAP_LENS_SESSION. */
+function refreshSessionId(): string | undefined {
+  return process.env.SYNAP_LENS_SESSION || process.env.CLAUDE_CODE_SESSION_ID || undefined;
+}
 
-  const prev = readCache();
+/**
+ * Catch the transcript index up (local files only), streaming: render reads at
+ * most RENDER_TRANSCRIPT_BYTES, so the first scan of a big transcript happens
+ * here. Also prunes this conversation's finished `synap wait` files.
+ */
+function catchUpTranscript(claudeSessionId: string | undefined): void {
+  const transcriptPath = process.env.SYNAP_STATUSLINE_TRANSCRIPT;
+  if (!claudeSessionId) return;
+  try { pruneWaits(claudeSessionId); } catch {}
+  if (!transcriptPath) return;
+  const lock = indexLockPath(claudeSessionId);
+  try { fs.mkdirSync(path.dirname(lock), { recursive: true }); } catch {}
+  if (!takeLock(lock)) return;
   try {
-    const cfg = await resolveHubConfig({});
+    const { index, changed } = updateIndex(loadIndex(claudeSessionId), transcriptPath, { maxBytes: Infinity });
+    if (changed) saveIndex(claudeSessionId, index);
+  } catch {
+    /* the index is a display aid: the next render retries */
+  } finally {
+    dropLock(lock);
+  }
+}
+
+async function refresh(): Promise<void> {
+  const claudeSessionId = refreshSessionId();
+  catchUpTranscript(claudeSessionId);
+
+  const convFile = convCacheFile(claudeSessionId);
+  const convLock = convLockFile(claudeSessionId);
+  const prevShared = readJson<PodCache>(CACHE_FILE);
+  const prevConv = readJson<ConvCache>(convFile);
+  // Each cache is fetched only when IT is due and nobody else is fetching it:
+  // N conversations share one pod-wide burst per TTL, plus their own 1–2 GETs.
+  const doShared = isDue(prevShared) && takeLock(LOCK_FILE);
+  const doConv = isDue(prevConv) && takeLock(convLock);
+  if (!doShared && !doConv) return;
+
+  try {
+    const cfg = await resolveHubConfig({}).catch(() => null);
+    await Promise.all([
+      doShared ? refreshShared(cfg, prevShared) : null,
+      doConv ? refreshConv(cfg, prevConv, convFile) : null,
+    ]);
+  } finally {
+    if (doShared) dropLock(LOCK_FILE);
+    if (doConv) dropLock(convLock);
+  }
+}
+
+type Cfg = Awaited<ReturnType<typeof resolveHubConfig>>;
+
+/** The pod-wide burst: workspaces (doubling as liveness), skills, identity, proposals. */
+async function refreshShared(cfg: Cfg | null, prev: PodCache | null): Promise<void> {
+  try {
     // Thrown, not returned: the catch below stamps the attempt, so an
     // unconfigured CLI also backs off instead of respawning every render.
-    if (!cfg.podUrl || !cfg.apiKey) throw new Error("statusline: no pod config");
-
-    // This connection's per-Claude-session lens (forwarded as SYNAP_LENS_SESSION
-    // by the render process). Drives WHICH project/session we show — the bound
-    // ones, not a global guess.
-    const lens = resolveActiveLens();
-
-    // Minimal burst (the pod's edge limiter is shared with agent traffic).
-    // `/workspaces` succeeding doubles as the liveness signal — no separate
-    // `/health`. The bound focus-session and project are fetched by id only
-    // when the lens has them (0–2 extra calls).
-    const sessionReq = lens?.focusSessionId
-      ? hubGet(`/focus-sessions/${lens.focusSessionId}`, cfg.workspaceId ? { workspaceId: cfg.workspaceId } : {}, cfg)
-      : hubGet("/focus-sessions?status=active&limit=1", {}, cfg);
-    // Use the FULLY-RESOLVED project id (cfg.projectId = session-lens ?? env ??
-    // durable activeProjectId), NOT just the session lens — so a durable
-    // `synap project use` shows even in a fresh session with no lens file yet.
-    // Mirrors how activeWorkspaceId already uses cfg.workspaceId below.
-    const resolvedProjectId = cfg.projectId;
-    // Resolve the NAME via the single-project route. `GET /projects` returns a
-    // bare array and ignores `?ids=` (only status/limit) — the old call read a
-    // nonexistent `.projects` field, so the name never resolved and the line
-    // showed the raw UUID. `/projects/:id` returns the row directly ({id,name}).
-    const projectReq = resolvedProjectId
-      ? hubGet(`/projects/${encodeURIComponent(resolvedProjectId)}`, {}, cfg)
-      : Promise.resolve(null);
+    if (!cfg?.podUrl || !cfg.apiKey) throw new Error("statusline: no pod config");
 
     // Identity safety: compare the AMBIENT SYNAP_HUB_API_KEY against the
     // claude-code surface key pinned to this pod. A cheap string compare
@@ -227,11 +314,12 @@ async function refresh(): Promise<void> {
     // clear 1000 pending proposals before this undercounts).
     const proposalsReq = hubGet("/proposals", { status: "pending", limit: 1000 }, cfg);
 
-    const [ws, skills, session, project, identity, proposals] = await Promise.allSettled([
+    // Minimal burst (the pod's edge limiter is shared with agent traffic).
+    // `/workspaces` succeeding doubles as the liveness signal — no separate
+    // `/health`.
+    const [ws, skills, identity, proposals] = await Promise.allSettled([
       hubGet("/workspaces", {}, cfg),
       hubGet("/agent-skills?limit=1", {}, cfg),
-      sessionReq,
-      projectReq,
       identityReq,
       proposalsReq,
     ]);
@@ -250,27 +338,6 @@ async function refresh(): Promise<void> {
 
     const skillCount =
       skills.status === "fulfilled" ? ((skills.value as { total?: number })?.total ?? 0) : prev?.skillCount ?? 0;
-
-    // Bound session — either the by-id fetch (object) or the active-list fallback.
-    let sessionGoal = prev?.sessionGoal ?? "";
-    let sessionId = prev?.sessionId ?? "";
-    if (session.status === "fulfilled" && session.value) {
-      const v = session.value as { id?: string; goal?: string; sessions?: Array<{ id: string; goal?: string }> };
-      const s = v.sessions ? v.sessions[0] : v; // list-shape vs object-shape
-      sessionGoal = s?.goal?.slice(0, 60) ?? "";
-      sessionId = s?.id ?? "";
-    } else if (lens?.focusSessionId) {
-      sessionGoal = "";
-      sessionId = "";
-    }
-
-    // Bound project (from the fully-resolved id — durable or session).
-    let projectName = resolvedProjectId ? prev?.projectName ?? "" : "";
-    let projectId = resolvedProjectId ?? "";
-    if (project.status === "fulfilled" && project.value) {
-      const p = (project.value as { projects?: Array<{ id: string; name: string }> })?.projects?.find((x) => x.id === resolvedProjectId);
-      projectName = p?.name?.slice(0, 30) ?? "";
-    }
 
     // Acting identity: clean unless we detected a real divergence.
     let actingAgentLabel = "";
@@ -294,20 +361,15 @@ async function refresh(): Promise<void> {
       ? proposalsRaw.length
       : prev?.proposalCount ?? 0;
 
-    const out: PodCache = {
+    const out: SharedCache = {
       ts: Date.now(),
       attemptedTs: Date.now(),
       ok: true,
       podUrl: cfg.podUrl,
-      activeWorkspaceId: cfg.workspaceId ?? "", // the lens THIS connection resolves to
       workspaces,
-      projectName,
-      projectId,
       skillCount,
       proposalCount,
       proposalsFetched: proposalsFetched || (prev?.proposalsFetched ?? false),
-      sessionGoal,
-      sessionId,
       totalEntities,
       actingAgentLabel,
       identityMismatch,
@@ -321,15 +383,112 @@ async function refresh(): Promise<void> {
     // it still means "last success", which is what the staleness display reads.
     // With no previous cache at all, write the empty one for the same reason.
     try {
-      const failed: PodCache = { ...(prev ?? emptyCache()), ok: false, attemptedTs: Date.now() };
+      const failed = { ...(prev ?? emptyCache()), ok: false, attemptedTs: Date.now() };
       fs.writeFileSync(CACHE_FILE, JSON.stringify(failed));
     } catch {}
-  } finally {
-    try { fs.unlinkSync(LOCK_FILE); } catch {}
   }
 }
 
-// ── RENDER mode: stdin + cache → 3 lines (no network) ──────────────────
+/** This conversation's own fields: its lens workspace, bound session and project (0–2 GETs). */
+async function refreshConv(cfg: Cfg | null, prev: ConvCache | null, file: string): Promise<void> {
+  try {
+    if (!cfg?.podUrl || !cfg.apiKey) throw new Error("statusline: no pod config");
+
+    // This connection's per-Claude-session lens (forwarded as SYNAP_LENS_SESSION
+    // by the render process). Drives WHICH project/session we show — the bound
+    // ones, not a global guess.
+    const lens = resolveActiveLens();
+
+    // The bound focus-session and project are fetched by id only when the
+    // lens has them.
+    const sessionReq = lens?.focusSessionId
+      ? hubGet(`/focus-sessions/${lens.focusSessionId}`, cfg.workspaceId ? { workspaceId: cfg.workspaceId } : {}, cfg)
+      : hubGet("/focus-sessions?status=active&limit=1", {}, cfg);
+    // Use the FULLY-RESOLVED project id (cfg.projectId = session-lens ?? env ??
+    // durable activeProjectId), NOT just the session lens — so a durable
+    // `synap project use` shows even in a fresh session with no lens file yet.
+    // Mirrors how activeWorkspaceId already uses cfg.workspaceId below.
+    const resolvedProjectId = cfg.projectId;
+    // Resolve the NAME via the single-project route. `GET /projects` returns a
+    // bare array and ignores `?ids=` (only status/limit) — the old call read a
+    // nonexistent `.projects` field, so the name never resolved and the line
+    // showed the raw UUID. `/projects/:id` returns the row directly ({id,name}).
+    const projectReq = resolvedProjectId
+      ? hubGet(`/projects/${encodeURIComponent(resolvedProjectId)}`, {}, cfg)
+      : Promise.resolve(null);
+
+    const [session, project] = await Promise.allSettled([sessionReq, projectReq]);
+
+    // Bound session — either the by-id fetch (object) or the active-list fallback.
+    let sessionGoal = prev?.sessionGoal ?? "";
+    let sessionId = prev?.sessionId ?? "";
+    if (session.status === "fulfilled" && session.value) {
+      const v = session.value as { id?: string; goal?: string; sessions?: Array<{ id: string; goal?: string }> };
+      const s = v.sessions ? v.sessions[0] : v; // list-shape vs object-shape
+      sessionGoal = s?.goal?.slice(0, 60) ?? "";
+      sessionId = s?.id ?? "";
+    } else if (lens?.focusSessionId) {
+      sessionGoal = "";
+      sessionId = "";
+    }
+
+    // Bound project (from the fully-resolved id — durable or session).
+    let projectName = resolvedProjectId ? prev?.projectName ?? "" : "";
+    const projectId = resolvedProjectId ?? "";
+    if (project.status === "fulfilled" && project.value) {
+      const p = (project.value as { projects?: Array<{ id: string; name: string }> })?.projects?.find((x) => x.id === resolvedProjectId);
+      projectName = p?.name?.slice(0, 30) ?? "";
+    }
+
+    const out: ConvCache = {
+      ts: Date.now(),
+      attemptedTs: Date.now(),
+      ok: true,
+      podUrl: cfg.podUrl,
+      activeWorkspaceId: cfg.workspaceId ?? "", // the lens THIS connection resolves to
+      projectName,
+      projectId,
+      sessionGoal,
+      sessionId,
+    };
+    fs.writeFileSync(file, JSON.stringify(out));
+  } catch {
+    // Same backoff as the shared cache: keep the last good values, stamp the attempt.
+    try {
+      fs.writeFileSync(file, JSON.stringify({ ...(prev ?? emptyConv()), ok: false, attemptedTs: Date.now() }));
+    } catch {}
+  }
+}
+
+// ── RENDER mode: stdin + caches + local state → 4 lines (no network) ───
+
+/**
+ * This conversation's transcript index, brought up to date with what was
+ * appended since the last render — at most RENDER_TRANSCRIPT_BYTES: a bigger
+ * backlog (the first look at a long conversation) is left to the detached
+ * refresh, and this render shows the index as it is. Returns whether that
+ * backlog is waiting.
+ */
+function currentIndex(claudeSessionId: string, transcriptPath: string): { index: TranscriptIndex | null; behind: boolean } {
+  try {
+    const { index, changed, behind } = updateIndex(loadIndex(claudeSessionId), transcriptPath, { maxBytes: RENDER_TRANSCRIPT_BYTES });
+    if (changed) {
+      try { saveIndex(claudeSessionId, index); } catch {}
+    }
+    return { index, behind: behind > 0 };
+  } catch {
+    return { index: null, behind: false };
+  }
+}
+
+/** Terminal width when Claude Code (or the shell) says it; the now line caps itself to it. */
+function widthOf(cc: Record<string, unknown>): number | undefined {
+  for (const v of [cc.terminal_width, cc.columns, (cc.terminal as { columns?: unknown } | undefined)?.columns, process.env.COLUMNS]) {
+    const n = Number(v);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  return undefined;
+}
 
 function render(): void {
   let cc: Record<string, unknown> = {};
@@ -342,13 +501,38 @@ function render(): void {
   // THIS session's lens (workspace/project/session), not a global guess.
   const claudeSessionId = (cc.session_id as string | undefined) || process.env.CLAUDE_CODE_SESSION_ID;
 
-  const cache = readCache();
-  // Trigger a background refresh if cache is missing or stale.
-  // The backoff clock is the last ATTEMPT, not the last success (see PodCache).
-  if (!cache || Date.now() - (cache.attemptedTs ?? cache.ts) > REFRESH_TTL_MS)
-    triggerRefresh(claudeSessionId);
+  const cwd = (cc.cwd ?? "") as string;
+  const transcriptPath =
+    (typeof cc.transcript_path === "string" && cc.transcript_path) ||
+    (cwd && claudeSessionId ? defaultTranscriptPath(cwd, claudeSessionId) : "");
 
-  const pod = cache ?? emptyCache();
+  const shared = readJson<PodCache>(CACHE_FILE);
+  const conv = readJson<ConvCache>(convCacheFile(claudeSessionId));
+  const { index, behind } = claudeSessionId && transcriptPath ? currentIndex(claudeSessionId, transcriptPath) : { index: null, behind: false };
+  // Trigger a background refresh if a cache is missing or stale, or the
+  // transcript backlog is too big for a render — unless that refresh is
+  // already running.
+  if (
+    (isDue(shared) && !lockIsFresh(LOCK_FILE)) ||
+    (isDue(conv) && !lockIsFresh(convLockFile(claudeSessionId))) ||
+    (behind && claudeSessionId && !lockIsFresh(indexLockPath(claudeSessionId)))
+  )
+    triggerRefresh(claudeSessionId, transcriptPath);
+
+  // Pod-wide fields from the shared cache; the conversation's own ONLY from its
+  // file — a shared cache written by an older CLI carries another
+  // conversation's session and project, which must not show here.
+  const c = conv ?? emptyConv();
+  const pod: PodCache = {
+    ...emptyCache(),
+    ...(shared ?? {}),
+    activeWorkspaceId: c.activeWorkspaceId,
+    projectName: c.projectName,
+    projectId: c.projectId,
+    sessionGoal: c.sessionGoal,
+    sessionId: c.sessionId,
+    podUrl: shared?.podUrl || c.podUrl,
+  };
 
   // ── Claude Code fields ───────────────────────────────────────────────
   const modelName = ((cc.model as { display_name?: string })?.display_name ?? "").replace(/\s*\((?:1M|200K) context\)/, "").trim();
@@ -361,7 +545,6 @@ function render(): void {
   const sdPct = rl?.seven_day?.used_percentage;
   const fhReset = rl?.five_hour?.resets_at;
   const vimMode = (cc.vim as { mode?: string })?.mode;
-  const cwd = (cc.cwd ?? "") as string;
 
   const branch = cwd ? gitBranchOf(cwd) : "";
 
@@ -473,6 +656,19 @@ function render(): void {
     l3.push(`${D}${compact(callCount)} calls · ${sessionCount} sessions${X}`);
   }
   if (l3.length) console.log(l3.join("  "));
+
+  // ─═─ LINE 4 — now: working / needs you / waiting on … / stopped ─═──────
+  console.log(
+    buildNowLine({
+      now: Date.now(),
+      registry: claudeSessionId ? readRegistry(claudeSessionId) : null,
+      open: index ? Object.values(index.open) : [],
+      waits: claudeSessionId ? readWaits(claudeSessionId) : [],
+      width: widthOf(cc),
+      lastActivityAt: index?.lastEventAt || undefined,
+      alive: pidAlive,
+    })
+  );
 }
 
 // ── Entry ──────────────────────────────────────────────────────────────
