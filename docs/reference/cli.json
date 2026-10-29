@@ -2915,6 +2915,12 @@
             "takesValue": "required"
           },
           {
+            "flags": "--github-app <file>",
+            "long": "--github-app",
+            "description": "GitHub App env file ({GITHUB_APP_ID, GITHUB_APP_PRIVATE_KEY_FILE, GITHUB_APP_INSTALLATION_ID?}, mode 600): runs' gh and git push act as that App; default ~/.config/synap-agent-app.env when it exists, else the environment's login (warned loudly)",
+            "takesValue": "required"
+          },
+          {
             "flags": "--allowed-tools <list>",
             "long": "--allowed-tools",
             "description": "Comma-separated Claude tools allowed without asking (the pod MCP server is always added)",

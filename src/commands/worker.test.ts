@@ -392,6 +392,75 @@ describe("the night protocol in the prompt", () => {
   });
 });
 
+describe("a code run's own tree folder in the prompt", () => {
+  const p = (treeDir?: string) =>
+    buildWorkerPrompt({ sessionId: "c5a34b78-0000", goal: "g", agentName: "cc", cwd: "/w", mcpServer: "m", treeDir });
+  it("names the folder, a --no-track worktree there (concurrent adds race on the repo config), and forbids the shared clone", () => {
+    expect(p("/t/c5a34b78")).toContain("git -C /w/<repo> worktree add --no-track /t/c5a34b78/<repo> -b devbox/c5a34b78-<slug> origin/main");
+    expect(p("/t/c5a34b78")).toContain("never in /w/<repo> itself");
+  });
+  it("without a folder the prompt is what it was", () => {
+    expect(p()).not.toContain("worktree add");
+  });
+});
+
+describe("workerEnv with a GitHub token", () => {
+  const g = { token: "ghs_app", sock: "/s", binDir: "/bin-synap", gitHelper: "/bin-synap/h", ghConfigDir: "/c" };
+  it("puts the App token in GH_TOKEN and the helpers first on PATH, over an inherited GH_TOKEN", () => {
+    const env = workerEnv({ GH_TOKEN: "founder", PATH: "/usr/bin" }, undefined, undefined, g);
+    expect(env.GH_TOKEN).toBe("ghs_app");
+    expect(env.GITHUB_TOKEN).toBe("ghs_app");
+    expect(env.PATH).toBe("/bin-synap:/usr/bin");
+  });
+  it("without the App, an inherited GH_TOKEN is NOT passed on", () => {
+    expect(workerEnv({ GH_TOKEN: "founder" }).GH_TOKEN).toBeUndefined();
+  });
+});
+
+describe("workerEnv is an allowlist: a secret in the worker's env never reaches a run", () => {
+  const worker = {
+    PATH: "/usr/bin",
+    HOME: "/h",
+    LANG: "C",
+    TERM: "xterm",
+    LC_ALL: "C",
+    CLAUDE_CODE_OAUTH_TOKEN: "oauth",
+    CLAUDE_CONFIG_DIR: "/cc",
+    SYNAP_AGENT: "a",
+    SYNAP_POD_URL: "https://pod",
+    VERCEL_TOKEN: "v",
+    VERCEL_ORG_ID: "o",
+    CLOUDFLARE_API_TOKEN: "c",
+    GH_TOKEN: "founder",
+    GITHUB_TOKEN: "founder",
+    NPM_TOKEN: "n",
+    AWS_SECRET_ACCESS_KEY: "a",
+    SSH_AUTH_SOCK: "/ssh",
+    ANTHROPIC_API_KEY: "sk",
+    ANTHROPIC_AUTH_TOKEN: "t",
+    ANTHROPIC_BASE_URL: "u",
+  };
+  it("VERCEL_*, CLOUDFLARE_*, GH_TOKEN, ANTHROPIC_* and any other secret are not visible to the run", () => {
+    const env = workerEnv(worker);
+    for (const k of ["VERCEL_TOKEN", "VERCEL_ORG_ID", "CLOUDFLARE_API_TOKEN", "GH_TOKEN", "GITHUB_TOKEN", "NPM_TOKEN", "AWS_SECRET_ACCESS_KEY", "SSH_AUTH_SOCK", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL"]) {
+      expect(env[k], k).toBeUndefined();
+    }
+  });
+  it("keeps what the run needs: PATH, HOME, locale, the Claude login and the pod vars", () => {
+    expect(workerEnv(worker)).toEqual({
+      PATH: "/usr/bin",
+      HOME: "/h",
+      LANG: "C",
+      TERM: "xterm",
+      LC_ALL: "C",
+      CLAUDE_CODE_OAUTH_TOKEN: "oauth",
+      CLAUDE_CONFIG_DIR: "/cc",
+      SYNAP_AGENT: "a",
+      SYNAP_POD_URL: "https://pod",
+    });
+  });
+});
+
 describe("workerEnv with an account", () => {
   it("the chosen token REPLACES an inherited one", () => {
     const env = workerEnv({ CLAUDE_CODE_OAUTH_TOKEN: "inherited", CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR: "4" }, undefined, "chosen");

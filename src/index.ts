@@ -1201,6 +1201,10 @@ program
     "--accounts <file>",
     "Claude accounts to rotate across ({version:1, reserve, accounts:[{id,label,token,design?}]}, mode 600); default ~/.config/synap-worker/accounts.json when it exists, else the environment's login"
   )
+  .option(
+    "--github-app <file>",
+    "GitHub App env file ({GITHUB_APP_ID, GITHUB_APP_PRIVATE_KEY_FILE, GITHUB_APP_INSTALLATION_ID?}, mode 600): runs' gh and git push act as that App; default ~/.config/synap-agent-app.env when it exists, else the environment's login (warned loudly)"
+  )
   .option("--allowed-tools <list>", "Comma-separated Claude tools allowed without asking (the pod MCP server is always added)")
   .option("--skip-permissions", "Launch with --dangerously-skip-permissions instead of an allow-list")
   .option("--dry-run", "Claim and log what would launch, without launching Claude")
