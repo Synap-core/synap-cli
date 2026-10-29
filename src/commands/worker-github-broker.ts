@@ -21,6 +21,7 @@ import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
+import { writeSecretFile } from "../lib/atomic-file.js";
 import type { InstallationTokenSource } from "./worker-github-app.js";
 
 export interface TokenBroker {
@@ -86,7 +87,8 @@ export function writeGithubHelpers(binDir: string, o: { realGh?: string; nodeBin
   fs.mkdirSync(binDir, { recursive: true, mode: 0o700 });
   const node = o.nodeBin ?? process.execPath;
   const tokenBin = path.join(binDir, "synap-gh-token");
-  const put = (name: string, body: string) => fs.writeFileSync(path.join(binDir, name), body, { mode: 0o700 });
+  // writeSecretFile chmods after writing: a helper left by an earlier run is tightened too.
+  const put = (name: string, body: string) => writeSecretFile(path.join(binDir, name), body, { mode: 0o700 });
   put(
     "synap-gh-token",
     `#!${node}

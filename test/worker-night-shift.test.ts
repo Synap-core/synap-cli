@@ -27,7 +27,7 @@ let fakeClaude: string;
 const FAKE = `#!/usr/bin/env node
 const fs = require("fs");
 const argv = process.argv.slice(2);
-fs.appendFileSync(process.env.FAKE_CLAUDE_LOG, JSON.stringify({ argv, token: process.env.CLAUDE_CODE_OAUTH_TOKEN || null }) + "\\n");
+fs.appendFileSync(process.env.SYNAP_FAKE_CLAUDE_LOG, JSON.stringify({ argv, token: process.env.CLAUDE_CODE_OAUTH_TOKEN || null }) + "\\n");
 const out = (o) => process.stdout.write(JSON.stringify(o) + "\\n");
 const r = argv.indexOf("--resume");
 out({ type: "system", subtype: "init", session_id: r >= 0 ? argv[r + 1] : "${CLAUDE_SID}" });
@@ -128,7 +128,7 @@ beforeEach(() => {
   fs.writeFileSync(fakeClaude, FAKE, { mode: 0o755 });
   fs.rmSync(path.join(os.homedir(), ".synap"), { recursive: true, force: true });
   fs.rmSync(path.join(os.homedir(), ".claude"), { recursive: true, force: true });
-  vi.stubEnv("FAKE_CLAUDE_LOG", fakeLog);
+  vi.stubEnv("SYNAP_FAKE_CLAUDE_LOG", fakeLog);
 });
 
 afterEach(() => {
