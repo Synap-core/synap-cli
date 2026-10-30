@@ -16,7 +16,7 @@
  *                      (the dot goes stale, not blank). Also catches the
  *                      conversation's transcript index up (local, no network).
  *
- * Two pod caches: the pod-WIDE fields (workspaces, skills, proposals, identity,
+ * Two pod caches: the pod-WIDE fields (workspaces, skills, needs-you, identity,
  * entity totals) in ONE shared file, refreshed at most once per REFRESH_TTL
  * whatever the number of conversations; the CONVERSATION's own fields (its lens
  * workspace, bound session, project) in a file per Claude Code session id, so
@@ -69,7 +69,7 @@ const RENDER_TRANSCRIPT_BYTES = 2 * 1024 * 1024;
 // The pod sits behind a strict edge rate-limiter (15-min window) shared with
 // the agent's own traffic on the same key. Keep statusline cost minimal:
 // refresh at most once per 120s; the burst is ~4-6 GETs (workspaces, skills,
-// session, proposals, + conditional project/identity). Fold new fields into an
+// session, needs-you, + conditional project/identity). Fold new fields into an
 // existing call rather than adding to the burst.
 const REFRESH_TTL_MS = 120_000;
 const LOCK_STALE_MS = 30_000; // a lock older than this is considered dead
@@ -133,8 +133,9 @@ interface PodCache {
   projectName: string;
   projectId: string;
   skillCount: number;
-  proposalCount: number;
-  proposalsFetched: boolean; // false only until the first successful refresh ever completes
+  needsYouCount: number;
+  needsYouTruncated: boolean; // the pod's count is a floor (a scan hit its cap)
+  needsYouFetched: boolean; // false only until the first successful refresh ever completes
   sessionGoal: string;
   sessionId: string;
   totalEntities: number;
@@ -156,7 +157,7 @@ function emptyConv(): ConvCache {
 function emptyCache(): PodCache {
   return {
     ts: 0, attemptedTs: 0, ok: false, podUrl: "", activeWorkspaceId: "", workspaces: [], projectName: "", projectId: "",
-    skillCount: 0, proposalCount: 0, proposalsFetched: false, sessionGoal: "", sessionId: "", totalEntities: 0,
+    skillCount: 0, needsYouCount: 0, needsYouTruncated: false, needsYouFetched: false, sessionGoal: "", sessionId: "", totalEntities: 0,
     actingAgentLabel: "", identityMismatch: false,
   };
 }
@@ -284,6 +285,17 @@ async function refresh(): Promise<void> {
 
 type Cfg = Awaited<ReturnType<typeof resolveHubConfig>>;
 
+/**
+ * The needs-you number out of a `GET /needs-you` body: `count.needsYou` is THE
+ * rule's headline. Anything else (no `count`, a non-number) is null = not
+ * measured, never 0.
+ */
+export function parseNeedsYouCount(body: unknown): { count: number; truncated: boolean } | null {
+  const c = (body as { count?: { needsYou?: unknown; truncated?: unknown } } | null)?.count;
+  if (typeof c?.needsYou !== "number" || !Number.isFinite(c.needsYou)) return null;
+  return { count: c.needsYou, truncated: c.truncated === true };
+}
+
 /** The pod-wide burst: workspaces (doubling as liveness), skills, identity, proposals. */
 async function refreshShared(cfg: Cfg | null, prev: PodCache | null): Promise<void> {
   try {
@@ -307,21 +319,20 @@ async function refreshShared(cfg: Cfg | null, prev: PodCache | null): Promise<vo
       ? hubGet("/users/me", {}, { podUrl: cfg.podUrl, apiKey: ambientKey as string, userId: "cli" })
       : Promise.resolve(null);
 
-    // Pending proposals — the one actionable ambient signal. No dedicated
-    // count endpoint exists yet (verified: `/proposals` returns `{ proposals: [] }`,
-    // no `total`); a high `limit` on the pending-only list is the cheapest
-    // accurate count within the burst budget (a personal pod won't realistically
-    // clear 1000 pending proposals before this undercounts).
-    const proposalsReq = hubGet("/proposals", { status: "pending", limit: 1000 }, cfg);
+    // Needs you — the one actionable ambient signal, counted by the pod's own
+    // rule (`GET /needs-you`, `signals.needsYou`; decision E): the same number
+    // the badge shows, never re-derived from the pending-proposal list. `limit=1`
+    // trims the rows (we read only `count`).
+    const needsYouReq = hubGet("/needs-you", { limit: 1 }, cfg);
 
     // Minimal burst (the pod's edge limiter is shared with agent traffic).
     // `/workspaces` succeeding doubles as the liveness signal — no separate
     // `/health`.
-    const [ws, skills, identity, proposals] = await Promise.allSettled([
+    const [ws, skills, identity, needsYou] = await Promise.allSettled([
       hubGet("/workspaces", {}, cfg),
       hubGet("/agent-skills?limit=1", {}, cfg),
       identityReq,
-      proposalsReq,
+      needsYouReq,
     ]);
 
     // Reached the pod iff /workspaces returned a well-formed payload.
@@ -350,16 +361,11 @@ async function refreshShared(cfg: Cfg | null, prev: PodCache | null): Promise<vo
       }
     }
 
-    // Only a well-shaped array counts as "fetched" — a malformed 200 must not
-    // masquerade as "0 pending"; it falls back to the last-good count instead.
-    const proposalsRaw =
-      proposals.status === "fulfilled"
-        ? (proposals.value as { proposals?: unknown[] })?.proposals
-        : undefined;
-    const proposalsFetched = Array.isArray(proposalsRaw);
-    const proposalCount = Array.isArray(proposalsRaw)
-      ? proposalsRaw.length
-      : prev?.proposalCount ?? 0;
+    // A failed or malformed read keeps the last-good count (unknown until one
+    // has ever succeeded); only a well-shaped `count` is a measurement.
+    const read = needsYou.status === "fulfilled" ? parseNeedsYouCount(needsYou.value) : null;
+    const needsYouCount = read ? read.count : prev?.needsYouCount ?? 0;
+    const needsYouTruncated = read ? read.truncated : prev?.needsYouTruncated ?? false;
 
     const out: SharedCache = {
       ts: Date.now(),
@@ -368,8 +374,9 @@ async function refreshShared(cfg: Cfg | null, prev: PodCache | null): Promise<vo
       podUrl: cfg.podUrl,
       workspaces,
       skillCount,
-      proposalCount,
-      proposalsFetched: proposalsFetched || (prev?.proposalsFetched ?? false),
+      needsYouCount,
+      needsYouTruncated,
+      needsYouFetched: read !== null || (prev?.needsYouFetched ?? false),
       totalEntities,
       actingAgentLabel,
       identityMismatch,
@@ -626,19 +633,20 @@ function render(): void {
     const sg = pod.sessionId ? osc8(`synap://open/session/${pod.sessionId}`, pod.sessionGoal) : pod.sessionGoal;
     l2.push(`${D}▸${X} ${Y}${sg}${X}`);
   }
-  if (pod.proposalCount > 0) {
-    // cmd/ctrl-click opens the Proposals review app via the /open bounce
-    // (bare `proposals` keyword → synap://open/proposals → browser opens the app).
-    const proposalsLink = pod.podUrl ? `${pod.podUrl}/open/proposals` : "";
-    const label = `${pod.proposalCount} proposals`;
-    l2.push(`${D}↳${X} ${Y}${proposalsLink ? osc8(proposalsLink, label) : label}${X}`);
-  } else if (pod.proposalsFetched) {
+  if (pod.needsYouCount > 0) {
+    // cmd/ctrl-click opens the review queue via the pod's /open bounce (bare
+    // `proposals` keyword): the one door the pod URL alone reaches. Pod admin's
+    // Home lists every needs-you kind, but it lives on its own host.
+    const needsYouLink = pod.podUrl ? `${pod.podUrl}/open/proposals` : "";
+    const label = `${pod.needsYouCount}${pod.needsYouTruncated ? "+" : ""} need you`;
+    l2.push(`${D}↳${X} ${Y}${needsYouLink ? osc8(needsYouLink, label) : label}${X}`);
+  } else if (pod.needsYouFetched) {
     // Genuinely fetched and empty — distinct from "never fetched" so the line
     // never silently omits a signal a user might mistake for "not checked yet".
-    l2.push(`${D}↳ 0 proposals${X}`);
+    l2.push(`${D}↳ 0 need you${X}`);
   } else {
     // No successful refresh has completed yet (fresh cache / all refreshes failed).
-    l2.push(`${D}↳ proposals —${X}`);
+    l2.push(`${D}↳ need you —${X}`);
   }
   console.log(l2.join(" · "));
 
