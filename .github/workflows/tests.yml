@@ -1,0 +1,52 @@
+name: Tests
+
+# The CLI's unit tests, including the parity tests that pin vocabularies and
+# skill copies mirrored from the pod (test/*-parity.test.ts, *.tripwire.test.ts).
+# They read the public backend repo by relative path (`../synap-backend/...`)
+# and SKIP when it is absent, so a PR run without it would pass over nothing:
+# the backend is checked out beside this repo, as in the monorepo. synap-app is
+# private and not available here; its parity tests skip on CI.
+# Before this job the tests ran only inside publish-cli.yml, after a merge.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: synap-cli
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: Synap-core/backend
+          path: synap-backend
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22.18.0"
+
+      # `npm install`, not `npm ci`, for the reason recorded in publish-cli.yml.
+      - name: Install dependencies
+        working-directory: synap-cli
+        run: npm install --no-audit --no-fund
+
+      - name: Sync skills (the skills parity test compares this copy)
+        working-directory: synap-cli
+        run: npm run sync-skills
+
+      - name: Typecheck
+        working-directory: synap-cli
+        run: npx tsc --noEmit
+
+      - name: Test
+        working-directory: synap-cli
+        run: npx vitest run

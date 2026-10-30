@@ -62,23 +62,20 @@ describe("parseViewTypes", () => {
   });
 });
 
-const WIDGET_DEFINITIONS_SCHEMA = resolve(
+const CONTENT_KINDS_SOURCE = resolve(
   dirname(fileURLToPath(import.meta.url)),
-  "../../synap-backend/packages/database/src/schema/widget-definitions.ts"
+  "../../synap-backend/packages/types/src/renderables/content-kinds.ts"
 );
 
 describe("door parity: CONTENT_KINDS vs the ContentKind union", () => {
-  it.skipIf(!existsSync(WIDGET_DEFINITIONS_SCHEMA))(
-    "matches the backend schema's ContentKind union exactly",
+  it.skipIf(!existsSync(CONTENT_KINDS_SOURCE))(
+    "matches the backend's CONTENT_KINDS exactly",
     () => {
-      const src = readFileSync(WIDGET_DEFINITIONS_SCHEMA, "utf-8");
-      // Read the runtime CONST, not the type alias. The pod derived the union
-      // FROM this array (`export type ContentKind = (typeof CONTENT_KINDS)[number]`)
-      // precisely so the two can never disagree — which means the literals no
-      // longer live in the type declaration at all, and a scanner pointed at
-      // the alias finds zero of them. That is what happened: this test went RED
-      // on its own non-vacuity guard rather than passing green over nothing,
-      // which is the behaviour we want from a source scan whose target moved.
+      const src = readFileSync(CONTENT_KINDS_SOURCE, "utf-8");
+      // Read the runtime CONST: it is declared ONCE in `@synap-core/types/renderables`
+      // (the schema re-exports it and derives the union from it). A source scan
+      // whose target moved goes RED on the non-vacuity guard below, never green
+      // over nothing.
       const decl = /export const CONTENT_KINDS\s*=([\s\S]*?)\]\s*as const;/.exec(src);
       expect(
         decl,

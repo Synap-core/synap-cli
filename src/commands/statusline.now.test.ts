@@ -88,7 +88,7 @@ function podAnswers(): void {
   hubGet.mockImplementation(async (p: string) => {
     if (p === "/workspaces") return { workspaces: [{ id: "ws-A", name: "Alpha", entityCount: 3 }, { id: "ws-B", name: "Beta", entityCount: 4 }] };
     if (p.startsWith("/agent-skills")) return { total: 7 };
-    if (p === "/proposals") return { proposals: [] };
+    if (p === "/needs-you") return { count: { needsYou: 0, truncated: false } };
     const m = /^\/focus-sessions\/fs-(\w+)$/.exec(p);
     if (m) return { id: `fs-${m[1]}`, goal: `goal of ${m[1]}` };
     return null;
