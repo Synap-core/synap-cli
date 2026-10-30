@@ -16,6 +16,7 @@
 import { Command, Option } from "commander";
 import { bootstrapPodOverride } from "./lib/pod.js";
 import { INIT_EXIT_HELP } from "./lib/init-exit.js";
+import { WAIT_HELP } from "./lib/wait-help.js";
 import { cliBuild, formatCliBuild } from "./lib/cli-build.js";
 
 // The version AND the commit this build came from — a stale build is visible.
@@ -248,6 +249,25 @@ program
   .action(async (opts: { refresh?: boolean }) => {
     const { statusline } = await import("./commands/statusline.js");
     await statusline({ refresh: opts.refresh });
+  });
+
+program
+  .command("wait")
+  .description("Wait for a devbox job, a PR's checks or merge, or an Actions run; the status line shows the wait")
+  .argument("<kind>", "devbox | pr | run")
+  .argument("<target>", "devbox: <job>   pr: <owner/repo|repo>#<n>   run: <run-url|run-id>")
+  .option("--interval <duration>", "Time between probes (default devbox 30s, pr/run 60s)")
+  .option("--timeout <duration>", "Give up after this long: exit 2 (default 4h)")
+  .option("--label <text>", "What the status line calls this wait")
+  .option("--for <what>", "pr: checks (default) or merged")
+  .option("--checks <names>", "pr --for checks: only these checks, comma-separated (default: all)")
+  .option("-R, --repo <owner/repo>", "run: the repository of a bare run id")
+  .option("--host <host>", "devbox: the ssh host (default devbox)")
+  .option("--since <duration>", "devbox: also accept a run that finished this long before the wait started (default 2m)")
+  .addHelpText("after", WAIT_HELP)
+  .action(async (kind: string, target: string, opts) => {
+    const { waitCommand } = await import("./commands/wait.js");
+    await waitCommand(kind, target, opts);
   });
 
 program
