@@ -23,6 +23,18 @@ import os from "node:os";
 
 export const CP_URL =
   process.env.SYNAP_CP_URL || "https://api.synap.live";
+/**
+ * The managed control plane's public MCP connector (decision 7c31a585,
+ * 2026-10-30): what a person pastes into claude.ai, ChatGPT or any OAuth MCP
+ * client. A self-hosted control plane keeps `<cp>/mcp` (`mcpConnectorUrl`).
+ */
+export const MANAGED_MCP_URL = "https://mcp.synap.live";
+
+/** The connector URL of a control plane: the managed one's public host, else `<cp>/mcp`. */
+export function mcpConnectorUrl(cpOrigin: string): string {
+  const origin = cpOrigin.replace(/\/$/, "");
+  return origin === "https://api.synap.live" ? MANAGED_MCP_URL : `${origin}/mcp`;
+}
 const LANDING_URL =
   process.env.SYNAP_LANDING_URL || "https://synap.live";
 
