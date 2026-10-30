@@ -40,6 +40,17 @@ function notification(taskIds: string[], status: string, s: number, summary = "d
     message: { role: "user", content: `<task-notification>\n${ids}\n<status>${status}</status>\n<summary>${summary}</summary>\n</task-notification>` },
   });
 }
+/** A notice that arrived while a turn ran: Claude Code queues it (shape from a real transcript, 2026-10-30). */
+function queued(operation: "enqueue" | "remove", taskIds: string[], status: string, s: number): string {
+  const ids = taskIds.map((t) => `<task-id>${t}</task-id>`).join("\n");
+  return JSON.stringify({
+    type: "queue-operation",
+    operation,
+    timestamp: iso(s),
+    sessionId: "s1",
+    content: `<task-notification>\n${ids}\n<tool-use-id>toolu_x</tool-use-id>\n<status>${status}</status>\n<summary>done</summary>\n</task-notification>`,
+  });
+}
 function teammateIdle(from: string, s: number): string {
   const body = JSON.stringify({ type: "idle_notification", from, timestamp: iso(s), idleReason: "available" });
   return JSON.stringify({
@@ -67,6 +78,18 @@ describe("background tasks open and close", () => {
     apply([notification(["bx1"], "completed", 60)], idx);
     expect(idx.open).toEqual({});
     expect(idx.recentlyClosed.at(-1)).toMatchObject({ taskId: "bx1", status: "completed", closedAt: T0 + 60_000 });
+  });
+
+  it("a notification queued while a turn runs closes its task at the enqueue", () => {
+    const launch = [
+      toolUse("toolu_q", "Bash", { command: "sleep 600", description: "Wait for the gate", run_in_background: true }),
+      toolResult("toolu_q", { backgroundTaskId: "bq1" }),
+    ];
+    const idx = apply([...launch, queued("remove", ["bq1"], "completed", 30)]);
+    expect(Object.keys(idx.open)).toEqual(["bq1"]); // a remove is the queue draining, not news
+    apply([queued("enqueue", ["bq1"], "completed", 40)], idx);
+    expect(idx.open).toEqual({});
+    expect(idx.recentlyClosed.at(-1)).toMatchObject({ taskId: "bq1", status: "completed", closedAt: T0 + 40_000 });
   });
 
   it("a foreground Bash that finishes normally opens nothing", () => {

@@ -14,9 +14,12 @@
  *    moved to the background by its timeout), Agent `status: "async_launched"`
  *    + `agentId`, Agent `status: "teammate_spawned"` (a teammate, keyed by
  *    agent id and known by name), Monitor `taskId`;
- *  - a `<task-notification>` in a user message (`<task-id>`, `<status>`,
- *    `<summary>`), which can name several tasks and can fire more than once
- *    for one agent: the last event wins;
+ *  - a `<task-notification>` (`<task-id>`, `<status>`, `<summary>`), in a
+ *    user message or, when it arrives while a turn runs, in a
+ *    `queue-operation` `enqueue` line (every notice is enqueued first; on
+ *    2026-10-30, 79 of 153 in one transcript were never written in another
+ *    form). It can name several tasks and can fire more than once for one
+ *    agent: the last event wins;
  *  - a `TaskStop` tool_use (`input.task_id`);
  *  - a teammate goes idle with an `idle_notification` teammate message, and is
  *    busy again after a SendMessage to it succeeds; a SendMessage result with
@@ -254,6 +257,13 @@ export function applyLine(idx: TranscriptIndex, line: string, now = Date.now()):
         }
       }
     }
+    return;
+  }
+
+  // A notice that arrives while a turn runs is queued: its `enqueue` line is
+  // the first (and often the only) record of it, before any user message.
+  if (o.type === "queue-operation") {
+    if (isNotification && o.operation === "enqueue" && typeof o.content === "string") applyNotifications(idx, o.content, at);
     return;
   }
 
