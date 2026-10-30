@@ -16,7 +16,8 @@
  *      <out>/synap-agent-app.pem   (0600)
  *      <out>/synap-agent-app.env   (0600: GITHUB_APP_ID, GITHUB_APP_PRIVATE_KEY_FILE)
  * 4. INSTALL the App (a separate click, GitHub offers no manifest for it):
- *    https://github.com/organizations/<org>/settings/apps/synap-agent/installations
+ *    https://github.com/apps/<slug>/installations/new (the slug is printed; it is not
+ *    always synap-agent, because App names are unique across GitHub)
  *    → Install → the repos the worker may push to (not "all" unless you mean it).
  *    Never add the App to a ruleset's bypass list.
  *
@@ -75,8 +76,8 @@ const server = createServer(async (req, res) => {
     const pem = path.join(out, "synap-agent-app.pem");
     fs.writeFileSync(pem, app.pem, { mode: 0o600 });
     fs.writeFileSync(path.join(out, "synap-agent-app.env"), `GITHUB_APP_ID=${app.id}\nGITHUB_APP_PRIVATE_KEY_FILE=${pem}\n`, { mode: 0o600 });
-    console.log(`App "${app.slug}" (id ${app.id}) created. Credentials written to ${out} (owner-only). Now install it: ${app.html_url}/installations`);
-    res.setHeader("content-type", "text/html").end(`<p>Created. Back to the terminal: install the App on the repos, then you can close this tab.</p><p><a href="${esc(app.html_url)}/installations">Install it</a></p>`);
+    console.log(`App "${app.slug}" (id ${app.id}) created. Credentials written to ${out} (owner-only). Now install it: ${app.html_url}/installations/new`);
+    res.setHeader("content-type", "text/html").end(`<p>Created. Back to the terminal: install the App on the repos, then you can close this tab.</p><p><a href="${esc(app.html_url)}/installations/new">Install it</a></p>`);
   } catch (err) {
     console.error(`failed: ${err.message}`);
     res.statusCode = 500;
