@@ -246,6 +246,10 @@ export function createJobServer(registry: BoxRegistry): http.Server {
             req.destroy();
           });
         };
+        // A write that fails (disk full), or a pending write cut short by the
+        // destroy above: one answer either way, never an unhandled 'error'
+        // (which would crash the provisioner and leave the box unanswered).
+        file.on("error", () => abort(500, "could not stage the file"));
         req.on("data", (c: Buffer) => {
           if (over) return;
           size += c.length;
