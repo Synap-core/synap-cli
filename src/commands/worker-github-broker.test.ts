@@ -23,6 +23,9 @@ const run = (bin: string, args: string[], env: Record<string, string>, input?: s
     const c = execFile(bin, args, { env }, (err, stdout, stderr) =>
       resolve({ code: err ? ((err as { code?: number }).code ?? 1) : 0, stdout, stderr })
     );
+    // A helper may exit without reading its stdin (the git helper on `store`):
+    // the write then fails with EPIPE, which is the child's choice, not a test failure.
+    c.stdin?.on("error", () => {});
     c.stdin?.end(input ?? "");
   });
 
