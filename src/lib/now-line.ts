@@ -89,13 +89,14 @@ export function ordinal(n: number): string {
   return `${n}${({ 1: "st", 2: "nd", 3: "rd" } as Record<number, string>)[n % 10] ?? "th"}`;
 }
 
+// Colours and OSC 8 links (whose URL is never seen).
 // eslint-disable-next-line no-control-regex
-const ANSI = /\x1b\[[0-9;]*m/g;
+const ANSI = /\x1b\[[0-9;]*m|\x1b\]8;;[^\x1b]*\x1b\\/g;
 export function visibleLength(s: string): number {
   return [...s.replace(ANSI, "")].length;
 }
 
-function clip(s: string, max: number): string {
+export function clip(s: string, max: number): string {
   const chars = [...s];
   return chars.length > max ? `${chars.slice(0, max - 1).join("")}…` : s;
 }
@@ -182,7 +183,7 @@ export function nowItems(input: NowInput): { open: string[]; done: string[] } {
   return { open: items, done };
 }
 
-function capped(head: string, items: string[], width: number): string {
+export function capped(head: string, items: string[], width: number): string {
   let line = head;
   for (let i = 0; i < items.length; i++) {
     const rest = items.length - i - 1;
