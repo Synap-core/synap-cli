@@ -23,9 +23,11 @@
  * a conversation never shows the session another conversation refreshed last
  * (each one used to, when all of it lived in the one shared file).
  *
- * The 4th line (lib/now-line.ts) says what the conversation is doing now and
- * what it waits on, from Claude Code's process registry, the transcript index
- * (lib/transcript-index.ts) and `synap wait` state files — all local files.
+ * The 4th line says what the conversation is doing now and what it waits on:
+ * first from the synap-bridge plugin's per-conversation status file (what the
+ * pod says, lib/bridge-status.ts), else from Claude Code's process registry,
+ * the transcript index (lib/transcript-index.ts) and `synap wait` state files
+ * (lib/now-line.ts) — all local files.
  *
  * Why: Claude Code calls the statusline on every render (debounced ~300ms +
  * periodic refresh). Fetching live pod data synchronously per render hammers
@@ -42,6 +44,7 @@ import { resolveActiveLens } from "../lib/session-lens.js";
 import { describeLens } from "../lib/describe-lens.js";
 import { getSurfaceAgentKey, SURFACE_NAMES } from "../lib/pod.js";
 import { buildNowLine, readRegistry } from "../lib/now-line.js";
+import { buildBridgeLine, readBridgeStatus } from "../lib/bridge-status.js";
 import {
   defaultTranscriptPath,
   indexLockPath,
@@ -672,17 +675,26 @@ function render(): void {
   if (l3.length) console.log(l3.join("  "));
 
   // ─═─ LINE 4 — now: working / needs you / waiting on … / stopped ─═──────
-  console.log(
-    buildNowLine({
-      now: Date.now(),
-      registry: claudeSessionId ? readRegistry(claudeSessionId) : null,
-      open: index ? Object.values(index.open) : [],
-      waits: claudeSessionId ? readWaits(claudeSessionId) : [],
-      width: widthOf(cc),
-      lastActivityAt: index?.lastEventAt || undefined,
-      alive: pidAlive,
-    })
-  );
+  // The bridge's status file first (what the POD says this conversation waits
+  // on); the transcript index when the file is absent, unbound, stale or
+  // unreadable — and an unreadable one is marked, never passed off as absent.
+  const now = Date.now();
+  const registry = claudeSessionId ? readRegistry(claudeSessionId) : null;
+  const bridge = claudeSessionId ? readBridgeStatus(claudeSessionId, { now, startedAt: registry?.startedAt }) : null;
+  if (bridge?.status === "fresh") {
+    console.log(buildBridgeLine({ now, file: bridge.file, writtenAt: bridge.writtenAt, registry, width: widthOf(cc) }));
+    return;
+  }
+  const line = buildNowLine({
+    now,
+    registry,
+    open: index ? Object.values(index.open) : [],
+    waits: claudeSessionId ? readWaits(claudeSessionId) : [],
+    width: widthOf(cc),
+    lastActivityAt: index?.lastEventAt || undefined,
+    alive: pidAlive,
+  });
+  console.log(bridge?.status === "failed" ? `${line} ${D}· ⚑ bridge status ${bridge.why}${X}` : line);
 }
 
 // ── Entry ──────────────────────────────────────────────────────────────

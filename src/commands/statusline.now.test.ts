@@ -217,3 +217,59 @@ describe("render touches no network", () => {
     }
   });
 });
+
+describe("line 4 from the bridge's status file", () => {
+  /** This conversation's registry (idle, its process started an hour ago) and, when given, its status file. */
+  function conversation(conv: string, statusFile?: string): void {
+    const home = os.homedir();
+    fs.mkdirSync(path.join(home, ".claude", "sessions"), { recursive: true });
+    fs.writeFileSync(
+      path.join(home, ".claude", "sessions", `${conv.slice(0, 4)}.json`),
+      JSON.stringify({ pid: 4321, sessionId: conv, status: "idle", statusUpdatedAt: Date.now() - 60_000, startedAt: Date.now() - 3_600_000 })
+    );
+    if (statusFile === undefined) return;
+    const dir = path.join(home, ".synap", "bridge", "status");
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, `${conv}.json`), statusFile);
+  }
+  const bridgeFile = (writtenAt: number) =>
+    JSON.stringify({
+      v: 1,
+      writtenAt: new Date(writtenAt).toISOString(),
+      sessionId: "54436c32-783f-4a9d-9322-16ff18f448f7",
+      title: "Lane cli-statusfile",
+      live: null,
+      nextMove: { kind: "agent_slot", actor: "ai", label: "Open the PR", reason: "" },
+      waitingOn: [{ reason: "approval", count: 2 }],
+      workUnits: [],
+    });
+
+  it("a fresh file is drawn: what the pod says the conversation waits on", async () => {
+    const conv = "aaaa1111-2222-3333-4444-555555555555";
+    conversation(conv, bridgeFile(Date.now() - 30_000));
+    const out = await renderAs(conv);
+    expect(out[3]).toBe("⏳ waiting on 2 · approval (2) · next: Open the PR");
+  });
+
+  it("no file: the transcript index line, as before", async () => {
+    const conv = "bbbb1111-2222-3333-4444-555555555555";
+    conversation(conv);
+    const out = await renderAs(conv);
+    expect(out[3]).toBe("■ stopped · nothing running · 1m");
+  });
+
+  it("a file an earlier Claude Code process wrote is stale: the transcript index line", async () => {
+    const conv = "cccc1111-2222-3333-4444-555555555555";
+    conversation(conv, bridgeFile(Date.now() - 2 * 3_600_000));
+    const out = await renderAs(conv);
+    expect(out[3]).toBe("■ stopped · nothing running · 1m");
+  });
+
+  it("a malformed file falls back, never throws, and is marked as a failed read", async () => {
+    const conv = "dddd1111-2222-3333-4444-555555555555";
+    conversation(conv, '{"v":1,"writ');
+    const out = await renderAs(conv);
+    expect(out).toHaveLength(4);
+    expect(out[3]).toBe("■ stopped · nothing running · 1m · ⚑ bridge status not JSON");
+  });
+});
