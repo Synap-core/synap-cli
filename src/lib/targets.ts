@@ -27,6 +27,7 @@ import {
   clientConfigBackupPath,
 } from "./atomic-file.js";
 import { redactKey, mcpRemoteArgs, MCP_REMOTE_PACKAGE } from "./mcp-snippets.js";
+import { MANAGED_MCP_URL } from "./auth.js";
 import { installSkills, getDeliverableSkills } from "./skills-installer.js";
 import { TARGET_KEY_MINT, takePreApprovedKey } from "./batch-approval.js";
 import { agentTypeOfSurface, machineInstanceId, machineInstanceLabel } from "./machine-instance.js";
@@ -1631,7 +1632,7 @@ async function installOpenWebUI(cfg: TargetConnectionConfig): Promise<boolean> {
  *
  * OAuth: ChatGPT also supports OAuth (no header field). The pod's /mcp is
  * Bearer-only, so OAuth for a SINGLE pod isn't available — it lives on the
- * Control Plane (`https://api.synap.live/mcp`), which is an OAuth MCP server
+ * Control Plane (`https://mcp.synap.live`), which is an OAuth MCP server
  * exposing `list_pods` / `connect_pod` / 14 proxied `pod__*` tools. That path
  * is multi-pod and managed; `synap mcp connect-claude` prints it for
  * claude.ai, and the same URL works for ChatGPT's OAuth connector.
@@ -1667,7 +1668,7 @@ async function installChatGpt(cfg: TargetConnectionConfig): Promise<boolean> {
       headers: { Authorization: `Bearer ${effectiveApiKey}` },
     },
     oauthAlternative: {
-      url: "https://api.synap.live/mcp",
+      url: MANAGED_MCP_URL,
       note:
         "ChatGPT OAuth connector (no header field). Multi-pod: list_pods, " +
         "connect_pod, then proxied pod__* tools. Same URL as claude.ai.",
@@ -1693,7 +1694,7 @@ async function installChatGpt(cfg: TargetConnectionConfig): Promise<boolean> {
   log.info("Path 2 — OAuth (multi-pod, no key to paste):");
   log.blank();
   log.info("  ChatGPT → Settings → Connectors → Add custom connector");
-  log.info("  URL:     https://api.synap.live/mcp");
+  log.info(`  URL:     ${MANAGED_MCP_URL}`);
   log.info("  Auth:    OAuth (leave API key blank)");
   log.blank();
   log.dim(

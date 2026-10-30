@@ -2,7 +2,7 @@
  * `synap mcp` — the MCP front door. Two lanes:
  *
  *   1. Web AI (Cloud MCP / OAuth) — control plane `${cp}/mcp` (managed:
- *      https://api.synap.live/mcp). claude.ai's connector UI is OAuth-only; use
+ *      https://mcp.synap.live). claude.ai's connector UI is OAuth-only; use
  *      `synap mcp connect-claude` to print the URL (no key mint, no file write).
  *   2. IDE / file-configurable — pod `${podUrl}/mcp` (Bearer). Needs a pod +
  *      key. `synap mcp connect <client>` writes client config; `synap mcp url`
@@ -22,6 +22,7 @@ import {
   enrollAgentIfNeeded,
 } from "../lib/targets.js";
 import { log } from "../utils/logger.js";
+import { MANAGED_MCP_URL, mcpConnectorUrl } from "../lib/auth.js";
 import { printMcpConnection, redactKey, writeMcpSnippetFiles, MCP_KEY_ENV, mcpRemoteArgs } from "../lib/mcp-snippets.js";
 
 interface McpBaseOpts {
@@ -270,7 +271,7 @@ export async function mcpConnectClaudeWeb(
     }
 
     const finalCpOrigin = cpOrigin.replace(/\/$/, "");
-    const url = `${finalCpOrigin}/mcp`;
+    const url = mcpConnectorUrl(finalCpOrigin);
 
     const steps = [
       "Open claude.ai → Settings → Connectors → Add custom connector",
@@ -296,7 +297,7 @@ export async function mcpConnectClaudeWeb(
     if (source === "managed-fallback" && !opts.cpUrl) {
       console.log(
         chalk.dim(
-          "  Using managed Cloud MCP (https://api.synap.live). Pass --cp-url for a self-hosted control plane. No key minted."
+          `  Using managed Cloud MCP (${MANAGED_MCP_URL}). Pass --cp-url for a self-hosted control plane. No key minted.`
         )
       );
     }
@@ -363,7 +364,7 @@ export async function mcpUiSetup(
         format: "http",
         fields: {
           "Connector Name": "Synap (Control Plane)",
-          "URL": "https://api.synap.live/mcp",
+          "URL": MANAGED_MCP_URL,
           "Auth Type": "OAuth",
           "API Key": "(leave blank — OAuth flow)",
         },

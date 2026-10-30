@@ -149,7 +149,7 @@ export function printMcpConnection(c: McpConnectionPrintout): void {
   );
   console.log(
     chalk.yellow(
-      "\nclaude.ai (web) uses OAuth via Synap Cloud MCP — run `synap mcp connect-claude` to print https://api.synap.live/mcp (no header field in that UI)."
+      "\nclaude.ai (web) uses OAuth via Synap Cloud MCP — run `synap mcp connect-claude` to print https://mcp.synap.live (no header field in that UI)."
     )
   );
   console.log(
