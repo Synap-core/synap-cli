@@ -71,6 +71,8 @@ export const WAITING_ON_REASON_LABELS: Readonly<Record<string, string>> = {
   access: "Access",
   another_work: "Other work",
   outside_world: "Outside world",
+  external: "Outside party",
+  date: "A date",
 };
 
 /** `TRACK_PARTICIPANT_ROLE_LABELS` (vocabulary/track-participant-words.ts) */
