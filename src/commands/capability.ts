@@ -122,7 +122,18 @@ interface CapabilityCard {
   verbs: CardVerb[];
   /** Install params the caller must supply (vault key, baseUrl, …). May be absent on older pods. */
   installParams?: CardInstallParam[];
-  nextAction: { kind: "add" | "connect" | "enable" | "run" | "none"; hint: string };
+  /**
+   * Its member tool rows the pod's run gate refuses: its ACCESS to the service
+   * is off, so no verb runs however many are enabled. Absent when none is, and
+   * on pods older than this field.
+   */
+  toolsOff?: Array<{ id: string; name: string }>;
+  nextAction: {
+    kind: "add" | "connect" | "enable" | "run" | "none";
+    hint: string;
+    /** Deep link to this capability's page, where a person fixes it. */
+    url?: string;
+  };
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -873,9 +884,12 @@ async function applyTemplateWithParams(
         await hubPost(`/tools/${t.toolId}/approve`, { approved: true }, cfg);
       } catch (err) {
         // Non-fatal — the connection itself succeeded; surface so it isn't
-        // silently stuck in the old "not approved" trap.
-        log.warn(`Connected, but couldn't auto-approve tool "${t.name}": ${(err as Error).message}`);
-        log.dim(`Approve it manually if runs fail with "Capability is not approved".`);
+        // silently stuck in the old "not approved" trap. Founder dogfood
+        // 2026-10-30 (Hetzner Cloud): this approve timed out, the old hint
+        // named no command, and every run was refused "installed but not
+        // enabled" while `cap enable` (verbs only) printed success.
+        log.warn(`Connected, but its access to "${t.name}" is still off: ${(err as Error).message}`);
+        log.dim(`Nothing it does can run until it is on. Turn it on:  synap cap enable "${card.name}"`);
       }
     }
     spinner.succeed(chalk.green(`${verb === "Adding" ? "Added" : "Connected"} ${chalk.bold(card.name)}.`));
@@ -1252,8 +1266,12 @@ export async function capabilityEnable(
     if (after) card = after;
   }
 
+  // (a′) Its access to the service: a tool row the run gate refuses blocks
+  //      every verb, so it is turned on before (and whatever) the verbs.
+  const accessOn = (card.toolsOff?.length ?? 0) === 0 || reportAccess(card, await turnOnAccess(cfg, card));
+
   if (card.verbs.length === 0) {
-    log.heading(`${card.name} is on`);
+    if (accessOn) log.heading(`${card.name} is on`);
     log.dim("This capability has no selectable verbs yet.");
     return;
   }
@@ -1288,7 +1306,12 @@ export async function capabilityEnable(
   const toDisable = card.verbs.filter((v) => !selected.has(v.verbId) && v.enabled);
 
   if (toEnable.length === 0 && toDisable.length === 0) {
-    log.success(`Nothing changed — ${card.name} is already set up that way.`);
+    if (!accessOn) return;
+    log.success(
+      (card.toolsOff?.length ?? 0) > 0
+        ? `Nothing else changed — ${card.name}'s verbs are already set up that way.`
+        : `Nothing changed — ${card.name} is already set up that way.`
+    );
     return;
   }
 
@@ -1338,6 +1361,48 @@ export async function capabilityEnable(
   if (example) {
     log.dim(`Run it:  synap cap run ${example.verbId} --<param> <value>`);
   }
+}
+
+/**
+ * Turn ON a capability's access to its service: each member tool row the pod's
+ * run gate refuses (`card.toolsOff`), through the same door the install uses
+ * (`POST /tools/:id/approve`). A person's step: the pod refuses an agent key,
+ * and that refusal is reported with where a person fixes it, never as success.
+ */
+export async function turnOnAccess(
+  cfg: HubCfg,
+  card: CapabilityCard
+): Promise<{ turnedOn: string[]; refused: Array<{ name: string; reason: string }> }> {
+  const turnedOn: string[] = [];
+  const refused: Array<{ name: string; reason: string }> = [];
+  for (const t of card.toolsOff ?? []) {
+    try {
+      await hubPost(`/tools/${t.id}/approve`, { approved: true }, cfg);
+      turnedOn.push(t.name);
+    } catch (err) {
+      refused.push({ name: t.name, reason: (err as Error).message });
+    }
+  }
+  return { turnedOn, refused };
+}
+
+/** Say what `turnOnAccess` did; returns false when some access is still off. */
+function reportAccess(card: CapabilityCard, res: Awaited<ReturnType<typeof turnOnAccess>>): boolean {
+  if (res.turnedOn.length > 0) {
+    log.success(`Turned on its access to ${res.turnedOn.join(", ")}`);
+  }
+  for (const r of res.refused) {
+    log.warn(`Its access to "${r.name}" is still off: ${r.reason}`);
+  }
+  if (res.refused.length > 0) {
+    log.dim(
+      card.nextAction.url
+        ? `Nothing it does can run until it is on. A person turns it on here:  ${card.nextAction.url}`
+        : "Nothing it does can run until it is on. A person turns it on in the pod admin, under Tools."
+    );
+    return false;
+  }
+  return true;
 }
 
 // ── Public: capabilityConnect (connection sub-flow only) ─────────────────────
