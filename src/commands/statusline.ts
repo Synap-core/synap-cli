@@ -634,8 +634,9 @@ function render(): void {
     l2.push(`${D}▸${X} ${Y}${sg}${X}`);
   }
   if (pod.needsYouCount > 0) {
-    // cmd/ctrl-click opens the Proposals review app via the /open bounce
-    // (bare `proposals` keyword → synap://open/proposals → browser opens the app).
+    // cmd/ctrl-click opens the review queue via the pod's /open bounce (bare
+    // `proposals` keyword): the one door the pod URL alone reaches. Pod admin's
+    // Home lists every needs-you kind, but it lives on its own host.
     const needsYouLink = pod.podUrl ? `${pod.podUrl}/open/proposals` : "";
     const label = `${pod.needsYouCount}${pod.needsYouTruncated ? "+" : ""} need you`;
     l2.push(`${D}↳${X} ${Y}${needsYouLink ? osc8(needsYouLink, label) : label}${X}`);
