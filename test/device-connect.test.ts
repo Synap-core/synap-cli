@@ -25,7 +25,12 @@ vi.mock("child_process", async (orig) => ({
   }),
 }));
 
-import { deviceConnect, deviceAgentsFor, computerKeyNeedsRenewal } from "../src/lib/device-connect.js";
+import {
+  deviceConnect,
+  deviceAgentsFor,
+  computerKeyNeedsRenewal,
+  ensureComputerEnrolled,
+} from "../src/lib/device-connect.js";
 
 const SCALE = 0.02; // 5 s → 100 ms
 
@@ -145,6 +150,17 @@ describe("deviceConnect", () => {
     expect(gapAfter).toBeGreaterThanOrEqual(185);
   });
 
+  it("asks under this computer's name, the one its keys carry: no `.local`, SYNAP_COMPUTER_NAME honoured", async () => {
+    script = [{ status: 200, body: GRANT }];
+    vi.stubEnv("SYNAP_COMPUTER_NAME", "MacBook-Pro-de-Antoine");
+    await deviceConnect(podUrl, { agents: [] }, { renderQr: qr, timeScale: SCALE });
+    vi.unstubAllEnvs();
+    expect(started[0]!.hostname).toBe("MacBook-Pro-de-Antoine");
+    script = [{ status: 200, body: GRANT }];
+    await deviceConnect(podUrl, { agents: [] }, { renderQr: qr, timeScale: SCALE });
+    expect(started[1]!.hostname).toBe(os.hostname().split(".")[0]);
+  });
+
   it("denied on the pod → denied, naming the pod", async () => {
     script = [pending, { status: 400, body: { error: "access_denied", error_description: "Denied." } }];
     const outcome = await deviceConnect(podUrl, { agents: [] }, { renderQr: qr, timeScale: SCALE });
@@ -219,5 +235,57 @@ describe("pure helpers", () => {
     expect(computerKeyNeedsRenewal({ keyExpiresAt: inDays(6) }, now)).toBe(true);
     expect(computerKeyNeedsRenewal({ keyExpiresAt: inDays(-1) }, now)).toBe(true);
     expect(computerKeyNeedsRenewal({}, now)).toBe(false); // a pasted key: no expiry known
+  });
+});
+
+describe("enrol first: an agent belongs on an enrolled computer", () => {
+  const pod = "https://pod.test";
+  const profile = (credential?: "computer") => ({
+    name: "home",
+    config: { podUrl: `${pod}/`, hubApiKey: credential ? "computer-key" : "human-key", workspaceId: "", agentUserId: "", savedAt: "", ...(credential ? { credential } : {}) },
+  });
+
+  it("enrolled: the computer's own key, nothing asked", async () => {
+    const connect = vi.fn();
+    const r = await ensureComputerEnrolled(pod, "run this again", { profiles: () => [profile("computer")], interactive: true, connect });
+    expect(r).toEqual({ enrolled: true, computerKey: "computer-key" });
+    expect(connect).not.toHaveBeenCalled();
+  });
+
+  it("a person's key, nobody at the terminal: stops with how to enrol, connects nothing", async () => {
+    const connect = vi.fn();
+    const r = await ensureComputerEnrolled(pod, "run this again", { profiles: () => [profile()], interactive: false, connect });
+    expect(r).toEqual({
+      enrolled: false,
+      message: expect.stringContaining("This computer is not enrolled on pod.test: run `synap login --reconnect home` to connect it, then run this again."),
+    });
+    expect(connect).not.toHaveBeenCalled();
+  });
+
+  it("no saved pod at all: `synap init`", async () => {
+    const r = await ensureComputerEnrolled(pod, "run this again", { profiles: () => [], interactive: true });
+    expect(r.enrolled).toBe(false);
+    if (!r.enrolled) expect(r.message).toContain("run `synap init`");
+  });
+
+  it("a person at the terminal is offered the device flow; approved, the new computer key is used", async () => {
+    const connect = vi.fn(async () => ({ ...profile("computer").config, hubApiKey: "new-computer-key", credential: "computer" as const }));
+    const r = await ensureComputerEnrolled(pod, "run this again", {
+      profiles: () => [profile()],
+      interactive: true,
+      confirm: async () => true,
+      connect,
+    });
+    expect(connect).toHaveBeenCalledWith(pod, { name: "home" });
+    expect(r).toEqual({ enrolled: true, computerKey: "new-computer-key" });
+  });
+
+  it("declined, or the device flow did not finish: still not enrolled", async () => {
+    const connect = vi.fn(async () => null);
+    const no = await ensureComputerEnrolled(pod, "x", { profiles: () => [profile()], interactive: true, confirm: async () => false, connect });
+    expect(no.enrolled).toBe(false);
+    expect(connect).not.toHaveBeenCalled();
+    const failed = await ensureComputerEnrolled(pod, "x", { profiles: () => [profile()], interactive: true, confirm: async () => true, connect });
+    expect(failed.enrolled).toBe(false);
   });
 });
