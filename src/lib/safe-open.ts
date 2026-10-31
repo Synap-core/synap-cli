@@ -14,6 +14,7 @@
  */
 
 import { execFile } from "node:child_process";
+import { consoleHostForPod } from "@synap-core/types/tenancy";
 import { log } from "../utils/logger.js";
 
 export type Launch = (cmd: string, args: string[]) => void;
@@ -71,19 +72,19 @@ export function openExternalUrl(
 }
 
 /**
- * The pod-admin origin for a pod origin — mirror of the pod's
- * `toPodAdminOrigin` (synap-backend `utils/pod-admin-origin.ts`), which builds
- * every approval URL: `pod.<root>` / `<sub>.<root>` → `pod-admin.<root>`,
+ * The pod-admin origin for a pod origin. The host rule is the one naming rule,
+ * `consoleHostForPod` (`@synap-core/types/tenancy`, what the pod's own
+ * `toPodAdminOrigin` uses for every approval URL): `<name>.pod.<domain>` →
+ * `admin.<name>.pod.<domain>`, legacy `pod.<name>.<domain>` →
+ * `pod-admin.<name>.<domain>`, self-hosted `pod.<root>` → `pod-admin.<root>`.
  * localhost → the local pod-admin dev server.
  */
 export function podAdminOrigin(podOrigin: string): string | null {
   const u = httpUrlOrNull(podOrigin);
   if (!u) return null;
-  const host = u.host;
-  if (host.startsWith("localhost") || host.startsWith("127.0.0.1")) return "http://localhost:4040";
-  const bare = host.replace(/:\d+$/, "");
-  const root = bare.startsWith("pod.") ? bare.slice(4) : bare.includes(".") ? bare.slice(bare.indexOf(".") + 1) : bare;
-  return `${u.protocol}//pod-admin.${root}`;
+  if (u.hostname === "localhost" || u.hostname === "127.0.0.1") return "http://localhost:4040";
+  const consoleHost = consoleHostForPod(u.hostname);
+  return consoleHost ? `${u.protocol}//${consoleHost}` : null;
 }
 
 /** The origins a page from `podUrl` may live on: the pod itself and its pod-admin app. */
