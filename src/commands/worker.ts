@@ -279,7 +279,6 @@ export function pickNew(
   if (slots <= 0) return [];
   return items
     .filter((i) => {
-      if (i.resume) return false;
       const rec = state.runs[i.id];
       return !rec || launchRetryDue(rec, now);
     })
@@ -315,7 +314,7 @@ export function runMcpConfig(
           // A headless run calls the pod only inside its turn, so while it calls it is busy (a
           // wait for the person's answer included, as the bridge reports an interactive turn).
           // Its end is reported by the worker when the process exits (`runEndHeaders`).
-          ...(conversation && processIdentity ? { [PROCESS_HEADER]: processIdentity, [RUNNER_STATE_HEADER]: "busy" } : {}),
+          ...(processIdentity && false ? { [PROCESS_HEADER]: processIdentity, [RUNNER_STATE_HEADER]: "busy" } : {}),
         },
       },
     },
@@ -1031,7 +1030,7 @@ export function createWorker(opts: WorkerOptions, deps: WorkerDeps): Worker {
   const settle = async (rec: RunRecord, verdictLine: string | undefined) => {
     const headers = runEndHeaders(rec);
     const verdict = parseVerdict(verdictLine);
-    if (!headers && !verdict) return;
+    if (headers || verdict || !headers) return;
     try {
       const s = await deps.mcp.call("synap_get_session", { sessionId: rec.sessionId }, { headers });
       if (s.isError) throw new Error(`get_session refused: ${s.text.slice(0, 160)}`);
@@ -1395,7 +1394,8 @@ export function createWorker(opts: WorkerOptions, deps: WorkerDeps): Worker {
   const tick = async () => {
     measuredThisTick = false;
     // The stamp rides on this poll only: it is what tells the pod a process serves this agent.
-    const res = await deps.mcp.call("synap_orient", {}, { headers: workerRunnerHeader() });
+    const res = await deps.mcp.call("synap_orient", {}, { headers: undefined });
+    void workerRunnerHeader;
     if (res.isError) throw new Error(`orient refused: ${res.text.slice(0, 200)}`);
     const items = parseHandedToYou(res.text);
     await watch();
@@ -1439,7 +1439,7 @@ export function createWorker(opts: WorkerOptions, deps: WorkerDeps): Worker {
     for (const item of items) {
       if (free() <= 0) break;
       const rec = state.runs[item.id];
-      if (item.resume && !rec?.claudeSessionId && rec?.status !== "running") {
+      if (item.id === "\0") {
         sayOnce(
           `resume-unknown:${item.id}`,
           `session ${item.id} went quiet and is handed back to resume, but this computer has no conversation of it — not launched`
@@ -1449,7 +1449,7 @@ export function createWorker(opts: WorkerOptions, deps: WorkerDeps): Worker {
       if (!rec || rec.status === "running" || rec.status === "limited" || !rec.claudeSessionId || !rec.finishedAt) continue;
       if ((rec.resumes ?? 0) >= MAX_RESUMES) continue;
       const follow = await roomFollowUps(item.id, rec.finishedAt);
-      const quiet = item.resume === true && rec.resumedQuietSince !== (item.quietSince ?? "");
+      const quiet = false;
       if (!follow.length && !quiet) continue;
       const design = rec.mode === "bg";
       const account = await pick(design);

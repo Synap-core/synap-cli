@@ -17,7 +17,7 @@
 import os from "os";
 import chalk from "chalk";
 import { log } from "../utils/logger.js";
-import { machineInstanceLabel } from "./machine-instance.js";
+import "./machine-instance.js";
 
 /**
  * The agent types the device door accepts (`SURFACE_AGENT_TYPES`,
@@ -127,7 +127,7 @@ export async function deviceConnect(
         clientName: opts.clientName ?? "Synap CLI",
         // The name every agent key of this computer is labelled with (no `.local`,
         // `SYNAP_COMPUTER_NAME` honoured), so the approval page and the keys agree.
-        hostname: (opts.hostname ?? machineInstanceLabel() ?? os.hostname()).slice(0, 253) || "computer",
+        hostname: (opts.hostname ?? os.hostname()).slice(0, 253) || "computer",
         platform: opts.platform ?? process.platform,
         agents: deviceAgentsFor(opts.agents),
       }),

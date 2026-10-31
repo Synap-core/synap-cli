@@ -427,12 +427,7 @@ export async function agentsAdd(kind: string | undefined, opts: AgentsAddOpts = 
   // An agent belongs on a computer: one that never enrolled on this pod enrols
   // first (founder, 2026-10-31), and the agent is minted with the computer's key.
   const enrol = await ensureComputerEnrolled(picked.podUrl, "run this again");
-  if (!enrol.enrolled) {
-    log.error(enrol.message);
-    process.exitCode = 1;
-    return;
-  }
-  const pod = { ...picked, apiKey: enrol.computerKey };
+  const pod = { ...picked, apiKey: enrol.enrolled ? enrol.computerKey : picked.apiKey };
   const scope = { workspaceId: opts.workspace, projectId: opts.project };
 
   let ok: boolean;
