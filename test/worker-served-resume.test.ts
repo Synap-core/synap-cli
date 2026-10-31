@@ -18,7 +18,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { createWorker } from "../src/commands/worker.js";
+import { createWorker, type WorkerDeps } from "../src/commands/worker.js";
 import type { McpCallClient } from "../src/lib/mcp-call.js";
 
 const VERSION = (JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string }).version;
@@ -44,6 +44,7 @@ const out = (o) => process.stdout.write(JSON.stringify(o) + "\\n");
 const r = argv.indexOf("--resume");
 out({ type: "system", subtype: "init", session_id: r >= 0 ? argv[r + 1] : "${CLAUDE_SID}" });
 out({ type: "result", subtype: "success", is_error: false, result: "Did it.\\nWORKER-RESULT: " + process.env.SYNAP_FAKE_VERDICT });
+process.exitCode = Number(process.env.SYNAP_FAKE_EXIT || 0);
 `;
 
 type Run = { argv: string[]; mcp: { mcpServers: Record<string, { headers: Record<string, string> }> } };
@@ -56,9 +57,19 @@ interface Call {
   headers: Record<string, string>;
 }
 
-/** A pod whose orient lists `handed` (mutable between ticks) and records every call. */
-function stubPod(handed: { items: Array<Record<string, unknown>> }, outcomes: Array<Record<string, unknown>> = []) {
+/**
+ * A pod whose orient lists `handed` (mutable between ticks) and records every
+ * call, and when each room post landed. `outcomesFailFrom`: from that
+ * synap_get_session read on (1-based), the outcomes read says `unavailable`.
+ */
+function stubPod(
+  handed: { items: Array<Record<string, unknown>> },
+  outcomes: Array<Record<string, unknown>> = [],
+  outcomesFailFrom = Infinity
+) {
   const calls: Call[] = [];
+  let sessionReads = 0;
+  const postedAt: string[] = [];
   const mcp: McpCallClient = {
     async call(tool, args = {}, extras = {}) {
       calls.push({ tool, args, headers: extras.headers ?? {} });
@@ -67,23 +78,28 @@ function stubPod(handed: { items: Array<Record<string, unknown>> }, outcomes: Ar
       }
       if (tool === "synap_get_session") {
         const id = args.sessionId as string;
+        const outcomesStatus = ++sessionReads >= outcomesFailFrom ? "unavailable" : "ok";
         return {
           isError: false,
-          text: JSON.stringify({ session: { id, goal: "g", playbookId: null, channelId: `room-${id.slice(0, 8)}` }, outcomes: { status: "ok", outcomes } }),
+          text: JSON.stringify({
+            session: { id, goal: "g", playbookId: null, channelId: `room-${id.slice(0, 8)}` },
+            outcomes: { status: outcomesStatus, ...(outcomesStatus === "ok" ? { outcomes } : {}) },
+          }),
         };
       }
       if (tool === "synap_get_thread_context") return { isError: false, text: JSON.stringify({ messages: [] }) };
+      if (tool === "synap_post_message") postedAt.push(new Date().toISOString());
       if (tool === "synap_post_message" || tool === "synap_update_session") return { isError: false, text: "{}" };
       throw new Error(`unexpected tool ${tool}`);
     },
   };
-  return { mcp, calls };
+  return { mcp, calls, postedAt };
 }
 
-const mk = (agent: string, mcp: McpCallClient, lines: string[] = []) =>
+const mk = (agent: string, mcp: McpCallClient, lines: string[] = [], extra: Partial<WorkerDeps> = {}) =>
   createWorker(
     { agent, claudeBin: fakeClaude, cwd: tmp, workRoot: path.join(tmp, "work"), maxParallel: "3" },
-    { mcp, podUrl: "https://pod.example", apiKey: "k", selfAgentId: "self", say: (l) => lines.push(l) }
+    { mcp, podUrl: "https://pod.example", apiKey: "k", selfAgentId: "self", say: (l) => lines.push(l), ...extra }
   );
 
 beforeEach(() => {
@@ -189,6 +205,45 @@ describe("the verdict goes on the session itself", () => {
     expect(pod.calls.some((c) => c.tool === "synap_update_session")).toBe(false);
     expect(pod.calls.filter((c) => c.tool === "synap_post_message")).toHaveLength(1);
   });
+
+  it("done with an open pull request: the PR is never claimed (it is delivered when it merges)", async () => {
+    vi.stubEnv("SYNAP_FAKE_VERDICT", "done — PR #12 is open");
+    const pod = stubPod({ items: [{ id: A, goal: "g" }] }, [
+      { key: "pr-backend-12", kind: "pull_request", owner: "agent", met: false, ref: { url: "https://github.com/o/backend/pull/12" } },
+    ]);
+    const w = mk("verdict4", pod.mcp);
+    await w.tick();
+    await w.waitForChildren();
+    expect(pod.calls.some((c) => c.tool === "synap_update_session")).toBe(false);
+    expect(pod.calls.filter((c) => c.tool === "synap_post_message").map((c) => c.args.content)).toEqual(["Result: done — PR #12 is open"]);
+  });
+
+  it("done, but the process exited non-zero: failed is posted and nothing is claimed", async () => {
+    vi.stubEnv("SYNAP_FAKE_VERDICT", "done — the cut is filed");
+    vi.stubEnv("SYNAP_FAKE_EXIT", "3");
+    const pod = stubPod({ items: [{ id: A, goal: "g" }] }, [{ key: "video", kind: "file", owner: "agent", met: false }]);
+    const w = mk("verdict5", pod.mcp);
+    await w.tick();
+    await w.waitForChildren();
+    expect(w.state.runs[A].status).toBe("failed");
+    expect(pod.calls.some((c) => c.tool === "synap_update_session")).toBe(false);
+    expect(pod.calls.filter((c) => c.tool === "synap_post_message").map((c) => c.args.content)).toEqual([
+      "Result: failed — the run exited 3; it said done — the cut is filed",
+    ]);
+  });
+
+  it("done, but the outcomes could not be read: nothing is claimed, and that is said", async () => {
+    vi.stubEnv("SYNAP_FAKE_VERDICT", "done — the cut is filed");
+    const lines: string[] = [];
+    // The launch reads the session (read 1); the run's end reads it again (read 2), unreadable.
+    const pod = stubPod({ items: [{ id: A, goal: "g" }] }, [{ key: "video", kind: "file", owner: "agent", met: false }], 2);
+    const w = mk("verdict6", pod.mcp, lines);
+    await w.tick();
+    await w.waitForChildren();
+    expect(pod.calls.some((c) => c.tool === "synap_update_session")).toBe(false);
+    expect(lines.some((l) => l.includes(A) && l.includes("its outcomes could not be read (outcomes unavailable)"))).toBe(true);
+    expect(pod.calls.filter((c) => c.tool === "synap_post_message")).toHaveLength(1);
+  });
 });
 
 describe("a session handed back to resume never launches fresh", () => {
@@ -249,5 +304,51 @@ describe("a session handed back to resume never launches fresh", () => {
     expect((await w.tick()).launched).toBe(0);
     expect(fakeRuns()).toHaveLength(0);
     expect(lines.some((l) => l.includes(A) && l.includes("not launched"))).toBe(true);
+  });
+
+  it("quiet since the run's own Result post: never resumed again (the post is the run's own activity)", async () => {
+    const handed = { items: [{ id: A, goal: "g" }] as Array<Record<string, unknown>> };
+    const pod = stubPod(handed);
+    const w = mk("resume4", pod.mcp);
+    await w.tick(); // the first launch; its end posts "Result: blocked — …"
+    await w.waitForChildren();
+    expect(pod.postedAt).toHaveLength(1);
+
+    // The pod's quietSince is the session's newest activity: that Result post.
+    handed.items = [{ id: A, goal: "g", resume: true, quietSince: pod.postedAt[0] }];
+    expect((await w.tick()).launched).toBe(0);
+    await w.waitForChildren();
+    expect((await w.tick()).launched).toBe(0);
+    await w.waitForChildren();
+    expect(fakeRuns()).toHaveLength(1);
+    expect(w.state.runs[A].resumes ?? 0).toBe(0);
+  });
+
+  it("a resume whose launch did not start leaves the quiet period due: the next tick resumes it", async () => {
+    let gets = 0;
+    // The App token fails once, on the resume's launch only.
+    const githubToken = {
+      get: async () => {
+        gets++;
+        if (gets === 2) throw new Error("GitHub said 502");
+        return "ghs_token";
+      },
+    };
+    const handed = { items: [{ id: A, goal: "g" }] as Array<Record<string, unknown>> };
+    const pod = stubPod(handed);
+    const w = mk("resume5", pod.mcp, [], { githubToken });
+    try {
+      await w.tick();
+      await w.waitForChildren();
+      handed.items = [{ id: A, goal: "g", resume: true, quietSince: "2026-10-29T10:00:00.000Z" }];
+      expect((await w.tick()).launched).toBe(0); // the token failed: nothing started
+      expect(w.state.runs[A].resumedQuietSince).toBeUndefined();
+      expect((await w.tick()).launched).toBe(1); // still due
+      await w.waitForChildren();
+      expect(w.state.runs[A].resumedQuietSince).toBe("2026-10-29T10:00:00.000Z");
+      expect(fakeRuns()).toHaveLength(2);
+    } finally {
+      w.stop();
+    }
   });
 });

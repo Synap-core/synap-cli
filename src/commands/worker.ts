@@ -393,7 +393,7 @@ export function buildWorkerPrompt(p: {
         ]
       : []),
     `4. Need help or a decision: post in the room starting with "QUESTION:" — kind "update" when the orchestrating AI can answer it, kind "question" only for a decision only the person can make. Then wait for the reply: read synap_get_thread_context about every 60 seconds (Bash "sleep 60" between reads), up to 30 minutes, and use the first reply posted after your question. No reply: state your assumption in the room and continue, or stop and say what is blocked.`,
-    `5. Record EVERY deliverable as a session output: synap_update_session {sessionId, outcomes:[{key, label, kind, ref:{url}}]}, then completeOutput <key> for each — the draft PR (ref = its URL), the branch, the gate summary path (name both in the label)${p.design ? `, and the design (the outcome of kind "design", ref = the artifact's claude.ai URL); also put that URL on the session's subject entity (synap_update_entity)` : ""}. Do not close the session; the owner does.`,
+    `5. Record EVERY deliverable as a session output: synap_update_session {sessionId, outcomes:[{key, label, kind, ref:{url}}]} — the draft PR (ref = its URL), the branch, the gate summary path (name both in the label)${p.design ? `, and the design (the outcome of kind "design", ref = the artifact's claude.ai URL); also put that URL on the session's subject entity (synap_update_entity)` : ""}. Then completeOutput <key> for each one that is finished now${p.design ? " (the design, a gate summary)" : " (a gate summary)"}. Never completeOutput a pull request, a branch or a commit: a PR is delivered only when it merges, and the merge sweeper marks it met then. Do not close the session; the owner does.`,
     `6. Report: post ONE paragraph in the room starting "Look at first:" — what changed, where (PR, branch${p.design ? ", artifact URL" : ""}), and the first thing to check.`,
     `7. End your final message with one line: WORKER-RESULT: done | blocked | failed — <one sentence>.`,
   ].join("\n");
@@ -746,11 +746,30 @@ export function workerVerdict(resultText: string | undefined): string | undefine
 
 export type VerdictStatus = "done" | "blocked" | "failed";
 
-/** `done — <sentence>` (a `workerVerdict`) → its status and sentence; anything else is no verdict. */
+/**
+ * `done — <sentence>` (a `workerVerdict`) → its status and sentence; anything
+ * else is no verdict. The prompt's own template echoed back
+ * (`done | blocked | failed — …`) names no status: it is no verdict either.
+ */
 export function parseVerdict(verdict: string | undefined): { status: VerdictStatus; sentence: string } | undefined {
   const m = /^(done|blocked|failed)\b\s*(?:[—–:-]+\s*)?(.*)$/i.exec(verdict?.trim() ?? "");
-  if (!m) return undefined;
+  if (!m || m[2].startsWith("|")) return undefined;
   return { status: m[1].toLowerCase() as VerdictStatus, sentence: m[2].trim() };
+}
+
+/**
+ * The verdict the session hears, given how the process ended: `done` only from
+ * a run that exited cleanly; a run that said `done` and then exited non-zero is
+ * `failed`, with what it said kept. `blocked` and `failed` stand as they are.
+ */
+export function verdictForExit(
+  v: { status: VerdictStatus; sentence: string },
+  exitedOk: boolean,
+  exitCode?: number | null
+): { status: VerdictStatus; sentence: string } {
+  if (v.status !== "done" || exitedOk) return v;
+  const how = typeof exitCode === "number" ? `the run exited ${exitCode}` : "the run did not end cleanly";
+  return { status: "failed", sentence: `${how}${v.sentence ? `; it said done — ${v.sentence}` : ""}` };
 }
 
 /** The one room line a verdict becomes. */
@@ -759,25 +778,51 @@ export function verdictRoomLine(v: { status: VerdictStatus; sentence: string }):
 }
 
 /**
+ * Outcome kinds a verdict never claims: a pull request is delivered only when
+ * it merges (rule work-units), and the merge sweeper marks it met then; a
+ * branch or a commit is a step toward that PR, not a deliverable of its own.
+ */
+export const UNCLAIMABLE_OUTCOME_KINDS: ReadonlySet<string> = new Set(["pull_request", "commit", "branch"]);
+
+/** What the session read says a `done` verdict may claim. */
+export type VerdictClaim =
+  | { kind: "one"; key: string }
+  | { kind: "none" }
+  | { kind: "several"; keys: string[] }
+  /** The outcomes list could not be read: nothing is claimed, and that is said. */
+  | { kind: "unreadable"; why: string };
+
+/**
  * The outcome a `done` verdict claims, from the `synap_get_session` read: the
  * session's ONE open deliverable the agent owns (not a fact, not the person's,
- * not met, not withdrawn). None, or several, and nothing is claimed: which of
- * several the run finished is the run's to say (it claims each as it records
- * it). An unreadable outcomes list claims nothing.
+ * not met, not withdrawn, never a PR, branch or commit). None, or several, and
+ * nothing is claimed: which of several the run finished is the run's to say
+ * (it claims each as it records it). An outcomes list that could not be read is
+ * `unreadable`, never "none open".
  */
-export function verdictClaim(getSessionText: string): string | undefined {
+export function verdictClaim(getSessionText: string): VerdictClaim {
   let data: { outcomes?: { status?: string; outcomes?: Array<Record<string, unknown>> } };
   try {
     data = JSON.parse(getSessionText);
   } catch {
-    return undefined;
+    return { kind: "unreadable", why: "the session read is not JSON" };
   }
   const o = data?.outcomes;
-  if (!o || o.status !== "ok" || !Array.isArray(o.outcomes)) return undefined;
+  if (!o) return { kind: "unreadable", why: "the session read has no outcomes" };
+  if (o.status !== "ok") return { kind: "unreadable", why: `outcomes ${String(o.status ?? "status missing")}` };
+  if (!Array.isArray(o.outcomes)) return { kind: "unreadable", why: "outcomes list missing" };
   const open = o.outcomes.filter(
-    (x) => typeof x?.key === "string" && x.owner !== "human" && x.kind !== "fact" && x.met !== true && x.retired !== true
+    (x) =>
+      typeof x?.key === "string" &&
+      x.owner !== "human" &&
+      x.kind !== "fact" &&
+      !UNCLAIMABLE_OUTCOME_KINDS.has(String(x.kind)) &&
+      x.met !== true &&
+      x.retired !== true
   );
-  return open.length === 1 ? (open[0].key as string) : undefined;
+  if (open.length === 0) return { kind: "none" };
+  if (open.length > 1) return { kind: "several", keys: open.map((x) => x.key as string) };
+  return { kind: "one", key: open[0].key as string };
 }
 
 export interface RoomMessage {
@@ -803,6 +848,21 @@ export function followUpsSince(messages: RoomMessage[], since: string, selfAgent
     .filter((m) => m.routedTeammateId !== selfAgentId)
     .filter((m) => typeof m.content === "string" && m.content.trim().length > 0)
     .sort((a, b) => Date.parse(a.timestamp as string) - Date.parse(b.timestamp as string));
+}
+
+/**
+ * Whether a session's quiet period began with THIS worker's own run: the pod's
+ * `quietSince` is the session's newest activity, and the run's own room posts
+ * (its claim, its "Look at first:", the worker's `Result:` line) count. Quiet
+ * since then means the run ended and nothing happened after it; resuming it
+ * would only re-run it (up to MAX_RESUMES paid runs). Someone else's message
+ * after the run resumes it through the follow-up path instead.
+ */
+export function quietIsOwnRun(item: Pick<HandedItem, "quietSince">, rec: Pick<RunRecord, "launchedAt">): boolean {
+  if (!item.quietSince || !rec.launchedAt) return false;
+  const quiet = Date.parse(item.quietSince);
+  const launched = Date.parse(rec.launchedAt);
+  return Number.isFinite(quiet) && Number.isFinite(launched) && quiet >= launched;
 }
 
 /** The prompt that resumes a run whose session went quiet and was handed back (`resume`). */
@@ -1026,20 +1086,24 @@ export function createWorker(opts: WorkerOptions, deps: WorkerDeps): Worker {
    * apply directly for an agent on the session's roster. Never the run-capture
    * door (governed as a playbook-run update, it would wait on the person, and a
    * session handed with no run has none). Never closes the session. A failed
-   * write is said; the local record keeps the verdict either way.
+   * write is said; the local record keeps the verdict either way. `done` is
+   * heard only from a process that exited cleanly (`verdictForExit`).
    */
-  const settle = async (rec: RunRecord, verdictLine: string | undefined) => {
+  const settle = async (rec: RunRecord, verdictLine: string | undefined, exitedOk: boolean) => {
     const headers = runEndHeaders(rec);
-    const verdict = parseVerdict(verdictLine);
+    const said = parseVerdict(verdictLine);
+    const verdict = said ? verdictForExit(said, exitedOk, rec.exitCode) : undefined;
     if (!headers && !verdict) return;
     try {
       const s = await deps.mcp.call("synap_get_session", { sessionId: rec.sessionId }, { headers });
       if (s.isError) throw new Error(`get_session refused: ${s.text.slice(0, 160)}`);
       if (!verdict) return;
       const claim = verdict.status === "done" ? verdictClaim(s.text) : undefined;
-      if (claim) {
-        const u = await deps.mcp.call("synap_update_session", { sessionId: rec.sessionId, completeOutput: claim }, { headers });
-        if (u.isError) log(`session ${rec.sessionId}: could not claim "${claim}": ${u.text.slice(0, 160)}`);
+      if (claim?.kind === "unreadable") {
+        log(`session ${rec.sessionId}: its outcomes could not be read (${claim.why}) — nothing claimed for the done verdict`);
+      } else if (claim?.kind === "one") {
+        const u = await deps.mcp.call("synap_update_session", { sessionId: rec.sessionId, completeOutput: claim.key }, { headers });
+        if (u.isError) log(`session ${rec.sessionId}: could not claim "${claim.key}": ${u.text.slice(0, 160)}`);
       }
       const channelId = findKey(JSON.parse(s.text), "channelId");
       if (typeof channelId !== "string" || !channelId) throw new Error("the session has no room");
@@ -1061,7 +1125,7 @@ export function createWorker(opts: WorkerOptions, deps: WorkerDeps): Worker {
     design: boolean,
     protocol: WorkerProtocol,
     account: AccountSpec | undefined
-  ): Promise<void> => {
+  ): Promise<boolean> => {
     // Who `gh` and `git push` act as in this run: the App, or (loudly) the login the worker runs under.
     let ghToken: string | undefined;
     if (githubToken) {
@@ -1070,7 +1134,7 @@ export function createWorker(opts: WorkerOptions, deps: WorkerDeps): Worker {
         await broker?.ready;
       } catch (err) {
         log(`session ${item.id}: no GitHub App token (${(err as Error).message}) — not launching; retrying next tick`);
-        return;
+        return false;
       }
     } else {
       log(
@@ -1167,7 +1231,7 @@ export function createWorker(opts: WorkerOptions, deps: WorkerDeps): Worker {
         record.result = `dry run: would launch ${claudeBin} --bg in ${cwd}${on}`;
         save();
         log(`dry run — design session ${item.id}${on}: ${claudeBin} --bg <prompt> ${args.slice(4).join(" ")}`);
-        return;
+        return true;
       }
       save();
       const res = await exec(claudeBin, args, { cwd, env });
@@ -1180,12 +1244,12 @@ export function createWorker(opts: WorkerOptions, deps: WorkerDeps): Worker {
         record.result = `claude --bg did not start (exit ${res.code}): ${(res.stderr || res.stdout).trim().slice(-200)}`;
         save();
         log(`session ${item.id}: ${record.result}`);
-        return;
+        return false;
       }
       record.bgId = bgId;
       save();
       log(`${what} design session ${item.id} as background ${bgId}${on}`);
-      return;
+      return true;
     }
 
     const args = ["-p", prompt, "--output-format", "stream-json", "--verbose", "--mcp-config", mcpConfigPath];
@@ -1198,7 +1262,7 @@ export function createWorker(opts: WorkerOptions, deps: WorkerDeps): Worker {
       record.result = `dry run: would launch ${claudeBin} (${protocol}) in ${runCwd}${on}`;
       save();
       log(`dry run — ${protocol} session ${item.id}${on} in ${runCwd}: ${claudeBin} ${args.slice(0, 1).join(" ")} <prompt> ${args.slice(2).join(" ")}`);
-      return;
+      return true;
     }
 
     if (workDir) fs.mkdirSync(workDir, { recursive: true, mode: 0o700 });
@@ -1262,13 +1326,14 @@ export function createWorker(opts: WorkerOptions, deps: WorkerDeps): Worker {
         if (record.keptTrees) record.result = `${record.result ?? ""} · KEPT (unpushed work): ${record.keptTrees.join("; ")}`.trim();
         save();
         log(`session ${item.id} finished — exit ${code}${record.result ? ` · ${record.result}` : ""}`);
-        await settle(record, limited ? undefined : workerVerdict(end.text));
+        await settle(record, limited ? undefined : workerVerdict(end.text), code === 0);
       };
       const p = finish()
         .catch((err) => log(`session ${item.id}: finishing failed: ${(err as Error).message}`))
         .finally(() => sweeps.delete(p));
       sweeps.add(p);
     });
+    return true;
   };
 
   // ── watching background (design) runs ──
@@ -1286,7 +1351,7 @@ export function createWorker(opts: WorkerOptions, deps: WorkerDeps): Worker {
     appendRunLog(rec.sessionId, { type: "synap-worker", event: "bg-end", bgId: rec.bgId ?? null, status });
     log(`session ${rec.sessionId} (background ${rec.bgId}) finished — ${status}${result ? ` · ${result}` : ""}`);
     await stopBg(rec);
-    await settle(rec, verdictLine);
+    await settle(rec, verdictLine, status === "done");
   };
 
   const watch = async () => {
@@ -1337,7 +1402,7 @@ export function createWorker(opts: WorkerOptions, deps: WorkerDeps): Worker {
         save();
         log(`session ${rec.sessionId} (background ${rec.bgId}): ${rec.result}`);
         await stopBg(rec);
-        await settle(rec, undefined);
+        await settle(rec, undefined, false);
         continue;
       }
       if (phase === "finished") {
@@ -1449,13 +1514,12 @@ export function createWorker(opts: WorkerOptions, deps: WorkerDeps): Worker {
       if (!rec || rec.status === "running" || rec.status === "limited" || !rec.claudeSessionId || !rec.finishedAt) continue;
       if ((rec.resumes ?? 0) >= MAX_RESUMES) continue;
       const follow = await roomFollowUps(item.id, rec.finishedAt);
-      const quiet = item.resume === true && rec.resumedQuietSince !== (item.quietSince ?? "");
+      const quiet = item.resume === true && rec.resumedQuietSince !== (item.quietSince ?? "") && !quietIsOwnRun(item, rec);
       if (!follow.length && !quiet) continue;
       const design = rec.mode === "bg";
       const account = await pick(design);
       if (account === null) continue;
-      if (item.resume) rec.resumedQuietSince = item.quietSince ?? "";
-      await launch(
+      const started = await launch(
         item,
         {
           kind: "followUp",
@@ -1466,6 +1530,10 @@ export function createWorker(opts: WorkerOptions, deps: WorkerDeps): Worker {
         rec.protocol ?? "code",
         account
       );
+      if (!started) continue;
+      // Stamped only once a run started: a launch that failed leaves the quiet period due.
+      if (item.resume) rec.resumedQuietSince = item.quietSince ?? "";
+      save();
       launched++;
     }
     return { handed: items.length, launched };
@@ -1502,7 +1570,9 @@ export async function workerCommand(opts: WorkerOptions): Promise<void> {
   process.env.SYNAP_AGENT = agent;
   const cfg = await resolveHubConfig();
   // The agent runs ON this computer: one that never enrolled on the pod enrols first (founder, 2026-10-31).
-  const enrol = await ensureComputerEnrolled(cfg.podUrl, `run \`synap worker --agent ${agent}\` again`);
+  // Never interactive: a supervised worker (tmux, launchd) has no person to answer a prompt, and the
+  // device flow would rewire this computer's other MCP clients. It stops with how to enrol.
+  const enrol = await ensureComputerEnrolled(cfg.podUrl, `run \`synap worker --agent ${agent}\` again`, { interactive: false });
   if (!enrol.enrolled) throw new Error(enrol.message);
   const intervalMs = parseInterval(opts.interval);
 

@@ -23,14 +23,17 @@ export const CONVERSATION_CWD_HEADER = "X-Synap-Conversation-Cwd";
 export const CLIENT_HEADER = "X-Synap-Client";
 export type SynapClientName = "synap-cli" | "synap-cli-mcp";
 
+/** A header value must be visible ASCII: an odd version reads `unknown` and never fails the call. */
+function headerVersion(version: string): string {
+  return /^[\x21-\x7E]{1,64}$/.test(version) ? version : "unknown";
+}
+
 /** `{ "X-Synap-Client": "<name>/<version>" }`; the version is the package's. */
 export function clientHeader(
   name: SynapClientName,
   version: string = cliBuild().version
 ): Record<string, string> {
-  // A header value must be visible ASCII; an odd version never fails the call.
-  const v = /^[\x21-\x7E]{1,64}$/.test(version) ? version : "unknown";
-  return { [CLIENT_HEADER]: `${name}/${v}` };
+  return { [CLIENT_HEADER]: `${name}/${headerVersion(version)}` };
 }
 
 /**
@@ -44,8 +47,7 @@ export const RUNNER_HEADER = "X-Synap-Runner";
 
 /** `{ "X-Synap-Runner": "synap-worker/<version>" }`; the version is the package's. */
 export function workerRunnerHeader(version: string = cliBuild().version): Record<string, string> {
-  const v = /^[\x21-\x7E]{1,64}$/.test(version) ? version : "unknown";
-  return { [RUNNER_HEADER]: `synap-worker/${v}` };
+  return { [RUNNER_HEADER]: `synap-worker/${headerVersion(version)}` };
 }
 
 /**

@@ -25,6 +25,15 @@ vi.mock("child_process", async (orig) => ({
   }),
 }));
 
+/** Every interactive question asked through `prompts` in this file. */
+const asked = vi.hoisted(() => [] as unknown[]);
+vi.mock("prompts", () => ({
+  default: async (q: unknown) => {
+    asked.push(q);
+    return { ok: true };
+  },
+}));
+
 import {
   deviceConnect,
   deviceAgentsFor,
@@ -150,15 +159,28 @@ describe("deviceConnect", () => {
     expect(gapAfter).toBeGreaterThanOrEqual(185);
   });
 
-  it("asks under this computer's name, the one its keys carry: no `.local`, SYNAP_COMPUTER_NAME honoured", async () => {
-    script = [{ status: 200, body: GRANT }];
-    vi.stubEnv("SYNAP_COMPUTER_NAME", "MacBook-Pro-de-Antoine");
-    await deviceConnect(podUrl, { agents: [] }, { renderQr: qr, timeScale: SCALE });
-    vi.unstubAllEnvs();
-    expect(started[0]!.hostname).toBe("MacBook-Pro-de-Antoine");
-    script = [{ status: 200, body: GRANT }];
-    await deviceConnect(podUrl, { agents: [] }, { renderQr: qr, timeScale: SCALE });
-    expect(started[1]!.hostname).toBe(os.hostname().split(".")[0]);
+  it("asks under the RAW hostname, never the keys' label: the pod matches an enrolled computer on it exactly", async () => {
+    // The pod offers "reuse this computer" only when the request's hostname equals the one an
+    // enrolled computer asked under (machine-connect.ts, agentMetadata->>'hostname').
+    const hostname = vi.spyOn(os, "hostname").mockReturnValue("MacBook-Pro-de-Antoine.local");
+    try {
+      script = [{ status: 200, body: GRANT }];
+      vi.stubEnv("SYNAP_COMPUTER_NAME", "Antoine laptop");
+      await deviceConnect(podUrl, { agents: [] }, { renderQr: qr, timeScale: SCALE });
+      vi.unstubAllEnvs();
+      expect(started[0]!.hostname).toBe("MacBook-Pro-de-Antoine.local");
+      script = [{ status: 200, body: GRANT }];
+      await deviceConnect(podUrl, { agents: [] }, { renderQr: qr, timeScale: SCALE });
+      expect(started[1]!.hostname).toBe("MacBook-Pro-de-Antoine.local");
+      // An explicit hostname is sent as given.
+      script = [{ status: 200, body: GRANT }];
+      await deviceConnect(podUrl, { agents: [], hostname: "devbox" }, { renderQr: qr, timeScale: SCALE });
+      expect(started[2]!.hostname).toBe("devbox");
+      // The create door takes no display name: nothing else is sent for one.
+      expect(Object.keys(started[0]!).sort()).toEqual(["agents", "clientName", "hostname", "platform"]);
+    } finally {
+      hostname.mockRestore();
+    }
   });
 
   it("denied on the pod → denied, naming the pod", async () => {
@@ -252,6 +274,12 @@ describe("enrol first: an agent belongs on an enrolled computer", () => {
     expect(connect).not.toHaveBeenCalled();
   });
 
+  it("reads the saved profiles once", async () => {
+    const profiles = vi.fn(() => [profile()]);
+    await ensureComputerEnrolled(pod, "x", { profiles, interactive: true, confirm: async () => false, connect: vi.fn() });
+    expect(profiles).toHaveBeenCalledTimes(1);
+  });
+
   it("a person's key, nobody at the terminal: stops with how to enrol, connects nothing", async () => {
     const connect = vi.fn();
     const r = await ensureComputerEnrolled(pod, "run this again", { profiles: () => [profile()], interactive: false, connect });
@@ -287,5 +315,42 @@ describe("enrol first: an agent belongs on an enrolled computer", () => {
     expect(connect).not.toHaveBeenCalled();
     const failed = await ensureComputerEnrolled(pod, "x", { profiles: () => [profile()], interactive: true, confirm: async () => true, connect });
     expect(failed.enrolled).toBe(false);
+  });
+});
+
+describe("synap worker on a computer that never enrolled", () => {
+  it("stops with how to enrol: never a prompt, never the device flow, even at a terminal", async () => {
+    asked.length = 0;
+    const dir = path.join(os.homedir(), ".synap");
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, "config.json"),
+      JSON.stringify({
+        activePod: "home",
+        pods: { home: { podUrl: "https://pod.test", hubApiKey: "human-key", workspaceId: "", agentUserId: "", savedAt: "" } },
+        agents: { alpha: { podName: "home", apiKey: "agent-key", createdAt: "" } },
+      })
+    );
+    const tty = { in: process.stdin.isTTY, out: process.stdout.isTTY };
+    Object.defineProperty(process.stdin, "isTTY", { value: true, configurable: true });
+    Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true });
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    const priorAgent = process.env.SYNAP_AGENT;
+    try {
+      const { workerCommand } = await import("../src/commands/worker.js");
+      await expect(workerCommand({ agent: "alpha" } as never)).rejects.toThrow(
+        "This computer is not enrolled on pod.test: run `synap login --reconnect home` to connect it"
+      );
+      expect(asked).toEqual([]);
+      expect(fetchSpy).not.toHaveBeenCalled();
+    } finally {
+      Object.defineProperty(process.stdin, "isTTY", { value: tty.in, configurable: true });
+      Object.defineProperty(process.stdout, "isTTY", { value: tty.out, configurable: true });
+      vi.unstubAllGlobals();
+      if (priorAgent === undefined) delete process.env.SYNAP_AGENT;
+      else process.env.SYNAP_AGENT = priorAgent;
+      fs.rmSync(path.join(dir, "config.json"), { force: true });
+    }
   });
 });

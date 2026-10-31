@@ -17,7 +17,6 @@
 import os from "os";
 import chalk from "chalk";
 import { log } from "../utils/logger.js";
-import { machineInstanceLabel } from "./machine-instance.js";
 
 /**
  * The agent types the device door accepts (`SURFACE_AGENT_TYPES`,
@@ -125,9 +124,11 @@ export async function deviceConnect(
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         clientName: opts.clientName ?? "Synap CLI",
-        // The name every agent key of this computer is labelled with (no `.local`,
-        // `SYNAP_COMPUTER_NAME` honoured), so the approval page and the keys agree.
-        hostname: (opts.hostname ?? machineInstanceLabel() ?? os.hostname()).slice(0, 253) || "computer",
+        // The RAW hostname, never the keys' display label (no `.local`, SYNAP_COMPUTER_NAME):
+        // the pod offers "reuse this computer" only on exact equality with the hostname an
+        // enrolled computer asked under (`agentMetadata->>'hostname'`, machine-connect.ts).
+        // The create door takes no display name; the person names the computer on approval.
+        hostname: (opts.hostname ?? os.hostname()).slice(0, 253) || "computer",
         platform: opts.platform ?? process.platform,
         agents: deviceAgentsFor(opts.agents),
       }),
@@ -331,17 +332,12 @@ export async function connectThisComputer(
 const normPodUrl = (u: string) => u.replace(/\/+$/, "");
 
 /**
- * Whether THIS computer is enrolled on `podUrl`: a saved profile for that pod
- * holds the computer's own key from the device flow (`credential: "computer"`,
+ * The saved profile holding this computer's own key for `podUrl`, if any: the
+ * computer's key from the device flow (`credential: "computer"`,
  * `saveDeviceGrant`). The pod cannot tell a computer that never enrolled from
  * a person's key (decision 59c75aab: it never trusts a client-claimed machine
  * id), so the CLI asks first.
  */
-export function computerEnrolled(podUrl: string, profiles: Array<{ config: { podUrl: string; credential?: string } }>): boolean {
-  return !!computerProfileFor(podUrl, profiles);
-}
-
-/** The saved profile holding this computer's own key for `podUrl`, if any. */
 export function computerProfileFor<P extends { config: { podUrl: string; credential?: string } }>(podUrl: string, profiles: P[]): P | undefined {
   return profiles.find((p) => normPodUrl(p.config.podUrl) === normPodUrl(podUrl) && p.config.credential === "computer");
 }
@@ -376,12 +372,12 @@ export async function ensureComputerEnrolled(
     connect?: typeof connectThisComputer;
   } = {}
 ): Promise<{ enrolled: true; computerKey: string } | { enrolled: false; message: string }> {
-  const profiles = deps.profiles ?? (await import("./pod.js")).listPodProfiles;
-  const enrolled = computerProfileFor(podUrl, profiles());
+  const profiles = (deps.profiles ?? (await import("./pod.js")).listPodProfiles)();
+  const enrolled = computerProfileFor(podUrl, profiles);
   if (enrolled) return { enrolled: true, computerKey: enrolled.config.hubApiKey };
-  const command = enrolCommand(podUrl, profiles());
+  const command = enrolCommand(podUrl, profiles);
   const message = notEnrolledMessage(podUrl, then, command);
-  const saved = profiles().find((p) => normPodUrl(p.config.podUrl) === normPodUrl(podUrl));
+  const saved = profiles.find((p) => normPodUrl(p.config.podUrl) === normPodUrl(podUrl));
   const interactive = deps.interactive ?? (!!process.stdin.isTTY && !!process.stdout.isTTY);
   // No saved pod (a key from the environment): `synap init` is the person's to run.
   if (!interactive || !saved) return { enrolled: false, message };

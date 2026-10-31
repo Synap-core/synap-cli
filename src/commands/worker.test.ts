@@ -18,6 +18,8 @@ import {
   workerVerdict,
   parseVerdict,
   verdictClaim,
+  verdictForExit,
+  quietIsOwnRun,
   runProcessIdentity,
   runEndHeaders,
 } from "./worker.js";
@@ -408,6 +410,12 @@ describe("the night protocol in the prompt", () => {
     expect(p()).toContain("the draft PR (ref = its URL), the branch, the gate summary path");
     expect(p()).toContain('starting "Look at first:"');
   });
+  it("a run never completes its own PR, branch or commit: a PR is delivered when it merges", () => {
+    expect(p()).toContain("Never completeOutput a pull request, a branch or a commit");
+    expect(p()).toContain("the merge sweeper marks it met then");
+    expect(p()).not.toMatch(/completeOutput <key> for each —/);
+    expect(p(true)).toContain("Never completeOutput a pull request, a branch or a commit");
+  });
   it("a design run is told to quickstart the Artifact tool, publish, and store the URL on the session and the subject", () => {
     const d = p(true);
     expect(d).toContain('Artifact tool with action "quickstart" and intent "design" FIRST');
@@ -644,18 +652,53 @@ describe("the verdict, read for the session", () => {
     expect(parseVerdict("done — PR #4 is open")).toEqual({ status: "done", sentence: "PR #4 is open" });
     expect(parseVerdict("Blocked - needs the key")).toEqual({ status: "blocked", sentence: "needs the key" });
     expect(parseVerdict("failed")).toEqual({ status: "failed", sentence: "" });
-    expect(parseVerdict("done | blocked | failed — <one sentence>")?.status).toBe("done");
+    // The prompt's template echoed back names no status: no verdict.
+    expect(parseVerdict("done | blocked | failed — <one sentence>")).toBeUndefined();
+    expect(parseVerdict("done|blocked|failed")).toBeUndefined();
     expect(parseVerdict("maybe — later")).toBeUndefined();
     expect(parseVerdict(undefined)).toBeUndefined();
   });
-  it("claims only the ONE open deliverable the agent owns; an unreadable list claims nothing", () => {
-    const read = (outcomes: unknown, status = "ok") => JSON.stringify({ outcomes: { status, outcomes } });
-    expect(verdictClaim(read([{ key: "v", kind: "file", owner: "agent", met: false }]))).toBe("v");
-    expect(verdictClaim(read([{ key: "v", kind: "file", owner: "agent", met: false }, { key: "w", kind: "file", met: false }]))).toBeUndefined();
-    expect(verdictClaim(read([{ key: "q", kind: "decision", owner: "human", met: false }]))).toBeUndefined();
-    expect(verdictClaim(read([{ key: "f", kind: "fact", owner: "agent", met: false }]))).toBeUndefined();
-    expect(verdictClaim(read([{ key: "v", kind: "file", owner: "agent", met: false }], "unavailable"))).toBeUndefined();
-    expect(verdictClaim("not json")).toBeUndefined();
+  const read = (outcomes: unknown, status = "ok") => JSON.stringify({ outcomes: { status, outcomes } });
+  it("claims only the ONE open deliverable the agent owns; none and several are told apart", () => {
+    expect(verdictClaim(read([{ key: "v", kind: "file", owner: "agent", met: false }]))).toEqual({ kind: "one", key: "v" });
+    expect(verdictClaim(read([{ key: "v", kind: "file", owner: "agent", met: false }, { key: "w", kind: "file", met: false }]))).toEqual({
+      kind: "several",
+      keys: ["v", "w"],
+    });
+    expect(verdictClaim(read([{ key: "q", kind: "decision", owner: "human", met: false }]))).toEqual({ kind: "none" });
+    expect(verdictClaim(read([{ key: "f", kind: "fact", owner: "agent", met: false }]))).toEqual({ kind: "none" });
+    expect(verdictClaim(read([]))).toEqual({ kind: "none" });
+  });
+  it("never claims a pull request, a branch or a commit: a PR is delivered only when it merges", () => {
+    const pr = { key: "pr-backend-12", kind: "pull_request", owner: "agent", met: false, ref: { url: "https://github.com/o/r/pull/12" } };
+    expect(verdictClaim(read([pr]))).toEqual({ kind: "none" });
+    expect(verdictClaim(read([{ key: "branch-x", kind: "branch", met: false }, { key: "commit-r-abc", kind: "commit", met: false }]))).toEqual({
+      kind: "none",
+    });
+    // The one claimable deliverable beside an open PR is still the one.
+    expect(verdictClaim(read([pr, { key: "gate", kind: "file", owner: "agent", met: false }]))).toEqual({ kind: "one", key: "gate" });
+  });
+  it("an outcomes list that could not be read is unreadable, never \"nothing open\"", () => {
+    expect(verdictClaim(read([{ key: "v", kind: "file", owner: "agent", met: false }], "unavailable")).kind).toBe("unreadable");
+    expect(verdictClaim("not json").kind).toBe("unreadable");
+    expect(verdictClaim(JSON.stringify({ session: {} })).kind).toBe("unreadable");
+    expect(verdictClaim(JSON.stringify({ outcomes: { status: "ok" } })).kind).toBe("unreadable");
+  });
+  it("done is heard only from a clean exit; blocked and failed stand", () => {
+    const done = { status: "done" as const, sentence: "PR #4 is open" };
+    expect(verdictForExit(done, true, 0)).toEqual(done);
+    expect(verdictForExit(done, false, 1)).toEqual({ status: "failed", sentence: "the run exited 1; it said done — PR #4 is open" });
+    expect(verdictForExit({ status: "done", sentence: "" }, false, undefined)).toEqual({ status: "failed", sentence: "the run did not end cleanly" });
+    expect(verdictForExit({ status: "blocked", sentence: "b" }, false, 1)).toEqual({ status: "blocked", sentence: "b" });
+  });
+  it("a quiet period that began after the run launched is the run's own activity", () => {
+    const rec = { launchedAt: "2026-10-31T10:00:00.000Z" };
+    expect(quietIsOwnRun({ quietSince: "2026-10-31T10:05:00.000Z" }, rec)).toBe(true);
+    expect(quietIsOwnRun({ quietSince: "2026-10-31T10:00:00.000Z" }, rec)).toBe(true);
+    expect(quietIsOwnRun({ quietSince: "2026-10-31T09:59:59.000Z" }, rec)).toBe(false);
+    expect(quietIsOwnRun({}, rec)).toBe(false);
+    expect(quietIsOwnRun({ quietSince: "not a date" }, rec)).toBe(false);
+    expect(quietIsOwnRun({ quietSince: "2026-10-31T10:05:00.000Z" }, {})).toBe(false);
   });
 });
 
