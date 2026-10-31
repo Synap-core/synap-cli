@@ -16,8 +16,12 @@ import {
   MAX_LAUNCH_RETRIES,
   workerEnv,
   workerVerdict,
+  parseVerdict,
+  verdictClaim,
+  runProcessIdentity,
+  runEndHeaders,
 } from "./worker.js";
-import { lastJsonPayload } from "../lib/mcp-call.js";
+import { createMcpClient, lastJsonPayload } from "../lib/mcp-call.js";
 
 const orient = (handed: unknown) =>
   JSON.stringify({ startHere: { pendingReview: { count: 0 }, handedToYou: handed } });
@@ -52,6 +56,23 @@ describe("parseHandedToYou", () => {
   it("non-JSON orient text throws", () => {
     expect(() => parseHandedToYou("Error: pod down")).toThrow(/did not return JSON/);
   });
+
+  it("keeps a resume mark and when the session went quiet; anything but `resume: true` is no mark", () => {
+    const items = parseHandedToYou(
+      orient({
+        items: [
+          { id: "a", goal: "g", resume: true, quietSince: "2026-10-29T10:00:00.000Z" },
+          { id: "b", goal: "g", resume: "yes", quietSince: "2026-10-29T10:00:00.000Z" },
+          { id: "c", goal: "g", resume: true },
+        ],
+      })
+    );
+    expect(items).toEqual([
+      { id: "a", goal: "g", resume: true, quietSince: "2026-10-29T10:00:00.000Z" },
+      { id: "b", goal: "g" },
+      { id: "c", goal: "g", resume: true },
+    ]);
+  });
 });
 
 describe("pickNew", () => {
@@ -62,6 +83,10 @@ describe("pickNew", () => {
   });
   it("launches nothing when no slot is free", () => {
     expect(pickNew(items, { runs: {} }, 0)).toEqual([]);
+  });
+  it("never a session handed back to resume, even with no record of it (an empty state file relaunches nothing)", () => {
+    const handedBack = [{ id: "a", goal: null, resume: true as const }, { id: "b", goal: null }];
+    expect(pickNew(handedBack, { runs: {} }, 5).map((i) => i.id)).toEqual(["b"]);
   });
 
   // A run that failed BEFORE Claude started (no Claude session: an expired
@@ -585,5 +610,74 @@ describe("the work-folder protocol in the prompt", () => {
     expect(p).toContain("never approve, skip or work around it");
     expect(p).toContain('starting "Look at first:"');
     expect(p).toContain("WORKER-RESULT: done | blocked | failed");
+  });
+});
+
+describe("a run's process and end, as the pod reads them", () => {
+  const POD_PROCESS_RE = /^([A-Za-z0-9._-]{1,255}):(\d{1,10}):(\d{10,14})$/;
+  it("the process identity is <host>:<pid>:<launch ms>, in the pod's own shape, whatever the hostname", () => {
+    expect(runProcessIdentity(1_792_000_000_123, "devbox", 4242)).toBe("devbox:4242:1792000000123");
+    expect(runProcessIdentity(1_792_000_000_123, "MacBook Pro de Antoine.local", 7)).toMatch(POD_PROCESS_RE);
+    expect(runProcessIdentity(1_792_000_000_123, "", 7)).toBe("computer:7:1792000000123");
+  });
+  it("the run's config says busy for that process; nothing is claimed without a conversation", () => {
+    const sid = "8c34a72b-b1c1-4c37-9c1f-02920b69ccb2";
+    const cfg = runMcpConfig("https://pod.example", "k", sid, "devbox:1:1792000000000") as {
+      mcpServers: Record<string, { headers: Record<string, string> }>;
+    };
+    expect(cfg.mcpServers[RUN_MCP_SERVER]!.headers).toMatchObject({
+      "X-Synap-Process": "devbox:1:1792000000000",
+      "X-Synap-Runner-State": "busy",
+    });
+    expect(runEndHeaders({ claudeSessionId: sid, process: "devbox:1:1792000000000" })).toEqual({
+      "X-Synap-Conversation": `claude-code:${sid}`,
+      "X-Synap-Process": "devbox:1:1792000000000",
+      "X-Synap-Runner-State": "ended",
+    });
+    expect(runEndHeaders({ process: "devbox:1:1792000000000" })).toBeUndefined();
+    expect(runEndHeaders({ claudeSessionId: sid })).toBeUndefined();
+  });
+});
+
+describe("the verdict, read for the session", () => {
+  it("parses done | blocked | failed and the sentence; anything else is no verdict", () => {
+    expect(parseVerdict("done — PR #4 is open")).toEqual({ status: "done", sentence: "PR #4 is open" });
+    expect(parseVerdict("Blocked - needs the key")).toEqual({ status: "blocked", sentence: "needs the key" });
+    expect(parseVerdict("failed")).toEqual({ status: "failed", sentence: "" });
+    expect(parseVerdict("done | blocked | failed — <one sentence>")?.status).toBe("done");
+    expect(parseVerdict("maybe — later")).toBeUndefined();
+    expect(parseVerdict(undefined)).toBeUndefined();
+  });
+  it("claims only the ONE open deliverable the agent owns; an unreadable list claims nothing", () => {
+    const read = (outcomes: unknown, status = "ok") => JSON.stringify({ outcomes: { status, outcomes } });
+    expect(verdictClaim(read([{ key: "v", kind: "file", owner: "agent", met: false }]))).toBe("v");
+    expect(verdictClaim(read([{ key: "v", kind: "file", owner: "agent", met: false }, { key: "w", kind: "file", met: false }]))).toBeUndefined();
+    expect(verdictClaim(read([{ key: "q", kind: "decision", owner: "human", met: false }]))).toBeUndefined();
+    expect(verdictClaim(read([{ key: "f", kind: "fact", owner: "agent", met: false }]))).toBeUndefined();
+    expect(verdictClaim(read([{ key: "v", kind: "file", owner: "agent", met: false }], "unavailable"))).toBeUndefined();
+    expect(verdictClaim("not json")).toBeUndefined();
+  });
+});
+
+describe("an MCP call's own headers", () => {
+  it("ride on that call only, never on the handshake or the next call", async () => {
+    const sent: Array<{ method: string; headers: Record<string, string> }> = [];
+    const fetchImpl = (async (_u: string, init: RequestInit) => {
+      const body = JSON.parse(String(init.body)) as { method: string; id?: number };
+      sent.push({ method: body.method, headers: init.headers as Record<string, string> });
+      return new Response(JSON.stringify({ jsonrpc: "2.0", id: body.id, result: { content: [{ type: "text", text: "{}" }] } }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as unknown as typeof fetch;
+    const mcp = createMcpClient({ url: "https://pod/mcp", apiKey: "k", fetchImpl });
+    await mcp.call("synap_orient", {}, { headers: { "X-Synap-Runner": "synap-worker/1", Authorization: "Bearer other" } });
+    await mcp.call("synap_get_session", { sessionId: "s" });
+    const calls = sent.filter((s) => s.method === "tools/call");
+    expect(calls[0].headers["X-Synap-Runner"]).toBe("synap-worker/1");
+    // An extra header never replaces the key.
+    expect(calls[0].headers.Authorization).toBe("Bearer k");
+    expect(calls[1].headers["X-Synap-Runner"]).toBeUndefined();
+    for (const s of sent.filter((s) => s.method !== "tools/call")) expect(s.headers["X-Synap-Runner"]).toBeUndefined();
   });
 });

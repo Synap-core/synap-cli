@@ -33,6 +33,30 @@ export function clientHeader(
   return { [CLIENT_HEADER]: `${name}/${v}` };
 }
 
+/**
+ * The worker's stamp, `synap-worker/<version>`: sent ONLY by `synap worker` on
+ * its own orient poll. The pod records, per key, the last time a request
+ * carried it (`servedAt`): proof that a process serves that agent, which a key
+ * merely being used is not. Interactive commands and the MCP bridge never send
+ * it, or every use of a key would read as "a worker runs".
+ */
+export const RUNNER_HEADER = "X-Synap-Runner";
+
+/** `{ "X-Synap-Runner": "synap-worker/<version>" }`; the version is the package's. */
+export function workerRunnerHeader(version: string = cliBuild().version): Record<string, string> {
+  const v = /^[\x21-\x7E]{1,64}$/.test(version) ? version : "unknown";
+  return { [RUNNER_HEADER]: `synap-worker/${v}` };
+}
+
+/**
+ * Which OS process of a conversation calls (`<host>:<pid>:<startedAtMs>`), and
+ * what that runner is doing (`busy` | `idle` | `needs_permission` | `ended`).
+ * The pod records both on the conversation's `session_runners` rows; a pod
+ * that reads neither ignores them. synap-bridge sends the state the same way.
+ */
+export const PROCESS_HEADER = "X-Synap-Process";
+export const RUNNER_STATE_HEADER = "X-Synap-Runner-State";
+
 /** The same two values in a request's `params._meta` (reverse-DNS vendor keys; `io.modelcontextprotocol/` is reserved). */
 export const CONVERSATION_META_KEY = "live.synap/conversation";
 export const CONVERSATION_CWD_META_KEY = "live.synap/conversationCwd";

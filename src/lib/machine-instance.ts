@@ -1,11 +1,13 @@
 /**
  * One agent key per COMPUTER — the `instanceId` every agent-key mint sends.
  *
- * The pod keeps ONE agent identity per (person × agent type): Claude Code on a
- * laptop and Claude Code on a devbox are the same agent. Without an instance
- * label on their keys, approving the devbox's new connection revokes EVERY live
- * key of that agent — the laptop's included (2026-10-12 incident). With a
- * label, `approvePendingAgentKey` replaces only the keys carrying the same one.
+ * An agent is ONE place and ONE owner (decision 59c75aab): Claude Code on a
+ * laptop and Claude Code on a devbox are two agents, each on its own computer.
+ * A key still carries the computer it was minted on, because older agents
+ * predate that rule and hold keys from several computers: without an instance
+ * label, approving one computer's new connection revoked EVERY live key of the
+ * agent, the other computer's included (2026-10-12 incident). With a label,
+ * `approvePendingAgentKey` replaces only the keys carrying the same one.
  *
  * The label must be STABLE for a computer (a changing label strands the old
  * key alive and never replaces it) and DIFFERENT across computers (a shared

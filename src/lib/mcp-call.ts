@@ -16,8 +16,13 @@ export interface McpToolResult {
   text: string;
 }
 
+/** Extra headers for ONE call (the worker's runner stamp, a run's runner headers); the handshake never carries them. */
+export interface McpCallExtras {
+  headers?: Record<string, string>;
+}
+
 export interface McpCallClient {
-  call(tool: string, args?: Record<string, unknown>): Promise<McpToolResult>;
+  call(tool: string, args?: Record<string, unknown>, extras?: McpCallExtras): Promise<McpToolResult>;
 }
 
 export interface McpCallOptions {
@@ -46,8 +51,9 @@ export function createMcpClient(opts: McpCallOptions): McpCallClient {
   let initialized = false;
   let nextId = 1;
 
-  const post = async (message: Record<string, unknown>) => {
+  const post = async (message: Record<string, unknown>, extra: Record<string, string> = {}) => {
     const headers: Record<string, string> = {
+      ...extra,
       Authorization: `Bearer ${opts.apiKey}`,
       "Content-Type": "application/json",
       Accept: "application/json, text/event-stream",
@@ -85,23 +91,26 @@ export function createMcpClient(opts: McpCallOptions): McpCallClient {
     initialized = true;
   };
 
-  const callOnce = async (tool: string, args: Record<string, unknown>) => {
+  const callOnce = async (tool: string, args: Record<string, unknown>, extra?: Record<string, string>) => {
     if (!initialized) await initialize();
-    return post({
-      jsonrpc: "2.0",
-      id: nextId++,
-      method: "tools/call",
-      params: { name: tool, arguments: args },
-    });
+    return post(
+      {
+        jsonrpc: "2.0",
+        id: nextId++,
+        method: "tools/call",
+        params: { name: tool, arguments: args },
+      },
+      extra
+    );
   };
 
   return {
-    async call(tool, args = {}) {
-      let { status, body } = await callOnce(tool, args);
+    async call(tool, args = {}, extras = {}) {
+      let { status, body } = await callOnce(tool, args, extras.headers);
       if (status === 404 || status === 400) {
         // The pod forgot the session (restart, expiry): one fresh handshake.
         initialized = false;
-        ({ status, body } = await callOnce(tool, args));
+        ({ status, body } = await callOnce(tool, args, extras.headers));
       }
       if (status < 200 || status >= 300) {
         throw new Error(`MCP ${tool} failed (HTTP ${status}): ${body.slice(0, 300)}`);

@@ -41,6 +41,9 @@
  * State (which sessions were launched, their Claude session ids and outcome)
  * lives in ~/.synap/worker/<agent>/state.json; each run's stream-json goes to
  * ~/.synap/worker/<agent>/runs/<sessionId>.jsonl. Neither ever holds a token.
+ * A run's verdict is ALSO recorded on its session (`settle`), and the worker's
+ * orient poll carries its served stamp (`X-Synap-Runner`): the pod's proof
+ * that a process serves this agent.
  */
 
 import { execFile, spawn, type ChildProcess } from "node:child_process";
@@ -49,10 +52,17 @@ import fs from "node:fs";
 import { ensureSecretDir, writeSecretFile } from "../lib/atomic-file.js";
 import os from "node:os";
 import path from "node:path";
-import { CONVERSATION_HEADER, claudeCodeConversation } from "../lib/conversation-headers.js";
+import {
+  CONVERSATION_HEADER,
+  PROCESS_HEADER,
+  RUNNER_STATE_HEADER,
+  claudeCodeConversation,
+  workerRunnerHeader,
+} from "../lib/conversation-headers.js";
 import { resolveHubConfig } from "../lib/hub-client.js";
 import { unknownAgentMessage } from "../lib/agents-config.js";
 import { resolveAgentUserId } from "../lib/credential-class.js";
+import { ensureComputerEnrolled } from "../lib/device-connect.js";
 import { createMcpClient, type McpCallClient } from "../lib/mcp-call.js";
 import {
   AccountPool,
@@ -96,6 +106,13 @@ export interface WorkerOptions {
 export interface HandedItem {
   id: string;
   goal: string | null;
+  /**
+   * A session that went quiet (stale) while handed to this agent, handed back
+   * to be RESUMED: it never launches fresh. Absent from an older pod's items.
+   */
+  resume?: true;
+  /** When it went quiet (ISO), with `resume`. */
+  quietSince?: string;
 }
 
 /** `limited`: cut off by a usage limit, waiting to be resumed on another account. */
@@ -134,6 +151,10 @@ export interface RunRecord {
   treeDir?: string;
   /** Worktrees a finished run left because they hold unpushed or uncommitted work. */
   keptTrees?: string[];
+  /** The latest launch's process identity (`X-Synap-Process`), what its runner row is keyed by. */
+  process?: string;
+  /** The quiet period (its `quietSince`, "" when the pod gave none) this run was last resumed for. */
+  resumedQuietSince?: string;
 }
 
 interface WorkerState {
@@ -190,7 +211,7 @@ export function parseHandedToYou(orientText: string): HandedItem[] {
     throw new Error(`orient did not return JSON: ${orientText.slice(0, 160)}`);
   }
   const block = findKey(data, "handedToYou") as
-    | { status?: string; items?: Array<{ id?: unknown; goal?: unknown }> }
+    | { status?: string; items?: Array<{ id?: unknown; goal?: unknown; resume?: unknown; quietSince?: unknown }> }
     | undefined;
   if (!block || typeof block !== "object") {
     throw new Error("orient carried no handedToYou block (pod too old, or not an agent key)");
@@ -201,8 +222,13 @@ export function parseHandedToYou(orientText: string): HandedItem[] {
     throw new Error("orient could not read handedToYou (status unavailable)");
   }
   return block.items
-    .filter((i): i is { id: string; goal?: unknown } => typeof i?.id === "string")
-    .map((i) => ({ id: i.id, goal: typeof i.goal === "string" ? i.goal : null }));
+    .filter((i): i is { id: string; goal?: unknown; resume?: unknown; quietSince?: unknown } => typeof i?.id === "string")
+    .map((i) => ({
+      id: i.id,
+      goal: typeof i.goal === "string" ? i.goal : null,
+      ...(i.resume === true ? { resume: true as const } : {}),
+      ...(i.resume === true && typeof i.quietSince === "string" ? { quietSince: i.quietSince } : {}),
+    }));
 }
 
 function findKey(x: unknown, key: string): unknown {
@@ -239,7 +265,11 @@ function launchRetryDue(rec: RunRecord, now: number): boolean {
   return now - Date.parse(rec.finishedAt) >= LAUNCH_RETRY_BASE_MS * 2 ** retries;
 }
 
-/** Sessions to launch now: never launched, or due a relaunch (see above). */
+/**
+ * Sessions to launch now: never launched, or due a relaunch (see above). A
+ * `resume` item is never one of them: it continues its conversation or waits
+ * (see `tick`), so an empty state file never relaunches every quiet session.
+ */
 export function pickNew(
   items: HandedItem[],
   state: WorkerState,
@@ -249,6 +279,7 @@ export function pickNew(
   if (slots <= 0) return [];
   return items
     .filter((i) => {
+      if (i.resume) return false;
       const rec = state.runs[i.id];
       return !rec || launchRetryDue(rec, now);
     })
@@ -268,7 +299,9 @@ export function runMcpConfig(
   podUrl: string,
   apiKey: string,
   /** The run's Claude session id: names the conversation to the pod, one id across resumes. */
-  claudeSessionId?: string
+  claudeSessionId?: string,
+  /** The launch's process identity (`runProcessIdentity`): the pod keeps one runner row per process. */
+  processIdentity?: string
 ): { mcpServers: Record<string, unknown> } {
   const conversation = claudeCodeConversation(claudeSessionId);
   return {
@@ -276,10 +309,40 @@ export function runMcpConfig(
       [RUN_MCP_SERVER]: {
         type: "http",
         url: `${podUrl.replace(/\/+$/, "")}/mcp`,
-        headers: { Authorization: `Bearer ${apiKey}`, ...(conversation ? { [CONVERSATION_HEADER]: conversation } : {}) },
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          ...(conversation ? { [CONVERSATION_HEADER]: conversation } : {}),
+          // A headless run calls the pod only inside its turn, so while it calls it is busy (a
+          // wait for the person's answer included, as the bridge reports an interactive turn).
+          // Its end is reported by the worker when the process exits (`runEndHeaders`).
+          ...(conversation && processIdentity ? { [PROCESS_HEADER]: processIdentity, [RUNNER_STATE_HEADER]: "busy" } : {}),
+        },
       },
     },
   };
+}
+
+/**
+ * A launch's process identity, `<host>:<pid>:<startedAtMs>` (the pod's
+ * `X-Synap-Process`). The config is written before `claude` exists, so the pid
+ * is the worker's and the time is the launch's: a resume is a new launch and
+ * reads as a new process, never a twin of the one that ended.
+ */
+export function runProcessIdentity(launchedAtMs: number, hostname: string = os.hostname(), pid: number = process.pid): string {
+  const host = hostname.replace(/[^A-Za-z0-9._-]/g, "-").slice(0, 255) || "computer";
+  return `${host}:${pid}:${Math.trunc(launchedAtMs)}`;
+}
+
+/**
+ * The headers of the worker's calls once a run's process exited: the run's
+ * conversation and process, state `ended`, so the pod ends that runner at once
+ * rather than when its live window runs out. None for a run that never named
+ * its conversation or process.
+ */
+export function runEndHeaders(rec: Pick<RunRecord, "claudeSessionId" | "process">): Record<string, string> | undefined {
+  const conversation = claudeCodeConversation(rec.claudeSessionId);
+  if (!conversation || !rec.process) return undefined;
+  return { [CONVERSATION_HEADER]: conversation, [PROCESS_HEADER]: rec.process, [RUNNER_STATE_HEADER]: "ended" };
 }
 
 /** Writes the run config owner-only (it holds the key) and returns its path. */
@@ -681,6 +744,42 @@ export function workerVerdict(resultText: string | undefined): string | undefine
   return undefined;
 }
 
+export type VerdictStatus = "done" | "blocked" | "failed";
+
+/** `done — <sentence>` (a `workerVerdict`) → its status and sentence; anything else is no verdict. */
+export function parseVerdict(verdict: string | undefined): { status: VerdictStatus; sentence: string } | undefined {
+  const m = /^(done|blocked|failed)\b\s*(?:[—–:-]+\s*)?(.*)$/i.exec(verdict?.trim() ?? "");
+  if (!m) return undefined;
+  return { status: m[1].toLowerCase() as VerdictStatus, sentence: m[2].trim() };
+}
+
+/** The one room line a verdict becomes. */
+export function verdictRoomLine(v: { status: VerdictStatus; sentence: string }): string {
+  return `Result: ${v.status}${v.sentence ? ` — ${v.sentence}` : ""}`;
+}
+
+/**
+ * The outcome a `done` verdict claims, from the `synap_get_session` read: the
+ * session's ONE open deliverable the agent owns (not a fact, not the person's,
+ * not met, not withdrawn). None, or several, and nothing is claimed: which of
+ * several the run finished is the run's to say (it claims each as it records
+ * it). An unreadable outcomes list claims nothing.
+ */
+export function verdictClaim(getSessionText: string): string | undefined {
+  let data: { outcomes?: { status?: string; outcomes?: Array<Record<string, unknown>> } };
+  try {
+    data = JSON.parse(getSessionText);
+  } catch {
+    return undefined;
+  }
+  const o = data?.outcomes;
+  if (!o || o.status !== "ok" || !Array.isArray(o.outcomes)) return undefined;
+  const open = o.outcomes.filter(
+    (x) => typeof x?.key === "string" && x.owner !== "human" && x.kind !== "fact" && x.met !== true && x.retired !== true
+  );
+  return open.length === 1 ? (open[0].key as string) : undefined;
+}
+
 export interface RoomMessage {
   id?: string;
   content?: string;
@@ -704,6 +803,14 @@ export function followUpsSince(messages: RoomMessage[], since: string, selfAgent
     .filter((m) => m.routedTeammateId !== selfAgentId)
     .filter((m) => typeof m.content === "string" && m.content.trim().length > 0)
     .sort((a, b) => Date.parse(a.timestamp as string) - Date.parse(b.timestamp as string));
+}
+
+/** The prompt that resumes a run whose session went quiet and was handed back (`resume`). */
+export function buildQuietResumePrompt(quietSince: string | undefined): string {
+  return [
+    `This session went quiet${quietSince ? ` (no activity since ${quietSince})` : ""} and is still handed to you.`,
+    `Continue under the same protocol: re-read the session and its room, pick up where you stopped, report in the room, record outcomes, and end with one line: WORKER-RESULT: done | blocked | failed — <one sentence>.`,
+  ].join("\n");
 }
 
 /** The prompt that resumes a finished run with the room's new messages. */
@@ -911,6 +1018,42 @@ export function createWorker(opts: WorkerOptions, deps: WorkerDeps): Worker {
     return true;
   };
 
+  // ── a run's end, on the pod ──
+  /**
+   * A run's process exited: the pod hears its runner ended, and its verdict is
+   * recorded on the session itself — the ONE open deliverable claimed on `done`
+   * (`verdictClaim`) and one room line — through the session's own doors, which
+   * apply directly for an agent on the session's roster. Never the run-capture
+   * door (governed as a playbook-run update, it would wait on the person, and a
+   * session handed with no run has none). Never closes the session. A failed
+   * write is said; the local record keeps the verdict either way.
+   */
+  const settle = async (rec: RunRecord, verdictLine: string | undefined) => {
+    const headers = runEndHeaders(rec);
+    const verdict = parseVerdict(verdictLine);
+    if (!headers && !verdict) return;
+    try {
+      const s = await deps.mcp.call("synap_get_session", { sessionId: rec.sessionId }, { headers });
+      if (s.isError) throw new Error(`get_session refused: ${s.text.slice(0, 160)}`);
+      if (!verdict) return;
+      const claim = verdict.status === "done" ? verdictClaim(s.text) : undefined;
+      if (claim) {
+        const u = await deps.mcp.call("synap_update_session", { sessionId: rec.sessionId, completeOutput: claim }, { headers });
+        if (u.isError) log(`session ${rec.sessionId}: could not claim "${claim}": ${u.text.slice(0, 160)}`);
+      }
+      const channelId = findKey(JSON.parse(s.text), "channelId");
+      if (typeof channelId !== "string" || !channelId) throw new Error("the session has no room");
+      const p = await deps.mcp.call(
+        "synap_post_message",
+        { channelId, kind: "update", content: verdictRoomLine(verdict) },
+        { headers }
+      );
+      if (p.isError) throw new Error(`post refused: ${p.text.slice(0, 160)}`);
+    } catch (err) {
+      log(`session ${rec.sessionId}: ${verdict ? "the verdict was not recorded on the session" : "could not tell the pod the run ended"} (${(err as Error).message}); the local record keeps it`);
+    }
+  };
+
   // ── launching ──
   const launch = async (
     item: HandedItem,
@@ -946,9 +1089,10 @@ export function createWorker(opts: WorkerOptions, deps: WorkerDeps): Worker {
     // The run names its own Claude session up front (`--session-id`), so the pod sees ONE
     // conversation per run, kept across resumes, instead of a new MCP transport id each launch.
     const runSessionId = resumeId ?? randomUUID();
+    const processIdentity = runProcessIdentity(now());
     const mcpConfigPath = writeRunMcpConfig(
       stateDir(agent),
-      runMcpConfig(deps.podUrl, deps.apiKey, runSessionId),
+      runMcpConfig(deps.podUrl, deps.apiKey, runSessionId, processIdentity),
       `mcp-${item.id}.json`
     );
     const prompt =
@@ -970,6 +1114,7 @@ export function createWorker(opts: WorkerOptions, deps: WorkerDeps): Worker {
       protocol,
       workDir,
       treeDir,
+      process: processIdentity,
     };
     const record: RunRecord =
       how.kind !== "fresh" && prior
@@ -1109,13 +1254,15 @@ export function createWorker(opts: WorkerOptions, deps: WorkerDeps): Worker {
         record.exitCode = code;
         record.finishedAt = iso();
         const hit = endedOnLimit(end);
-        if (!(hit && markLimited(record, hit))) {
+        const limited = !!hit && markLimited(record, hit);
+        if (!limited) {
           record.result = workerVerdict(end.text) ?? (end.text ? end.text.slice(-300) : undefined);
           record.status = code === 0 ? "done" : "failed";
         }
         if (record.keptTrees) record.result = `${record.result ?? ""} · KEPT (unpushed work): ${record.keptTrees.join("; ")}`.trim();
         save();
         log(`session ${item.id} finished — exit ${code}${record.result ? ` · ${record.result}` : ""}`);
+        await settle(record, limited ? undefined : workerVerdict(end.text));
       };
       const p = finish()
         .catch((err) => log(`session ${item.id}: finishing failed: ${(err as Error).message}`))
@@ -1130,7 +1277,7 @@ export function createWorker(opts: WorkerOptions, deps: WorkerDeps): Worker {
     const r = await exec(claudeBin, ["stop", rec.bgId], { cwd, env: workerEnv(process.env, opts.claudeConfigDir) });
     if (r.code !== 0) log(`could not stop background ${rec.bgId} (exit ${r.code}); stop it with: claude stop ${rec.bgId}`);
   };
-  const endBg = async (rec: RunRecord, status: "done" | "failed", result: string | undefined) => {
+  const endBg = async (rec: RunRecord, status: "done" | "failed", result: string | undefined, verdictLine?: string) => {
     rec.status = status;
     rec.result = result;
     rec.finishedAt = iso();
@@ -1139,6 +1286,7 @@ export function createWorker(opts: WorkerOptions, deps: WorkerDeps): Worker {
     appendRunLog(rec.sessionId, { type: "synap-worker", event: "bg-end", bgId: rec.bgId ?? null, status });
     log(`session ${rec.sessionId} (background ${rec.bgId}) finished — ${status}${result ? ` · ${result}` : ""}`);
     await stopBg(rec);
+    await settle(rec, verdictLine);
   };
 
   const watch = async () => {
@@ -1189,6 +1337,7 @@ export function createWorker(opts: WorkerOptions, deps: WorkerDeps): Worker {
         save();
         log(`session ${rec.sessionId} (background ${rec.bgId}): ${rec.result}`);
         await stopBg(rec);
+        await settle(rec, undefined);
         continue;
       }
       if (phase === "finished") {
@@ -1198,7 +1347,8 @@ export function createWorker(opts: WorkerOptions, deps: WorkerDeps): Worker {
         await endBg(
           rec,
           entry?.state === "done" ? "done" : "failed",
-          workerVerdict(text) ?? (text ? text.slice(-300) : file ? "no reply since launch" : "transcript not found")
+          workerVerdict(text) ?? (text ? text.slice(-300) : file ? "no reply since launch" : "transcript not found"),
+          workerVerdict(text)
         );
         continue;
       }
@@ -1244,7 +1394,8 @@ export function createWorker(opts: WorkerOptions, deps: WorkerDeps): Worker {
 
   const tick = async () => {
     measuredThisTick = false;
-    const res = await deps.mcp.call("synap_orient", {});
+    // The stamp rides on this poll only: it is what tells the pod a process serves this agent.
+    const res = await deps.mcp.call("synap_orient", {}, { headers: workerRunnerHeader() });
     if (res.isError) throw new Error(`orient refused: ${res.text.slice(0, 200)}`);
     const items = parseHandedToYou(res.text);
     await watch();
@@ -1256,7 +1407,8 @@ export function createWorker(opts: WorkerOptions, deps: WorkerDeps): Worker {
     for (const rec of Object.values(state.runs)) {
       if (free() <= 0) break;
       const item = rec.status === "limited" ? handed.get(rec.sessionId) : undefined;
-      if (!item) continue;
+      // A resume item continues its conversation or nothing: never a fresh start.
+      if (!item || (item.resume && !rec.claudeSessionId)) continue;
       if ((rec.limitResumes ?? 0) >= MAX_LIMIT_RESUMES) {
         rec.status = "failed";
         rec.result = `stopped: cut off by a usage limit ${MAX_LIMIT_RESUMES + 1} times`;
@@ -1282,20 +1434,34 @@ export function createWorker(opts: WorkerOptions, deps: WorkerDeps): Worker {
       launched++;
     }
 
-    // 3. Finished runs with new room messages: resumed.
+    // 3. Finished runs with new room messages, or whose quiet session was handed back
+    //    (`resume`): their conversation resumed — once per quiet period.
     for (const item of items) {
       if (free() <= 0) break;
       const rec = state.runs[item.id];
+      if (item.resume && !rec?.claudeSessionId && rec?.status !== "running") {
+        sayOnce(
+          `resume-unknown:${item.id}`,
+          `session ${item.id} went quiet and is handed back to resume, but this computer has no conversation of it — not launched`
+        );
+        continue;
+      }
       if (!rec || rec.status === "running" || rec.status === "limited" || !rec.claudeSessionId || !rec.finishedAt) continue;
       if ((rec.resumes ?? 0) >= MAX_RESUMES) continue;
       const follow = await roomFollowUps(item.id, rec.finishedAt);
-      if (!follow.length) continue;
+      const quiet = item.resume === true && rec.resumedQuietSince !== (item.quietSince ?? "");
+      if (!follow.length && !quiet) continue;
       const design = rec.mode === "bg";
       const account = await pick(design);
       if (account === null) continue;
+      if (item.resume) rec.resumedQuietSince = item.quietSince ?? "";
       await launch(
         item,
-        { kind: "followUp", claudeSessionId: rec.claudeSessionId, prompt: buildFollowUpPrompt(follow) },
+        {
+          kind: "followUp",
+          claudeSessionId: rec.claudeSessionId,
+          prompt: follow.length ? buildFollowUpPrompt(follow) : buildQuietResumePrompt(item.quietSince),
+        },
         design,
         rec.protocol ?? "code",
         account
@@ -1335,6 +1501,9 @@ export async function workerCommand(opts: WorkerOptions): Promise<void> {
   // The named agent's own key and pod (SYNAP_AGENT is the CLI's one door for it).
   process.env.SYNAP_AGENT = agent;
   const cfg = await resolveHubConfig();
+  // The agent runs ON this computer: one that never enrolled on the pod enrols first (founder, 2026-10-31).
+  const enrol = await ensureComputerEnrolled(cfg.podUrl, `run \`synap worker --agent ${agent}\` again`);
+  if (!enrol.enrolled) throw new Error(enrol.message);
   const intervalMs = parseInterval(opts.interval);
 
   const mcp: McpCallClient = createMcpClient({
