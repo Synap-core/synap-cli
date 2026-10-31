@@ -18,7 +18,7 @@ import chalk from "chalk";
 import { log, banner } from "../utils/logger.js";
 import { timeAgo } from "../lib/time-ago.js";
 import { cliBuild, formatCliBuild } from "../lib/cli-build.js";
-import { checkPodHealth, getActivePodConfig, listPodProfiles, getAgentWorkspaceRouting } from "../lib/pod.js";
+import { checkPodHealth, getActivePodConfig, getPodOverride, findPodNameByUrl, listPodProfiles, getAgentWorkspaceRouting } from "../lib/pod.js";
 import { resolveHubConfig, hubGet, HubError, renderHubError } from "../lib/hub-client.js";
 import {
   isLoggedIn,
@@ -68,7 +68,7 @@ export async function status(opts: { json?: boolean } = {}): Promise<void> {
   // Focused on the "is the latest actually deployed?" question — pod health +
   // release/migration/coherence detail as one machine-readable object.
   if (opts.json) {
-    const cfg = getActivePodConfig();
+    const cfg = getPodOverride() ?? getActivePodConfig();
     const url = cfg?.podUrl ?? process.env.SYNAP_POD_URL ?? null;
     const health = url ? await checkPodHealth(url) : null;
     const release = url ? await fetchReleaseStatus(url) : null;
@@ -124,7 +124,8 @@ export async function status(opts: { json?: boolean } = {}): Promise<void> {
   }
 
   // ── Pod ────────────────────────────────────────────────────────────────
-  const localConfig = getActivePodConfig();
+  // `--pod <name>` (this invocation only) beats the active profile, as in resolveHubConfig.
+  const localConfig = getPodOverride() ?? getActivePodConfig();
   const podUrl = localConfig?.podUrl ?? process.env.SYNAP_POD_URL;
   const allProfiles = listPodProfiles();
 
@@ -136,7 +137,10 @@ export async function status(opts: { json?: boolean } = {}): Promise<void> {
     const pod = await checkPodHealth(podUrl);
     podHealthy = pod.healthy;
     if (allProfiles.length > 1) {
-      const active = allProfiles.find((p) => p.active);
+      const override = getPodOverride();
+      const active = override
+        ? allProfiles.find((p) => p.name === findPodNameByUrl(override.podUrl))
+        : allProfiles.find((p) => p.active);
       log.info(`Active profile: ${chalk.bold(active?.name ?? "default")}  ${chalk.dim("(synap pods list to see all)")}`);
     }
     log.info(`URL: ${podUrl}`);
@@ -230,7 +234,9 @@ export async function status(opts: { json?: boolean } = {}): Promise<void> {
           : msg.toLowerCase().includes("unauthorized");
       if (is401) {
         keyValid = false;
-        const activeName = allProfiles.find((p) => p.active)?.name ?? "default";
+        const override = getPodOverride();
+        const activeName =
+          (override ? allProfiles.find((p) => p.name === findPodNameByUrl(override.podUrl)) : allProfiles.find((p) => p.active))?.name ?? "default";
         log.warn(chalk.red("Invalid or expired — credentials must be refreshed."));
         log.info(`Run: ${chalk.cyan(`synap login --reconnect ${activeName}`)}`);
       } else {
@@ -393,7 +399,9 @@ export async function status(opts: { json?: boolean } = {}): Promise<void> {
   } else if (!localConfig) {
     log.info("Pod reachable but no local config — run: synap init");
   } else if (keyValid === false) {
-    const activeName = allProfiles.find((p) => p.active)?.name ?? "default";
+    const override = getPodOverride();
+        const activeName =
+          (override ? allProfiles.find((p) => p.name === findPodNameByUrl(override.podUrl)) : allProfiles.find((p) => p.active))?.name ?? "default";
     log.info(`Refresh pod credentials: ${chalk.cyan(`synap login --reconnect ${activeName}`)}`);
   } else {
     log.dim("All set. Run: synap context   to load workspace context for an agent session.");
