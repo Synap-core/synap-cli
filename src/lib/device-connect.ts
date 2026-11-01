@@ -124,6 +124,10 @@ export async function deviceConnect(
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         clientName: opts.clientName ?? "Synap CLI",
+        // The RAW hostname, never the keys' display label (no `.local`, SYNAP_COMPUTER_NAME):
+        // the pod offers "reuse this computer" only on exact equality with the hostname an
+        // enrolled computer asked under (`agentMetadata->>'hostname'`, machine-connect.ts).
+        // The create door takes no display name; the person names the computer on approval.
         hostname: (opts.hostname ?? os.hostname()).slice(0, 253) || "computer",
         platform: opts.platform ?? process.platform,
         agents: deviceAgentsFor(opts.agents),
@@ -321,4 +325,73 @@ export async function connectThisComputer(
   log.success(`${outcome.grant.computer.name} connected to ${podHost(podUrl)}`);
   if (opts.wireAgents !== false) await wireApprovedAgents(podUrl, config.hubApiKey, outcome.grant);
   return config;
+}
+
+// ─── enrolment: an agent belongs on an enrolled computer ──────────────────────
+
+const normPodUrl = (u: string) => u.replace(/\/+$/, "");
+
+/**
+ * The saved profile holding this computer's own key for `podUrl`, if any: the
+ * computer's key from the device flow (`credential: "computer"`,
+ * `saveDeviceGrant`). The pod cannot tell a computer that never enrolled from
+ * a person's key (decision 59c75aab: it never trusts a client-claimed machine
+ * id), so the CLI asks first.
+ */
+export function computerProfileFor<P extends { config: { podUrl: string; credential?: string } }>(podUrl: string, profiles: P[]): P | undefined {
+  return profiles.find((p) => normPodUrl(p.config.podUrl) === normPodUrl(podUrl) && p.config.credential === "computer");
+}
+
+/** What the person runs to enrol this computer on `podUrl`. */
+export function enrolCommand(podUrl: string, profiles: Array<{ name: string; config: { podUrl: string } }>): string {
+  const saved = profiles.find((p) => normPodUrl(p.config.podUrl) === normPodUrl(podUrl));
+  // `synap init` keeps a saved key that still works, so a saved pod is enrolled by reconnecting it.
+  return saved ? `synap login --reconnect ${saved.name}` : "synap init";
+}
+
+/** The stop line for an agent asked for on a computer that never enrolled. */
+export function notEnrolledMessage(podUrl: string, then: string, command: string): string {
+  return `This computer is not enrolled on ${podHost(podUrl)}: run \`${command}\` to connect it, then ${then}. An agent made from a computer that never enrolled belongs to no computer.`;
+}
+
+/**
+ * The enrol-first door (founder, 2026-10-31, Q3): `synap agents add` and
+ * `synap worker --agent` on a computer that never enrolled on `podUrl` stop
+ * here with what to run, and, with a person at the terminal, offer to connect
+ * it now (the device flow, `connectThisComputer`). Enrolled: the computer's
+ * own key, the one an agent is minted with so it belongs to this computer. The
+ * pod's own rule does not change.
+ */
+export async function ensureComputerEnrolled(
+  podUrl: string,
+  then: string,
+  deps: {
+    profiles?: () => Array<{ name: string; config: import("./pod.js").LocalPodConfig }>;
+    interactive?: boolean;
+    confirm?: (message: string) => Promise<boolean>;
+    connect?: typeof connectThisComputer;
+  } = {}
+): Promise<{ enrolled: true; computerKey: string } | { enrolled: false; message: string }> {
+  const profiles = (deps.profiles ?? (await import("./pod.js")).listPodProfiles)();
+  const enrolled = computerProfileFor(podUrl, profiles);
+  if (enrolled) return { enrolled: true, computerKey: enrolled.config.hubApiKey };
+  const command = enrolCommand(podUrl, profiles);
+  const message = notEnrolledMessage(podUrl, then, command);
+  const saved = profiles.find((p) => normPodUrl(p.config.podUrl) === normPodUrl(podUrl));
+  const interactive = deps.interactive ?? (!!process.stdin.isTTY && !!process.stdout.isTTY);
+  // No saved pod (a key from the environment): `synap init` is the person's to run.
+  if (!interactive || !saved) return { enrolled: false, message };
+  log.warn(message);
+  const confirm =
+    deps.confirm ??
+    (async (m: string) => {
+      const prompts = (await import("prompts")).default;
+      const { ok } = await prompts({ type: "confirm", name: "ok", message: m, initial: true });
+      return ok === true;
+    });
+  if (!(await confirm(`Connect this computer to ${podHost(podUrl)} now?`))) return { enrolled: false, message };
+  const connected = await (deps.connect ?? connectThisComputer)(podUrl, { name: saved.name });
+  return connected?.credential === "computer"
+    ? { enrolled: true, computerKey: connected.hubApiKey }
+    : { enrolled: false, message };
 }

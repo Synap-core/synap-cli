@@ -31,6 +31,9 @@ vi.mock("../src/lib/targets.js", async (importOriginal) => {
   };
 });
 
+/** The saved pod: this computer's own key (the device flow ran) unless a test says otherwise. */
+const profile = vi.hoisted(() => ({ credential: "computer" as "computer" | undefined, hubApiKey: "computer-key" }));
+
 vi.mock("../src/lib/pod.js", async (importOriginal) => {
   const real = await importOriginal<typeof import("../src/lib/pod.js")>();
   return {
@@ -41,7 +44,14 @@ vi.mock("../src/lib/pod.js", async (importOriginal) => {
       {
         name: "home",
         active: true,
-        config: { podUrl: "https://pod.test", hubApiKey: "human-key", workspaceId: "ws-profile", agentUserId: "", savedAt: "" },
+        config: {
+          podUrl: "https://pod.test",
+          hubApiKey: profile.hubApiKey,
+          workspaceId: "ws-profile",
+          agentUserId: "",
+          savedAt: "",
+          ...(profile.credential ? { credential: profile.credential } : {}),
+        },
       },
     ],
   };
@@ -60,6 +70,8 @@ const { agentsAdd, agentsCreate } = await import("../src/commands/agents.js");
 
 beforeEach(() => {
   vi.clearAllMocks();
+  profile.credential = "computer";
+  profile.hubApiKey = "computer-key";
   provisionAgentKey.mockResolvedValue({ hubApiKey: "agent-key", agentUserId: "agent-1", reused: false });
   enrollAgentIfNeeded.mockResolvedValue(undefined);
   verifyMcpConnection.mockResolvedValue({ ok: true, toolCount: 12 });
@@ -110,8 +122,8 @@ describe("custom agent through the real entry points", () => {
     await agentsAdd(undefined, { name: "Researcher" });
 
     expect(provisionAgentKey).toHaveBeenCalledTimes(1);
-    const [podUrl, humanKey, agentType, mintOpts] = provisionAgentKey.mock.calls[0];
-    expect([podUrl, humanKey, agentType]).toEqual(["https://pod.test", "human-key", "researcher"]);
+    const [podUrl, mintKey, agentType, mintOpts] = provisionAgentKey.mock.calls[0];
+    expect([podUrl, mintKey, agentType]).toEqual(["https://pod.test", "computer-key", "researcher"]);
     expect(mintOpts.requireApproval).not.toBe(false);
 
     expect(enrollAgentIfNeeded).toHaveBeenCalledTimes(1);
@@ -160,5 +172,20 @@ describe("custom agent through the real entry points", () => {
     verifyMcpConnection.mockResolvedValue({ ok: false, error: "401" });
     await agentsAdd("researcher", {});
     expect(process.exitCode).toBe(1);
+  });
+});
+
+describe("a computer that never enrolled enrols first (founder, 2026-10-31)", () => {
+  it("a person's key on this computer: nothing is minted, and the line says how to enrol it", async () => {
+    profile.credential = undefined;
+    profile.hubApiKey = "human-key";
+    const errors: string[] = [];
+    vi.spyOn(console, "error").mockImplementation((...a: unknown[]) => void errors.push(a.map(String).join(" ")));
+    await agentsAdd(undefined, { name: "Researcher" });
+    await agentsAdd("cursor", {});
+    expect(provisionAgentKey).not.toHaveBeenCalled();
+    expect(enrollAgentIfNeeded).not.toHaveBeenCalled();
+    expect(process.exitCode).toBe(1);
+    expect(errors.join("\n")).toContain("This computer is not enrolled on pod.test: run `synap login --reconnect home` to connect it, then run this again.");
   });
 });

@@ -35,6 +35,7 @@ import {
 import { provisionAgentKey } from "../lib/targets.js";
 import { connectionLines, type PodConnection } from "../lib/agent-connections.js";
 import { thisComputerInstanceIds } from "../lib/machine-instance.js";
+import { ensureComputerEnrolled } from "../lib/device-connect.js";
 
 function maskKey(key: string): string {
   if (key.length <= 12) return key.slice(0, 4) + "...";
@@ -421,8 +422,17 @@ export async function agentsAdd(kind: string | undefined, opts: AgentsAddOpts = 
     return;
   }
 
-  const pod = await resolveAgentPod({});
-  if (!pod) return;
+  const picked = await resolveAgentPod({});
+  if (!picked) return;
+  // An agent belongs on a computer: one that never enrolled on this pod enrols
+  // first (founder, 2026-10-31), and the agent is minted with the computer's key.
+  const enrol = await ensureComputerEnrolled(picked.podUrl, "run this again");
+  if (!enrol.enrolled) {
+    log.error(enrol.message);
+    process.exitCode = 1;
+    return;
+  }
+  const pod = { ...picked, apiKey: enrol.computerKey };
   const scope = { workspaceId: opts.workspace, projectId: opts.project };
 
   let ok: boolean;

@@ -23,15 +23,41 @@ export const CONVERSATION_CWD_HEADER = "X-Synap-Conversation-Cwd";
 export const CLIENT_HEADER = "X-Synap-Client";
 export type SynapClientName = "synap-cli" | "synap-cli-mcp";
 
+/** A header value must be visible ASCII: an odd version reads `unknown` and never fails the call. */
+function headerVersion(version: string): string {
+  return /^[\x21-\x7E]{1,64}$/.test(version) ? version : "unknown";
+}
+
 /** `{ "X-Synap-Client": "<name>/<version>" }`; the version is the package's. */
 export function clientHeader(
   name: SynapClientName,
   version: string = cliBuild().version
 ): Record<string, string> {
-  // A header value must be visible ASCII; an odd version never fails the call.
-  const v = /^[\x21-\x7E]{1,64}$/.test(version) ? version : "unknown";
-  return { [CLIENT_HEADER]: `${name}/${v}` };
+  return { [CLIENT_HEADER]: `${name}/${headerVersion(version)}` };
 }
+
+/**
+ * The worker's stamp, `synap-worker/<version>`: sent ONLY by `synap worker` on
+ * its own orient poll. The pod records, per key, the last time a request
+ * carried it (`servedAt`): proof that a process serves that agent, which a key
+ * merely being used is not. Interactive commands and the MCP bridge never send
+ * it, or every use of a key would read as "a worker runs".
+ */
+export const RUNNER_HEADER = "X-Synap-Runner";
+
+/** `{ "X-Synap-Runner": "synap-worker/<version>" }`; the version is the package's. */
+export function workerRunnerHeader(version: string = cliBuild().version): Record<string, string> {
+  return { [RUNNER_HEADER]: `synap-worker/${headerVersion(version)}` };
+}
+
+/**
+ * Which OS process of a conversation calls (`<host>:<pid>:<startedAtMs>`), and
+ * what that runner is doing (`busy` | `idle` | `needs_permission` | `ended`).
+ * The pod records both on the conversation's `session_runners` rows; a pod
+ * that reads neither ignores them. synap-bridge sends the state the same way.
+ */
+export const PROCESS_HEADER = "X-Synap-Process";
+export const RUNNER_STATE_HEADER = "X-Synap-Runner-State";
 
 /** The same two values in a request's `params._meta` (reverse-DNS vendor keys; `io.modelcontextprotocol/` is reserved). */
 export const CONVERSATION_META_KEY = "live.synap/conversation";

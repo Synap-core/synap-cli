@@ -22,7 +22,7 @@ vi.mock("./mcp-bridge.js", async (orig) => {
 });
 
 import { hubGet } from "./hub-client.js";
-import { mcpBridgeHeaders, CLIENT_HEADER, clientHeader } from "./conversation-headers.js";
+import { mcpBridgeHeaders, CLIENT_HEADER, RUNNER_HEADER, clientHeader } from "./conversation-headers.js";
 import { mcpBridge } from "../commands/mcp.js";
 
 const VERSION = (
@@ -56,6 +56,8 @@ describe("X-Synap-Client", () => {
     await hubGet("/workspaces", {}, { podUrl: "https://pod.example", apiKey: "k" } as never);
     expect(seen).toHaveLength(1);
     expect(seen[0]![CLIENT_HEADER]).toBe(`synap-cli/${VERSION}`);
+    // The worker's served stamp is the worker poll's alone: an ordinary command never claims it.
+    expect(seen[0]![RUNNER_HEADER]).toBeUndefined();
   });
 
   it("the stdio MCP bridge sends synap-cli-mcp/<version> on every request", async () => {
@@ -85,6 +87,7 @@ describe("X-Synap-Client", () => {
     await done;
     expect(sent.length).toBe(2);
     for (const h of sent) expect(h[CLIENT_HEADER]).toBe(`synap-cli-mcp/${VERSION}`);
+    for (const h of sent) expect(h[RUNNER_HEADER]).toBeUndefined();
   });
 
   it("`synap mcp bridge` hands the bridge those headers", async () => {
