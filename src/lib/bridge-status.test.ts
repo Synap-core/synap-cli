@@ -104,10 +104,43 @@ describe("reading the file", () => {
     expect(read()).toMatchObject({ status: "failed", why: "no writtenAt time" });
     write(JSON.stringify({ ...file(), waitingOn: { status: "ok", marks: [] } }));
     expect(read()).toMatchObject({ status: "failed", why: "waitingOn is malformed" });
-    write(JSON.stringify({ ...file(), live: { state: "working" } }));
-    expect(read()).toMatchObject({ status: "failed", why: "live is malformed" });
     write("[]");
     expect(read()).toMatchObject({ status: "failed", why: "not an object" });
+  });
+
+  it("a malformed `live` costs only its own fields, never the file (bridge ≤ 0.11 wrote NaN and \"undefined\")", () => {
+    // What `String(undefined)` and `Number(undefined)` (NaN → null in JSON) leave in the file.
+    write(JSON.stringify({ ...file(), live: { state: "idle", turnInFlight: false, since: null, lastActivityAt: null, measuredAt: "undefined", windowMs: null } }));
+    const r = read({ startedAt: min(600) });
+    expect(r.status).toBe("fresh");
+    if (r.status === "fresh") expect(r.file.live).toEqual({ state: "idle", turnInFlight: false, since: null, lastActivityAt: null, measuredAt: null, windowMs: null });
+    write(JSON.stringify({ ...file(), live: { state: "working" } }));
+    expect(read().status).toBe("fresh");
+    write(JSON.stringify({ ...file(), live: "undefined" }));
+    const s = read();
+    expect(s.status).toBe("fresh");
+    if (s.status === "fresh") expect(s.file.live).toBeNull();
+  });
+
+  it("every string in the file is scrubbed of control characters", () => {
+    write(
+      JSON.stringify(
+        file({
+          nextMove: { kind: "agent_slot", actor: "ai", label: "Open\x1b]8;;https://evil.test\x1b\\ the PR\x07", reason: "" },
+          workUnits: [{ key: "a", label: "backend#7\x1b[2J x", kind: "pull_request", url: "https://github.com/Synap-core/backend/pull/7\x1b\\", state: "open", prState: null }],
+        }),
+      ),
+    );
+    const r = read({ startedAt: min(600) });
+    expect(r.status).toBe("fresh");
+    if (r.status !== "fresh") return;
+    const raw = buildBridgeLine({ now: NOW, file: r.file, writtenAt: r.writtenAt, registry: reg("idle") });
+    expect(raw).not.toContain("https://evil.test\x1b");
+    expect(raw).not.toContain("\x1b[2J");
+    expect(raw).not.toContain("\x07");
+    // The URL's own ESC is gone (its backslash is left, inert); our link around the PR name is intact.
+    expect(raw).toContain("\x1b]8;;https://github.com/Synap-core/backend/pull/7\\\x1b\\backend#7\x1b]8;;\x1b\\");
+    expect(plain(raw)).toContain("next: Open]8;;https://evil.test\\ the PR");
   });
 
   it("an unreadable file (here a directory) is a failed read", () => {
@@ -158,6 +191,18 @@ describe("drawing the line", () => {
     const lapsed = file({ live: { state: "working", turnInFlight: false, since: iso(min(8)), lastActivityAt: iso(min(8)), measuredAt: iso(min(1)), windowMs: 300_000 } });
     expect(line(lapsed, null)).toBe('■ stopped · 8m · next: Produce "Wave 2 report"');
     expect(line(file({ live: null }), null)).toBe('○ no session status · next: Produce "Wave 2 report"');
+  });
+
+  it("a turn in flight is the pod's word at `measuredAt`: it lapses one window later, never 12 h later", () => {
+    const inFlight = (measured: number, windowMs: number | null = 300_000) =>
+      file({ live: { state: "working", turnInFlight: true, since: iso(min(700)), lastActivityAt: iso(min(700)), measuredAt: iso(measured), windowMs } });
+    expect(line(inFlight(min(1)), null)).toBe("▶ working · 11h40");
+    // Written mid-turn 6 h ago and never rewritten: not "working".
+    expect(line(inFlight(min(360)), null)).toBe('■ stopped · 11h40 · next: Produce "Wave 2 report"');
+    // No usable measurement time: the time the file was written bounds it, and the pod's default window applies.
+    const unmeasured = file({ writtenAt: iso(min(30)), live: { ...inFlight(min(1)).live!, measuredAt: null, windowMs: null } });
+    expect(line(unmeasured, null)).toBe('■ stopped · 11h40 · next: Produce "Wave 2 report" · pod 30m ago');
+    expect(line({ ...unmeasured, writtenAt: iso(min(2)) }, null)).toBe("▶ working · 11h40");
   });
 
   it("a section the pod could not read is said, never drawn as nothing", () => {
