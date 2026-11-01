@@ -70,7 +70,7 @@ export const WAITING_ON_REASON_LABELS: Readonly<Record<string, string>> = {
   approval: "Approval",
   access: "Access",
   another_work: "Other work",
-  outside_world: "Outside world",
+  outside_world: "Outside party",
   external: "Outside party",
   date: "A date",
 };
