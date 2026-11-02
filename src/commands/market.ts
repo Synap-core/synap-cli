@@ -256,8 +256,8 @@ const KIND_HEADINGS: Record<string, string> = {
   // (`GET /installed`) calls the same thing `automation`. Both tokens reach
   // `kindHeading()` — `market --list` speaks CP, `market installed` speaks pod —
   // so both are mapped, to the ONE plural the registry says.
-  workflow: "Rules",
-  automation: "Rules",
+  workflow: "Automations",
+  automation: "Automations",
   view: "Views",
   cell: "Cards",
   workspace: "Spaces",
