@@ -20,7 +20,9 @@ import {
   StandingsUnavailableError,
   type PackageStanding,
 } from "../src/lib/package-updates.js";
-import { installedStatusLabel } from "../src/commands/market.js";
+import { cliUpdatableSlugs, installedStatusLabel } from "../src/commands/market.js";
+import { FLOW } from "../src/lib/next-steps.js";
+import { readFileSync } from "node:fs";
 
 const cfg = { podUrl: "https://pod.example", apiKey: "k" } as never;
 
@@ -108,5 +110,29 @@ describe("tripwire: market update never derives the verdict itself", () => {
     // The forks this replaced: the pod's inventory drift + the CLI's own
     // fallback comparison (`computeUpdates` → `computeTemplateUpdates`).
     expect(body).not.toMatch(/\bcomputeUpdates\(|\bcomputeTemplateUpdates\(|\bfetchInstalledInventoryStrict\(/);
+  });
+});
+
+describe("next steps offer only what market update can run", () => {
+  // Live pod, 2 Nov 2026: "Next: synap market update fal-ai" was printed for a
+  // capability, and that command then refused it ("it was not updated here").
+  it("a capability with an update is left out of the suggested commands", () => {
+    const checks = checksFromStandings([
+      standing({}),
+      standing({ slug: "fal-ai", kind: "capability", installedVersion: "h-c10a96", latestVersion: "h-9f8036" }),
+      standing({ slug: "daily-brief", kind: "view", installedVersion: "h-1", latestVersion: "h-2" }),
+      standing({ slug: "operations", installedVersion: "h-1", latestVersion: "h-1", hasUpdate: false }),
+    ]);
+    expect(cliUpdatableSlugs(checks)).toEqual(["brand-library", "daily-brief"]);
+    const commands = FLOW.afterMarketUpdateCheck(cliUpdatableSlugs(checks)).map((s) => s.command);
+    expect(commands.some((c) => c.includes("fal-ai"))).toBe(false);
+    expect(commands).toContain("synap market update brand-library");
+  });
+
+  it("every next-step call in market.ts goes through cliUpdatableSlugs", () => {
+    const src = readFileSync(new URL("../src/commands/market.ts", import.meta.url), "utf8");
+    const calls = src.match(/FLOW\.afterMarket(Update|Installed)Check\(([^)]*\)?)/g) ?? [];
+    expect(calls.length).toBeGreaterThanOrEqual(5);
+    for (const call of calls) expect(call).toContain("cliUpdatableSlugs(");
   });
 });

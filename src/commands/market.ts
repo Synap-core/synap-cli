@@ -1698,6 +1698,17 @@ export interface UpdateCheck extends TemplateUpdateCheck {
  *  - cell / capability have no per-package updater here: `null`.
  */
 export type UpdateDoor = "packages-apply" | "configs-reconcile";
+/**
+ * The slugs with an update that `synap market update <slug>` can apply (a
+ * kind with a CLI updater). Next-step suggestions use it, so they never offer
+ * a command that would only refuse.
+ */
+export function cliUpdatableSlugs(
+  checks: ReadonlyArray<{ slug: string; kind?: InstalledKind; updateAvailable: boolean }>
+): string[] {
+  return checks.filter((c) => c.updateAvailable && updateDoorFor(c.kind) !== null).map((c) => c.slug);
+}
+
 export function updateDoorFor(kind: InstalledKind | undefined): UpdateDoor | null {
   switch (kind ?? "workspace") {
     case "workspace":
@@ -2287,7 +2298,10 @@ export async function marketUpdate(
   }
 
   if (!shouldApply) {
-    const steps = FLOW.afterMarketUpdateCheck(withUpdates.map((c) => c.slug));
+    // Next steps offer only what this command can run: a capability update
+    // (no CLI updater) is the person's act in pod admin, named once below.
+    const steps = FLOW.afterMarketUpdateCheck(cliUpdatableSlugs(withUpdates));
+    const personApplies = withUpdates.filter((c) => updateDoorFor(c.kind) === null).map((c) => c.slug);
     if (opts.json) {
       console.log(
         JSON.stringify(
@@ -2297,6 +2311,9 @@ export async function marketUpdate(
             unknownSlugs,
             applied: [],
             nextSteps: steps,
+            ...(personApplies.length > 0
+              ? { appliedInPodAdmin: { slugs: personApplies, where: marketUpdatesDoor(cfg!.podUrl) } }
+              : {}),
             dataChanges: dataChangesJson,
             templateLifecycle: lifecycleJson,
           },
@@ -2309,6 +2326,9 @@ export async function marketUpdate(
     log.info(`${withUpdates.length} package${withUpdates.length === 1 ? "" : "s"} have updates.`);
     if ([...previews.values()].some((pv) => (pv.changes?.length ?? 0) > 0)) {
       log.hint("Updates with data changes ask before they run. To agree up front: --accept-data-changes <opKey,…>  (or --yes for all listed)");
+    }
+    if (personApplies.length > 0) {
+      log.hint(`${personApplies.join(", ")}: not updated by this command. ${marketUpdatesDoor(cfg!.podUrl)}`);
     }
     renderNextSteps(steps);
     return;
@@ -3093,7 +3113,7 @@ export async function marketInstalled(opts: {
 
   if (opts.layers) {
     const graph = await buildInstallationGraph(installedTemplates, cat, checks);
-    const steps = FLOW.afterMarketInstalledCheck(rows.filter((c) => c.updateAvailable).map((c) => c.slug));
+    const steps = FLOW.afterMarketInstalledCheck(cliUpdatableSlugs(rows));
 
     if (opts.json) {
       console.log(
@@ -3128,7 +3148,7 @@ export async function marketInstalled(opts: {
 
   if (opts.tree) {
     const { packages, leafRows } = await buildCompositionTrees(rows, cat, installedTemplates, workspaceCountBySlug);
-    const steps = FLOW.afterMarketInstalledCheck(rows.filter((c) => c.updateAvailable).map((c) => c.slug));
+    const steps = FLOW.afterMarketInstalledCheck(cliUpdatableSlugs(rows));
 
     if (opts.json) {
       console.log(
@@ -3200,7 +3220,7 @@ export async function marketInstalled(opts: {
   }
 
   if (opts.json) {
-    const steps = FLOW.afterMarketInstalledCheck(rows.filter((c) => c.updateAvailable).map((c) => c.slug));
+    const steps = FLOW.afterMarketInstalledCheck(cliUpdatableSlugs(rows));
     console.log(
       JSON.stringify(
         {
@@ -3330,7 +3350,7 @@ export async function marketInstalled(opts: {
 
   if (degradedNote) log.dim(degradedNote);
   if (!cat.loggedIn) log.dim("Not logged in — private template updates aren't visible. Run: synap login");
-  renderNextSteps(FLOW.afterMarketInstalledCheck(rows.filter((c) => c.updateAvailable).map((c) => c.slug)));
+  renderNextSteps(FLOW.afterMarketInstalledCheck(cliUpdatableSlugs(rows)));
 }
 
 // ── `synap market workspaces` — workspace-centric attachment discovery ───────
