@@ -14,7 +14,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   GRANT_DOOR_UNSUPPORTED_CODE,
+  grantDenialOf,
   hubGet,
+  hubPost,
   HubError,
   renderHubError,
   type HubConfig,
@@ -103,6 +105,57 @@ describe("a limited key refused at the door", () => {
     const out = printed(await refusalOf("/calendar/feed"));
     expect(out).toContain("This key is limited");
     expect(out).not.toContain("not accessible on this pod");
+  });
+});
+
+describe("a limited key whose grant leaves the action out", () => {
+  // The pod's words (synap-backend utils/grant-write-check.ts); it sends no code.
+  async function postRefusal(body: unknown): Promise<HubError> {
+    podAnswers(403, body);
+    try {
+      await hubPost("/packages/apply", {}, cfg);
+    } catch (e) {
+      if (e instanceof HubError) return e;
+      throw e;
+    }
+    throw new Error("expected POST /packages/apply to fail");
+  }
+
+  it("is read from the pod's words, and names the refused action", async () => {
+    const err = await postRefusal({ error: `This key's grant does not allow "workspace.update".` });
+    expect(err.code).toBeUndefined();
+    expect(grantDenialOf(err)).toEqual({ action: "workspace.update" });
+  });
+
+  it("says the key may not do it, never that the workspace is missing", async () => {
+    const out = printed(
+      await postRefusal({ error: `This key's grant does not allow "workspace.update".` })
+    );
+    expect(out).toContain(`This key may not do "workspace.update"`);
+    expect(out).toContain("Nothing is wrong with your workspace");
+    expect(out).toContain("Do it yourself with full access");
+    expect(out).not.toContain("not accessible on this pod");
+    expect(out).not.toContain(`Sent workspace ${WS}`);
+  });
+
+  it("the words that name a workspace id are still a grant denial", async () => {
+    const out = printed(
+      await postRefusal({
+        error: `This key's grant does not allow "entity.task.update" in workspace ${WS}.`,
+      })
+    );
+    expect(out).toContain(`This key may not do "entity.task.update"`);
+    expect(out).not.toContain("not accessible on this pod");
+  });
+
+  it("a command that knows the person's door names it", async () => {
+    const err = await postRefusal({ error: `This key's grant does not allow "workspace.update".` });
+    const lines: string[] = [];
+    vi.spyOn(console, "error").mockImplementation((m) => void lines.push(String(m)));
+    renderHubError(err, { personDoor: "Apply it yourself from pod admin → Marketplace → Updates." });
+    const out = lines.join("\n");
+    expect(out).toContain("Apply it yourself from pod admin → Marketplace → Updates.");
+    expect(out).not.toContain("Do it yourself with full access");
   });
 });
 

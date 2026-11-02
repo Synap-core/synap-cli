@@ -78,6 +78,7 @@ import {
 import { capabilityAdd } from "./capability.js";
 import { bundledTemplatesVersion } from "../lib/bundle-version.js";
 import { HubNetworkError } from "../lib/hub-client.js";
+import { podAdminOrigin } from "../lib/safe-open.js";
 import {
   parseDataChanges,
   dataChangesFromRefusal,
@@ -1890,7 +1891,7 @@ async function applyOnePackage(
     if (!opts.json) {
       log.error(`${entry.name} update failed`);
       if (refusal) log.warn(refusal);
-      else renderHubError(e);
+      else renderHubError(e, { personDoor: marketUpdatesDoor(cfg.podUrl) });
     }
     return {
       slug: entry.slug,
@@ -1900,6 +1901,19 @@ async function applyOnePackage(
       error: e instanceof Error ? e.message : String(e),
     };
   }
+}
+
+/**
+ * Where the person applies a package update a limited key may not apply
+ * (a computer key's grant leaves out `workspace.update`, by design: applying a
+ * workspace package is the person's act). Pod admin's Marketplace, Updates
+ * tab, named by URL when the pod-admin origin derives from the pod's.
+ */
+export function marketUpdatesDoor(podUrl: string): string {
+  const admin = podAdminOrigin(podUrl);
+  return admin
+    ? `Apply it yourself from pod admin → Marketplace → Updates: ${admin}/marketplace/updates`
+    : "Apply it yourself from pod admin → Marketplace → Updates.";
 }
 
 /** What the pod's write-free preview says an update would do to existing data. */
