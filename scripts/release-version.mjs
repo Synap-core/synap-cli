@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 /**
  * The version a CLI release carries, derived in the publish job and never
- * committed by it for the `next` channel (`.github/workflows/publish-cli.yml`).
+ * committed by it, on either channel (`.github/workflows/publish-cli.yml`).
+ * main is protected (ruleset "main: PR only", 2 Nov 2026): the job cannot
+ * push a bump there, so the registry, not `package.json`, carries the number.
  *
  *   next   → `<next patch>-next.<YYYYMMDD>.<sha7>`, published under the npm
  *            dist-tag `next` on every merge to main. The base is the HIGHER of
@@ -9,14 +11,18 @@
  *            was published by hand from a laptop while main still said 1.12.2,
  *            so a base read from `package.json` alone would have produced a
  *            `1.12.3-next…` that sorts BELOW the release users already have.
- *   ahead  → the `latest` path's guard: the version `npm version patch` just
- *            wrote must be above the registry's `latest`, or the run stops
- *            before anything is committed or published (npm moves `latest` to
- *            whatever is published under it, even a LOWER version).
+ *   latest → `<next patch>`, published under `latest` by a dispatch. Same
+ *            base as `next`: the HIGHER of `package.json` and the registry's
+ *            `latest`, so a release never repeats or lowers a number.
+ *   ahead  → the `latest` path's guard: the version the job just wrote must
+ *            be above the registry's `latest`, or the run stops before
+ *            anything is tagged or published (npm moves `latest` to whatever
+ *            is published under it, even a LOWER version).
  *
  * Usage:
- *   node scripts/release-version.mjs next  --latest <v> --sha <git sha> [--date YYYYMMDD]
- *   node scripts/release-version.mjs ahead --latest <v>
+ *   node scripts/release-version.mjs next   --latest <v> --sha <git sha> [--date YYYYMMDD]
+ *   node scripts/release-version.mjs latest --latest <v>
+ *   node scripts/release-version.mjs ahead  --latest <v>
  */
 
 import { readFileSync } from "node:fs";
@@ -44,13 +50,26 @@ export function compareCore(a, b) {
  * whole version invalid.
  */
 export function nextPrerelease({ base, latest, sha, date }) {
-  const top = latest && compareCore(latest, base) > 0 ? latest : base;
-  const [major, minor, patch] = parseCore(top);
+  const [major, minor, patch] = parseCore(higher(base, latest));
   const sha7 = String(sha).trim().slice(0, 7).toLowerCase();
   if (!/^[0-9a-f]{7}$/.test(sha7)) throw new Error(`not a git sha: "${sha}"`);
   if (!/^\d{8}$/.test(String(date))) throw new Error(`not a YYYYMMDD date: "${date}"`);
   const shaId = /^\d+$/.test(sha7) ? `g${sha7}` : sha7;
   return `${major}.${minor}.${patch + 1}-next.${date}.${shaId}`;
+}
+
+/** The higher of `package.json`'s version and npm's `latest` (none: the base). */
+function higher(base, latest) {
+  return latest && compareCore(latest, base) > 0 ? latest : base;
+}
+
+/**
+ * The release a dispatch publishes under `latest`: the next patch of the
+ * higher of `package.json` and npm's `latest`. Derived, never committed.
+ */
+export function nextRelease({ base, latest }) {
+  const [major, minor, patch] = parseCore(higher(base, latest));
+  return `${major}.${minor}.${patch + 1}`;
 }
 
 /** Throws unless `candidate` is a release strictly above `latest`. */
@@ -81,11 +100,13 @@ function main(argv) {
     process.stdout.write(
       nextPrerelease({ base: version, latest, sha: arg(argv, "sha"), date: arg(argv, "date") ?? utcDate() }) + "\n"
     );
+  } else if (mode === "latest") {
+    process.stdout.write(nextRelease({ base: version, latest }) + "\n");
   } else if (mode === "ahead") {
     assertAhead(version, latest);
     process.stdout.write(`${version} is ahead of npm latest ${latest ?? "(none)"}\n`);
   } else {
-    throw new Error("usage: release-version.mjs next|ahead --latest <v> [--sha <sha>] [--date YYYYMMDD]");
+    throw new Error("usage: release-version.mjs next|latest|ahead --latest <v> [--sha <sha>] [--date YYYYMMDD]");
   }
 }
 

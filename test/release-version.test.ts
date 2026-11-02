@@ -2,13 +2,14 @@
  * The CLI's two release channels (`.github/workflows/publish-cli.yml`):
  * `next` on every merge to main, `latest` by hand. These rows pin the version
  * each one derives, and that the workflow wires them so a merge can never move
- * `latest` or commit to main.
+ * `latest` and no run ever commits to main (main is protected: ruleset "main:
+ * PR only, no deletion or force push", bypass OrganizationAdmin only).
  */
 import fs from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import YAML from "yaml";
-import { assertAhead, nextPrerelease } from "../scripts/release-version.mjs";
+import { assertAhead, nextPrerelease, nextRelease } from "../scripts/release-version.mjs";
 
 const root = path.join(__dirname, "..");
 
@@ -30,6 +31,18 @@ describe("nextPrerelease", () => {
     expect(nextPrerelease({ base: "1.13.0", latest: undefined, sha: "0123456789", date: "20261102" })).toBe(
       "1.13.1-next.20261102.g0123456"
     );
+  });
+});
+
+describe("nextRelease (the latest path)", () => {
+  it("is the next patch of package.json when npm's latest is not above it", () => {
+    expect(nextRelease({ base: "1.13.0", latest: "1.13.0" })).toBe("1.13.1");
+    expect(nextRelease({ base: "1.13.0", latest: undefined })).toBe("1.13.1");
+  });
+
+  it("starts from npm's latest when main's package.json lags (it is never bumped on main)", () => {
+    expect(nextRelease({ base: "1.13.0", latest: "1.13.4" })).toBe("1.13.5");
+    expect(() => assertAhead(nextRelease({ base: "1.12.2", latest: "1.13.0" }), "1.13.0")).not.toThrow();
   });
 });
 
@@ -69,10 +82,20 @@ describe("publish-cli.yml", () => {
     expect(wf.on).toHaveProperty("workflow_dispatch");
   });
 
-  it("only a dispatch bumps, commits and pushes the version", () => {
-    for (const s of steps.filter((x) => /git push|npm version patch/.test(x.run ?? ""))) {
-      expect(s.if).toMatch(/github\.event_name == 'workflow_dispatch'/);
-    }
+  it("no step commits, and the only push is a dispatch's release tag", () => {
+    for (const s of steps) expect(s.run ?? "").not.toMatch(/git commit|npm version patch/);
+    const pushes = steps.filter((x) => /git push/.test(x.run ?? ""));
+    expect(pushes.map((x) => x.name)).toEqual(["Tag the release"]);
+    expect(pushes[0].if).toBe("github.event_name == 'workflow_dispatch'");
+    expect(pushes[0].run).toMatch(/git push origin "refs\/tags\/v\$VERSION"/);
+  });
+
+  it("a dispatch derives its version from npm's latest and tags it only after publishing", () => {
+    const derive = step(/^Set the latest version/);
+    expect(derive.if).toBe("github.event_name == 'workflow_dispatch'");
+    expect(derive.run).toMatch(/release-version\.mjs latest --latest "\$LATEST"/);
+    const names = steps.map((x) => x.name ?? "");
+    expect(names.indexOf("Tag the release")).toBeGreaterThan(names.findIndex((n) => /^Publish to npm/.test(n)));
   });
 
   it("a push publishes under the next dist-tag, never latest", () => {
@@ -95,15 +118,15 @@ describe("publish-cli.yml", () => {
     expect(derive.run).toMatch(/release-version\.mjs next --latest "\$LATEST" --sha "\$GITHUB_SHA"/);
     expect(derive.run).not.toMatch(/git (commit|push)/);
     const checkout = steps.find((x) => x.name === "Checkout synap-cli") as { with: { ref: string } };
-    expect(checkout.with.ref).toMatch(/\|\| github\.sha/);
+    expect(checkout.with.ref).toBe("${{ github.sha }}");
   });
 
-  it("a dispatch checks the bump is ahead of npm's latest before it commits", () => {
+  it("a dispatch checks the version is ahead of npm's latest before it publishes", () => {
     const names = steps.map((x) => x.name ?? "");
     const guard = names.findIndex((n) => /ahead of npm's latest/.test(n));
-    const commit = names.findIndex((n) => /^Commit the version bump/.test(n));
+    const publish = names.findIndex((n) => /^Publish to npm/.test(n));
     expect(guard).toBeGreaterThan(-1);
-    expect(guard).toBeLessThan(commit);
+    expect(guard).toBeLessThan(publish);
     expect(steps[guard].run).toMatch(/release-version\.mjs ahead/);
   });
 });

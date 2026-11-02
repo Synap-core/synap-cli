@@ -41,10 +41,15 @@ on:
   # TWO CHANNELS (founder, 2026-11-02, session 1aff9699: "publish the CLI on
   # every merge to a 'next' channel and install it globally on the Mac").
   #
-  #   latest — `workflow_dispatch` on main, unchanged: a release to everyone
-  #            is a decision, not a side effect of merging. It waits for the
-  #            `production` reviewer, bumps the patch, commits that bump to
-  #            main BEFORE publishing, and publishes under `latest`.
+  #   latest — `workflow_dispatch` on main: a release to everyone is a
+  #            decision, not a side effect of merging. It waits for the
+  #            `production` reviewer, DERIVES the next patch
+  #            (`scripts/release-version.mjs latest`), publishes under
+  #            `latest`, then pushes the tag `v<version>`.
+  #            It never commits: main is protected (ruleset "main: PR only, no
+  #            deletion or force push", bypass OrganizationAdmin only, founder
+  #            2 Nov 2026, session b46b66d3), and GITHUB_TOKEN cannot be a
+  #            ruleset bypass actor, so a bump pushed to main would be refused.
   #   next   — every push to main that changes what ships. The version is
   #            DERIVED in the job (`scripts/release-version.mjs next`:
   #            `<next patch>-next.<YYYYMMDD>.<sha7>`), published under the
@@ -103,10 +108,10 @@ jobs:
       CHANNEL: ${{ github.event_name == 'workflow_dispatch' && 'latest' || 'next' }}
     # Least privilege.
     #
-    # `contents: write` is REQUIRED, not decorative: the "Commit the version bump"
-    # step (a dispatch only; a `next` run never pushes) pushes with GITHUB_TOKEN, and an org (or repo) whose default workflow
-    # permission is read-only makes that push fail. Under the old ordering that
-    # failure was silent-but-fatal — see the step's own comment.
+    # `contents: write` is REQUIRED, not decorative: the "Tag the release"
+    # step (a dispatch only; a `next` run pushes nothing) pushes a tag with
+    # GITHUB_TOKEN, and an org (or repo) whose default workflow permission is
+    # read-only makes that push fail.
     #
     # `id-token: write` is required for npm Trusted Publishing (OIDC). It is
     # inert until npm is told to trust this workflow, so it is safe to declare
@@ -119,16 +124,11 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: cli
-          # `actions/checkout` defaults to a DETACHED HEAD at the triggering
-          # SHA. Committing there works, but `git push` with no refspec fails
-          # ("HEAD does not match any"), which is one of the three ways the old
-          # publish-then-push ordering could leave npm ahead of the repo. Naming
-          # the branch puts us on it, so the final `git push` is an ordinary
-          # fast-forward — and a non-fast-forward (someone merged meanwhile)
-          # fails the run BEFORE anything is published. A `next` run checks out
-          # the merge commit itself, never the branch tip: the version it
-          # publishes is named after that commit, so the tree must be its tree.
-          ref: ${{ github.event_name == 'workflow_dispatch' && github.ref_name || github.sha }}
+          # Both channels check out the triggering commit itself, never the
+          # branch tip: the version is derived from it and a `latest` release
+          # tags it, so the tree built must be its tree. Nothing is pushed to a
+          # branch, so a detached HEAD is fine.
+          ref: ${{ github.sha }}
 
       # `actions/checkout` cannot write outside $GITHUB_WORKSPACE, so the
       # sibling lands NEXT TO `cli/` rather than at a literal `../`. Running
@@ -243,49 +243,28 @@ jobs:
           npm version "$VERSION" --no-git-tag-version
           echo "Publishing $VERSION under the next dist-tag (latest stays $LATEST)"
 
-      - name: Bump patch version
+      # `latest`: derived the same way (the higher of package.json and npm's
+      # latest, plus one patch) and never committed. main is protected, and
+      # the registry is what says which number was released last.
+      - name: Set the latest version (derived, never committed)
         if: github.event_name == 'workflow_dispatch'
         working-directory: cli
-        run: npm version patch --no-git-tag-version
+        env:
+          LATEST: ${{ steps.npm-latest.outputs.version }}
+        run: |
+          VERSION=$(node scripts/release-version.mjs latest --latest "$LATEST")
+          npm version "$VERSION" --no-git-tag-version
+          echo "Publishing $VERSION under the latest dist-tag (was $LATEST)"
 
       # npm moves `latest` to whatever is published under it, even a LOWER
       # version: from a main behind the registry, the bump would publish
-      # 1.12.3 over 1.13.0. Stop before anything is committed or published.
+      # 1.12.3 over 1.13.0. Stop before anything is tagged or published.
       - name: The bumped version is ahead of npm's latest
         if: github.event_name == 'workflow_dispatch'
         working-directory: cli
         env:
           LATEST: ${{ steps.npm-latest.outputs.version }}
         run: node scripts/release-version.mjs ahead --latest "$LATEST"
-
-      # ── ORDERING IS THE WHOLE POINT ──────────────────────────────────────────
-      # The bump is committed and pushed BEFORE `npm publish`, never after.
-      #
-      # The other order wedges the pipeline permanently. `npm version patch`
-      # runs, `npm publish` puts 1.12.1 on the registry, and then the push
-      # fails — read-only GITHUB_TOKEN, a detached HEAD, or a merge that landed
-      # meanwhile. npm now says 1.12.1 and the repo still says 1.12.0, so the
-      # NEXT run bumps to 1.12.1 again and dies on EPUBLISHCONFLICT, and so
-      # does every run after it, until a human hand-edits the version. That is
-      # how this package sat at 1.11.0 while the repo claimed 1.12.0.
-      #
-      # Pushing first inverts the failure into the harmless direction: if the
-      # push fails, the job stops here and NOTHING was published. If the push
-      # succeeds and a later step fails, the repo is one patch ahead of the
-      # registry — the next release simply skips a version number, which costs
-      # nothing and wedges nothing.
-      - name: Commit the version bump (BEFORE publish — see above)
-        if: github.event_name == 'workflow_dispatch'
-        working-directory: cli
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add package.json package-lock.json
-          # No `|| true`: `npm version patch` always rewrites package.json, so
-          # an empty commit here means the bump did not happen and the run must
-          # not continue to publish.
-          git commit -m "chore: publish @synap-core/cli [skip ci]"
-          git push
 
       # PRE-publish gate: pack this tree with `npm pack` (the same packer
       # `npm publish` uses — `pnpm pack` would rewrite the very protocols we are
@@ -309,6 +288,21 @@ jobs:
         run: npm publish --access public --provenance --tag "$CHANNEL"
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      # The record of a `latest` release is the tag `v<version>`, pushed AFTER
+      # `npm publish`. Nothing is committed: main accepts only pull requests.
+      # The order is safe either way now that the number is derived from npm's
+      # latest: if this push fails, the next dispatch still derives the next
+      # patch from the registry, so nothing wedges. (The old flow committed a
+      # bump to main and wedged on EPUBLISHCONFLICT whenever npm got ahead of
+      # main: the package sat at 1.11.0 while the repo claimed 1.12.0.)
+      - name: Tag the release
+        if: github.event_name == 'workflow_dispatch'
+        working-directory: cli
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          git tag "v$VERSION" HEAD
+          git push origin "refs/tags/v$VERSION"
 
       # POST-publish ground truth: re-download what the registry now actually
       # serves. A local pack proves what your packer produced; only this proves
