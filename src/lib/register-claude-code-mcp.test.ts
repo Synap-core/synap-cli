@@ -61,6 +61,25 @@ describe("registerClaudeCodeMcp", () => {
     expect(args.indexOf("--")).toBeGreaterThan(args.indexOf("-e"));
   });
 
+  it("bridge add names the installed bin, not the checkout it may resolve to", () => {
+    useTransport("bridge");
+    const entry = path.join(home, "prefix", "lib", "node_modules", "@synap-core", "cli", "dist", "index.js");
+    fs.mkdirSync(path.dirname(entry), { recursive: true });
+    fs.writeFileSync(entry, "");
+    const bin = path.join(home, "prefix", "bin", "synap");
+    fs.mkdirSync(path.dirname(bin), { recursive: true });
+    fs.symlinkSync("../lib/node_modules/@synap-core/cli/dist/index.js", bin);
+    const argv1 = process.argv[1];
+    process.argv[1] = bin;
+    try {
+      registerClaudeCodeMcp(URL, KEY, "synap-test");
+    } finally {
+      process.argv[1] = argv1;
+    }
+    const args = addCall();
+    expect(args.slice(args.indexOf("--") + 1)).toEqual([process.execPath, bin, "mcp", "bridge", "--url", URL]);
+  });
+
   it("a failed bridge add prints the stdio form, not http, and never the key", () => {
     useTransport("bridge");
     exec.mockImplementation((_bin: string, args: string[]) => {
