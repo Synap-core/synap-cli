@@ -1439,9 +1439,9 @@ session
   )
   .option(
     "--events <kinds>",
-    "Wait on the session change feed: comma list of answer, proposal_decided, stage_moved, owner_message, session_message (a message from another session's agent), or all"
+    "Wait on the session change feed: comma list of answer, proposal_decided, stage_moved, owner_message, session_message (a message from another session's agent), pr_merged, pr_closed, checks_finished, status_moved, hold_set, blocker_ended, signal_raised, or all"
   )
-  .option("--wake-only", "Stop only on what should wake an agent: answers, owner messages, and agent messages the pod marked wake (the rest is read and skipped)")
+  .option("--wake-only", "Stop only on what the pod marks `wake` (answers, owner messages, agent messages sent to wake you, decided proposals, merged or closed PRs, finished checks, ended blockers, signals, a pause it resumed); the rest is read and skipped. The default when --events is not given")
   .option("--once", "One read, no waiting loop")
   .option("--peek", "Mark nothing picked up or read (a watcher that is not the agent doing the work)")
   .option("--hook", "Run as a Claude Code asyncRewake Stop hook: wait for a wake-worthy event, print it on stderr, exit 2 (see: synap hooks install-wake)")

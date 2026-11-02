@@ -3588,13 +3588,13 @@
               {
                 "flags": "--events <kinds>",
                 "long": "--events",
-                "description": "Wait on the session change feed: comma list of answer, proposal_decided, stage_moved, owner_message, session_message (a message from another session's agent), or all",
+                "description": "Wait on the session change feed: comma list of answer, proposal_decided, stage_moved, owner_message, session_message (a message from another session's agent), pr_merged, pr_closed, checks_finished, status_moved, hold_set, blocker_ended, signal_raised, or all",
                 "takesValue": "required"
               },
               {
                 "flags": "--wake-only",
                 "long": "--wake-only",
-                "description": "Stop only on what should wake an agent: answers, owner messages, and agent messages the pod marked wake (the rest is read and skipped)",
+                "description": "Stop only on what the pod marks `wake` (answers, owner messages, agent messages sent to wake you, decided proposals, merged or closed PRs, finished checks, ended blockers, signals, a pause it resumed); the rest is read and skipped. The default when --events is not given",
                 "takesValue": "none"
               },
               {
