@@ -16,6 +16,7 @@
 
 import chalk from "chalk";
 import { resolveHubConfig, type HubConfig } from "../lib/hub-client.js";
+import { probeAuthStatus } from "../lib/credential-class.js";
 import {
   buildMcpUrl,
   provisionAgentKey,
@@ -158,20 +159,13 @@ export async function mcpVerify(opts: McpBaseOpts): Promise<void> {
     }
 
     // 2. Key validity (authed call).
-    let keyValid = false;
-    try {
-      const res = await fetch(`${podBase}/api/hub/auth/status`, {
-        headers: { Authorization: `Bearer ${cfg.apiKey}` },
-        signal: AbortSignal.timeout(30000),
-      });
-      keyValid = res.ok;
-    } catch {
-      keyValid = false;
-    }
+    // Three answers: an unreachable pod says nothing about the key.
+    const keyProbe = await probeAuthStatus(cfg);
+    const keyValid = keyProbe === "valid";
 
     if (opts.json) {
       console.log(
-        JSON.stringify({ url, reachable, toolCount, keyValid }, null, 2)
+        JSON.stringify({ url, reachable, toolCount, keyValid, keyProbe }, null, 2)
       );
       return;
     }
@@ -182,7 +176,7 @@ export async function mcpVerify(opts: McpBaseOpts): Promise<void> {
       `  ${chalk.dim("Endpoint")}   ${reachable ? chalk.green("reachable") : chalk.red("unreachable")}${toolCount != null ? chalk.dim(` · ${toolCount} tools`) : ""}`
     );
     console.log(
-      `  ${chalk.dim("API key")}    ${keyValid ? chalk.green("valid") : chalk.red("invalid / expired")}`
+      `  ${chalk.dim("API key")}    ${keyProbe === "valid" ? chalk.green("valid") : keyProbe === "unreachable" ? chalk.yellow("could not reach the pod to check") : chalk.red("invalid / expired")}`
     );
     if (workspaceId)
       console.log(`  ${chalk.dim("Workspace")}  ${workspaceId}`);

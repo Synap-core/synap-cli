@@ -89,6 +89,24 @@ export async function fetchAuthStatus(cfg: HubConfig, apiKey?: string): Promise<
   return (await hubGet("/auth/status", {}, apiKey ? { ...cfg, apiKey } : cfg)) as AuthStatus;
 }
 
+/**
+ * Is this key good? Three answers, never two: a pod that cannot be reached
+ * says NOTHING about the key, so it is `unreachable`, not `invalid`. Only the
+ * pod's own refusal (401/403) is `invalid`. Goes through `fetchAuthStatus`,
+ * so it shares the hub client's pacing, 429 retry and error shapes.
+ */
+export type KeyProbe = "valid" | "invalid" | "unreachable";
+
+export async function probeAuthStatus(cfg: HubConfig): Promise<KeyProbe> {
+  try {
+    await fetchAuthStatus(cfg);
+    return "valid";
+  } catch (err) {
+    if (err instanceof HubError && (err.status === 401 || err.status === 403)) return "invalid";
+    return "unreachable";
+  }
+}
+
 const agentUserIdCache = new Map<string, string>();
 
 /**
