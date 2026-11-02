@@ -104,6 +104,12 @@ export interface WorkerOptions {
   githubApp?: string;
   /** Where work-folder runs get their folder, one per session (default ~/synap-work). */
   workRoot?: string;
+  /**
+   * Which protocols this worker takes, comma-separated (`code`, `work-folder`;
+   * default both). A design run counts as `code`. A computer that runs no code
+   * (the person's Mac) takes `work-folder` only (`parseProtocols`).
+   */
+  protocols?: string;
 }
 
 export interface HandedItem {
@@ -723,6 +729,32 @@ export function sessionProtocol(getSessionText: string): WorkerProtocol {
   return "work-folder";
 }
 
+export const WORKER_PROTOCOLS: readonly WorkerProtocol[] = ["code", "work-folder"];
+
+/**
+ * `--protocols`: the protocols a worker takes. Absent = every protocol. An
+ * unknown or empty list THROWS: a typo must never quietly widen (or empty)
+ * what a computer runs.
+ */
+export function parseProtocols(list: string | undefined): ReadonlySet<WorkerProtocol> {
+  if (list === undefined) return new Set(WORKER_PROTOCOLS);
+  const names = list
+    .split(",")
+    .map((t) => t.trim())
+    .filter(Boolean);
+  const bad = names.filter((n) => !(WORKER_PROTOCOLS as readonly string[]).includes(n));
+  if (bad.length || !names.length) {
+    throw new Error(`--protocols takes ${WORKER_PROTOCOLS.join(", ")} (comma-separated); got "${list}"`);
+  }
+  return new Set(names as WorkerProtocol[]);
+}
+
+/** The one room line a session gets when this worker does not take its protocol. */
+export function refusedProtocolLine(protocol: WorkerProtocol, takes: ReadonlySet<WorkerProtocol>): string {
+  const kind = protocol === "code" ? "code work (a session with no playbook, or a repo, branch or pull request to make)" : "a playbook run over pod data";
+  return `This computer's worker does not take ${kind}: it takes ${[...takes].join(" and ")} runs only. Nothing was launched. Hand this session to an agent on a computer that runs ${protocol === "code" ? "code (the devbox)" : "playbook runs"}.`;
+}
+
 /** A work-folder run's folder: `<root>/<sessionId>`. */
 export function workFolderFor(root: string, sessionId: string): string {
   return path.join(root, sessionId);
@@ -1082,6 +1114,8 @@ export function createWorker(opts: WorkerOptions, deps: WorkerDeps): Worker {
   const cwd = path.resolve(opts.cwd ?? path.join(os.homedir(), "Documents", "Code", "synap"));
   const claudeBin = opts.claudeBin ?? "claude";
   const workRoot = path.resolve(opts.workRoot ?? path.join(os.homedir(), "synap-work"));
+  const takes = parseProtocols(opts.protocols);
+  const takesAll = WORKER_PROTOCOLS.every((p) => takes.has(p));
 
   const mcpServer = RUN_MCP_SERVER;
 
@@ -1152,7 +1186,7 @@ export function createWorker(opts: WorkerOptions, deps: WorkerDeps): Worker {
   const who = accountsFile
     ? `accounts ${accountsFile.accounts.map((a) => `${a.id}${a.design ? " (design)" : ""}`).join(", ")} · reserve ${accountsFile.reserve}`
     : "the environment's Claude login";
-  log(`agent ${agent} → ${deps.podUrl} · MCP server "${mcpServer}" · cwd ${cwd} · work folders ${workRoot} · max ${maxParallel} parallel · ${who} · GitHub as ${githubToken ? "the Synap Agent App" : "THE ENVIRONMENT'S LOGIN"}`);
+  log(`agent ${agent} → ${deps.podUrl} · MCP server "${mcpServer}" · cwd ${cwd} · work folders ${workRoot} · max ${maxParallel} parallel${takesAll ? "" : ` · takes ${[...takes].join(", ")} runs only`} · ${who} · GitHub as ${githubToken ? "the Synap Agent App" : "THE ENVIRONMENT'S LOGIN"}`);
 
   // ── accounts ──
   const saidOnce = new Set<string>();
@@ -1591,18 +1625,49 @@ export function createWorker(opts: WorkerOptions, deps: WorkerDeps): Worker {
    * before protocols), else the protocol its data says. `undefined` when that
    * could not be read (not launched this tick).
    */
-  const readShape = async (sessionId: string): Promise<{ design: boolean; protocol: WorkerProtocol } | undefined> => {
+  const readShape = async (
+    sessionId: string
+  ): Promise<{ design: boolean; protocol: WorkerProtocol; channelId: string | null } | undefined> => {
     try {
       const s = await deps.mcp.call("synap_get_session", { sessionId });
       if (s.isError) throw new Error(`refused: ${s.text.slice(0, 160)}`);
       const design = isDesignSession(s.text);
-      return { design, protocol: design ? "code" : sessionProtocol(s.text) };
+      const protocol = design ? "code" : sessionProtocol(s.text);
+      const channelId = findKey(JSON.parse(s.text), "channelId");
+      return { design, protocol, channelId: typeof channelId === "string" && channelId ? channelId : null };
     } catch (err) {
       const msg = (err as Error).message;
       sayOnce(`shape:${sessionId}:${msg}`, `session ${sessionId}: could not read how to run it (${msg}) — not launched; retried every tick`);
       return undefined;
     }
   };
+
+  /**
+   * Sessions whose protocol this worker does not take (`--protocols`): never
+   * launched, fresh or resumed. Each is said once in the log and once in its
+   * room (a session that only reads "handed" while nothing runs it is a calm,
+   * wrong screen); the shape is not read again in this process.
+   */
+  const refused = new Set<string>();
+  const refuse = async (sessionId: string, protocol: WorkerProtocol, channelId: string | null | undefined) => {
+    if (refused.has(sessionId)) return;
+    refused.add(sessionId);
+    log(`session ${sessionId}: a ${protocol} session — this worker takes ${[...takes].join(", ")} runs only (--protocols); not launched`);
+    if (!channelId) return;
+    try {
+      const p = await deps.mcp.call("synap_post_message", {
+        channelId,
+        kind: "update",
+        content: refusedProtocolLine(protocol, takes),
+        idempotencyKey: `worker-refused:${agent}:${sessionId}`,
+      });
+      if (p.isError) log(`session ${sessionId}: could not say so in its room: ${p.text.slice(0, 160)}`);
+    } catch (err) {
+      log(`session ${sessionId}: could not say so in its room: ${(err as Error).message}`);
+    }
+  };
+  /** A recorded run's protocol, for a resume: a design run is `code`, a run from before protocols too. */
+  const takesRecorded = (rec: RunRecord) => takes.has(rec.mode === "bg" ? "code" : (rec.protocol ?? "code"));
 
   const tick = async () => {
     measuredThisTick = false;
@@ -1623,6 +1688,10 @@ export function createWorker(opts: WorkerOptions, deps: WorkerDeps): Worker {
       const item = rec.status === "limited" ? handed.get(rec.sessionId) : undefined;
       // A resume item continues its conversation or nothing: never a fresh start.
       if (!item || (item.resume && !rec.claudeSessionId)) continue;
+      if (!takesRecorded(rec)) {
+        await refuse(rec.sessionId, rec.mode === "bg" ? "code" : (rec.protocol ?? "code"), undefined);
+        continue;
+      }
       if ((rec.limitResumes ?? 0) >= MAX_LIMIT_RESUMES) {
         rec.status = "failed";
         rec.result = `stopped: cut off by a usage limit ${MAX_LIMIT_RESUMES + 1} times`;
@@ -1640,8 +1709,13 @@ export function createWorker(opts: WorkerOptions, deps: WorkerDeps): Worker {
     // 2. Sessions never launched (or due a relaunch).
     for (const item of pickNew(items, state, items.length, now())) {
       if (free() <= 0) break;
+      if (refused.has(item.id)) continue;
       const shape = await readShape(item.id);
       if (shape === undefined) continue;
+      if (!takes.has(shape.protocol)) {
+        await refuse(item.id, shape.protocol, shape.channelId);
+        continue;
+      }
       const account = await pick(shape.design);
       if (account === null) continue;
       await launch(item, { kind: "fresh" }, shape.design, shape.protocol, account);
@@ -1661,6 +1735,10 @@ export function createWorker(opts: WorkerOptions, deps: WorkerDeps): Worker {
         continue;
       }
       if (!rec || rec.status === "running" || rec.status === "limited" || !rec.claudeSessionId || !rec.finishedAt) continue;
+      if (!takesRecorded(rec)) {
+        await refuse(item.id, rec.mode === "bg" ? "code" : (rec.protocol ?? "code"), undefined);
+        continue;
+      }
       if ((rec.resumes ?? 0) >= MAX_RESUMES) continue;
       const follow = await roomFollowUps(item.id, rec.finishedAt);
       const quiet = item.resume === true && rec.resumedQuietSince !== (item.quietSince ?? "") && !quietIsOwnRun(item, rec);

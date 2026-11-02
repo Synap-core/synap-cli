@@ -1228,6 +1228,10 @@ program
   .option("--allowed-tools <list>", "Comma-separated Claude tools allowed without asking (the pod MCP server is always added)")
   .option("--skip-permissions", "Launch with --dangerously-skip-permissions instead of an allow-list")
   .option("--dry-run", "Claim and log what would launch, without launching Claude")
+  .option(
+    "--protocols <list>",
+    "Which runs this computer takes: code, work-folder (comma-separated; default both). A computer that runs no code, like the person's Mac, takes work-folder only; a design run counts as code"
+  )
   .action(async (opts: import("./commands/worker.js").WorkerOptions) => {
     const { workerCommand } = await import("./commands/worker.js");
     await workerCommand(opts);
