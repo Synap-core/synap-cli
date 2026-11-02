@@ -3011,6 +3011,12 @@
             "long": "--dry-run",
             "description": "Claim and log what would launch, without launching Claude",
             "takesValue": "none"
+          },
+          {
+            "flags": "--protocols <list>",
+            "long": "--protocols",
+            "description": "Which runs this computer takes: code, work-folder (comma-separated; default both). A computer that runs no code, like the person's Mac, takes work-folder only; a design run counts as code",
+            "takesValue": "required"
           }
         ],
         "subcommands": []
