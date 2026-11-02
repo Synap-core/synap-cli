@@ -64,7 +64,7 @@ import {
   type CpMineRow,
   type TierInfo,
 } from "../lib/cp-packages.js";
-import { fetchInstalledSlugs, fetchInstalledTemplates, fetchInstalledInventory, fetchInstalledInventoryStrict, installedRowsToTemplates, fetchWorkspaceAttachments, fetchWorkspaceAttachmentsStrict, verifyStampLanded, INSTALLED_KINDS, type InstalledKind, type InstalledRow, type InstalledTemplateInfo, type WorkspaceAttachment } from "../lib/installed.js";
+import { fetchInstalledSlugs, fetchInstalledTemplates, fetchInstalledInventory, installedRowsToTemplates, fetchWorkspaceAttachments, fetchWorkspaceAttachmentsStrict, verifyStampLanded, INSTALLED_KINDS, type InstalledKind, type InstalledRow, type InstalledTemplateInfo, type WorkspaceAttachment } from "../lib/installed.js";
 import { isSuite } from "../lib/suite.js";
 import {
   TEMPLATE_STEP_LABELS,
@@ -78,6 +78,12 @@ import {
 import { capabilityAdd } from "./capability.js";
 import { bundledTemplatesVersion } from "../lib/bundle-version.js";
 import { HubNetworkError } from "../lib/hub-client.js";
+import {
+  checksFromStandings,
+  fetchPackageStandings,
+  StandingsUnavailableError,
+  type PackageStanding,
+} from "../lib/package-updates.js";
 import { podAdminOrigin } from "../lib/safe-open.js";
 import {
   parseDataChanges,
@@ -1670,6 +1676,8 @@ export interface UpdateCheck extends TemplateUpdateCheck {
   noVersionInfo: boolean;
   /** The installed row's kind (absent = `"workspace"`, the only kind an older pod reports). Picks the update door — see {@link updateDoorFor}. */
   kind?: InstalledKind;
+  /** The pod's reason when it could not compare this package (`market update`). */
+  reason?: string;
 }
 
 /**
@@ -2017,25 +2025,29 @@ export async function marketUpdate(
   }
 ): Promise<void> {
   const applyTimeoutMs = parseApplyTimeoutMs(opts.timeout);
-  // STRICT fetch: distinguish "pod unreachable" (transient — don't claim the
-  // pod is empty, that reads as data loss) from "genuinely nothing installed".
   const cat = await buildMarketCatalog();
-  let installedTemplates: InstalledTemplateInfo[];
-  // Whether the pod answered from the ONE read door (`GET /installed`, all six
-  // kinds) or is old enough that only workspace packages were visible. An old
-  // pod is not an empty pod — say which, rather than letting a narrower list
-  // read as the whole truth.
-  let degraded = false;
+  // THE POD'S ANSWER, never the CLI's: which installed package has an update
+  // is derived once on the pod, for every kind, with one rule (Hub
+  // `GET /package-updates` → `installed[]`), and pod admin's Updates tab reads
+  // the same list. A pod that cannot answer is said out loud, never replaced
+  // by a verdict computed here (that fork is how the CLI said "content
+  // changed" while pod admin said nothing, 2 Nov 2026).
+  let standings: PackageStanding[];
   try {
-    const inv = await fetchInstalledInventoryStrict();
-    installedTemplates = installedRowsToTemplates(inv.rows);
-    degraded = inv.degraded;
+    standings = await fetchPackageStandings(await resolveHubConfig(opts));
   } catch (e) {
     // Unreachable ≠ success — a script checking `$?` (or `&&`-chaining) must see
     // failure, not exit 0, even though the JSON payload also carries the reason.
     process.exitCode = 1;
+    const unavailable = e instanceof StandingsUnavailableError ? e.reason : null;
     if (opts.json) {
-      console.log(JSON.stringify({ checks: [], loggedIn: cat.loggedIn, error: "pod-unreachable" }, null, 2));
+      console.log(
+        JSON.stringify({ checks: [], loggedIn: cat.loggedIn, error: unavailable ?? "pod-unreachable" }, null, 2)
+      );
+      return;
+    }
+    if (e instanceof StandingsUnavailableError) {
+      log.error(e.message);
       return;
     }
     log.error("Couldn't reach your pod to read what's installed — not saying it's empty.");
@@ -2043,30 +2055,23 @@ export async function marketUpdate(
     log.hint("Check the pod is up / you're on the right --pod, then retry.");
     return;
   }
+  // Kept in the JSON for readers of the older shape: the pod's list covers
+  // every kind, so it is never the workspace-only view of an old pod.
+  const degraded = false;
 
-  const degradedNote = degraded
-    ? "This pod does not serve GET /api/hub/installed — only workspace packages were checked. Capability / view / skill / automation / card installs were NOT (upgrade the pod to include them)."
-    : undefined;
-
-  if (installedTemplates.length === 0) {
+  if (standings.length === 0) {
     if (opts.json) {
-      console.log(
-        JSON.stringify({ checks: [], loggedIn: cat.loggedIn, degraded, ...(degradedNote ? { degradedNote } : {}) }, null, 2)
-      );
+      console.log(JSON.stringify({ checks: [], loggedIn: cat.loggedIn, degraded }, null, 2));
       return;
     }
     log.warn("No installed packages found on this pod.");
-    if (degradedNote) log.dim(degradedNote);
     log.hint("Install one: synap market install <slug>");
     return;
   }
 
-  // ONE ROW PER SLUG. `GET /installed` reports one row per installed OBJECT —
-  // a views pack that installed four views is four rows — and an update is
-  // applied per PACKAGE, not per object. Without this the preview listed
-  // `task-views-pack` four times and the "N up to date" tally counted it four
-  // times. `market installed` has always deduped the same way.
-  let checks = dedupeBySlug(computeUpdates(installedTemplates, cat));
+  // One check per slug: the pod answers per package (slug + kind); a slug
+  // installed as two kinds is updated per kind by its own door, but listed once.
+  let checks: UpdateCheck[] = dedupeBySlug(checksFromStandings(standings));
   const entryBySlug = new Map(cat.entries.map((e) => [e.slug, e]));
   const explicitSlugs = !!slugsArg && slugsArg.length > 0;
   let unknownSlugs: string[] = [];
@@ -2199,7 +2204,6 @@ export async function marketUpdate(
         `${noVersionInfo.length} installed without a version stamp — can't check ${noVersionInfo.length === 1 ? "it" : "them"} for updates.`
       );
     }
-    if (degradedNote) log.dim(degradedNote);
   }
 
   // What the JSON carries for the new facts: per slug, the pod's data changes
@@ -2299,8 +2303,15 @@ export async function marketUpdate(
   for (const c of withUpdates) {
     const door = updateDoorFor(c.kind);
     if (door === null) {
-      if (!opts.json)
-        log.warn(`${c.slug} is a ${c.kind} — the pod has no per-package update for this kind, so it was not updated. Nothing was written.`);
+      if (!opts.json) {
+        // A capability update is a person's act on pod admin (the pod refuses
+        // an agent key there); any other kind here has no updater at all.
+        log.warn(
+          c.kind === "capability"
+            ? `${c.slug} is a capability — it was not updated here. Nothing was written. ${marketUpdatesDoor(cfg!.podUrl)}`
+            : `${c.slug} is a ${c.kind} — the pod has no per-package update for this kind, so it was not updated. Nothing was written.`
+        );
+      }
       results.push({ slug: c.slug, outcome: "no-updater", status: "no-updater", warnings: [] });
       continue;
     }
