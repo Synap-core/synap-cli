@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import { describe, it, expect } from "vitest";
 import { osc8, safeText, scrubStrings } from "./term.js";
 
@@ -6,7 +7,7 @@ describe("safeText: what a pod string may put on the terminal", () => {
     expect(safeText("a\x1b[31mb\x07c\x00d\x7fe\x9b2Jf\x9dg")).toBe("a[31mbcde2Jfg");
   });
   it("drops the bidi overrides and isolates", () => {
-    expect(safeText("ab‮cd⁦ef⁩‏")).toBe("abcdef");
+    expect(safeText("ab\u202ecd\u2066ef\u2069\u200f")).toBe("abcdef");
   });
   it("turns line breaks and tabs into one space, and keeps ordinary text whole", () => {
     expect(safeText("one\r\n\ttwo")).toBe("one two");
@@ -27,5 +28,22 @@ describe("osc8", () => {
   it("is plain text with no URL", () => {
     expect(osc8("", "name\x07")).toBe("name");
     expect(osc8(null, "name")).toBe("name");
+  });
+});
+
+describe("the bidi scrubber's source", () => {
+  // Trojan Source: a raw bidi control inside a source file reorders what a reviewer reads.
+  const BIDI = [0x200e, 0x200f, 0x202a, 0x202b, 0x202c, 0x202d, 0x202e, 0x2066, 0x2067, 0x2068, 0x2069];
+
+  it("holds no raw bidi control character in term.ts or in this test", () => {
+    for (const f of ["./term.ts", "./term.test.ts"]) {
+      const src = fs.readFileSync(new URL(f, import.meta.url), "utf-8");
+      const raw = [...src].filter((c) => BIDI.includes(c.codePointAt(0)!));
+      expect(raw, f).toEqual([]);
+    }
+  });
+
+  it("still removes each one", () => {
+    for (const cp of BIDI) expect(safeText(`a${String.fromCodePoint(cp)}b`)).toBe("ab");
   });
 });

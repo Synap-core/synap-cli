@@ -14,10 +14,11 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { convCachePath, podCacheFile } from "../lib/statusline-store.js";
 
 const tmpFiles = new Map<string, string>();
 let stdin = "";
-const isTmp = (p: unknown) => typeof p === "string" && p.startsWith("/tmp/synap-statusline");
+const isTmp = (p: unknown) => typeof p === "string" && /[/\\]\.synap[/\\]statusline[/\\](pod|conv)-/.test(p);
 
 vi.mock("node:fs", async () => {
   const real = await vi.importActual<typeof import("node:fs")>("node:fs");
@@ -35,6 +36,10 @@ vi.mock("node:fs", async () => {
       if (isTmp(p)) return void tmpFiles.set(p as string, String(data));
       return (real.writeFileSync as (...a: unknown[]) => unknown)(p, data, ...rest);
     }) as typeof real.writeFileSync,
+    chmodSync: ((p: unknown, ...rest: unknown[]) => {
+      if (isTmp(p)) return;
+      return (real.chmodSync as (...a: unknown[]) => unknown)(p, ...rest);
+    }) as typeof real.chmodSync,
     unlinkSync: ((p: unknown) => {
       if (isTmp(p)) return void tmpFiles.delete(p as string);
       return real.unlinkSync(p as string);
@@ -78,9 +83,9 @@ vi.mock("../lib/pod.js", () => ({ getSurfaceAgentKey: () => null, SURFACE_NAMES:
 
 const { statusline } = await import("./statusline.js");
 
-const SHARED = "/tmp/synap-statusline-cache.json";
+const SHARED = podCacheFile();
 const CONV = "eeee1111-2222-3333-4444-555555555555";
-const CONV_FILE = `/tmp/synap-statusline-conv-${CONV}.json`;
+const CONV_FILE = convCachePath(CONV);
 const BOLD_YELLOW = "\x1b[01;33m";
 // eslint-disable-next-line no-control-regex
 const plain = (s: string) => s.replace(/\x1b\[[0-9;]*m|\x1b\]8;;[^\x1b]*\x1b\\/g, "");

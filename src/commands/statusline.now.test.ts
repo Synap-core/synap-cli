@@ -2,7 +2,7 @@
  * The statusline's per-conversation pod cache and its 4th ("now") line,
  * driven through the REAL exported `statusline()`.
  *
- * The `/tmp/synap-statusline-*` caches live in an in-memory map (a test must
+ * The `~/.synap/statusline/{pod,conv}-*` caches live in an in-memory map (a test must
  * never read or write the person's real cache); every other path is the real
  * fs under the throwaway HOME of test/setup/temp-home.ts. fd 0 (stdin) returns
  * the Claude Code JSON fixture.
@@ -12,10 +12,11 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { podCacheFile } from "../lib/statusline-store.js";
 
 const tmpFiles = new Map<string, string>();
 let stdin = "";
-const isTmp = (p: unknown) => typeof p === "string" && p.startsWith("/tmp/synap-statusline");
+const isTmp = (p: unknown) => typeof p === "string" && /[/\\]\.synap[/\\]statusline[/\\](pod|conv)-/.test(p);
 
 vi.mock("node:fs", async () => {
   const real = await vi.importActual<typeof import("node:fs")>("node:fs");
@@ -33,6 +34,10 @@ vi.mock("node:fs", async () => {
       if (isTmp(p)) return void tmpFiles.set(p as string, String(data));
       return (real.writeFileSync as (...a: unknown[]) => unknown)(p, data, ...rest);
     }) as typeof real.writeFileSync,
+    chmodSync: ((p: unknown, ...rest: unknown[]) => {
+      if (isTmp(p)) return;
+      return (real.chmodSync as (...a: unknown[]) => unknown)(p, ...rest);
+    }) as typeof real.chmodSync,
     unlinkSync: ((p: unknown) => {
       if (isTmp(p)) return void tmpFiles.delete(p as string);
       return real.unlinkSync(p as string);
@@ -80,7 +85,7 @@ vi.mock("../lib/pod.js", () => ({ getSurfaceAgentKey: () => null, SURFACE_NAMES:
 
 const { statusline, convCacheFile } = await import("./statusline.js");
 
-const SHARED = "/tmp/synap-statusline-cache.json";
+const SHARED = podCacheFile();
 // eslint-disable-next-line no-control-regex
 const plain = (s: string) => s.replace(/\x1b\[[0-9;]*m|\x1b\]8;;[^\x1b]*\x1b\\/g, "");
 
