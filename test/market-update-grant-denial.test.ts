@@ -25,6 +25,12 @@ vi.mock("../src/lib/auth.js", async (importOriginal) => ({
   isTokenLocallyExpired: () => false,
 }));
 
+// `market update` reads the pod's verdicts; here they follow the mocked inventory.
+vi.mock("../src/lib/package-updates.js", async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  fetchPackageStandings: async () => (await import("./helpers/standings-from-inventory.js")).standingsFromMockedInventory(),
+}));
+
 vi.mock("../src/lib/installed.js", async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
   fetchInstalledInventoryStrict: async () => ({
