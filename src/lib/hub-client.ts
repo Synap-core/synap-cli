@@ -1220,19 +1220,17 @@ export async function hubPostMultipartRetryable(
 }
 
 export async function hubPatch(path: string, body: unknown, cfg: HubConfig): Promise<unknown> {
-  const url = `${cfg.podUrl}/api/hub${path}`;
-  let res: Response;
-  try {
-    res = await podFetch(url, {
+  const res = await hubFetchWithRetry(
+    `${cfg.podUrl}/api/hub${path}`,
+    {
       method: "PATCH",
       headers: { Authorization: `Bearer ${cfg.apiKey}`, "Content-Type": "application/json", ...sessionHeaders(cfg) },
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(15_000),
-    });
-  } catch (err) {
-    if (err instanceof PodMovedError) throw err;
-    throw networkError(err, url, "PATCH", path, 15_000);
-  }
+    },
+    `PATCH ${path}`,
+    15_000
+  );
   if (!res.ok) {
     const bodyText = await res.text().catch(() => "");
     throw hubError("PATCH", path, res.status, bodyText, undefined, {
@@ -1244,18 +1242,16 @@ export async function hubPatch(path: string, body: unknown, cfg: HubConfig): Pro
 }
 
 export async function hubDelete(path: string, cfg: HubConfig): Promise<unknown> {
-  const url = `${cfg.podUrl}/api/hub${path}`;
-  let res: Response;
-  try {
-    res = await podFetch(url, {
+  const res = await hubFetchWithRetry(
+    `${cfg.podUrl}/api/hub${path}`,
+    {
       method: "DELETE",
       headers: { Authorization: `Bearer ${cfg.apiKey}`, ...sessionHeaders(cfg) },
       signal: AbortSignal.timeout(15_000),
-    });
-  } catch (err) {
-    if (err instanceof PodMovedError) throw err;
-    throw networkError(err, url, "DELETE", path, 15_000);
-  }
+    },
+    `DELETE ${path}`,
+    15_000
+  );
   if (!res.ok) {
     const bodyText = await res.text().catch(() => "");
     throw hubError("DELETE", path, res.status, bodyText, undefined, cfg);

@@ -446,6 +446,9 @@ program
 
     // Already have pods — show status and offer reconnect if any are unreachable
     const { checkPodHealth } = await import("./lib/pod.js");
+    const { probeAuthStatus } = await import("./lib/credential-class.js");
+    type KeyProbe = import("./lib/credential-class.js").KeyProbe;
+    type HubConfig = import("./lib/hub-client.js").HubConfig;
     const ora = (await import("ora")).default;
     const spinner = ora("Checking pods + credentials...").start();
     const checks = await Promise.all(
@@ -454,22 +457,15 @@ program
         // A pod can be HEALTHY (public /health) while the saved key is REVOKED.
         // Validate the actual credential too — otherwise a dead key looks "ok"
         // and the user gets cryptic 401s downstream (the connect trap).
-        let keyValid = false;
+        let keyProbe: KeyProbe | null = null;
         if (h.healthy && p.config.hubApiKey) {
-          try {
-            const res = await fetch(
-              `${p.config.podUrl.replace(/\/$/, "")}/api/hub/auth/status`,
-              {
-                headers: { Authorization: `Bearer ${p.config.hubApiKey}` },
-                signal: AbortSignal.timeout(6000),
-              }
-            );
-            keyValid = res.ok;
-          } catch {
-            keyValid = false;
-          }
+          keyProbe = await probeAuthStatus({
+            podUrl: p.config.podUrl,
+            apiKey: p.config.hubApiKey,
+          } as HubConfig);
         }
-        return { ...p, healthy: h.healthy, keyValid };
+        const keyValid = keyProbe === "valid";
+        return { ...p, healthy: h.healthy, keyValid, keyProbe };
       })
     );
     spinner.stop();
@@ -479,9 +475,11 @@ program
       const active = p.active ? chalk.green(" ● ") : "   ";
       const status = !p.healthy
         ? chalk.red("unreachable")
-        : p.keyValid
-          ? chalk.green("ok")
-          : chalk.yellow("key expired");
+        : p.keyProbe === "unreachable"
+          ? chalk.yellow("could not reach the pod to check the key")
+          : p.keyValid
+            ? chalk.green("ok")
+            : chalk.yellow("key expired");
       console.log(`  ${active}${chalk.bold(p.name.padEnd(14))} ${status}  ${chalk.dim(p.config.podUrl)}`);
     }
     console.log();
@@ -502,7 +500,7 @@ program
     }
 
     // Anything that won't authenticate — unreachable OR a revoked/expired key.
-    const needsReconnect = checks.filter((p) => !renewed.has(p.name) && (!p.healthy || !p.keyValid));
+    const needsReconnect = checks.filter((p) => !renewed.has(p.name) && (!p.healthy || (!p.keyValid && p.keyProbe !== "unreachable")));
     if (needsReconnect.length > 0) {
       console.log(chalk.yellow(`  ${needsReconnect.length} pod(s) need re-authentication. Refresh credentials:`));
       for (const p of needsReconnect) {
