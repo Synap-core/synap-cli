@@ -111,6 +111,20 @@ export function writeSecretFile(file: string, data: string, opts: { mode?: numbe
   fs.chmodSync(file, mode);
 }
 
+/**
+ * {@link writeSecretFile} for a file at a predictable name: it refuses to
+ * follow a symlink at `file` (O_NOFOLLOW, ELOOP), so a link planted there
+ * cannot redirect the write. The caller creates the 0700 directory.
+ */
+export function writeSecretFileNoFollow(file: string, data: string, opts: { mode?: number } = {}): void {
+  const mode = opts.mode ?? 0o600;
+  // O_NOFOLLOW is undefined on Windows, where a symlink needs privilege to plant.
+  // Node accepts a numeric flag at runtime; its typings only list the string form.
+  const flag = (fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_TRUNC | (fs.constants.O_NOFOLLOW ?? 0)) as unknown as string;
+  fs.writeFileSync(file, data, { mode, flag });
+  fs.chmodSync(file, mode);
+}
+
 /** Copy a file that may hold credentials (a `.bak`) and force it to 0600. */
 export function copySecretBackup(src: string, dst: string): void {
   fs.copyFileSync(src, dst);

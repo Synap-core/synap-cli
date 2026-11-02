@@ -25,7 +25,7 @@ export const RESET = "\x1b[0m";
  * the person reads. Line breaks and tabs become one space.
  */
 // eslint-disable-next-line no-control-regex
-const CONTROL = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f‎‏‪-‮⁦-⁩]/g;
+const CONTROL = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
 const BREAKS = /[\t\n\r]+/g;
 
 /** A string from the pod (or any file) as the terminal may show it: no control characters. */

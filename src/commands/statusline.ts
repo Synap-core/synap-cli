@@ -53,6 +53,7 @@ import {
   updateIndex,
   type TranscriptIndex,
 } from "../lib/transcript-index.js";
+import { convCachePath, convLockPath, podCacheFile, podLockFile, writeStatuslineFile } from "../lib/statusline-store.js";
 import { pidAlive, pruneWaits, readWaits } from "../lib/wait-state.js";
 import {
   BOLD_BLUE as BB,
@@ -67,18 +68,11 @@ import {
   safeText,
 } from "../lib/term.js";
 
-const CACHE_FILE = "/tmp/synap-statusline-cache.json"; // pod-wide fields, shared by every conversation
-const LOCK_FILE = "/tmp/synap-statusline-refresh.lock";
-/** A session id as a file-name part. */
-function convKey(claudeSessionId: string | undefined): string {
-  return (claudeSessionId ?? "").replace(/[^A-Za-z0-9_-]/g, "") || "_nosession";
-}
-export function convCacheFile(claudeSessionId: string | undefined): string {
-  return `/tmp/synap-statusline-conv-${convKey(claudeSessionId)}.json`;
-}
-function convLockFile(claudeSessionId: string | undefined): string {
-  return `/tmp/synap-statusline-conv-${convKey(claudeSessionId)}.lock`;
-}
+// Caches and locks live under ~/.synap/statusline/ (0700, files 0600; lib/statusline-store.ts), never /tmp.
+const CACHE_FILE = podCacheFile(); // pod-wide fields, shared by every conversation
+const LOCK_FILE = podLockFile();
+export const convCacheFile = convCachePath;
+const convLockFile = convLockPath;
 /** Render reads at most this many new transcript bytes; more is left to the detached refresh. */
 const RENDER_TRANSCRIPT_BYTES = 2 * 1024 * 1024;
 // The pod sits behind a strict edge rate-limiter (15-min window) shared with
@@ -206,7 +200,7 @@ function lockIsFresh(file = LOCK_FILE): boolean {
 function takeLock(file: string): boolean {
   if (lockIsFresh(file)) return false; // another refresh owns the window
   try {
-    fs.writeFileSync(file, String(process.pid));
+    writeStatuslineFile(file, String(process.pid));
   } catch {
     /* ignore */
   }
@@ -396,7 +390,7 @@ async function refreshShared(cfg: Cfg | null, prev: PodCache | null): Promise<vo
       identityMismatch,
     };
 
-    fs.writeFileSync(CACHE_FILE, JSON.stringify(out));
+    writeStatuslineFile(CACHE_FILE, JSON.stringify(out));
   } catch {
     // Preserve last good cache, mark it not-ok so render can dim the dot, and
     // STAMP THE ATTEMPT: without it the next render refreshes immediately and a
@@ -405,7 +399,7 @@ async function refreshShared(cfg: Cfg | null, prev: PodCache | null): Promise<vo
     // With no previous cache at all, write the empty one for the same reason.
     try {
       const failed = { ...(prev ?? emptyCache()), ok: false, attemptedTs: Date.now() };
-      fs.writeFileSync(CACHE_FILE, JSON.stringify(failed));
+      writeStatuslineFile(CACHE_FILE, JSON.stringify(failed));
     } catch {}
   }
 }
@@ -479,11 +473,11 @@ async function refreshConv(cfg: Cfg | null, prev: ConvCache | null, file: string
       sessionGoal,
       sessionId,
     };
-    fs.writeFileSync(file, JSON.stringify(out));
+    writeStatuslineFile(file, JSON.stringify(out));
   } catch {
     // Same backoff as the shared cache: keep the last good values, stamp the attempt.
     try {
-      fs.writeFileSync(file, JSON.stringify({ ...(prev ?? emptyConv()), ok: false, attemptedTs: Date.now() }));
+      writeStatuslineFile(file, JSON.stringify({ ...(prev ?? emptyConv()), ok: false, attemptedTs: Date.now() }));
     } catch {}
   }
 }
