@@ -197,6 +197,61 @@ describe("synap keys request", () => {
     expect((s.calls[1]!.body as { request_code: string }).request_code).toBe(filed(2).request_code);
   });
 
+  // 2 Nov 2026: an agent asks for the exact permissions it needs instead of a
+  // template; the pod makes the list the ceiling (backend key-request-permissions).
+  describe("--permission", () => {
+    const PERMS = ["entity.company.update", "entity.company.read", "facet.create"];
+
+    it("files the list, with no template, and the usual flags", async () => {
+      const out = tmp();
+      const s = stub({ "/keys/requests": [filed(1)], "/keys/requests/token": [approved] });
+      expect(
+        await runKeysRequest(
+          { permissions: PERMS, workspace: "ws-1", name: "sillage-ingest", expiresDays: 120, out, envName: "SILLAGE_KEY" },
+          s.deps
+        )
+      ).toBe(EXIT_APPROVED);
+      expect(s.calls[0]).toEqual({
+        path: "/keys/requests",
+        body: { permissions: PERMS, name: "sillage-ingest", expiresInDays: 120, workspaceId: "ws-1" },
+      });
+      expect(fs.readFileSync(out, "utf8")).toBe(`SYNAP_POD_URL=https://pod.example\nSILLAGE_KEY=${SECRET}\n`);
+    });
+
+    it("a template and --permission together, or neither, is refused before filing", async () => {
+      const s = stub({ "/keys/requests": [], "/keys/requests/token": [] });
+      expect(await runKeysRequest({ template: "read-only", permissions: PERMS, print: true }, s.deps)).toBe(EXIT_DENIED);
+      expect(s.logs.join("\n")).toMatch(/not both/);
+      expect(await runKeysRequest({ print: true }, s.deps)).toBe(EXIT_DENIED);
+      expect(await runKeysRequest({ permissions: [], print: true }, s.deps)).toBe(EXIT_DENIED);
+      expect(s.calls).toEqual([]);
+    });
+
+    // Rules out: a rerun collecting a request filed for ANOTHER ask (the
+    // person approved a template, the agent now wants a list, or the list grew).
+    it("a saved request is resumed only for the same ask, in any order", async () => {
+      const out = tmp();
+      const first = stub({ "/keys/requests": [filed(1)], "/keys/requests/token": [] });
+      await runKeysRequest({ permissions: PERMS, out, noWait: true }, first.deps);
+
+      const same = stub({ "/keys/requests": [], "/keys/requests/token": [approved] });
+      expect(await runKeysRequest({ permissions: [...PERMS].reverse(), out }, same.deps)).toBe(EXIT_APPROVED);
+      expect(same.calls.map((c) => c.path)).toEqual(["/keys/requests/token"]);
+
+      const out2 = tmp();
+      await runKeysRequest({ permissions: PERMS, out: out2, noWait: true }, stub({ "/keys/requests": [filed(2)], "/keys/requests/token": [] }).deps);
+      const other = stub({ "/keys/requests": [filed(3)], "/keys/requests/token": [approved] });
+      expect(await runKeysRequest({ permissions: [...PERMS, "entity.person.read"], out: out2 }, other.deps)).toBe(EXIT_APPROVED);
+      expect(other.calls.map((c) => c.path)).toEqual(["/keys/requests", "/keys/requests/token"]);
+
+      const out3 = tmp();
+      await runKeysRequest({ template: "read-only", out: out3, noWait: true }, stub({ "/keys/requests": [filed(4)], "/keys/requests/token": [] }).deps);
+      const list = stub({ "/keys/requests": [filed(5)], "/keys/requests/token": [approved] });
+      expect(await runKeysRequest({ permissions: PERMS, out: out3 }, list.deps)).toBe(EXIT_APPROVED);
+      expect(list.calls[0]!.path).toBe("/keys/requests");
+    });
+  });
+
   it("parseDuration", () => {
     expect(parseDuration("24h")).toBe(86_400_000);
     expect(parseDuration("90s")).toBe(90_000);
