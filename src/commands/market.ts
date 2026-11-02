@@ -1779,7 +1779,7 @@ export function dedupeBySlug(checks: UpdateCheck[]): UpdateCheck[] {
  * pod's idempotent-create path, which reconciles when the pod build supports
  * it (see the `applyOnePackage` caveat below for what "created" means here).
  */
-async function applyOnePackage(
+export async function applyOnePackage(
   entry: CatalogEntry,
   cat: MarketCatalog,
   cfg: HubConfig,
@@ -1802,6 +1802,10 @@ async function applyOnePackage(
   seedSummary?: SeedSummary;
   /** Set when the pod refused for lack of consent — the changes it still needs agreement on. */
   pendingDataChanges?: DataChange[];
+  /** Set when the update was filed for the person's approval. */
+  proposalId?: string;
+  /** Where the person approves it (pod admin's proposal page, else the pod's link). */
+  reviewUrl?: string;
 }> {
   if (cat.lockedSlugs.has(entry.slug)) {
     const tier = cat.tierBySlug.get(entry.slug)?.requiredTier;
@@ -1831,13 +1835,26 @@ async function applyOnePackage(
     const res = (await hubPost("/packages/apply", pkg, cfg, applyTimeoutMs)) as Record<string, unknown>;
     s?.stop();
 
+    // A key that may not apply a workspace package on its own (a computer
+    // key's grant leaves out `workspace.update`) files the update for the
+    // person's approval: 202 `{status:"proposed", proposalId, reviewUrl}`.
+    // Waiting, never failed — it applies when the person approves it.
     if (writeGovernance(res) === "proposed") {
       const proposalId = res.proposalId ? String(res.proposalId) : undefined;
+      const reviewUrl = approvalLink(cfg.podUrl, proposalId, res.reviewUrl);
       if (!opts.json) {
-        log.info(`${entry.name} — update proposed (under review, not live yet).`);
-        if (proposalId) log.hint(`Review and approve: synap open proposal ${proposalId}`);
+        log.info(`${entry.name} — update filed for your approval (not applied yet).`);
+        if (reviewUrl) log.hint(`Approve it: ${reviewUrl}`);
+        else if (proposalId) log.hint(`Approve it: synap open proposal ${proposalId}`);
       }
-      return { slug: entry.slug, outcome: "proposed", status: "proposed", warnings: [] };
+      return {
+        slug: entry.slug,
+        outcome: "proposed",
+        status: "proposed",
+        warnings: [],
+        ...(proposalId ? { proposalId } : {}),
+        ...(reviewUrl ? { reviewUrl } : {}),
+      };
     }
 
     const ws = res.workspace as WorkspaceApplyResult | undefined;
@@ -1901,6 +1918,17 @@ async function applyOnePackage(
       error: e instanceof Error ? e.message : String(e),
     };
   }
+}
+
+/**
+ * Where the person approves a filed update: pod admin's proposal page, the
+ * approval door (`/proposal/<id>`), when the pod-admin origin derives from the
+ * pod's; else the link the pod sent (`reviewUrl`); else nothing.
+ */
+export function approvalLink(podUrl: string, proposalId: string | undefined, reviewUrl: unknown): string | undefined {
+  const admin = podAdminOrigin(podUrl);
+  if (admin && proposalId) return `${admin}/proposal/${encodeURIComponent(proposalId)}`;
+  return typeof reviewUrl === "string" && reviewUrl.length > 0 ? reviewUrl : undefined;
 }
 
 /**
@@ -2391,9 +2419,11 @@ export async function marketUpdate(
  * already-current, the `*-with-failures` and `"stamp-contradiction"` statuses
  * get their OWN bucket — a partial capability-seed failure or a stamp that
  * silently didn't take is never folded into a clean "updated" count.
- * `"timed-out"` is broken out from the generic `"failed"` bucket; everything
- * else (locked/proposed/fetch-failed/not-in-catalog/no-workspace/unknown)
- * rolls into "failed".
+ * `"timed-out"` is broken out from the generic `"failed"` bucket;
+ * `"proposed"`/`"awaiting-approval"` count as waiting for the person's
+ * approval (never failed); everything else
+ * (locked/fetch-failed/not-in-catalog/no-workspace/unknown) rolls into
+ * "failed".
  */
 export function summarizeApplyResults(
   results: Array<{ slug: string; status: string }>
@@ -2444,7 +2474,7 @@ export function summarizeApplyResults(
     }
   }
   const parts = [`${updated} updated`, `${unchanged} already current`];
-  if (proposed > 0) parts.push(`${proposed} proposed (awaiting review)`);
+  if (proposed > 0) parts.push(`${proposed} waiting for your approval`);
   // The vocabulary's `unfinished` ("Not finished"): one state, one name on
   // every surface — never "completed with failures" (review2 UX §1 #2).
   if (withFailures > 0) parts.push(`${withFailures} ${templateStepPhrase("unfinished")}`);
@@ -2453,7 +2483,7 @@ export function summarizeApplyResults(
   if (needsConsent > 0) parts.push(`${needsConsent} waiting for your agreement to data changes`);
   const clean = withFailures === 0 && failed === 0 && timedOut === 0 && needsConsent === 0;
   // Proposed isn't a failure (never ⚠) but isn't live yet (not a bare ✓) —
-  // a distinct "→ awaiting review" marker keeps the summary honest.
+  // a distinct "→ waiting for your approval" marker keeps the summary honest.
   const marker = !clean ? "⚠" : proposed > 0 ? "→" : "✓";
   const color = !clean ? chalk.yellow : proposed > 0 ? chalk.cyan : chalk.green;
   return {
