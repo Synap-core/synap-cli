@@ -79,6 +79,38 @@ function resolveProjectIdForPod(
 }
 
 /**
+ * The pod's `code` on a 403 that refused a LIMITED key at the door (a key
+ * whose grant is not unbounded full access), whatever the door: a read no
+ * grant bounds yet, or a door that acts on everything the person owns.
+ * synap-backend `routers/hub-protocol/_middleware/auth.ts`.
+ */
+export const GRANT_DOOR_UNSUPPORTED_CODE = "GRANT_DOOR_UNSUPPORTED";
+
+/**
+ * How the pod words a 403 that refused a write the calling key's GRANT does
+ * not cover (rung 0 of governance: synap-backend `utils/grant-write-check.ts`
+ * `grantWriteDenial`, also `access/fenced-proposal.ts`, `routers/hub-protocol/
+ * channels.ts`). The pod sends NO structured code for it (`{ error }` only, at
+ * `POST /packages/apply` among others), so the CLI reads the words. When the
+ * pod adds a code, read it here first.
+ */
+export const GRANT_DENIAL_PREFIX = "This key's grant does not allow";
+
+/**
+ * A 403 the pod sent because the calling key's grant leaves the action out:
+ * a limited key (a computer's or an agent's) refused by design, never a
+ * missing workspace. `action` is the refused action key when the pod named it
+ * (`workspace.update`).
+ */
+export function grantDenialOf(err: unknown): { action?: string } | null {
+  if (!(err instanceof HubError) || err.status !== 403) return null;
+  const said = err.detail ?? "";
+  if (!said.startsWith(GRANT_DENIAL_PREFIX)) return null;
+  const named = /^This key's grant does not allow "([^"]+)"/.exec(said);
+  return named ? { action: named[1] } : {};
+}
+
+/**
  * A failed Hub call, carrying the structured facts callers need to branch on.
  *
  * `message` is HUMAN-READABLE and is what the many `log.error((err as Error).message)`
@@ -91,6 +123,13 @@ export class HubError extends Error {
   readonly status: number;
   readonly code?: string;
   readonly reason?: string;
+  /**
+   * What the pod itself said, without the `Hub <METHOD> <path> failed` prefix
+   * `message` carries. Read a hint's words from here, never from `message`:
+   * the path is in `message`, so `/workspace/i` over it matched every refusal
+   * on a `/workspaces` route (finding de33a075).
+   */
+  readonly detail?: string;
   readonly body?: unknown;
   readonly rawBody: string;
   readonly path: string;
@@ -104,6 +143,7 @@ export class HubError extends Error {
     message: string;
     status: number;
     code?: string;
+    detail?: string;
     reason?: string;
     body?: unknown;
     rawBody: string;
@@ -117,6 +157,7 @@ export class HubError extends Error {
     this.status = init.status;
     this.code = init.code;
     this.reason = init.reason;
+    this.detail = init.detail;
     this.body = init.body;
     this.rawBody = init.rawBody;
     this.path = init.path;
@@ -386,6 +427,7 @@ function hubError(
     status,
     code,
     reason,
+    detail,
     body: parsed,
     rawBody,
     path,
@@ -439,14 +481,24 @@ export function helpFooterLine(): void {
  * in utils/logger so the logger stays domain-agnostic and the taxonomy and its
  * presentation sit in one file. Always closes with the one-time help footer.
  */
-export function renderHubError(err: unknown): void {
-  renderHubErrorBody(err);
+export function renderHubError(
+  err: unknown,
+  opts: {
+    /**
+     * Where the PERSON does what a limited key was refused (a grant denial):
+     * the command knows its own door, this module does not. Without it the
+     * hint names full access in general.
+     */
+    personDoor?: string;
+  } = {}
+): void {
+  renderHubErrorBody(err, opts);
   // ONE central place every failed Hub command flows through — append the help
   // footer here so it prints once per failed command (guarded), not per line.
   helpFooterLine();
 }
 
-function renderHubErrorBody(err: unknown): void {
+function renderHubErrorBody(err: unknown, opts: { personDoor?: string }): void {
   // Hints use log.hint (stderr), not log.dim (stdout): a hint belongs to the
   // error it explains, and splitting one message across two streams means
   // `2>/dev/null` shows a bare hint with no error above it.
@@ -545,15 +597,44 @@ function renderHubErrorBody(err: unknown): void {
   // gave nothing better than the status phrase.
   const hasSpecificCause =
     !!err.rawBody && !err.message.endsWith("the pod hit an internal error");
-  // A 403/message naming a workspace: the real cause is almost always "that
-  // workspace doesn't exist or isn't accessible ON THIS POD" (a stale saved
-  // workspace id after a pod switch), not a scopes problem — name it + the
-  // exact next command instead of the generic "credentials" hint.
-  const namesWorkspace = /workspace/i.test(err.message);
+  // A limited key refused at the door: the pod says so in a structured `code`
+  // (synap-backend access/grant-door-fence.ts, the Hub auth middleware), for a
+  // read door no grant bounds yet and for a door that acts on everything the
+  // person owns. It says nothing about any workspace.
+  const limitedKeyRefusal =
+    err.status === 403 && err.code === GRANT_DOOR_UNSUPPORTED_CODE;
+  // A limited key whose grant leaves this action out (no code: the pod's
+  // words, `grantDenialOf`). Refused by design; its words often name a
+  // workspace ("workspace.update", "in workspace <id>"), which is no reason to
+  // say the workspace is missing.
+  const grantDenial = grantDenialOf(err);
+  // A 403 whose OWN words name a workspace: the real cause is almost always
+  // "that workspace doesn't exist or isn't accessible ON THIS POD" (a stale
+  // saved workspace id after a pod switch), not a scopes problem — name it +
+  // the exact next command instead of the generic "credentials" hint. The
+  // pod's words (`detail`), never `message`: that one carries the path.
+  const namesWorkspace =
+    !limitedKeyRefusal && !grantDenial && /workspace/i.test(err.detail ?? "");
   if (err.status >= 500) {
     if (!hasSpecificCause) {
       log.hint("The pod hit an internal error — check the pod logs for the stack trace.");
     }
+  } else if (limitedKeyRefusal) {
+    log.hint(
+      `This key is limited (a computer's or an agent's key), and the pod does not let a limited key use ${err.method} ${err.path}. Nothing is wrong with your workspace.`
+    );
+    log.hint(
+      "Until your pod opens this door to limited keys, do it with full access: in the Synap app, or with a full-access key in SYNAP_HUB_API_KEY."
+    );
+  } else if (grantDenial) {
+    const what = grantDenial.action ? `"${grantDenial.action}"` : "this action";
+    log.hint(
+      `This key may not do ${what}: it is a limited key (a computer's or an agent's), and its grant leaves that out on purpose. Nothing is wrong with your workspace.`
+    );
+    log.hint(
+      opts.personDoor ??
+        "Do it yourself with full access: in the Synap app or pod admin."
+    );
   } else if (err.status === 403 && namesWorkspace) {
     // Name the exact workspace + pod this call used: the usual cause is a global
     // active workspace left over from ANOTHER pod (a stale `synap use` after a

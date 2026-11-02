@@ -57,6 +57,8 @@ import {
   PROCESS_HEADER,
   RUNNER_STATE_HEADER,
   claudeCodeConversation,
+  modelHeaders,
+  reportableModel,
   workerRunnerHeader,
 } from "../lib/conversation-headers.js";
 import { resolveHubConfig } from "../lib/hub-client.js";
@@ -153,6 +155,8 @@ export interface RunRecord {
   keptTrees?: string[];
   /** The latest launch's process identity (`X-Synap-Process`), what its runner row is keyed by. */
   process?: string;
+  /** The model the run's Claude Code said it runs (its stream's `init`), reported as `X-Synap-Model`. */
+  model?: string;
   /** The quiet period (its `quietSince`, "" when the pod gave none) this run was last resumed for. */
   resumedQuietSince?: string;
   /** The latest launch's end, not yet recorded on the pod (`settle`): retried each tick until it lands. */
@@ -317,13 +321,23 @@ export function pickNew(
  */
 export const RUN_MCP_SERVER = "synap-worker";
 
+/**
+ * The provider every run's model is served by: Anthropic, on the account's
+ * subscription. By construction of the run's environment (`workerEnv`): no
+ * `ANTHROPIC_*` (key, token, base URL) and no provider switch
+ * (`RUN_ENV_BLOCKLIST`) reaches it. Reported as `X-Synap-Model-Provider`.
+ */
+export const WORKER_MODEL_PROVIDER = "anthropic";
+
 export function runMcpConfig(
   podUrl: string,
   apiKey: string,
   /** The run's Claude session id: names the conversation to the pod, one id across resumes. */
   claudeSessionId?: string,
   /** The launch's process identity (`runProcessIdentity`): the pod keeps one runner row per process. */
-  processIdentity?: string
+  processIdentity?: string,
+  /** The model the run is known to use (a resume: what its first launch said), when known. */
+  model?: string
 ): { mcpServers: Record<string, unknown> } {
   const conversation = claudeCodeConversation(claudeSessionId);
   return {
@@ -338,6 +352,8 @@ export function runMcpConfig(
           // wait for the person's answer included, as the bridge reports an interactive turn).
           // Its end is reported by the worker when the process exits (`runEndHeaders`).
           ...(conversation && processIdentity ? { [PROCESS_HEADER]: processIdentity, [RUNNER_STATE_HEADER]: "busy" } : {}),
+          // What the run runs on: the provider always (the subscription), the model once known.
+          ...modelHeaders(model, WORKER_MODEL_PROVIDER),
         },
       },
     },
@@ -361,10 +377,15 @@ export function runProcessIdentity(launchedAtMs: number, hostname: string = os.h
  * rather than when its live window runs out. None for a run that never named
  * its conversation or process.
  */
-export function runEndHeaders(rec: Pick<RunRecord, "claudeSessionId" | "process">): Record<string, string> | undefined {
+export function runEndHeaders(rec: Pick<RunRecord, "claudeSessionId" | "process" | "model">): Record<string, string> | undefined {
   const conversation = claudeCodeConversation(rec.claudeSessionId);
   if (!conversation || !rec.process) return undefined;
-  return { [CONVERSATION_HEADER]: conversation, [PROCESS_HEADER]: rec.process, [RUNNER_STATE_HEADER]: "ended" };
+  return {
+    [CONVERSATION_HEADER]: conversation,
+    [PROCESS_HEADER]: rec.process,
+    [RUNNER_STATE_HEADER]: "ended",
+    ...modelHeaders(rec.model, WORKER_MODEL_PROVIDER),
+  };
 }
 
 /** Writes the run config owner-only (it holds the key) and returns its path. */
@@ -457,12 +478,29 @@ export function buildWorkFolderPrompt(p: {
   ].join("\n");
 }
 
+/**
+ * What the allowlist's `CLAUDE_*` must NOT pass: the variables that switch
+ * Claude Code off the subscription to another provider (Bedrock, Vertex,
+ * Foundry, Bedrock Mantle, Claude Platform on AWS — `CLAUDE_CODE_USE_*`), skip
+ * that provider's own auth for a gateway (`CLAUDE_CODE_SKIP_*_AUTH`), or hand
+ * routing to a host platform (`CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST`). Any
+ * future `CLAUDE_CODE_USE_*` provider is blocked too; the one `USE_` flag that
+ * is not a provider (the Windows PowerShell tool) passes. Without this a run
+ * would report `anthropic` while another provider served it.
+ */
+export const RUN_ENV_BLOCKLIST: RegExp[] = [
+  /^CLAUDE_CODE_USE_(?!POWERSHELL_TOOL$)[A-Z_]+$/,
+  /^CLAUDE_CODE_SKIP_[A-Z_]+_AUTH$/,
+  /^CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST$/,
+];
+
 export const RUN_ENV_ALLOWLIST: RegExp[] = [
   /^(PATH|HOME|USER|LOGNAME|SHELL|LANG|TERM|TMPDIR|TZ|COLORTERM)$/,
   /^LC_[A-Z_]+$/,
   /^(HTTPS?_PROXY|NO_PROXY|http_proxy|https_proxy|no_proxy|SSL_CERT_FILE|SSL_CERT_DIR|NODE_EXTRA_CA_CERTS)$/,
   /^PNPM_HOME$/,
-  // What the Claude CLI needs; the ANTHROPIC_* key, auth token and base url are not here.
+  // What the Claude CLI needs; the ANTHROPIC_* key, auth token and base url are not here,
+  // and a provider switch is refused by RUN_ENV_BLOCKLIST.
   /^CLAUDE_[A-Z_]+$/,
   // The pod vars (SYNAP_AGENT, SYNAP_POD_URL, …).
   /^SYNAP_[A-Z_]+$/,
@@ -481,7 +519,10 @@ export function workerEnv(
   github?: GithubRunEnv
 ): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
-  for (const [k, v] of Object.entries(base)) if (v !== undefined && RUN_ENV_ALLOWLIST.some((re) => re.test(k))) env[k] = v;
+  for (const [k, v] of Object.entries(base)) {
+    if (v === undefined || RUN_ENV_BLOCKLIST.some((re) => re.test(k))) continue;
+    if (RUN_ENV_ALLOWLIST.some((re) => re.test(k))) env[k] = v;
+  }
   if (claudeConfigDir) env.CLAUDE_CONFIG_DIR = claudeConfigDir;
   if (oauthToken) {
     env.CLAUDE_CODE_OAUTH_TOKEN = oauthToken;
@@ -513,6 +554,8 @@ export interface LimitHit {
 /** What one run's events say about how it ended. */
 export interface RunEnd {
   claudeSessionId?: string;
+  /** The model the stream's `init` names, when it is an id the pod keeps. */
+  model?: string;
   /** The `result` text (stream) or the last main assistant text (transcript). */
   text?: string;
   /** Set when the run's LAST main-thread turn was refused by a usage limit. */
@@ -533,7 +576,8 @@ function epochToMs(v: unknown): number | undefined {
 export function foldRunEvent(end: RunEnd, ev: Record<string, unknown>, rejectedResetsAt?: { at?: number }): RunEnd {
   const type = ev.type;
   if (type === "system" && ev.subtype === "init" && typeof ev.session_id === "string" && !end.claudeSessionId) {
-    return { ...end, claudeSessionId: ev.session_id };
+    const model = typeof ev.model === "string" ? reportableModel(ev.model) : undefined;
+    return { ...end, claudeSessionId: ev.session_id, ...(model ? { model } : {}) };
   }
   if (type === "rate_limit_event") {
     const info = ev.rate_limit_info as { status?: string; resetsAt?: number } | undefined;
@@ -1252,7 +1296,8 @@ export function createWorker(opts: WorkerOptions, deps: WorkerDeps): Worker {
     const processIdentity = runProcessIdentity(now());
     const mcpConfigPath = writeRunMcpConfig(
       stateDir(agent),
-      runMcpConfig(deps.podUrl, deps.apiKey, runSessionId, processIdentity),
+      // A resume runs the model its first launch said; a fresh run's is known once it starts.
+      runMcpConfig(deps.podUrl, deps.apiKey, runSessionId, processIdentity, resumeId ? prior?.model : undefined),
       `mcp-${item.id}.json`
     );
     const prompt =
@@ -1391,6 +1436,10 @@ export function createWorker(opts: WorkerOptions, deps: WorkerDeps): Worker {
         }
         if (end.claudeSessionId && !record.claudeSessionId) {
           record.claudeSessionId = end.claudeSessionId;
+          save();
+        }
+        if (end.model && record.model !== end.model) {
+          record.model = end.model;
           save();
         }
       }

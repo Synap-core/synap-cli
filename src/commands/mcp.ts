@@ -496,7 +496,7 @@ export async function mcpUiSetup(
  * stdout IS the protocol — nothing but JSON-RPC may be written to it.
  */
 export async function mcpBridge(opts: { url?: string }): Promise<void> {
-  const { runMcpBridge } = await import("../lib/mcp-bridge.js");
+  const { modelHandoffPath, runMcpBridge } = await import("../lib/mcp-bridge.js");
   const { mcpBridgeHeaders } = await import("../lib/conversation-headers.js");
   const fromEnv = process.env.SYNAP_MCP_API_KEY || process.env.SYNAP_HUB_API_KEY;
   const cfg = fromEnv && opts.url ? null : await resolveHubConfig();
@@ -511,6 +511,8 @@ export async function mcpBridge(opts: { url?: string }): Promise<void> {
     url,
     apiKey,
     headers: mcpBridgeHeaders(process.env.CLAUDE_CODE_SESSION_ID),
+    // What the conversation runs on, handed over by the synap-bridge plugin.
+    modelFile: modelHandoffPath(process.env.CLAUDE_CODE_SESSION_ID),
   });
 }
 
