@@ -2340,7 +2340,14 @@ export async function marketUpdate(
     // Next steps offer only what this command can run: a capability update
     // (no CLI updater) is the person's act in pod admin, named once below.
     const steps = FLOW.afterMarketUpdateCheck(cliUpdatableSlugs(withUpdates, { agentKey }));
-    const personApplies = withUpdates.filter((c) => updateDoorFor(c.kind) === null).map((c) => c.slug);
+    // Same predicate as the apply loop: no CLI door for this kind, or a
+    // pod-admin door for this key (an agent key's skill/view/automation).
+    const personApplies = withUpdates
+      .filter((c) => {
+        const door = updateDoorFor(c.kind, agentKey);
+        return door === null || door === "pod-admin";
+      })
+      .map((c) => c.slug);
     if (opts.json) {
       console.log(
         JSON.stringify(

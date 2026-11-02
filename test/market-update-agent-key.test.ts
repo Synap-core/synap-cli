@@ -128,6 +128,9 @@ describe("market update with an agent key", () => {
     await marketUpdate(undefined, { json: true });
     const json = JSON.parse(said.at(-1)!);
     const commands = JSON.stringify(json.nextSteps);
+    // ...and named where the person applies it (2 Nov live run: the hint
+    // named the capabilities only, so the skill vanished from the advice).
+    expect(json.appliedInPodAdmin?.slugs).toContain("facecam-edit");
     expect(commands).toContain("content-os");
     expect(commands).not.toContain("facecam-edit");
   });
