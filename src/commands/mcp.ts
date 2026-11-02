@@ -497,7 +497,7 @@ export async function mcpUiSetup(
  */
 export async function mcpBridge(opts: { url?: string }): Promise<void> {
   const { modelHandoffPath, runMcpBridge } = await import("../lib/mcp-bridge.js");
-  const { mcpBridgeHeaders } = await import("../lib/conversation-headers.js");
+  const { claudeCodeProcess, mcpBridgeHeaders } = await import("../lib/conversation-headers.js");
   const fromEnv = process.env.SYNAP_MCP_API_KEY || process.env.SYNAP_HUB_API_KEY;
   const cfg = fromEnv && opts.url ? null : await resolveHubConfig();
   const apiKey = fromEnv || cfg?.apiKey;
@@ -507,12 +507,14 @@ export async function mcpBridge(opts: { url?: string }): Promise<void> {
     process.exit(1);
   }
   // The spawn-time id (a stdio server's env), never a lens fallback.
+  const sessionId = process.env.CLAUDE_CODE_SESSION_ID;
   await runMcpBridge({
     url,
     apiKey,
-    headers: mcpBridgeHeaders(process.env.CLAUDE_CODE_SESSION_ID),
+    // Claude Code's own process (the parent), read once: only inside Claude Code.
+    headers: mcpBridgeHeaders(sessionId, process.cwd(), sessionId ? claudeCodeProcess() : undefined),
     // What the conversation runs on, handed over by the synap-bridge plugin.
-    modelFile: modelHandoffPath(process.env.CLAUDE_CODE_SESSION_ID),
+    modelFile: modelHandoffPath(sessionId),
   });
 }
 

@@ -55,6 +55,7 @@ import path from "node:path";
 import {
   CONVERSATION_HEADER,
   PROCESS_HEADER,
+  processIdentity,
   RUNNER_STATE_HEADER,
   claudeCodeConversation,
   modelHeaders,
@@ -367,8 +368,7 @@ export function runMcpConfig(
  * reads as a new process, never a twin of the one that ended.
  */
 export function runProcessIdentity(launchedAtMs: number, hostname: string = os.hostname(), pid: number = process.pid): string {
-  const host = hostname.replace(/[^A-Za-z0-9._-]/g, "-").slice(0, 255) || "computer";
-  return `${host}:${pid}:${Math.trunc(launchedAtMs)}`;
+  return processIdentity(hostname, pid, launchedAtMs);
 }
 
 /**

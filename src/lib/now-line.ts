@@ -17,14 +17,7 @@ import os from "node:os";
 import path from "node:path";
 import type { OpenTask } from "./transcript-index.js";
 import { isFinal, stateAndDetail, waitName, type WaitRecord } from "./wait-state.js";
-
-const G = "\x1b[32m"; // green
-const R = "\x1b[31m"; // red
-const C = "\x1b[36m"; // cyan
-const A = "\x1b[33m"; // amber
-const Y = "\x1b[01;33m"; // yellow bold
-const D = "\x1b[2m"; // dim
-const X = "\x1b[0m"; // reset
+import { AMBER as A, BOLD_YELLOW as Y, CYAN as C, DIM as D, GREEN as G, RED as R, RESET as X, safeText } from "./term.js";
 
 /** A passed wait stays on the line this long, then goes. */
 export const PASSED_VISIBLE_MS = 10 * 60_000;
@@ -96,9 +89,10 @@ export function visibleLength(s: string): number {
   return [...s.replace(ANSI, "")].length;
 }
 
+/** A piece of text as the terminal shows it: control characters out (term.ts), at most `max` characters. */
 export function clip(s: string, max: number): string {
-  const chars = [...s];
-  return chars.length > max ? `${chars.slice(0, max - 1).join("")}…` : s;
+  const chars = [...safeText(s)];
+  return chars.length > max ? `${chars.slice(0, max - 1).join("")}…` : chars.join("");
 }
 
 // ── Items ──────────────────────────────────────────────────────────────

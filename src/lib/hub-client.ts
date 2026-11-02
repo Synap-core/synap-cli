@@ -87,12 +87,17 @@ function resolveProjectIdForPod(
 export const GRANT_DOOR_UNSUPPORTED_CODE = "GRANT_DOOR_UNSUPPORTED";
 
 /**
- * How the pod words a 403 that refused a write the calling key's GRANT does
- * not cover (rung 0 of governance: synap-backend `utils/grant-write-check.ts`
- * `grantWriteDenial`, also `access/fenced-proposal.ts`, `routers/hub-protocol/
- * channels.ts`). The pod sends NO structured code for it (`{ error }` only, at
- * `POST /packages/apply` among others), so the CLI reads the words. When the
- * pod adds a code, read it here first.
+ * The code a pod puts on a 403 that refused a write the calling key's GRANT
+ * does not cover (synap-backend `utils/grant-write-check.ts` `GRANT_DENIED`,
+ * added to every Hub REST denial by `_middleware/grant-denial-code.ts`), as
+ * `code` (or `reasonCode`, when the door set its own `code`), with the refused
+ * `action`.
+ */
+export const GRANT_DENIED_CODE = "GRANT_DENIED";
+
+/**
+ * How an OLDER pod words the same refusal, with no code (`{ error }` only):
+ * read only when the body carries no `GRANT_DENIED` code.
  */
 export const GRANT_DENIAL_PREFIX = "This key's grant does not allow";
 
@@ -100,10 +105,17 @@ export const GRANT_DENIAL_PREFIX = "This key's grant does not allow";
  * A 403 the pod sent because the calling key's grant leaves the action out:
  * a limited key (a computer's or an agent's) refused by design, never a
  * missing workspace. `action` is the refused action key when the pod named it
- * (`workspace.update`).
+ * (`workspace.update`). The code first; the words only for an older pod.
  */
 export function grantDenialOf(err: unknown): { action?: string } | null {
   if (!(err instanceof HubError) || err.status !== 403) return null;
+  const body =
+    err.body && typeof err.body === "object" && !Array.isArray(err.body)
+      ? (err.body as Record<string, unknown>)
+      : undefined;
+  if (err.code === GRANT_DENIED_CODE || body?.reasonCode === GRANT_DENIED_CODE) {
+    return typeof body?.action === "string" && body.action ? { action: body.action } : {};
+  }
   const said = err.detail ?? "";
   if (!said.startsWith(GRANT_DENIAL_PREFIX)) return null;
   const named = /^This key's grant does not allow "([^"]+)"/.exec(said);
