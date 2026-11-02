@@ -2,22 +2,17 @@
  * `synap market update --yes` with a computer's key: a workspace package
  * update the key may not apply on its own is FILED for the person's approval
  * (founder, 2026-11-02; synap-backend `proposeBeyondGrant`). The pod answers
- * 202 `{status: "proposed", proposalId, reviewUrl}`; the CLI says it waits for
+ * `{status: "proposed", proposalIds}`; the CLI says it waits for
  * the person, gives the approval link, and counts it apart, never as failed.
  * An older pod still refuses with a 403: that stays a refusal with the
  * person's door (test/hub-error-limited-key-hint.test.ts).
  *
- * Driven through the REAL `applyOnePackage` and `hubPost` (a stubbed fetch is
- * the pod); what is asserted is the returned outcome and what the person reads.
+ * Driven through the REAL `applyUpdateThroughDoor` (the one update door,
+ * `POST /package-updates/{slug}/apply`) and `hubPost` (a stubbed fetch is the
+ * pod); what is asserted is the returned outcome and what the person reads.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
-import {
-  applyOnePackage,
-  approvalLink,
-  summarizeApplyResults,
-  type InstallPayload,
-  type MarketCatalog,
-} from "../src/commands/market.js";
+import { applyUpdateThroughDoor, approvalLink, summarizeApplyResults } from "../src/commands/market.js";
 import type { HubConfig } from "../src/lib/hub-client.js";
 
 const POD = "https://pod.antoinesrvt.synap.live";
@@ -25,15 +20,7 @@ const ADMIN = "https://pod-admin.antoinesrvt.synap.live";
 const PROPOSAL = "0f6c8f8e-2f57-4b8e-9d2b-2f5f0d1f6a11";
 const cfg: HubConfig = { podUrl: POD, apiKey: "computer-key", userId: "cli" };
 
-const entry = { slug: "brand-library", name: "Brand library" } as unknown as Parameters<
-  typeof applyOnePackage
->[0];
-const cat = { lockedSlugs: new Set<string>(), tierBySlug: new Map() } as unknown as MarketCatalog;
-const payload: InstallPayload = {
-  pkg: { _meta: { slug: "brand-library", version: "h-336546" }, workspaceName: "Brand library" },
-  from: "catalog",
-  catalogVersion: "h-336546",
-} as InstallPayload;
+const check = { slug: "brand-library", kind: "workspace" as const, latestVersion: "h-336546" };
 
 function podAnswers(status: number, body: unknown): void {
   vi.stubGlobal(
@@ -61,14 +48,10 @@ afterEach(() => {
 });
 
 describe("an update the key may not apply is filed for the person's approval", () => {
-  it("a 202 proposed answer is waiting, with the pod-admin approval link — never failed", async () => {
-    podAnswers(202, {
-      status: "proposed",
-      proposalId: PROPOSAL,
-      reviewUrl: `${POD}/open/${PROPOSAL}`,
-    });
+  it("a proposed answer is waiting, with the pod-admin approval link — never failed", async () => {
+    podAnswers(200, { status: "proposed", proposalIds: [PROPOSAL] });
     const out = capture();
-    const r = await applyOnePackage(entry, cat, cfg, { json: false }, 5_000, { payload });
+    const r = await applyUpdateThroughDoor(check, cfg, { json: false }, 5_000);
     expect(r).toMatchObject({
       slug: "brand-library",
       status: "proposed",
@@ -95,10 +78,10 @@ describe("an update the key may not apply is filed for the person's approval", (
     expect(s.line).toContain("→");
   });
 
-  it("an older pod's 403 is still a refusal (failed), never counted as waiting", async () => {
+  it("a grant refusal (403, no reasonCode) is still a refusal (failed), never counted as waiting", async () => {
     podAnswers(403, { error: `This key's grant does not allow "workspace.update".` });
     capture();
-    const r = await applyOnePackage(entry, cat, cfg, { json: false }, 5_000, { payload });
+    const r = await applyUpdateThroughDoor(check, cfg, { json: false }, 5_000);
     expect(r.status).toBe("failed");
     expect(summarizeApplyResults([r]).proposed).toBe(0);
   });

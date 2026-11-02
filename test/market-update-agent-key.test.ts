@@ -1,13 +1,9 @@
 /**
- * `synap market update --yes` with a computer / agent key (founder, 2 Nov 2026,
- * CLI 1.13.1-next.20261102.ec3d166). The pod refuses a pod-wide config
- * reconcile to ANY agent credential (403 "An agent credential cannot trigger a
- * pod-wide config reconcile"), so:
- *  - a skill / view / automation update is the person's act in pod admin, like
- *    a capability: the reconcile door is never called, the row is not a failure;
- *  - those updates are not offered as next-step commands;
- *  - the summary counts them as "to apply in pod admin", never "failed";
- *  - the slug column fits a long slug and keeps two spaces.
+ * `synap market update` with a computer / agent key (founder, 2 Nov 2026,
+ * CLI 1.13.1-next.20261102.ec3d166): the summary counts what is the person's
+ * ("to apply in pod admin") apart from failures, and the slug column fits a
+ * long slug and keeps two spaces. How each kind is applied for such a key is
+ * the one door's (`market-update-one-door.test.ts`).
  *
  * Driven through the real `marketUpdate`; the pod is stubbed at the hub transport.
  */
@@ -64,10 +60,8 @@ vi.mock("../src/lib/hub-client.js", async (importOriginal) => ({
 }));
 
 const { marketUpdate, summarizeApplyResults } = await import("../src/commands/market.js");
-const { HubError } = await import("../src/lib/hub-client.js");
 const { log } = await import("../src/utils/logger.js");
 
-const agentKey = { userId: "u1", userEmail: "agent-computer-ab12@synap.agent", keyType: "user_pat" };
 const personKey = { userId: "u2", userEmail: "me@example.com", keyType: "user_pat" };
 const LONG = "designing-with-real-components"; // 30 characters
 
@@ -96,75 +90,7 @@ beforeEach(() => {
   }
 });
 
-const paths = () => hubPost.mock.calls.map((c) => c[0]);
 const plain = () => said.join("\n").replace(/\x1b\[[0-9;]*m/g, "");
-
-describe("market update with an agent key", () => {
-  it("a skill update never calls the reconcile door: it is pod admin's, and not a failure", async () => {
-    key.status = agentKey;
-    inventory.rows = [row("skill", "facecam-edit")];
-    await marketUpdate(undefined, { yes: true, json: true });
-    expect(paths()).not.toContain("/configs/reconcile");
-    const json = JSON.parse(said.at(-1)!);
-    expect(json.applied).toEqual([expect.objectContaining({ slug: "facecam-edit", status: "apply-in-pod-admin" })]);
-    expect(json.summary.failed).toBe(0);
-    expect(json.summary.toApplyInPodAdmin).toBe(1);
-  });
-
-  it("says where the person applies it, in the same words as the summary", async () => {
-    key.status = agentKey;
-    inventory.rows = [row("skill", "facecam-edit")];
-    await marketUpdate(undefined, { yes: true });
-    const out = plain();
-    expect(out).toContain("facecam-edit is a skill — to apply in pod admin");
-    expect(out).toContain("https://pod-admin.antoinesrvt.synap.live/marketplace/updates");
-    expect(out).toContain("1 to apply in pod admin");
-    expect(out).not.toMatch(/update failed|failed/);
-  });
-
-  it("is left out of the next steps (the check run)", async () => {
-    key.status = agentKey;
-    inventory.rows = [row("skill", "facecam-edit"), row("workspace", "content-os")];
-    await marketUpdate(undefined, { json: true });
-    const json = JSON.parse(said.at(-1)!);
-    const commands = JSON.stringify(json.nextSteps);
-    // ...and named where the person applies it (2 Nov live run: the hint
-    // named the capabilities only, so the skill vanished from the advice).
-    expect(json.appliedInPodAdmin?.slugs).toContain("facecam-edit");
-    expect(commands).toContain("content-os");
-    expect(commands).not.toContain("facecam-edit");
-  });
-
-  it("control: a person's key keeps the reconcile path", async () => {
-    key.status = personKey;
-    inventory.rows = [row("skill", "facecam-edit")];
-    hubPost.mockImplementationOnce(async () => ({
-      updated: [{ kind: "skill", packageSlug: "facecam-edit", name: "facecam-edit", reason: "advanced" }],
-    }));
-    await marketUpdate(undefined, { yes: true, json: true });
-    expect(paths()).toEqual(["/configs/reconcile"]);
-    const json = JSON.parse(said.at(-1)!);
-    expect(json.applied[0].status).toBe("updated");
-  });
-
-  it("a key the CLI cannot classify that the pod refuses is the same row, not a failure", async () => {
-    key.status = {}; // no signal: unknown
-    inventory.rows = [row("skill", "facecam-edit")];
-    hubPost.mockImplementationOnce(async () => {
-      throw new HubError({
-        message: "An agent credential cannot trigger a pod-wide config reconcile. (HTTP 403)",
-        status: 403,
-        rawBody: JSON.stringify({ error: "An agent credential cannot trigger a pod-wide config reconcile." }),
-        path: "/configs/reconcile",
-        method: "POST",
-      });
-    });
-    await marketUpdate(undefined, { yes: true, json: true });
-    const json = JSON.parse(said.at(-1)!);
-    expect(json.applied[0].status).toBe("apply-in-pod-admin");
-    expect(json.summary.failed).toBe(0);
-  });
-});
 
 describe("the summary", () => {
   it("counts what is the person's apart from failures", () => {

@@ -86,7 +86,7 @@ beforeEach(() => {
           packages: [{ id: "c", slug: "content-os", displayName: "Content OS", category: "workspace", version: "1.1.0" }],
         });
       if (u.endsWith("/packages/preflight")) return json(200, {});
-      if (u.endsWith("/packages/apply")) return json(403, GRANT_REFUSAL);
+      if (u.endsWith("/package-updates/content-os/apply")) return json(403, GRANT_REFUSAL);
       throw new Error(`unexpected fetch: ${u}`);
     })
   );
@@ -107,7 +107,7 @@ describe("market update refused by a computer key's grant", () => {
   it("says the key may not apply it and names the person's door, never a missing workspace", async () => {
     await marketUpdate(["content-os"], {});
     const out = printed.join("\n");
-    expect(out).toContain("Content OS update failed");
+    expect(out).toContain("content-os update failed");
     // The pod's own words stay on the error line.
     expect(out).toContain(`This key's grant does not allow "workspace.update"`);
     expect(out).toContain(`This key may not do "workspace.update"`);
