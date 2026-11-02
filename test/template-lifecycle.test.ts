@@ -1,10 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import {
-  dataChangeRefusalMessage,
   parseDataChanges,
   decideConsent,
-  dataChangesFromRefusal,
-  consentNeedsPerson,
   parseAcceptList,
   parseLifecycle,
   lifecycleNotice,
@@ -12,7 +9,6 @@ import {
   formatRetirePlan,
   parseOverlays,
 } from "../src/lib/template-lifecycle.js";
-import { HubError } from "../src/lib/hub-client.js";
 import { classifyTemplateRow } from "../src/commands/market.js";
 import { resolveRetireTarget } from "../src/commands/templates-retire.js";
 import type { WorkspaceAttachment } from "../src/lib/installed.js";
@@ -63,19 +59,6 @@ describe("decideConsent", () => {
   it("parseAcceptList splits commas and spaces", () => {
     expect(parseAcceptList("a, b c")).toEqual(["a", "b", "c"]);
     expect(parseAcceptList(undefined)).toEqual([]);
-  });
-});
-
-describe("dataChangesFromRefusal", () => {
-  const err = (status: number, code?: string) =>
-    new HubError({ message: "x", status, code, body: { code, dataChanges: [W12] }, rawBody: "", path: "/p", method: "POST" });
-  it("reads the list from a 409 consent refusal", () => {
-    expect(dataChangesFromRefusal(err(409, "DATA_CHANGES_NEED_CONSENT"))).toEqual([W12]);
-  });
-  it("ignores any other 409 and any other status", () => {
-    expect(dataChangesFromRefusal(err(409, "WORKSPACE_IDENTITY_CONFLICT"))).toBeNull();
-    expect(dataChangesFromRefusal(err(500, "DATA_CHANGES_NEED_CONSENT"))).toBeNull();
-    expect(dataChangesFromRefusal(new Error("x"))).toBeNull();
   });
 });
 
@@ -262,27 +245,6 @@ describe("fetchWorkspaceAttachmentsStrict carries lifecycle from the wire", () =
   });
 });
 
-describe("dataChangeRefusalMessage — the pod's other data-change refusals, in words", () => {
-  const err = (status: number, code: string, extra: Record<string, unknown> = {}) =>
-    new HubError({ message: "x", status, code, body: { code, ...extra }, rawBody: "", path: "/p", method: "POST" });
-
-  it("names the pod-admin rule for 403 DATA_CHANGES_NEED_POD_ADMIN", () => {
-    expect(dataChangeRefusalMessage(err(403, "DATA_CHANGES_NEED_POD_ADMIN"))).toMatch(/pod owner or admin/);
-  });
-
-  it("says the template was not applied for 409 DATA_CHANGES_FAILED, with the pod's reason", () => {
-    const msg = dataChangeRefusalMessage(err(409, "DATA_CHANGES_FAILED", { error: "op crm.x hit a lock." }));
-    expect(msg).toMatch(/template was not applied/);
-    expect(msg).toMatch(/op crm\.x hit a lock\./);
-  });
-
-  it("leaves every other error to the generic path (a consent refusal is not a failure)", () => {
-    expect(dataChangeRefusalMessage(err(409, "DATA_CHANGES_NEED_CONSENT"))).toBeNull();
-    expect(dataChangeRefusalMessage(err(403, "FORBIDDEN"))).toBeNull();
-    expect(dataChangeRefusalMessage(new Error("boom"))).toBeNull();
-  });
-});
-
 describe("overlays — a pack composed onto a space shows under it", () => {
   const BD_WARNING =
     'The "business-developer" overlay on this space was retired. It is replaced by "crm", which this space already has. Its fields stay; there is nothing to move.';
@@ -347,23 +309,5 @@ describe("overlays — a pack composed onto a space shows under it", () => {
     expect(before.overlayNotices).toEqual([]);
     expect(before.group).toBe("attention");
     expect(before.action).toBe("synap templates update radar");
-  });
-});
-
-describe("consentNeedsPerson — an agent's refusal is not 'you have not agreed'", () => {
-  const refusal = (body: Record<string, unknown>) =>
-    new HubError({ message: "x", status: 409, code: "DATA_CHANGES_NEED_CONSENT", body: { code: "DATA_CHANGES_NEED_CONSENT", dataChanges: [W12], ...body }, rawBody: "", path: "/p", method: "POST" });
-  it("follows the pod's needsPerson flag", () => {
-    expect(consentNeedsPerson(refusal({ needsPerson: true, missing: [] }))).toBe(true);
-    expect(consentNeedsPerson(refusal({ needsPerson: false, missing: ["w12"] }))).toBe(false);
-  });
-  it("older pod: everything agreed (missing []) yet refused can only be an agent", () => {
-    // dogfood 2026-10-14: `--accept-data-changes h0.devplane-story.planned`
-    // from an agent session was told to re-run the same command.
-    expect(consentNeedsPerson(refusal({ missing: [] }))).toBe(true);
-    expect(consentNeedsPerson(refusal({ missing: ["w12"] }))).toBe(false);
-  });
-  it("false for any other error", () => {
-    expect(consentNeedsPerson(new Error("x"))).toBe(false);
   });
 });

@@ -115,17 +115,19 @@ describe("tripwire: market update never derives the verdict itself", () => {
 
 describe("next steps offer only what market update can run", () => {
   // Live pod, 2 Nov 2026: "Next: synap market update fal-ai" was printed for a
-  // capability, and that command then refused it ("it was not updated here").
-  it("a capability with an update is left out of the suggested commands", () => {
+  // capability, and that command then refused it. Since the one update door
+  // (`POST /package-updates/{slug}/apply`) applies every kind, a capability's
+  // update IS a command this CLI runs: it is offered, and the current one is not.
+  it("every update is offered, a capability's too; a current package is not", () => {
     const checks = checksFromStandings([
       standing({}),
       standing({ slug: "fal-ai", kind: "capability", installedVersion: "h-c10a96", latestVersion: "h-9f8036" }),
       standing({ slug: "daily-brief", kind: "view", installedVersion: "h-1", latestVersion: "h-2" }),
       standing({ slug: "operations", installedVersion: "h-1", latestVersion: "h-1", hasUpdate: false }),
     ]);
-    expect(cliUpdatableSlugs(checks)).toEqual(["brand-library", "daily-brief"]);
+    expect(cliUpdatableSlugs(checks)).toEqual(["brand-library", "fal-ai", "daily-brief"]);
     const commands = FLOW.afterMarketUpdateCheck(cliUpdatableSlugs(checks)).map((s) => s.command);
-    expect(commands.some((c) => c.includes("fal-ai"))).toBe(false);
+    expect(commands.some((c) => c.includes("operations"))).toBe(false);
     expect(commands).toContain("synap market update brand-library");
   });
 

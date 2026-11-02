@@ -29,7 +29,6 @@ vi.mock("../src/utils/logger.js", () => {
 
 import { mapWorkspaceAttachments } from "../src/lib/installed.js";
 import { classifyTemplateRow, renderTemplateRow, summarizeApplyResults, classifyApplyResponse } from "../src/commands/market.js";
-import { consentRefusalLines, type DataChange } from "../src/lib/template-lifecycle.js";
 import { classifyTemplateStep } from "../src/lib/template-steps.js";
 
 const plain = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, "");
@@ -207,20 +206,5 @@ describe("one name for the unfinished state", () => {
     expect(one.warnings[0]).toContain(`synap open proposal ${P1}`);
     const two = classifyApplyResponse(entry, { templateApply: { state: "awaiting-approval", proposals: [P1, P2] } }, { wasUnstamped: false });
     expect(two.warnings[0]).toContain("(synap proposals)");
-  });
-});
-
-describe("409: only a person can agree", () => {
-  const owed: DataChange[] = [{ opKey: "w12", description: "Stories move.", affected: 2, destructive: false }];
-
-  it("an agent-key refusal tells the person how to check their key", () => {
-    const said = consentRefusalLines("Builder", "builder", owed, true);
-    expect(said.hints.join("\n")).toContain("synap templates update builder --accept-data-changes w12");
-    expect(said.hints.join("\n")).toContain("`synap whoami` must say Is agent: no");
-  });
-
-  it("a person who has not agreed is not sent to whoami", () => {
-    const said = consentRefusalLines("Builder", "builder", owed, false);
-    expect(said.hints.join("\n")).not.toContain("whoami");
   });
 });
