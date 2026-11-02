@@ -28,6 +28,16 @@
  * Known edge: the id is fixed at spawn. After `/clear` Claude Code starts a new
  * session id, but MCP writes keep the pre-clear one (its transcript up to the
  * clear stays resumable). CLI calls send the live id (`hub-client.ts`).
+ *
+ * THE MODEL: Claude Code gives a stdio server no model, and a plugin can set no
+ * header on another MCP server's requests. The synap-bridge plugin (0.14.0)
+ * writes what the conversation runs on to `~/.synap/run/claude-code-<id>.json`
+ * (`{"model", "provider", "at"}`) whenever it changes; the bridge reads that
+ * file for its spawn-time id and adds `X-Synap-Model` / `X-Synap-Model-
+ * Provider` (re-read only when the file changed). Missing, unreadable or
+ * invalid = no model headers, never an error, never a guess. Same edge as the
+ * conversation: after `/clear` the plugin writes under the new id, which this
+ * bridge does not read, so those calls carry no model.
  */
 
 import { createHash } from "node:crypto";
@@ -41,6 +51,7 @@ import {
   CONVERSATION_CWD_META_KEY,
   CONVERSATION_HEADER,
   CONVERSATION_META_KEY,
+  modelHeaders,
 } from "./conversation-headers.js";
 
 type JsonRpcId = string | number;
@@ -61,6 +72,58 @@ export interface McpBridgeOptions {
   toolsListWaitMs?: number;
   /** How long a cached list may be served at all. Default 7 days. */
   toolsListMaxAgeMs?: number;
+  /** The model hand-off file the synap-bridge plugin writes (`modelHandoffPath`); absent = no model headers. */
+  modelFile?: string;
+}
+
+/** A Claude Code session id as a file name, as synap-bridge names it: nothing that walks a path. */
+const SESSION_FILE_NAME = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
+
+/**
+ * `~/.synap/run/claude-code-<session id>.json`, the file the synap-bridge
+ * plugin writes the conversation's model and provider to (its
+ * `modelHandoffPath`). Undefined without an id, or with one that could name
+ * another file.
+ */
+export function modelHandoffPath(sessionId: string | undefined, home: string = os.homedir()): string | undefined {
+  const id = sessionId?.trim();
+  if (!id || !SESSION_FILE_NAME.test(id) || !path.isAbsolute(home)) return undefined;
+  return path.join(home, ".synap", "run", `claude-code-${id}.json`);
+}
+
+/**
+ * The model headers from the hand-off file, read again only when the file
+ * changed (stat: mtime, size, inode). A missing, unreadable or invalid file is
+ * no headers; the values go through `modelHeaders` (a model the pod would
+ * drop, or a provider that is not a slug, is left out).
+ */
+export function modelHandoffReader(file: string | undefined): () => Record<string, string> {
+  let seen: string | undefined;
+  let headers: Record<string, string> = {};
+  return () => {
+    if (!file) return {};
+    let stamp: string;
+    try {
+      const st = fs.statSync(file);
+      stamp = `${st.mtimeMs}:${st.size}:${st.ino}`;
+    } catch {
+      seen = undefined;
+      headers = {};
+      return headers; // no file: this conversation's model is unknown
+    }
+    if (stamp === seen) return headers;
+    seen = stamp;
+    try {
+      const said = JSON.parse(fs.readFileSync(file, "utf8")) as { model?: unknown; provider?: unknown };
+      headers = modelHeaders(
+        typeof said?.model === "string" ? said.model : undefined,
+        typeof said?.provider === "string" ? said.provider : undefined
+      );
+    } catch {
+      headers = {}; // unreadable or not JSON: unknown, never a guess
+    }
+    return headers;
+  };
 }
 
 const TOOLS_LIST_WAIT_MS = 5_000;
@@ -165,6 +228,7 @@ export async function runMcpBridge(opts: McpBridgeOptions): Promise<void> {
   let sessionId: string | undefined;
   let protocolVersion: string | undefined;
   const inFlight = new Set<Promise<void>>();
+  const ranOn = modelHandoffReader(opts.modelFile);
 
   const write = (msg: unknown) => {
     if (msg && typeof msg === "object") {
@@ -220,6 +284,7 @@ export async function runMcpBridge(opts: McpBridgeOptions): Promise<void> {
           ...(sessionId ? { "Mcp-Session-Id": sessionId } : {}),
           ...(protocolVersion ? { "Mcp-Protocol-Version": protocolVersion } : {}),
           ...opts.headers,
+          ...ranOn(),
         },
         body: JSON.stringify(withConversationMeta(msg, opts.headers)),
       });

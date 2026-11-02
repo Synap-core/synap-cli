@@ -59,6 +59,36 @@ export function workerRunnerHeader(version: string = cliBuild().version): Record
 export const PROCESS_HEADER = "X-Synap-Process";
 export const RUNNER_STATE_HEADER = "X-Synap-Runner-State";
 
+/**
+ * Which MODEL a run uses and which PROVIDER serves it: facts the client
+ * reports, never identity (pod decision 5e7c77dc). The pod keeps a provider
+ * slug it knows (anthropic, bedrock, vertex, foundry, openai, openrouter, zai,
+ * deepseek) and reads any other word as `other`; it drops a model id that is
+ * not an id. Send nothing rather than a guess: absent reads unknown, never
+ * "anthropic". Never send a URL. A pod that reads neither ignores them.
+ */
+export const MODEL_HEADER = "X-Synap-Model";
+export const MODEL_PROVIDER_HEADER = "X-Synap-Model-Provider";
+
+/** The pod's model-id rule (`parseReportedModel`, @synap-core/types/agents): an id, at most 128 chars, never a URL. */
+const MODEL_ID = /^[A-Za-z0-9][A-Za-z0-9._:/@[\]-]{0,127}$/;
+
+/** A model id the pod will keep, else undefined (`<synthetic>`, a URL, junk). */
+export function reportableModel(model: string | undefined): string | undefined {
+  const id = model?.trim();
+  return id && MODEL_ID.test(id) && !id.includes("://") ? id : undefined;
+}
+
+/** `{ X-Synap-Model?, X-Synap-Model-Provider? }`: each only when known. */
+export function modelHeaders(model: string | undefined, provider: string | undefined): Record<string, string> {
+  const id = reportableModel(model);
+  const slug = provider?.trim().toLowerCase();
+  return {
+    ...(id ? { [MODEL_HEADER]: id } : {}),
+    ...(slug && /^[a-z0-9-]{1,32}$/.test(slug) ? { [MODEL_PROVIDER_HEADER]: slug } : {}),
+  };
+}
+
 /** The same two values in a request's `params._meta` (reverse-DNS vendor keys; `io.modelcontextprotocol/` is reserved). */
 export const CONVERSATION_META_KEY = "live.synap/conversation";
 export const CONVERSATION_CWD_META_KEY = "live.synap/conversationCwd";

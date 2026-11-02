@@ -10,8 +10,15 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
-import { describe, expect, it } from "vitest";
-import { runMcpBridge, sseEvents, toolsListCachePath, withConversationMeta } from "./mcp-bridge.js";
+import { describe, expect, it, vi } from "vitest";
+import {
+  modelHandoffPath,
+  modelHandoffReader,
+  runMcpBridge,
+  sseEvents,
+  toolsListCachePath,
+  withConversationMeta,
+} from "./mcp-bridge.js";
 import { conversationHeaders, claudeCodeConversation, cliConversation } from "./conversation-headers.js";
 
 const SID = "8c34a72b-b1c1-4c37-9c1f-02920b69ccb2";
@@ -262,5 +269,99 @@ describe("tools/list cache (an account switch must not drop the tools)", () => {
     await run(dir, ok(["a"]));
     await new Promise((r) => setTimeout(r, 20));
     expect((await run(dir, down, { maxAgeMs: 5 }))[0]).toMatchObject({ error: { code: -32000 } });
+  });
+});
+
+describe("model hand-off (synap-bridge writes what the conversation runs on)", () => {
+  const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), "synap-bridge-model-"));
+  let tick = 1_700_000_000;
+  /** Writes the file as the plugin does, with a fresh mtime so a rewrite is always seen. */
+  const handOff = (file: string, text: string) => {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, text);
+    tick += 10;
+    fs.utimesSync(file, tick, tick);
+  };
+
+  it("the path is the plugin's: ~/.synap/run/claude-code-<id>.json; an id that walks a path names none", () => {
+    expect(modelHandoffPath(SID, "/home/a")).toBe(`/home/a/.synap/run/claude-code-${SID}.json`);
+    for (const bad of [undefined, "", "../x", "a/b", "..", ".hidden", "a b", "a".repeat(129)]) {
+      expect(modelHandoffPath(bad, "/home/a")).toBeUndefined();
+    }
+    expect(modelHandoffPath(SID, "relative/home")).toBeUndefined();
+  });
+
+  it("present, changed, missing, invalid: the headers follow the file, never a guess", () => {
+    const file = modelHandoffPath(SID, tmp())!;
+    const read = modelHandoffReader(file);
+    // Missing: no headers, no error.
+    expect(read()).toEqual({});
+    handOff(file, JSON.stringify({ model: "claude-opus-5-5", provider: "anthropic", at: 1 }));
+    expect(read()).toEqual({ "X-Synap-Model": "claude-opus-5-5", "X-Synap-Model-Provider": "anthropic" });
+    // A /model switch rewrites the file: the next request names the new model.
+    handOff(file, JSON.stringify({ model: "claude-sonnet-5-5", provider: "zai", at: 2 }));
+    expect(read()).toEqual({ "X-Synap-Model": "claude-sonnet-5-5", "X-Synap-Model-Provider": "zai" });
+    // Unknown model (null) or one the pod would drop: the provider alone.
+    handOff(file, JSON.stringify({ model: null, provider: "anthropic", at: 3 }));
+    expect(read()).toEqual({ "X-Synap-Model-Provider": "anthropic" });
+    handOff(file, JSON.stringify({ model: "https://api.z.ai/v1", provider: "https://api.z.ai", at: 4 }));
+    expect(read()).toEqual({});
+    // Not JSON, or not an object: nothing.
+    handOff(file, "{\"model\": \"claude-op");
+    expect(read()).toEqual({});
+    handOff(file, "null");
+    expect(read()).toEqual({});
+    // The file goes (the session ended): nothing, not the last value.
+    handOff(file, JSON.stringify({ model: "claude-opus-5-5", provider: "anthropic", at: 5 }));
+    expect(read()["X-Synap-Model"]).toBe("claude-opus-5-5");
+    fs.rmSync(file);
+    expect(read()).toEqual({});
+    // No file named (no Claude Code id): nothing.
+    expect(modelHandoffReader(undefined)()).toEqual({});
+  });
+
+  it("an unchanged file is not read again", () => {
+    const file = modelHandoffPath(SID, tmp())!;
+    handOff(file, JSON.stringify({ model: "claude-opus-5-5", provider: "anthropic", at: 1 }));
+    const read = modelHandoffReader(file);
+    const spy = vi.spyOn(fs, "readFileSync");
+    try {
+      read();
+      read();
+      read();
+      expect(spy.mock.calls.filter((c) => c[0] === file).length).toBe(1);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("every forwarded request carries the model the file names at that moment", async () => {
+    const file = modelHandoffPath(SID, tmp())!;
+    handOff(file, JSON.stringify({ model: "claude-opus-5-5", provider: "anthropic", at: 1 }));
+    const input = new PassThrough();
+    const output = new PassThrough();
+    const sent: Record<string, string>[] = [];
+    const fetchImpl = (async (_u: string, init: RequestInit) => {
+      sent.push(init.headers as Record<string, string>);
+      const id = JSON.parse(String(init.body)).id;
+      return json({ jsonrpc: "2.0", id, result: {} });
+    }) as unknown as typeof fetch;
+    const conv = conversationHeaders(SID, "/Users/a/code");
+    const done = runMcpBridge({ url: "u", apiKey: "k", headers: conv, input, output, fetchImpl, log: () => {}, modelFile: file });
+    const call = async (id: number) => {
+      input.write(JSON.stringify({ jsonrpc: "2.0", id, method: "tools/call", params: { name: "synap_ask" } }) + "\n");
+      await new Promise((r) => setTimeout(r, 20));
+    };
+    await call(1);
+    handOff(file, JSON.stringify({ model: "claude-sonnet-5-5", provider: "anthropic", at: 2 }));
+    await call(2);
+    fs.rmSync(file);
+    await call(3);
+    input.end();
+    await done;
+    expect(sent.map((h) => h["X-Synap-Model"])).toEqual(["claude-opus-5-5", "claude-sonnet-5-5", undefined]);
+    expect(sent.map((h) => h["X-Synap-Model-Provider"])).toEqual(["anthropic", "anthropic", undefined]);
+    // The conversation headers are untouched.
+    expect(sent.every((h) => h["X-Synap-Conversation"] === `claude-code:${SID}`)).toBe(true);
   });
 });
