@@ -99,7 +99,9 @@ beforeAll(async () => {
 }, 60_000);
 
 let logs: string[] = [];
-const applyCalls = () => hubPost.mock.calls.filter((c) => c[0] === "/packages/apply");
+// Every kind updates through the pod's one update door (backend#678), a space too.
+const DOOR = `/package-updates/${SLUG}/apply`;
+const applyCalls = () => hubPost.mock.calls.filter((c) => c[0] === DOOR);
 
 beforeEach(() => {
   hubPost.mockReset();
@@ -122,7 +124,7 @@ afterEach(() => {
 function previewReturns(body: Record<string, unknown>) {
   hubPost.mockImplementation(async (path: string) => {
     if (path === "/packages/preflight") return body;
-    if (path === "/packages/apply") return { workspace: { id: "w1", outcome: "updated" } };
+    if (path === DOOR) return { status: "applied", receipt: null };
     throw new Error(`unexpected ${path}`);
   });
 }
@@ -197,15 +199,14 @@ describe("templates update — data changes need agreement", () => {
     expect("acceptDataChanges" in applyCalls()[0]![1]).toBe(false);
   });
 
-  it("a 409 DATA_CHANGES_NEED_CONSENT is held back, not counted as updated", async () => {
+  it("the door's refusal for a change not agreed (412) is never counted as updated", async () => {
     const { HubError } = await import("../src/lib/hub-client.js");
     hubPost.mockImplementation(async (path: string) => {
       if (path === "/packages/preflight") return { ok: true };
       throw new HubError({
-        message: "conflict",
-        status: 409,
-        code: "DATA_CHANGES_NEED_CONSENT",
-        body: { code: "DATA_CHANGES_NEED_CONSENT", dataChanges: [W12] },
+        message: "This update changes existing records. Agree to each change first (w12-deal-stage). Nothing was written.",
+        status: 412,
+        body: { error: "This update changes existing records. Agree to each change first (w12-deal-stage). Nothing was written." },
         rawBody: "",
         path,
         method: "POST",
@@ -214,16 +215,16 @@ describe("templates update — data changes need agreement", () => {
     const { marketUpdate } = await import("../src/commands/market.js");
     await marketUpdate([SLUG], { json: true });
     const out = lastJson();
-    expect(out.applied[0].status).toBe("needs-consent");
+    expect(applyCalls()).toHaveLength(1);
+    expect(out.applied[0].status).toBe("failed");
+    expect(out.applied[0].error).toContain("Agree to each change first");
     expect(out.summary.updated).toBe(0);
-    expect(out.summary.needsConsent).toBe(1);
-    expect(process.exitCode).toBe(1);
   });
 
   it("a failed preview is reported, never read as 'no data changes'", async () => {
     hubPost.mockImplementation(async (path: string) => {
       if (path === "/packages/preflight") throw new Error("boom");
-      return { workspace: { id: "w1", outcome: "updated" } };
+      return { status: "applied", receipt: null };
     });
     const { marketUpdate } = await import("../src/commands/market.js");
     await marketUpdate([SLUG], { json: true, dryRun: true });
