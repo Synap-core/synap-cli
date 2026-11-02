@@ -7,7 +7,9 @@
  * the stdio MCP bridge (`mcp-bridge.ts`). Outside Claude Code the conversation is
  * this process's own run (`synap-cli:<uuid>`, or `SYNAP_RUN_ID` to span a script).
  */
+import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import os from "node:os";
 import { cliBuild } from "./cli-build.js";
 
 export const CONVERSATION_HEADER = "X-Synap-Conversation";
@@ -52,7 +54,8 @@ export function workerRunnerHeader(version: string = cliBuild().version): Record
 
 /**
  * Which OS process of a conversation calls (`<host>:<pid>:<startedAtMs>`), and
- * what that runner is doing (`busy` | `idle` | `needs_permission` | `ended`).
+ * what that runner is doing (`busy` | `idle` | `needs_permission` |
+ * `needs_answer` (a question or a plan dialog) | `ended`).
  * The pod records both on the conversation's `session_runners` rows; a pod
  * that reads neither ignores them. synap-bridge sends the state the same way.
  */
@@ -87,6 +90,67 @@ export function modelHeaders(model: string | undefined, provider: string | undef
     ...(id ? { [MODEL_HEADER]: id } : {}),
     ...(slug && /^[a-z0-9-]{1,32}$/.test(slug) ? { [MODEL_PROVIDER_HEADER]: slug } : {}),
   };
+}
+
+/**
+ * THE process identity format, `<host>:<pid>:<startedAtMs>` (the pod's
+ * `parseProcessIdentity`): the host with every character outside
+ * `[A-Za-z0-9._-]` made `-`, at most 255, `computer` when empty. `synap worker`
+ * (`runProcessIdentity`), the stdio MCP bridge (`claudeCodeProcess`) and the
+ * synap-bridge mod (`processIdentity`, `hooks/lib.ts`, byte for byte, tested on
+ * the same fixture) all format through it, so one Claude Code process is one
+ * runner row on the pod.
+ */
+export function processIdentity(hostname: string, pid: number, startedAtMs: number): string {
+  const host = hostname.replace(/[^A-Za-z0-9._-]/g, "-").slice(0, 255) || "computer";
+  return `${host}:${pid}:${Math.trunc(startedAtMs)}`;
+}
+
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+/**
+ * `ps -o lstart=` read in UTC with the C locale (`Mon Nov  2 13:09:07 2026`,
+ * BSD and procps alike) -> epoch ms; undefined for anything else. Parsed field
+ * by field, never by `Date.parse`, as the synap-bridge mod parses it.
+ */
+export function lstartMs(text: string): number | undefined {
+  const m = /^[A-Z][a-z]{2} ([A-Z][a-z]{2}) +(\d{1,2}) (\d{2}):(\d{2}):(\d{2}) (\d{4})$/.exec(text.trim());
+  if (!m) return undefined;
+  const month = MONTHS.indexOf(m[1]!);
+  if (month < 0) return undefined;
+  const ms = Date.UTC(Number(m[6]), month, Number(m[2]), Number(m[3]), Number(m[4]), Number(m[5]));
+  return Number.isFinite(ms) ? ms : undefined;
+}
+
+/** When `pid` started, from `ps` in UTC with the C locale; undefined when it cannot be read. */
+function psStartMs(pid: number): number | undefined {
+  try {
+    const out = execFileSync("ps", ["-o", "lstart=", "-p", String(pid)], {
+      encoding: "utf8",
+      env: { ...process.env, LC_ALL: "C", TZ: "UTC" },
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: 2_000,
+    });
+    return lstartMs(out);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The Claude Code process this stdio MCP bridge serves: Claude Code spawns it
+ * directly, so it is the parent (`process.ppid`), started when `ps` says. Read
+ * once, at the bridge's start. Undefined when it cannot be read (no `ps`, an
+ * orphan): the header is then not sent, never guessed.
+ */
+export function claudeCodeProcess(
+  read: { ppid?: number; hostname?: string; startMs?: (pid: number) => number | undefined } = {}
+): string | undefined {
+  const pid = read.ppid ?? process.ppid;
+  if (!Number.isInteger(pid) || pid <= 1) return undefined;
+  const startedAt = (read.startMs ?? psStartMs)(pid);
+  if (startedAt === undefined) return undefined;
+  return processIdentity(read.hostname ?? os.hostname(), pid, startedAt);
 }
 
 /** The same two values in a request's `params._meta` (reverse-DNS vendor keys; `io.modelcontextprotocol/` is reserved). */
@@ -136,10 +200,17 @@ export function conversationHeaders(
 }
 
 
-/** Every header the stdio MCP bridge sends: its client name plus the conversation. */
+/**
+ * Every header the stdio MCP bridge sends: its client name, the conversation,
+ * and, with a Claude Code conversation, the Claude Code process it runs in
+ * (`claudeCodeProcess`, the same value the synap-bridge mod sends), so the
+ * pod's runner rows of that process are one, whichever door called.
+ */
 export function mcpBridgeHeaders(
   sessionId: string | undefined,
-  cwd: string = process.cwd()
+  cwd: string = process.cwd(),
+  processId?: string
 ): Record<string, string> {
-  return { ...clientHeader("synap-cli-mcp"), ...conversationHeaders(sessionId, cwd) };
+  const headers = { ...clientHeader("synap-cli-mcp"), ...conversationHeaders(sessionId, cwd) };
+  return processId && claudeCodeConversation(sessionId) ? { ...headers, [PROCESS_HEADER]: processId } : headers;
 }

@@ -22,7 +22,7 @@ vi.mock("./mcp-bridge.js", async (orig) => {
 });
 
 import { hubGet } from "./hub-client.js";
-import { mcpBridgeHeaders, CLIENT_HEADER, RUNNER_HEADER, clientHeader } from "./conversation-headers.js";
+import { mcpBridgeHeaders, CLIENT_HEADER, RUNNER_HEADER, claudeCodeProcess, clientHeader } from "./conversation-headers.js";
 import { mcpBridge } from "../commands/mcp.js";
 
 const VERSION = (
@@ -95,5 +95,18 @@ describe("X-Synap-Client", () => {
     await mcpBridge({ url: "https://pod/mcp" });
     expect(captured.opts?.headers?.[CLIENT_HEADER]).toBe(`synap-cli-mcp/${VERSION}`);
     expect(captured.opts?.headers?.["X-Synap-Conversation"]).toBeTruthy();
+  });
+
+  it("`synap mcp bridge` inside Claude Code names its parent process (plan C2); outside it names none", async () => {
+    vi.stubEnv("SYNAP_HUB_API_KEY", "k");
+    vi.stubEnv("CLAUDE_CODE_SESSION_ID", "8c34a72b-b1c1-4c37-9c1f-02920b69ccb2");
+    await mcpBridge({ url: "https://pod/mcp" });
+    const sent = captured.opts?.headers?.["X-Synap-Process"];
+    // This runner's own parent stands for Claude Code; a host without ps sends none.
+    if (sent !== undefined) expect(sent).toMatch(new RegExp(`^[A-Za-z0-9._-]+:${process.ppid}:\\d{13}$`));
+    else expect(claudeCodeProcess()).toBeUndefined();
+    vi.stubEnv("CLAUDE_CODE_SESSION_ID", "");
+    await mcpBridge({ url: "https://pod/mcp" });
+    expect(captured.opts?.headers?.["X-Synap-Process"]).toBeUndefined();
   });
 });
