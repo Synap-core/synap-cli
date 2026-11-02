@@ -189,3 +189,21 @@ describe("helpers", () => {
     expect(readRegistry("a", path.join(dir, "missing"))).toBeNull();
   });
 });
+
+describe("no wait, task or prompt text reaches the terminal with its control characters", () => {
+  it("a wait label, a task description and a waitingFor are printed inert", () => {
+    const raw = buildNowLine({
+      now: NOW,
+      registry: reg("busy"),
+      open: [task("run\x1b]0;pwned\x07 tests", 3)],
+      waits: [wait({ label: "PR \x1b[2J#5" })],
+      alive,
+    });
+    expect(raw).not.toContain("\x1b]0;");
+    expect(raw).not.toContain("\x1b[2J");
+    expect(raw).not.toContain("\x07");
+    expect(plain(raw)).toContain("PR [2J#5");
+    const asked = buildNowLine({ now: NOW, registry: reg("waiting", { waitingFor: "allow\x1b[8m rm" }), open: [], waits: [], alive });
+    expect(asked).not.toContain("\x1b[8m");
+  });
+});

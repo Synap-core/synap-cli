@@ -30,14 +30,7 @@ import os from "node:os";
 import path from "node:path";
 import { WAITING_ON_REASON_LABELS, goalWord } from "./goal-words.js";
 import { age, capped, clip, DEFAULT_WIDTH, type RegistryEntry } from "./now-line.js";
-
-const G = "\x1b[32m"; // green
-const R = "\x1b[31m"; // red
-const C = "\x1b[36m"; // cyan
-const A = "\x1b[33m"; // amber
-const Y = "\x1b[01;33m"; // yellow bold
-const D = "\x1b[2m"; // dim
-const X = "\x1b[0m"; // reset
+import { AMBER as A, BOLD_YELLOW as Y, CYAN as C, DIM as D, GREEN as G, RED as R, RESET as X, osc8, scrubStrings } from "./term.js";
 
 /** The pod's working window (`SESSION_WORKING_WINDOW_MS`), for a file whose `live` carries none. */
 export const POD_WORKING_WINDOW_MS = 5 * 60_000;
@@ -65,7 +58,12 @@ export interface BridgeWorkUnit {
   prState: { status?: string; label?: string; state?: string; checks?: string } | null;
 }
 
-/** Version 1 of the file, as the bridge writes it. */
+/**
+ * Version 1 of the file, as the status line reads it. `live` is normalised on
+ * read: a field the bridge wrote malformed (bridge ≤ 0.11 wrote
+ * `measuredAt: "undefined"` and `windowMs: NaN`, which JSON stores as null
+ * when the pod sent none) is null here, never a reason to drop the file.
+ */
 export interface BridgeStatusFile {
   v: 1;
   writtenAt: string;
@@ -76,8 +74,8 @@ export interface BridgeStatusFile {
     turnInFlight: boolean;
     since: string | null;
     lastActivityAt: string | null;
-    measuredAt: string;
-    windowMs: number;
+    measuredAt: string | null;
+    windowMs: number | null;
   } | null;
   nextMove: { kind: string; actor: string; label: string; reason: string } | null;
   waitingOn: WaitingOnMark[] | null;
@@ -105,15 +103,37 @@ const isObj = (v: unknown): v is Record<string, unknown> => typeof v === "object
 const isTime = (v: unknown): v is string => typeof v === "string" && Number.isFinite(Date.parse(v));
 const isStrOrNull = (v: unknown) => v === null || typeof v === "string";
 
-/** The parsed JSON as a version-1 file, or why it is not one. */
-export function parseBridgeStatus(json: unknown): BridgeStatusFile | string {
+/**
+ * The file's `live`, normalised. One malformed field costs that field (null),
+ * and a `live` that is no object at all reads as "not measured" (null): the
+ * rest of the file is still true, so it is never a failed read.
+ */
+function readLive(v: unknown): BridgeStatusFile["live"] {
+  if (!isObj(v)) return null;
+  const windowMs = typeof v.windowMs === "number" && Number.isFinite(v.windowMs) && v.windowMs > 0 ? v.windowMs : null;
+  return {
+    state: v.state === "working" ? "working" : "idle",
+    turnInFlight: v.turnInFlight === true,
+    since: isTime(v.since) ? v.since : null,
+    lastActivityAt: isTime(v.lastActivityAt) ? v.lastActivityAt : null,
+    measuredAt: isTime(v.measuredAt) ? v.measuredAt : null,
+    windowMs,
+  };
+}
+
+/**
+ * The parsed JSON as a version-1 file, or why it is not one. Every string in
+ * it is scrubbed of control characters first (term.ts): the file carries pod
+ * words (titles, labels, PR names) that are printed as they are.
+ */
+export function parseBridgeStatus(raw: unknown): BridgeStatusFile | string {
+  const json = scrubStrings(raw);
   if (!isObj(json)) return "not an object";
   if (json.v !== 1) return `version ${JSON.stringify(json.v)} is not 1`;
   if (!isTime(json.writtenAt)) return "no writtenAt time";
   if (!isStrOrNull(json.sessionId)) return "sessionId is not a string";
   if (!isStrOrNull(json.title ?? null)) return "title is not a string";
-  const live = json.live ?? null;
-  if (live !== null && (!isObj(live) || !isTime(live.measuredAt) || typeof live.windowMs !== "number")) return "live is malformed";
+  const live = readLive(json.live);
   const next = json.nextMove ?? null;
   if (next !== null && (!isObj(next) || typeof next.label !== "string")) return "nextMove is malformed";
   const waits = json.waitingOn ?? null;
@@ -176,10 +196,6 @@ function markText(m: WaitingOnMark): string {
   return m.count > 1 ? `${reason} (${m.count})` : reason;
 }
 
-function osc8(url: string | null, text: string): string {
-  return url ? `\x1b]8;;${url}\x1b\\${text}\x1b]8;;\x1b\\` : text;
-}
-
 /** A pull request still under way: `synap-cli#52 open ✗`, its name a link to it. */
 function unitText(u: BridgeWorkUnit): string | null {
   const isPr = u.kind === "pull_request" || /\/pull\/\d+/.test(u.url ?? "");
@@ -193,11 +209,21 @@ function unitText(u: BridgeWorkUnit): string | null {
   return `${name}${word ? ` ${D}${word}${X}` : ""}${checks}`;
 }
 
-/** The pod's rule (`isSessionWorkingNow`) on the file's `live`, judged now. */
-export function podWorking(live: NonNullable<BridgeStatusFile["live"]>, now: number): boolean {
-  if (live.turnInFlight) return true;
+/**
+ * The pod's rule (`isSessionWorkingNow`) on the file's `live`, judged now.
+ *
+ * `turnInFlight` is the pod's word AT `measuredAt` (else when the file was
+ * written, `writtenAt`), not now: it holds for one working window after that
+ * and no longer. Read as "now", a file the bridge last wrote mid-turn said
+ * "working" for as long as the file stayed fresh (12 h).
+ */
+export function podWorking(live: NonNullable<BridgeStatusFile["live"]>, now: number, writtenAt?: number): boolean {
+  const window = live.windowMs ?? POD_WORKING_WINDOW_MS;
   const last = live.lastActivityAt ? Date.parse(live.lastActivityAt) : NaN;
-  return Number.isFinite(last) && now - last <= (live.windowMs || POD_WORKING_WINDOW_MS);
+  if (Number.isFinite(last) && now - last <= window) return true;
+  if (!live.turnInFlight) return false;
+  const measured = live.measuredAt ? Date.parse(live.measuredAt) : writtenAt ?? NaN;
+  return Number.isFinite(measured) && now - measured <= window;
 }
 
 export interface BridgeLineInput {
@@ -229,7 +255,7 @@ export function buildBridgeLine(input: BridgeLineInput): string {
     working = registry.status === "busy";
     since = registry.statusUpdatedAt;
   } else if (file.live) {
-    working = podWorking(file.live, now);
+    working = podWorking(file.live, now, input.writtenAt);
     const at = Date.parse((working ? file.live.since : file.live.lastActivityAt) ?? "");
     since = Number.isFinite(at) ? at : undefined;
   }
