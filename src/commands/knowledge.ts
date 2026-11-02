@@ -6,11 +6,14 @@
  *   → renders a proposal table, prompts y/N, then POST /capture/execute.
  *
  * TYPED MODE (--type): `synap capture --type gotcha --claim "…" [--why] [--evidence] [--tags]`
- *   → POST /entities as a typed `knowledge` entity; `ek_type` (gotcha|lesson|decision|
- *     reference) discriminates the kind — ONE store, type tags (the canonical pattern,
- *     NOT a residual dump). The workspace lens supplies the domain (no
- *     `engineering_knowledge`). A formal decision RECORD (rationale/alternatives/status
- *     lifecycle) comes from smart `capture "<text>"` or `create entity --profile=decision`.
+ *   → POST /entities ({@link typedCaptureBody}):
+ *     - `--type decision` → a `decision` entity (summary = the claim, rationale = the
+ *       why + evidence, `decisionStatus: accepted`, `decidedAt` now). A decision is
+ *       its own kind on the pod, never a knowledge row tagged "decision".
+ *     - gotcha | lesson | reference → a `knowledge` entity whose ONE discriminator is
+ *       `knowledgeForm` (gotcha → caution, else fact). The legacy `ek_type` is never
+ *       written (plan 527996fa 0.9): the pod keeps it only to read historic rows.
+ *     The workspace lens supplies the domain (no `engineering_knowledge`).
  *
  * Workspace routing for Work-lane knowledge: --workspace (explicit pin) >
  * --team (first product ws, when configured) > omit workspaceId (server-derived
@@ -607,6 +610,87 @@ export function knowledgeFormForType(type: string | undefined): "caution" | "fac
   return type === "gotcha" ? "caution" : "fact";
 }
 
+/** The seeded `decision` profile's limits (`summary` 500, `rationale` 5000). */
+const DECISION_SUMMARY_MAX = 500;
+const DECISION_RATIONALE_MAX = 5000;
+
+function clip(text: string, max: number): string {
+  return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
+}
+
+/** What a typed (`--type`) capture sends to `POST /entities`. */
+export interface TypedCaptureInput {
+  type: string;
+  claim: string;
+  why?: string;
+  evidence?: string;
+  content?: string;
+  tags: string[];
+  title: string;
+  userId: string;
+  workspaceId?: string;
+  sessionId?: string;
+  projectId?: string;
+  now: Date;
+}
+
+/**
+ * PURE: the `POST /entities` body of a typed capture.
+ *
+ * `--type decision` files a `decision` entity, the pod's own decision kind
+ * (seeded profile `decision`: summary, rationale, decisionStatus, decidedAt,
+ * tags). It used to file a `knowledge` row tagged `ek_type: decision`, which no
+ * decision reader sees.
+ *
+ * Every other type files `knowledge` with `knowledgeForm` as its ONE
+ * discriminator. `ek_type` is never written: the pod retains it only to read
+ * historic rows (`ensure-system-profiles.ts`, "Legacy classification").
+ */
+export function typedCaptureBody(input: TypedCaptureInput): Record<string, unknown> {
+  const common = {
+    userId: input.userId,
+    ...(input.workspaceId ? { workspaceId: input.workspaceId } : {}),
+    title: input.title,
+    ...(input.sessionId ? { sessionId: input.sessionId } : {}),
+    ...(input.projectId ? { projectId: input.projectId } : {}),
+    ...(input.content?.trim().length ? { content: input.content } : {}),
+  };
+  if (input.type === "decision") {
+    // The pod's `summary` holds 500 characters and a claim up to 1000: a longer
+    // claim keeps its whole text at the head of the rationale, never cut away.
+    const claim = input.claim.trim();
+    const long = claim.length > DECISION_SUMMARY_MAX;
+    const rationale = clip(
+      [long ? claim : "", input.why?.trim(), input.evidence?.trim() ? `Evidence: ${input.evidence.trim()}` : ""]
+        .filter(Boolean)
+        .join("\n\n"),
+      DECISION_RATIONALE_MAX,
+    );
+    return {
+      ...common,
+      profileSlug: "decision",
+      properties: {
+        summary: clip(claim, DECISION_SUMMARY_MAX),
+        decisionStatus: "accepted",
+        decidedAt: input.now.toISOString(),
+        ...(rationale ? { rationale } : {}),
+        ...(input.tags.length > 0 ? { tags: input.tags } : {}),
+      },
+    };
+  }
+  return {
+    ...common,
+    profileSlug: "knowledge",
+    properties: {
+      knowledgeForm: knowledgeFormForType(input.type),
+      ek_claim: input.claim,
+      ...(input.why ? { ek_why: input.why } : {}),
+      ...(input.evidence ? { ek_evidence: input.evidence } : {}),
+      ...(input.tags.length > 0 ? { ek_tags: input.tags } : {}),
+    },
+  };
+}
+
 export async function captureKnowledge(opts: CaptureOpts): Promise<void> {
   try {
     // Mutual exclusion: smart mode (positional text) and typed mode (--type/--claim)
@@ -704,31 +788,28 @@ export async function captureKnowledge(opts: CaptureOpts): Promise<void> {
     }
     const title = chosen.title;
 
-    // Every --type entry is a typed `knowledge` entity; ek_type discriminates the
-    // kind. This is "one store, type tags" (the research-canonical pattern) — NOT a
-    // residual catch-all: each row is typed by ek_type and lives in the workspace
-    // lens that supplies its domain (so no `engineering_knowledge`). A structured
-    // decision RECORD (rationale/alternatives/status) is a different artifact, reached
-    // via smart `capture "<text>"` or `create entity --profile=decision`.
+    // A decision is a `decision` entity; everything else a `knowledge` entity
+    // discriminated by `knowledgeForm` alone ({@link typedCaptureBody}).
     const sessionId = opts.session ? resolveActiveSessionId(cfg.podUrl) : undefined;
 
-    const res = await hubPost("/entities", {
-      userId,
-      ...(workspaceId ? { workspaceId } : {}),
-      profileSlug: "knowledge",
-      title,
-      ...(sessionId ? { sessionId } : {}),
-      ...(projectId ? { projectId } : {}),
-      properties: {
-        knowledgeForm: knowledgeFormForType(opts.type),
-        ek_type: opts.type,
-        ek_claim: opts.claim,
-        ...(opts.why ? { ek_why: opts.why } : {}),
-        ...(opts.evidence ? { ek_evidence: opts.evidence } : {}),
-        ...(tags.length > 0 ? { ek_tags: tags } : {}),
-      },
-      ...(opts.content?.trim().length ? { content: opts.content } : {}),
-    }, cfg) as Record<string, unknown>;
+    const res = await hubPost(
+      "/entities",
+      typedCaptureBody({
+        type: opts.type,
+        claim: opts.claim,
+        why: opts.why,
+        evidence: opts.evidence,
+        content: opts.content,
+        tags,
+        title,
+        userId,
+        workspaceId,
+        sessionId,
+        projectId,
+        now: new Date(),
+      }),
+      cfg,
+    ) as Record<string, unknown>;
 
     // Governance may queue the write as a proposal rather than creating
     // directly — read the real outcome via the ONE shared detector.
