@@ -407,6 +407,21 @@ export function selectTombstones(
   );
 }
 
+/**
+ * The ONE rule for a stamp move (the catalog lib's `stampMoveLine` is its twin; keep them equal): only a
+ * `changed` row whose stamp moved says anything, in people's words.
+ */
+export function stampMoveLine(r: CatalogDiffRow): string | null {
+  if (r.status !== "changed") return null;
+  const before = r.sourcePackage?.before?.version;
+  const after = r.sourcePackage?.after?.version;
+  if ((before ?? "none") === (after ?? "none")) return null;
+  const words = (v?: string) => v ?? "unstamped";
+  return r.hashAfter && r.hashBefore === r.hashAfter
+    ? `~ stamp only: ${words(before)} → ${words(after)} (content unchanged)`
+    : `~ published as: ${words(before)} → ${words(after)}`;
+}
+
 export function formatDiff(
   allRows: CatalogDiffRow[],
   formatRetirement?: CatalogLib["formatRetirement"],
@@ -428,11 +443,8 @@ export function formatDiff(
     if (r.status === "changed" && r.hashBefore && r.hashAfter && r.hashBefore !== r.hashAfter) {
       detail.push("      ~ definition: new content version");
     }
-    const spBefore = r.sourcePackage?.before?.version ?? "none";
-    const spAfter = r.sourcePackage?.after?.version ?? "none";
-    if (r.status === "changed" && spBefore !== spAfter) {
-      detail.push(`      ~ sourcePackage: ${spBefore} → ${spAfter}`);
-    }
+    const stamp = stampMoveLine(r);
+    if (stamp) detail.push(`      ${stamp}`);
     if (r.status === "changed" && Array.isArray(r.columns)) {
       for (const c of r.columns) detail.push(`      ~ ${c.column}: ${shortValue(c.before)} → ${shortValue(c.after)}`);
     }

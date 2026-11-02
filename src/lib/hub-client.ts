@@ -591,7 +591,16 @@ function renderHubErrorBody(err: unknown, opts: { personDoor?: string }): void {
     );
     return;
   }
-  log.error(err.message);
+  // A 4xx refusal that carries the pod's own words (a 400 naming what to fix):
+  // a person reads those first, not "Hub POST /path failed (HTTP 400):". The
+  // 401/403/404 hints below read the path, so those keep the full line.
+  const podWordsFirst =
+    err.status >= 400 &&
+    err.status < 500 &&
+    ![401, 403, 404].includes(err.status) &&
+    err.body !== undefined &&
+    !!err.detail;
+  log.error(podWordsFirst ? err.detail! : err.message);
   // A 500 carries an `errorId` (the egress sanitizer logs the real cause under
   // it server-side) — surface it so "quote errorId when reporting it" is
   // actionable rather than a dead end.
@@ -886,7 +895,8 @@ export async function resolveHubConfig(opts?: { podUrl?: string; apiKey?: string
 //
 // ONE store, two rungs of the SAME lens mechanism:
 //
-//   env SYNAP_SESSION_ID  ›  session lens (per Claude tab)  ›  directory lens
+//   env SYNAP_SESSION_ID  ›  env SYNAP_POD_SESSION (the bridge's binding of this
+//   conversation)  ›  session lens (per Claude tab)  ›  directory lens
 //
 // The directory rung supplies a session only OUTSIDE a Claude Code conversation
 // (`effectiveDirectoryLens`): inside one, the session belongs to the
@@ -948,6 +958,11 @@ function migrateLegacySessionFile(): void {
 export function resolveActiveSessionId(podUrl?: string): string | undefined {
   const fromEnv = process.env.SYNAP_SESSION_ID;
   if (fromEnv) return fromEnv;
+  // synap-bridge binds a Claude conversation to a pod session and exports it to
+  // every child shell; without this a bound conversation's CLI writes carry no
+  // session (the directory lens no longer supplies one inside a conversation).
+  const fromBridge = process.env.SYNAP_POD_SESSION;
+  if (fromBridge) return fromBridge;
   migrateLegacySessionFile();
   const fromSessionLens = resolveActiveLensForPod(podUrl)?.focusSessionId;
   if (fromSessionLens) return fromSessionLens;
@@ -978,15 +993,22 @@ export function attachActiveSessionId(sessionId: string): SessionAttachTarget {
 }
 
 /**
- * Detach — clear the focus session from BOTH lens rungs, and return whatever
- * was active. Clearing only the top rung would "detach" into the lower one,
- * which reads as the command failing.
+ * Detach — clear the focus session from the lens rungs that SUPPLY one here,
+ * and return whatever was active. Outside a conversation that is the directory
+ * lens; inside one it is the session lens only (the directory rung supplies
+ * nothing there, and belongs to the plain terminals of the tree).
  */
 export function detachActiveSessionId(podUrl?: string): string | undefined {
   const previous = resolveActiveSessionId(podUrl);
   const claudeSession = getClaudeSessionId();
-  if (claudeSession) clearLensField(claudeSession, "focusSessionId");
-  clearDirectoryLensField("focusSessionId");
+  if (claudeSession) {
+    // Inside a conversation the directory lens supplies no session (resolve
+    // ignores it), so it is not ours to clear: a plain terminal in this tree
+    // keeps its own.
+    clearLensField(claudeSession, "focusSessionId");
+  } else {
+    clearDirectoryLensField("focusSessionId");
+  }
   return previous;
 }
 
