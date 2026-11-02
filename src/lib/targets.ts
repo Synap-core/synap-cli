@@ -902,6 +902,8 @@ export async function writeClaudeCodeEnv(
 export function registerClaudeCodeMcp(mcpUrl: string, apiKey: string, serverName: string): void {
   const header = `Authorization: Bearer ${apiKey}`;
   const bridge = claudeCodeMcpTransport() === "bridge";
+  const invocation = bridge ? resolveBridgeInvocation() : null;
+  const bridgeCommand = invocation ? synapBridgeCommand(mcpUrl, invocation) : [];
   try {
     // Remove legacy single-name entry and any prior pod-derived name.
     for (const name of new Set(["synap", serverName])) {
@@ -919,13 +921,15 @@ export function registerClaudeCodeMcp(mcpUrl: string, apiKey: string, serverName
           // server's env, as the header does for http.
           // `-e` is variadic in Claude Code's CLI: the server name must come
           // BEFORE it, or `-e` swallows it as an env var.
-          ["mcp", "add", "--scope", "user", serverName, "-e", `SYNAP_MCP_API_KEY=${apiKey}`, "--", ...synapBridgeCommand(mcpUrl)]
+          ["mcp", "add", "--scope", "user", serverName, "-e", `SYNAP_MCP_API_KEY=${apiKey}`, "--", ...bridgeCommand]
         : ["mcp", "add", "--transport", "http", serverName, mcpUrl, "--header", header, "--scope", "user"],
       { stdio: "ignore" }
     );
     log.success(
       `MCP server '${serverName}' registered with Claude Code (\`claude mcp add\`, user scope${bridge ? ", via the synap stdio bridge" : ""}). Relaunch Claude Code to load the tools.`
     );
+    const note = invocation && bridgeInvocationNote(invocation);
+    if (note) log.dim(note);
     if (serverName !== "synap") {
       log.dim(
         "Multi-pod: connect each profile separately — server names are derived from the pod host so they don't overwrite:"
@@ -947,7 +951,7 @@ export function registerClaudeCodeMcp(mcpUrl: string, apiKey: string, serverName
       log.dim(`  source ${keyFile}`);
       log.dim(
         bridge
-          ? `  claude mcp add --scope user ${serverName} -e SYNAP_MCP_API_KEY="$SYNAP_MCP_KEY" -- ${synapBridgeCommand(mcpUrl).map(shellQuote).join(" ")}`
+          ? `  claude mcp add --scope user ${serverName} -e SYNAP_MCP_API_KEY="$SYNAP_MCP_KEY" -- ${bridgeCommand.map(shellQuote).join(" ")}`
           : `  claude mcp add --transport http ${serverName} ${mcpUrl} --header 'Authorization: Bearer \${SYNAP_MCP_KEY}' --scope user`
       );
     } catch {
@@ -1005,18 +1009,84 @@ export function setClaudeCodeMcpTransport(transport: "http" | "bridge"): string 
 }
 
 /**
- * The command Claude Code spawns for the bridge: THIS CLI by absolute path (the
- * one running `use-bridge` is the one known to have the bridge — a `synap` on
- * PATH may be an older install without it), unless this run is a throwaway
- * `npx` copy, whose cache path can vanish; then the `synap` on PATH.
+ * Which copy of the CLI is running, and the entry Claude Code should spawn for
+ * the bridge. The one running `use-bridge` is the one known to have the
+ * bridge (a `synap` on PATH may be an older install without it), so it is
+ * named by absolute path, with one rule on WHICH path:
+ *
+ *   installed — an npm install (`npm i -g @synap-core/cli`): the bin npm put
+ *               on PATH (`<prefix>/bin/synap`), never its resolved target, so
+ *               the next `npm i -g` is what the bridge runs, with no
+ *               re-registration.
+ *   linked    — the same bin, but the install is a link to a source checkout
+ *               (`npm link`): registered the same way, and said.
+ *   checkout  — run straight from a checkout build (`node …/dist/index.js`):
+ *               kept, and said, since nothing installed is running.
+ *   npx       — a throwaway `npx` copy, whose cache path can vanish: the
+ *               `synap` on PATH.
+ *
+ * Until 2026-11-02 every case registered the resolved path, so a global
+ * install that was an `npm link` wrote the checkout's `dist/index.js` into
+ * `~/.claude.json`, and the bridge followed that checkout from then on.
  */
-function synapBridgeCommand(mcpUrl: string): string[] {
-  const args = ["mcp", "bridge", "--url", mcpUrl];
-  const self = process.argv[1];
-  if (self && !self.includes(`${path.sep}_npx${path.sep}`)) {
-    return [process.execPath, fs.realpathSync(self), ...args];
+export interface BridgeInvocation {
+  kind: "installed" | "linked" | "checkout" | "npx";
+  /** argv for Claude Code to spawn, before `mcp bridge …`. */
+  command: string[];
+  /** Where the code actually runs from (the resolved entry). */
+  realEntry?: string;
+}
+
+export function resolveBridgeInvocation(
+  self: string | undefined = process.argv[1],
+  execPath: string = process.execPath
+): BridgeInvocation {
+  const nm = `${path.sep}node_modules${path.sep}`;
+  if (!self || self.includes(`${path.sep}_npx${path.sep}`)) return { kind: "npx", command: ["synap"] };
+  const entry = path.resolve(self);
+  const realEntry = fs.realpathSync(entry);
+  const isLink = fs.lstatSync(entry).isSymbolicLink();
+  if (!isLink && !entry.includes(nm)) return { kind: "checkout", command: [execPath, realEntry], realEntry };
+  // Run through the package path (`<prefix>/lib/node_modules/@synap-core/cli/dist/index.js`):
+  // the bin npm installed next to it, when it leads to this same entry.
+  let installed = entry;
+  const pkgDir = `${nm}@synap-core${path.sep}cli${path.sep}`;
+  const at = entry.lastIndexOf(pkgDir);
+  if (!isLink && at >= 0) {
+    const prefix = entry.slice(0, at);
+    const bins = [
+      path.join(path.dirname(prefix), "bin", "synap"), // global: <prefix>/lib/node_modules → <prefix>/bin
+      path.join(prefix, "node_modules", ".bin", "synap"), // local: <dir>/node_modules → <dir>/node_modules/.bin
+    ];
+    for (const bin of bins) {
+      try {
+        if (fs.realpathSync(bin) === realEntry) {
+          installed = bin;
+          break;
+        }
+      } catch {
+        /* no such bin — try the next */
+      }
+    }
   }
-  return ["synap", ...args];
+  return { kind: realEntry.includes(nm) ? "installed" : "linked", command: [execPath, installed], realEntry };
+}
+
+/** The command Claude Code spawns for the bridge (see `resolveBridgeInvocation`). */
+function synapBridgeCommand(mcpUrl: string, invocation: BridgeInvocation): string[] {
+  return [...invocation.command, "mcp", "bridge", "--url", mcpUrl];
+}
+
+/** One line on what the bridge runs, when it is not an installed release. */
+export function bridgeInvocationNote(invocation: BridgeInvocation): string | null {
+  const install = "To run a release instead: `npm install -g @synap-core/cli@next`, then `synap mcp use-bridge`.";
+  if (invocation.kind === "checkout") {
+    return `The MCP bridge runs this checkout build (${invocation.realEntry}), not an installed CLI. ${install}`;
+  }
+  if (invocation.kind === "linked") {
+    return `The MCP bridge runs the installed \`synap\` (${invocation.command[1]}), which is a link to a checkout (${invocation.realEntry}). ${install}`;
+  }
+  return null;
 }
 
 // ─── Agent key provisioning helper ──────────────────────────────────────────
