@@ -46,6 +46,7 @@ import {
 } from "@synap-core/workspace-templates";
 import { log, banner } from "../utils/logger.js";
 import { resolveHubConfig, hubPost, renderHubError, HubError, type HubConfig } from "../lib/hub-client.js";
+import { classifyActiveCredential } from "../lib/credential-class.js";
 import { fetchProjects } from "../lib/project.js";
 import { writeGovernance } from "../lib/capture-lane.js";
 import { renderNextSteps, FLOW } from "../lib/next-steps.js";
@@ -1697,29 +1698,55 @@ export interface UpdateCheck extends TemplateUpdateCheck {
  *    automation arm returns "reused".
  *  - cell / capability have no per-package updater here: `null`.
  */
-export type UpdateDoor = "packages-apply" | "configs-reconcile";
+export type UpdateDoor = "packages-apply" | "configs-reconcile" | "pod-admin";
 /**
  * The slugs with an update that `synap market update <slug>` can apply (a
- * kind with a CLI updater). Next-step suggestions use it, so they never offer
- * a command that would only refuse.
+ * kind with a CLI updater, for this key). Next-step suggestions use it, so
+ * they never offer a command that would only refuse.
  */
 export function cliUpdatableSlugs(
-  checks: ReadonlyArray<{ slug: string; kind?: InstalledKind; updateAvailable: boolean }>
+  checks: ReadonlyArray<{ slug: string; kind?: InstalledKind; updateAvailable: boolean }>,
+  opts: { agentKey?: boolean } = {}
 ): string[] {
-  return checks.filter((c) => c.updateAvailable && updateDoorFor(c.kind) !== null).map((c) => c.slug);
+  return checks
+    .filter((c) => {
+      if (!c.updateAvailable) return false;
+      const door = updateDoorFor(c.kind, opts.agentKey);
+      return door !== null && door !== "pod-admin";
+    })
+    .map((c) => c.slug);
 }
 
-export function updateDoorFor(kind: InstalledKind | undefined): UpdateDoor | null {
+/**
+ * `agentKey`: the pod refuses a pod-wide config reconcile to any agent
+ * credential ("An agent credential cannot trigger a pod-wide config
+ * reconcile", 403), so for such a key a view / skill / automation update is
+ * the person's act, like a capability: its door is `"pod-admin"`.
+ */
+export function updateDoorFor(kind: InstalledKind | undefined, agentKey = false): UpdateDoor | null {
   switch (kind ?? "workspace") {
     case "workspace":
       return "packages-apply";
     case "view":
     case "skill":
     case "automation":
-      return "configs-reconcile";
+      return agentKey ? "pod-admin" : "configs-reconcile";
     default:
       return null;
   }
+}
+
+/** The status of an update left for the person to apply in pod admin (not a failure). */
+export const APPLY_IN_POD_ADMIN = "apply-in-pod-admin";
+
+/** The one row for a package this key cannot update: the person applies it in pod admin. */
+function applyInPodAdminResult(c: { slug: string; kind?: InstalledKind }, podUrl: string | undefined, json?: boolean) {
+  if (!json) {
+    log.warn(
+      `${c.slug} is a ${c.kind ?? "workspace"} — to apply in pod admin. ${podUrl ? marketUpdatesDoor(podUrl) : "Apply it yourself from pod admin → Marketplace → Updates."} Nothing was written.`
+    );
+  }
+  return { slug: c.slug, outcome: APPLY_IN_POD_ADMIN, status: APPLY_IN_POD_ADMIN, warnings: [] as string[] };
 }
 
 /**
@@ -2005,12 +2032,15 @@ interface StandaloneReconcileReport {
 async function reconcileOutcome(
   c: UpdateCheck,
   report: Promise<StandaloneReconcileReport>,
-  opts: { json?: boolean }
+  opts: { json?: boolean; podUrl?: string }
 ): Promise<{ slug: string; outcome: string; status: string; warnings: string[]; error?: string }> {
   let r: StandaloneReconcileReport;
   try {
     r = await report;
   } catch (e) {
+    // The pod's own refusal of an agent credential is the person's door, not a failure.
+    if (e instanceof HubError && e.status === 403 && `${e.message} ${e.rawBody}`.toLowerCase().includes("agent credential"))
+      return applyInPodAdminResult(c, opts.podUrl, opts.json);
     if (!opts.json) {
       log.error(`${c.slug} update failed`);
       renderHubError(e);
@@ -2173,6 +2203,7 @@ export async function marketUpdate(
   // Asked of the pod's write-free preview door BEFORE anything is shown, so the
   // person reads what will happen to their data before the template diff.
   let cfg: HubConfig | undefined;
+  let agentKey = false;
   const previews = new Map<string, DataChangePreview>();
   if (withUpdates.length > 0) {
     try {
@@ -2180,6 +2211,12 @@ export async function marketUpdate(
     } catch (e) {
       renderHubError(e);
       process.exit(1);
+    }
+    // Which door applies a view / skill / automation depends on the key: the
+    // pod refuses the pod-wide reconcile to any agent credential. Asked only
+    // when such an update exists, through the one credential-class read.
+    if (withUpdates.some((c) => updateDoorFor(c.kind) === "configs-reconcile")) {
+      agentKey = (await classifyActiveCredential(cfg)) === "agent";
     }
     for (const c of withUpdates) {
       // The data-change preview is the workspace door's (`/packages/preflight`).
@@ -2221,6 +2258,8 @@ export async function marketUpdate(
 
     log.heading("  Installed packages");
     log.blank();
+    // The slug column fits the longest slug (capped), with at least 2 spaces after it.
+    const slugW = Math.min(Math.max(28, ...checks.map((c) => c.slug.length + 2)), 46);
     for (const c of checks) {
       // ONE label door. This was a hand-rolled second copy that diverged from
       // `installedStatusLabel` in two ways that both LIED: it had no cache-cold
@@ -2235,7 +2274,7 @@ export async function marketUpdate(
             entryBySlug.get(c.slug)?.isPrivate ?? false,
             cat.loggedIn
           );
-      console.log("    " + chalk.cyan(c.slug.padEnd(28)) + label);
+      console.log("    " + chalk.cyan(clip(c.slug, slugW - 2).padEnd(slugW)) + label);
     }
     log.blank();
     if (noVersionInfo.length > 0) {
@@ -2300,7 +2339,7 @@ export async function marketUpdate(
   if (!shouldApply) {
     // Next steps offer only what this command can run: a capability update
     // (no CLI updater) is the person's act in pod admin, named once below.
-    const steps = FLOW.afterMarketUpdateCheck(cliUpdatableSlugs(withUpdates));
+    const steps = FLOW.afterMarketUpdateCheck(cliUpdatableSlugs(withUpdates, { agentKey }));
     const personApplies = withUpdates.filter((c) => updateDoorFor(c.kind) === null).map((c) => c.slug);
     if (opts.json) {
       console.log(
@@ -2349,23 +2388,22 @@ export async function marketUpdate(
   // at most once, lazily, and read each slug's outcome from its report.
   let configsReport: Promise<StandaloneReconcileReport> | undefined;
   for (const c of withUpdates) {
-    const door = updateDoorFor(c.kind);
+    const door = updateDoorFor(c.kind, agentKey);
+    // A capability update (and, for an agent key, a view / skill / automation)
+    // is the person's act in pod admin: not a failure.
+    if (door === "pod-admin" || (door === null && c.kind === "capability")) {
+      results.push(applyInPodAdminResult(c, cfg?.podUrl, opts.json));
+      continue;
+    }
     if (door === null) {
-      if (!opts.json) {
-        // A capability update is a person's act on pod admin (the pod refuses
-        // an agent key there); any other kind here has no updater at all.
-        log.warn(
-          c.kind === "capability"
-            ? `${c.slug} is a capability — it was not updated here. Nothing was written. ${marketUpdatesDoor(cfg!.podUrl)}`
-            : `${c.slug} is a ${c.kind} — the pod has no per-package update for this kind, so it was not updated. Nothing was written.`
-        );
-      }
+      if (!opts.json)
+        log.warn(`${c.slug} is a ${c.kind} — the pod has no per-package update for this kind, so it was not updated. Nothing was written.`);
       results.push({ slug: c.slug, outcome: "no-updater", status: "no-updater", warnings: [] });
       continue;
     }
     if (door === "configs-reconcile") {
       configsReport ??= hubPost("/configs/reconcile", {}, cfg!, applyTimeoutMs) as Promise<StandaloneReconcileReport>;
-      results.push(await reconcileOutcome(c, configsReport, { json: opts.json }));
+      results.push(await reconcileOutcome(c, configsReport, { json: opts.json, podUrl: cfg?.podUrl }));
       continue;
     }
     const entry = entryBySlug.get(c.slug);
@@ -2458,7 +2496,7 @@ export async function marketUpdate(
  */
 export function summarizeApplyResults(
   results: Array<{ slug: string; status: string }>
-): { updated: number; unchanged: number; withFailures: number; failed: number; timedOut: number; proposed: number; needsConsent: number; line: string } {
+): { updated: number; unchanged: number; withFailures: number; failed: number; timedOut: number; proposed: number; needsConsent: number; toApplyInPodAdmin: number; line: string } {
   let updated = 0;
   let unchanged = 0;
   let withFailures = 0;
@@ -2466,6 +2504,7 @@ export function summarizeApplyResults(
   let failed = 0;
   let proposed = 0;
   let needsConsent = 0;
+  let toApplyInPodAdmin = 0;
   for (const r of results) {
     switch (r.status) {
       case "installed":
@@ -2500,6 +2539,10 @@ export function summarizeApplyResults(
       case "needs-consent":
         needsConsent++;
         break;
+      // The person's act (pod admin → Marketplace → Updates): nothing failed.
+      case APPLY_IN_POD_ADMIN:
+        toApplyInPodAdmin++;
+        break;
       default:
         failed++;
     }
@@ -2509,14 +2552,15 @@ export function summarizeApplyResults(
   // The vocabulary's `unfinished` ("Not finished"): one state, one name on
   // every surface — never "completed with failures" (review2 UX §1 #2).
   if (withFailures > 0) parts.push(`${withFailures} ${templateStepPhrase("unfinished")}`);
+  if (toApplyInPodAdmin > 0) parts.push(`${toApplyInPodAdmin} to apply in pod admin`);
   if (failed > 0) parts.push(`${failed} failed`);
   if (timedOut > 0) parts.push(`${timedOut} timed out`);
   if (needsConsent > 0) parts.push(`${needsConsent} waiting for your agreement to data changes`);
   const clean = withFailures === 0 && failed === 0 && timedOut === 0 && needsConsent === 0;
   // Proposed isn't a failure (never ⚠) but isn't live yet (not a bare ✓) —
   // a distinct "→ waiting for your approval" marker keeps the summary honest.
-  const marker = !clean ? "⚠" : proposed > 0 ? "→" : "✓";
-  const color = !clean ? chalk.yellow : proposed > 0 ? chalk.cyan : chalk.green;
+  const marker = !clean ? "⚠" : proposed > 0 || toApplyInPodAdmin > 0 ? "→" : "✓";
+  const color = !clean ? chalk.yellow : proposed > 0 || toApplyInPodAdmin > 0 ? chalk.cyan : chalk.green;
   return {
     updated,
     unchanged,
@@ -2525,6 +2569,7 @@ export function summarizeApplyResults(
     timedOut,
     proposed,
     needsConsent,
+    toApplyInPodAdmin,
     line: color(`${marker} ${parts.join(" · ")}`),
   };
 }
