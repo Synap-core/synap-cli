@@ -9,7 +9,9 @@ describe("statusline store", () => {
     const dir = path.join(os.homedir(), ".synap", "statusline");
     for (const f of [podCacheFile(), podLockFile(), convCachePath("abc")]) {
       expect(path.dirname(f)).toBe(dir);
-      expect(f.startsWith("/tmp/")).toBe(false);
+      // The test HOME itself is a temp dir (test/setup/temp-home.ts), under /tmp on Linux:
+      // what must be gone is the old shared name, not any /tmp prefix.
+      expect(path.basename(f).startsWith("synap-statusline")).toBe(false);
     }
   });
 
