@@ -159,6 +159,28 @@ export interface RunRecord {
   model?: string;
   /** The quiet period (its `quietSince`, "" when the pod gave none) this run was last resumed for. */
   resumedQuietSince?: string;
+  /** The latest launch's end, not yet recorded on the pod (`settle`): retried each tick until it lands. */
+  unsettled?: PendingSettle;
+  /** When the latest end was recorded on the pod. */
+  settledAt?: string;
+}
+
+/**
+ * A run's end the pod has not heard yet, saved before the first try so that a
+ * crash or an MCP blip between the local save and the pod write loses nothing:
+ * the next tick (of this worker, or of the next one after a restart) retries it.
+ * It names its own launch, so a later resume of the same session never changes
+ * which runner it ends or which Result post it is.
+ */
+export interface PendingSettle {
+  /** The launch's process identity and conversation: what the pod's runner row is keyed by. */
+  process?: string;
+  claudeSessionId?: string;
+  /** The verdict to record; absent: the pod only hears the runner ended. */
+  verdict?: { status: VerdictStatus; sentence: string };
+  /** The Result post's `idempotencyKey`: a retry returns the post that already landed. */
+  key: string;
+  attempts: number;
 }
 
 interface WorkerState {
@@ -822,6 +844,49 @@ export function verdictRoomLine(v: { status: VerdictStatus; sentence: string }):
 }
 
 /**
+ * What the room hears from a run that FAILED without a verdict (it crashed,
+ * exited non-zero without `WORKER-RESULT:`, sat blocked, vanished, ran out of
+ * usage-limit resumes, or the worker restarted under it): how it ended and the
+ * reason the record keeps, on one line.
+ */
+export function deadRunSentence(rec: Pick<RunRecord, "result" | "exitCode">): string {
+  const how = typeof rec.exitCode === "number" ? `the run exited ${rec.exitCode} without a verdict` : "the run ended without a verdict";
+  const why = (rec.result ?? "").replace(/\s+/g, " ").trim();
+  const line = why ? `${how}: ${why}` : how;
+  return line.length > 300 ? `${line.slice(0, 299)}…` : line;
+}
+
+/**
+ * At most this many tries to record one run's end on the pod. A retry runs
+ * only after the tick's orient read answered, so a pod outage does not use them up.
+ */
+export const MAX_SETTLE_ATTEMPTS = 10;
+
+/**
+ * The end a run owes the pod, given what it said and how its process ended:
+ * its verdict (`verdictForExit`), or for a run that failed without one a
+ * synthesised `failed` (`deadRunSentence`), so a dead run is never silent.
+ * `undefined` when there is nothing to tell (no verdict, not failed, and no
+ * runner to end).
+ */
+export function pendingSettle(rec: RunRecord, verdictLine: string | undefined, exitedOk: boolean): PendingSettle | undefined {
+  const said = parseVerdict(verdictLine);
+  const verdict = said
+    ? verdictForExit(said, exitedOk, rec.exitCode)
+    : rec.status === "failed"
+      ? { status: "failed" as const, sentence: deadRunSentence(rec) }
+      : undefined;
+  if (!verdict && !runEndHeaders(rec)) return undefined;
+  return {
+    process: rec.process,
+    claudeSessionId: rec.claudeSessionId,
+    ...(verdict ? { verdict } : {}),
+    key: `result:${rec.sessionId}:${rec.process ?? rec.launchedAt ?? rec.startedAt}`,
+    attempts: 0,
+  };
+}
+
+/**
  * Outcome kinds a verdict never claims: a pull request is delivered only when
  * it merges (rule work-units), and the merge sweeper marks it met then; a
  * branch or a commit is a step toward that PR, not a deliverable of its own.
@@ -1052,6 +1117,8 @@ export function createWorker(opts: WorkerOptions, deps: WorkerDeps): Worker {
       r.status = "failed";
       r.result = "worker restarted while this run was in flight";
       r.finishedAt = iso();
+      // Its runner never heard it end and its room never heard why: both are owed (the first tick settles them).
+      r.unsettled = pendingSettle(r, undefined, false);
     }
   }
   saveState(agent, state);
@@ -1131,35 +1198,64 @@ export function createWorker(opts: WorkerOptions, deps: WorkerDeps): Worker {
    * door (governed as a playbook-run update, it would wait on the person, and a
    * session handed with no run has none). Never closes the session. A failed
    * write is said; the local record keeps the verdict either way. `done` is
-   * heard only from a process that exited cleanly (`verdictForExit`).
+   * heard only from a process that exited cleanly (`verdictForExit`). A run
+   * that failed with no verdict gets a synthesised one (`pendingSettle`).
+   *
+   * The end is saved as owed (`unsettled`) BEFORE the first try, and the
+   * Result post carries an `idempotencyKey` per launch: a write that failed,
+   * or a worker that died mid-write, is retried on a later tick, and a retry of
+   * a post that did land returns that post instead of a second line.
    */
-  const settle = async (rec: RunRecord, verdictLine: string | undefined, exitedOk: boolean) => {
-    const headers = runEndHeaders(rec);
-    const said = parseVerdict(verdictLine);
-    const verdict = said ? verdictForExit(said, exitedOk, rec.exitCode) : undefined;
-    if (!headers && !verdict) return;
+  const owe = (rec: RunRecord, verdictLine: string | undefined, exitedOk: boolean) => {
+    rec.unsettled = pendingSettle(rec, verdictLine, exitedOk);
+  };
+  const settling = new Set<string>();
+  const settleOwed = async (rec: RunRecord) => {
+    const owed = rec.unsettled;
+    if (!owed || settling.has(rec.sessionId)) return;
+    settling.add(rec.sessionId);
+    const headers = runEndHeaders(owed);
+    const verdict = owed.verdict;
     try {
       const s = await deps.mcp.call("synap_get_session", { sessionId: rec.sessionId }, { headers });
       if (s.isError) throw new Error(`get_session refused: ${s.text.slice(0, 160)}`);
-      if (!verdict) return;
-      const claim = verdict.status === "done" ? verdictClaim(s.text) : undefined;
-      if (claim?.kind === "unreadable") {
-        log(`session ${rec.sessionId}: its outcomes could not be read (${claim.why}) — nothing claimed for the done verdict`);
-      } else if (claim?.kind === "one") {
-        const u = await deps.mcp.call("synap_update_session", { sessionId: rec.sessionId, completeOutput: claim.key }, { headers });
-        if (u.isError) log(`session ${rec.sessionId}: could not claim "${claim.key}": ${u.text.slice(0, 160)}`);
+      if (verdict) {
+        const claim = verdict.status === "done" ? verdictClaim(s.text) : undefined;
+        if (claim?.kind === "unreadable") {
+          log(`session ${rec.sessionId}: its outcomes could not be read (${claim.why}) — nothing claimed for the done verdict`);
+        } else if (claim?.kind === "one") {
+          const u = await deps.mcp.call("synap_update_session", { sessionId: rec.sessionId, completeOutput: claim.key }, { headers });
+          if (u.isError) log(`session ${rec.sessionId}: could not claim "${claim.key}": ${u.text.slice(0, 160)}`);
+        }
+        const channelId = findKey(JSON.parse(s.text), "channelId");
+        if (typeof channelId !== "string" || !channelId) throw new Error("the session has no room");
+        const p = await deps.mcp.call(
+          "synap_post_message",
+          { channelId, kind: "update", content: verdictRoomLine(verdict), idempotencyKey: owed.key },
+          { headers }
+        );
+        if (p.isError) throw new Error(`post refused: ${p.text.slice(0, 160)}`);
       }
-      const channelId = findKey(JSON.parse(s.text), "channelId");
-      if (typeof channelId !== "string" || !channelId) throw new Error("the session has no room");
-      const p = await deps.mcp.call(
-        "synap_post_message",
-        { channelId, kind: "update", content: verdictRoomLine(verdict) },
-        { headers }
-      );
-      if (p.isError) throw new Error(`post refused: ${p.text.slice(0, 160)}`);
+      if (rec.unsettled === owed) delete rec.unsettled;
+      rec.settledAt = iso();
     } catch (err) {
-      log(`session ${rec.sessionId}: ${verdict ? "the verdict was not recorded on the session" : "could not tell the pod the run ended"} (${(err as Error).message}); the local record keeps it`);
+      owed.attempts++;
+      const what = verdict ? "the verdict was not recorded on the session" : "could not tell the pod the run ended";
+      if (owed.attempts >= MAX_SETTLE_ATTEMPTS) {
+        if (rec.unsettled === owed) delete rec.unsettled;
+        log(`session ${rec.sessionId}: ${what} (${(err as Error).message}); gave up after ${owed.attempts} tries — the local record keeps it`);
+      } else {
+        log(`session ${rec.sessionId}: ${what} (${(err as Error).message}); retried next tick (try ${owed.attempts} of ${MAX_SETTLE_ATTEMPTS})`);
+      }
+    } finally {
+      settling.delete(rec.sessionId);
+      save();
     }
+  };
+  const settle = async (rec: RunRecord, verdictLine: string | undefined, exitedOk: boolean) => {
+    owe(rec, verdictLine, exitedOk);
+    save();
+    await settleOwed(rec);
   };
 
   // ── launching ──
@@ -1396,11 +1492,12 @@ export function createWorker(opts: WorkerOptions, deps: WorkerDeps): Worker {
     rec.result = result;
     rec.finishedAt = iso();
     rec.blockedSince = undefined;
+    owe(rec, verdictLine, status === "done");
     save();
     appendRunLog(rec.sessionId, { type: "synap-worker", event: "bg-end", bgId: rec.bgId ?? null, status });
     log(`session ${rec.sessionId} (background ${rec.bgId}) finished — ${status}${result ? ` · ${result}` : ""}`);
     await stopBg(rec);
-    await settle(rec, verdictLine, status === "done");
+    await settleOwed(rec);
   };
 
   const watch = async () => {
@@ -1448,10 +1545,11 @@ export function createWorker(opts: WorkerOptions, deps: WorkerDeps): Worker {
           rec.status = "failed";
           rec.result = `usage limit (${hit.error})`;
         }
+        owe(rec, undefined, false);
         save();
         log(`session ${rec.sessionId} (background ${rec.bgId}): ${rec.result}`);
         await stopBg(rec);
-        await settle(rec, undefined, false);
+        await settleOwed(rec);
         continue;
       }
       if (phase === "finished") {
@@ -1511,6 +1609,8 @@ export function createWorker(opts: WorkerOptions, deps: WorkerDeps): Worker {
     // The stamp rides on this poll only: it is what tells the pod a process serves this agent.
     const res = await deps.mcp.call("synap_orient", {}, { headers: workerRunnerHeader() });
     if (res.isError) throw new Error(`orient refused: ${res.text.slice(0, 200)}`);
+    // 0. Run ends the pod has not heard yet (a write that failed, a restart mid-write): retried.
+    for (const rec of Object.values(state.runs)) if (rec.unsettled) await settleOwed(rec);
     const items = parseHandedToYou(res.text);
     await watch();
     const free = () => maxParallel - active();
@@ -1526,8 +1626,8 @@ export function createWorker(opts: WorkerOptions, deps: WorkerDeps): Worker {
       if ((rec.limitResumes ?? 0) >= MAX_LIMIT_RESUMES) {
         rec.status = "failed";
         rec.result = `stopped: cut off by a usage limit ${MAX_LIMIT_RESUMES + 1} times`;
-        save();
         log(`session ${rec.sessionId}: ${rec.result}`);
+        await settle(rec, undefined, false);
         continue;
       }
       const design = rec.mode === "bg";
