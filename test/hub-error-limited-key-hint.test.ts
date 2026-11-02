@@ -109,7 +109,8 @@ describe("a limited key refused at the door", () => {
 });
 
 describe("a limited key whose grant leaves the action out", () => {
-  // The pod's words (synap-backend utils/grant-write-check.ts); it sends no code.
+  // The pod's code (GRANT_DENIED, synap-backend grant-denial-code.ts), and an
+  // older pod's words (utils/grant-write-check.ts) with no code.
   async function postRefusal(body: unknown): Promise<HubError> {
     podAnswers(403, body);
     try {
@@ -125,6 +126,31 @@ describe("a limited key whose grant leaves the action out", () => {
     const err = await postRefusal({ error: `This key's grant does not allow "workspace.update".` });
     expect(err.code).toBeUndefined();
     expect(grantDenialOf(err)).toEqual({ action: "workspace.update" });
+  });
+
+  it("reads the pod's GRANT_DENIED code and action first, whatever the words", async () => {
+    const err = await postRefusal({
+      error: "Refused.",
+      code: "GRANT_DENIED",
+      reasonCode: "GRANT_DENIED",
+      action: "workspace.update",
+    });
+    expect(err.code).toBe("GRANT_DENIED");
+    expect(grantDenialOf(err)).toEqual({ action: "workspace.update" });
+  });
+
+  it("reads reasonCode when the door kept its own code", async () => {
+    const err = await postRefusal({
+      error: "Refused.",
+      code: "ROUTE_CODE",
+      reasonCode: "GRANT_DENIED",
+      action: "channel.read",
+    });
+    expect(grantDenialOf(err)).toEqual({ action: "channel.read" });
+  });
+
+  it("a 403 with neither the code nor the older words is not a grant denial", async () => {
+    expect(grantDenialOf(await postRefusal({ error: "Refused.", code: "OTHER" }))).toBeNull();
   });
 
   it("says the key may not do it, never that the workspace is missing", async () => {

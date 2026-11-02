@@ -62,7 +62,7 @@ describe("summarizeApplyResults — governed proposal is not a failure", () => {
     ]);
     expect(s.proposed).toBe(1);
     expect(s.failed).toBe(0);
-    expect(s.line).toContain("proposed (awaiting review)");
+    expect(s.line).toContain("waiting for your approval");
     expect(s.line).not.toContain("failed");
   });
 
