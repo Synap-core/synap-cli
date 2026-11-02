@@ -70,7 +70,8 @@ export const WAITING_ON_REASON_LABELS: Readonly<Record<string, string>> = {
   approval: "Approval",
   access: "Access",
   another_work: "Other work",
-  outside_world: "Outside world",
+  // Merged into `external` (backend 017224207, D-R4): an old value reads the same.
+  outside_world: "Outside party",
   external: "Outside party",
   date: "A date",
 };
