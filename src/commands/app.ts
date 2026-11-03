@@ -29,7 +29,12 @@ import { renderHubError, resolveHubConfig, type HubConfig } from "../lib/hub-cli
 import { pollForApproval } from "../lib/approval-poll.js";
 import { listPodProfiles } from "../lib/pod.js";
 import { samePodOrigin } from "../lib/project-ref.js";
-import { classifyProposalStatus, statusOf } from "./proposals-await.js";
+import {
+  APPROVAL_FAILED,
+  approvalFailedLine,
+  classifyProposalStatus,
+  statusOf,
+} from "./proposals-await.js";
 
 // ─── Manifest (APP-CONNECT-SPEC §1) ────────────────────────────────────────────
 
@@ -713,6 +718,7 @@ export async function appConnect(): Promise<void> {
   // ── 2. Poll until the human approves ────────────────────────────────────────
   process.stdout.write(chalk.dim("  Waiting for approval"));
   const ticker = setInterval(() => process.stdout.write(chalk.dim(".")), 2000);
+  let approvalFailedShown = false;
   try {
     await pollForApproval<Record<string, unknown>>({
       url: `${creds.podUrl.replace(/\/+$/, "")}/api/hub/proposals/${proposalId}`,
@@ -720,9 +726,16 @@ export async function appConnect(): Promise<void> {
       isApproved: (d) => classifyProposalStatus(statusOf(d)) === "approved",
       isRejected: (d) => classifyProposalStatus(statusOf(d)) === "rejected",
       onApproved: (d) => d as Record<string, unknown>,
-      // `classifyProposalStatus` maps rejected / expired / withdrawn /
-      // approval_failed to one "rejected" — say "not approved", never assert a
-      // rejection we cannot prove.
+      // `classifyProposalStatus` maps rejected / expired / withdrawn / reverted
+      // to one "rejected" — say "not approved", never assert a rejection we
+      // cannot prove. `approval_failed` is NOT one of them: the pod says a
+      // verdict is still owed (retryable), so the wait goes on and says so once.
+      onTick: ({ data }) => {
+        if (approvalFailedShown || statusOf(data) !== APPROVAL_FAILED) return;
+        approvalFailedShown = true;
+        process.stdout.write("\n");
+        log.error(approvalFailedLine(reviewUrl));
+      },
       rejectedError: `The access request for "${manifest.name}" was not approved (rejected, expired or withdrawn). Re-run \`synap app connect\` to ask again.`,
       // A timeout is NOT proof the human declined: the pod may have been
       // unreachable while polling. Name both causes.

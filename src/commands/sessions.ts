@@ -1,4 +1,5 @@
 import chalk from "chalk";
+import { resolveStatusLabel } from "@synap-core/types/vocabulary";
 import { log } from "../utils/logger.js";
 import {
   resolveHubConfig,
@@ -20,27 +21,12 @@ import { readFileSync, existsSync } from "fs";
 import { resolve } from "path";
 
 /**
- * The three session-population lenses ("kind"), and their human labels.
- *
- * `@synap-core/types/vocabulary` (`resolveStatusLabel`) is the SSOT for this —
- * `work`/`run`/`receipt` are pinned there verbatim (`.claude/rules/
- * vocabulary.md` forbids a local `charAt(0).toUpperCase()` guess). But this
- * package cannot import it: the CLI links only `@synap-core/workspace-
- * templates` (a real npm dep already), and `@synap-core/types` pulls in
- * drizzle-orm/drizzle-zod/yjs as transitive deps for a globally-installed
- * binary — an install-topology change, not a labelling fix. Same shape as
- * `KIND_HEADINGS` in `market.ts`: a local table, pinned by a source-scan
- * parity test (`test/session-kind-vocabulary-parity.test.ts`) against the
- * registry across the repo boundary, so it cannot silently drift.
+ * The three session-population lenses ("kind"), worded by the vocabulary door
+ * (`@synap-core/types/vocabulary` `resolveStatusLabel`): `work` / `run` /
+ * `receipt` are pinned there, and an unknown kind humanizes, never leaks raw.
  */
-const SESSION_KIND_LABELS: Record<string, string> = {
-  work: "Work",
-  run: "Run",
-  receipt: "Receipt",
-};
-
 export function sessionKindLabel(kind: string): string {
-  return SESSION_KIND_LABELS[kind] ?? kind;
+  return resolveStatusLabel(kind);
 }
 
 const SESSION_KIND_FILTERS = ["work", "run", "receipt", "all"] as const;
@@ -49,8 +35,7 @@ const SESSION_KIND_FILTERS = ["work", "run", "receipt", "all"] as const;
  * The name to show for a session: mirrors `resolveSessionTitle` in
  * `synap-backend/packages/types/src/focus-sessions/title.ts` — the
  * platform's ONE resolver (title when set, else the goal's first line,
- * clipped at a word boundary). This package cannot import that file (see the
- * doc comment on `SESSION_KIND_LABELS` above for why), so only the DISPLAY
+ * clipped at a word boundary). Only the DISPLAY
  * half of the rule is mirrored: the row's `title` already arrives
  * server-normalized (HTML-entity decoded, one line), so the write-path
  * decode step has nothing to do here. Pinned by
@@ -90,21 +75,9 @@ export function resolveSessionTitle(
   return clipAtWordBoundary(firstLine, opts.maxLength ?? SESSION_TITLE_FALLBACK_MAX);
 }
 
-/**
- * Session-evaluation verdicts (`session_evaluations.verdict`). SSOT is
- * `@synap-core/types/vocabulary`'s `STATUS_LABELS` (`pass`/`fail`/
- * `unmeasured`) — same cross-boundary constraint as `SESSION_KIND_LABELS`
- * above, mirrored here and pinned by
- * `test/verdict-label-vocabulary-parity.test.ts`.
- */
-const VERDICT_LABELS: Record<string, string> = {
-  pass: "Passed",
-  fail: "Failed",
-  unmeasured: "Not checked",
-};
-
+/** Session-evaluation verdicts (`pass` / `fail` / `unmeasured`), worded by the door. */
 function verdictLabel(verdict: string): string {
-  return VERDICT_LABELS[verdict] ?? verdict;
+  return resolveStatusLabel(verdict);
 }
 
 /** Shape of `SessionVerdict` (`@synap-core/types/focus-sessions`), as the wire sends it. */
@@ -436,7 +409,7 @@ export async function getSession(
     if (typeof s.kind === "string")
       console.log(`  Kind:       ${chalk.dim(sessionKindLabel(s.kind))}`);
     // `verdict` (SessionVerdict) is present iff the session carries criteria —
-    // see `test/verdict-label-vocabulary-parity.test.ts` for the label SSOT.
+    // the label words come from the vocabulary door (`verdictLabel`).
     const verdict = s.verdict as SessionVerdictWire | undefined;
     if (verdict && typeof verdict.total === "number" && verdict.total > 0) {
       const summary = verdictSummary(verdict);
