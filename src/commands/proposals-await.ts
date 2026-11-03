@@ -11,12 +11,10 @@
  * predicates and a first immediate check so an already-decided proposal returns
  * without paying one interval of latency.
  *
- * Status vocabulary and the "still the person's to decide?" rule come from the
- * pod's own leaf (`@synap-core/types/proposals/attention`: `PROPOSAL_STATUSES`,
- * `STATUS_ATTENTION`), never a list kept here: a new pod status is classified
- * by the leaf, and a test iterates `PROPOSAL_STATUSES` to prove none falls
- * through. `approval_failed` ("approved, but applying it threw") is `decide`,
- * so the wait goes on instead of reporting a rejection nobody made.
+ * Status vocabulary comes from `PROPOSAL_STATUS_FILTERS` (data-extra.ts), which
+ * itself mirrors the pod's SSOT. It is NOT hand-mirrored here: the terminal
+ * classification below is asserted exhaustive against that list by a test, so a
+ * new pod status cannot silently fall through.
  */
 
 import chalk from "chalk";
@@ -29,52 +27,55 @@ import {
 } from "../lib/hub-client.js";
 import { requireFullId } from "../lib/id.js";
 import { pollForApproval } from "../lib/approval-poll.js";
-import {
-  PROPOSAL_STATUSES,
-  STATUS_ATTENTION,
-} from "@synap-core/types/proposals/attention";
 import { PROPOSAL_STATUS_FILTERS, proposalStatusLabel } from "./data-extra.js";
 import { type BaseOpts } from "./data.js";
 
 // ─── status classification ────────────────────────────────────────────────────
 
-/** Every value a proposal ROW can hold: the pod's own list, imported. */
-export const PROPOSAL_ROW_STATUSES: readonly string[] = PROPOSAL_STATUSES;
+/**
+ * Every value a proposal ROW can hold — the shared `--status` vocabulary minus
+ * the `all` filter sentinel, which no row ever carries. Derived, never retyped.
+ */
+export const PROPOSAL_ROW_STATUSES = PROPOSAL_STATUS_FILTERS.filter(
+  (s) => s !== "all"
+) as readonly string[];
 
-/** Decided, and the decision was YES (the write stood or already executed). */
-const YES_STATUSES = new Set(["approved", "auto_approved"]);
+/** Decided, and the decision was YES. Exit 0. */
+const SUCCESS_STATUSES = new Set(["approved", "auto_approved"]);
 
-/** The status the pod sets when a person approved but the write then threw. */
-export const APPROVAL_FAILED = "approval_failed";
+/**
+ * Decided, and the decision was NOT yes. Exit 1.
+ *
+ * NOTE ON `cancelled`: the pod has no such status. The equivalent row state is
+ * `withdrawn` (proposer retracted it). `reverted` and `approval_failed` are
+ * likewise terminal-not-approved: the write did not stand.
+ */
+const FAILURE_STATUSES = new Set([
+  "rejected",
+  "expired",
+  "withdrawn",
+  "reverted",
+  "approval_failed",
+]);
 
 export type ProposalOutcome = "approved" | "rejected" | "pending" | "unknown";
 
 /**
- * Classify a proposal's status from the pod's attention rule.
- *
- * - `decide` (pending, approval_failed): a verdict is still owed, so keep
- *   waiting ("pending").
- * - `notice` / `history`: settled. YES for approved / auto_approved, else
- *   "rejected" (rejected, expired, withdrawn, reverted: the write did not
- *   stand).
+ * Classify a proposal's status.
  *
  * `unknown` is deliberately NON-terminal: a status this CLI has never heard of
  * may well be transient on a newer pod, and calling it "rejected" would be the
  * client inventing a decision the pod never made. An unknown status therefore
- * keeps polling and, failing that, times out (exit 2).
+ * keeps polling and, failing that, times out (exit 2) — an honest "I could not
+ * determine the outcome" rather than a fabricated one.
  */
 export function classifyProposalStatus(status: string | undefined): ProposalOutcome {
   if (!status) return "unknown";
   const s = status.trim().toLowerCase();
-  if (!Object.hasOwn(STATUS_ATTENTION, s)) return "unknown";
-  const attention = STATUS_ATTENTION[s as keyof typeof STATUS_ATTENTION];
-  if (attention === "decide") return "pending";
-  return YES_STATUSES.has(s) ? "approved" : "rejected";
-}
-
-/** The wait line for `approval_failed`: the person approved, the write threw. */
-export function approvalFailedLine(reviewHandle: string): string {
-  return `Approved, but the write failed: retry or dismiss it at ${reviewHandle}`;
+  if (SUCCESS_STATUSES.has(s)) return "approved";
+  if (FAILURE_STATUSES.has(s)) return "rejected";
+  if (s === "pending") return "pending";
+  return "unknown";
 }
 
 /** Process exit code for a finished await. */
@@ -127,8 +128,6 @@ export interface AwaitProposalResult {
 export interface AwaitProposalOptions {
   timeoutMs: number;
   intervalMs: number;
-  /** Called ONCE, the first time the proposal is seen `approval_failed` (still waiting). */
-  onApprovalFailed?: (proposal: Record<string, unknown>) => void;
 }
 
 /**
@@ -142,12 +141,6 @@ export async function awaitProposal(
   opts: AwaitProposalOptions
 ): Promise<AwaitProposalResult> {
   const startedAt = Date.now();
-  let warned = false;
-  const noticeFailure = (d: unknown): void => {
-    if (warned || statusOf(d) !== APPROVAL_FAILED) return;
-    warned = true;
-    opts.onApprovalFailed?.(d as Record<string, unknown>);
-  };
 
   // First check is IMMEDIATE — an already-decided proposal must not pay a full
   // interval of latency, and a 404/403 must surface as an error now rather than
@@ -155,7 +148,6 @@ export async function awaitProposal(
   const first = (await hubGet(`/proposals/${id}`, {}, cfg)) as Record<string, unknown>;
   const firstStatus = statusOf(first);
   const firstOutcome = classifyProposalStatus(firstStatus);
-  noticeFailure(first);
   if (firstOutcome === "approved" || firstOutcome === "rejected") {
     return {
       id,
@@ -190,7 +182,6 @@ export async function awaitProposal(
       },
       // Track the last status seen even on ticks that are neither terminal.
       onTick: ({ data }) => {
-        noticeFailure(data);
         const status = statusOf(data);
         if (status) lastStatus = status;
       },
@@ -271,16 +262,7 @@ export async function awaitProposalCommand(
         `Waiting for proposal ${id.slice(0, 8)} — checking every ${Math.round(intervalMs / 1000)}s, up to ${Math.round(timeoutMs / 60_000)}m.`
       );
     }
-    result = await awaitProposal(id, cfg, {
-      timeoutMs,
-      intervalMs,
-      onApprovalFailed: (p) => {
-        if (opts.json) return;
-        const nested = p.proposal && typeof p.proposal === "object" ? (p.proposal as Record<string, unknown>) : p;
-        const url = typeof nested.reviewUrl === "string" ? nested.reviewUrl : `synap open proposal ${id}`;
-        log.error(approvalFailedLine(url));
-      },
-    });
+    result = await awaitProposal(id, cfg, { timeoutMs, intervalMs });
   } catch (e) {
     renderHubError(e);
     process.exit(2);
