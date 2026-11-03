@@ -996,7 +996,7 @@ export function detachActiveSessionId(podUrl?: string): string | undefined {
  * Claude Code conversation the call comes from (`conversation-headers.ts`) — so
  * the work it lands can be traced back to, and reopened in, that conversation.
  */
-function sessionHeaders(cfg?: Pick<HubConfig, "podUrl">): Record<string, string> {
+function sessionHeaders(cfg?: HubConfig): Record<string, string> {
   const id = resolveActiveSessionId(cfg?.podUrl);
   return {
     ...clientHeader("synap-cli"),
@@ -1142,13 +1142,12 @@ async function waitOutRateLimit(
 /**
  * fetch with client pacing + automatic 429 backoff.
  *
- * The timeout signal is built per attempt: one signal made before the loop
- * would be spent by the time a 429 wait (default ~62s) ends, and every retry
- * would abort at once and read as a timeout.
+ * `timeoutMs` mirrors the AbortSignal.timeout() the caller put on `init` — it is
+ * only used to say how long we waited when the signal fires.
  */
 async function hubFetchWithRetry(
   url: string,
-  init: Omit<RequestInit, "signal">,
+  init: RequestInit,
   label: string,
   timeoutMs: number
 ): Promise<Response> {
@@ -1159,7 +1158,7 @@ async function hubFetchWithRetry(
     await acquireHubSlot();
     let res: Response;
     try {
-      res = await podFetch(url, { ...init, signal: AbortSignal.timeout(timeoutMs) });
+      res = await podFetch(url, init);
     } catch (err) {
       if (err instanceof PodMovedError) throw err;
       throw networkError(err, url, labelMethod, labelPath, timeoutMs);
@@ -1172,9 +1171,7 @@ async function hubFetchWithRetry(
 export async function hubGet(
   path: string,
   params: Record<string, string | number | undefined>,
-  // A read needs only where and with what key; a caller with no full config
-  // (a saved pod's credential check) passes just those two.
-  cfg: Pick<HubConfig, "podUrl" | "apiKey">,
+  cfg: HubConfig,
   // Default 15s suits reads. A long-poll door (`/answers/wait`) holds the
   // request open for its own `timeoutSeconds`; its caller passes more.
   timeoutMs = 15_000
@@ -1187,6 +1184,7 @@ export async function hubGet(
     url.toString(),
     {
       headers: { Authorization: `Bearer ${cfg.apiKey}`, ...sessionHeaders(cfg) },
+      signal: AbortSignal.timeout(timeoutMs),
     },
     `GET ${path}`,
     timeoutMs
@@ -1230,6 +1228,7 @@ export async function hubPost(
         ...sessionHeaders(cfg),
       },
       body: JSON.stringify(body),
+      signal: AbortSignal.timeout(timeoutMs),
     },
     `POST ${path}`,
     timeoutMs
@@ -1263,6 +1262,7 @@ export async function hubPostMultipart(
       method: "POST",
       headers: { Authorization: `Bearer ${cfg.apiKey}`, ...sessionHeaders(cfg) },
       body: form,
+      signal: AbortSignal.timeout(timeoutMs),
     },
     `POST multipart ${path}`,
     timeoutMs
@@ -1319,6 +1319,7 @@ export async function hubPatch(path: string, body: unknown, cfg: HubConfig): Pro
       method: "PATCH",
       headers: { Authorization: `Bearer ${cfg.apiKey}`, "Content-Type": "application/json", ...sessionHeaders(cfg) },
       body: JSON.stringify(body),
+      signal: AbortSignal.timeout(15_000),
     },
     `PATCH ${path}`,
     15_000
@@ -1339,6 +1340,7 @@ export async function hubDelete(path: string, cfg: HubConfig): Promise<unknown> 
     {
       method: "DELETE",
       headers: { Authorization: `Bearer ${cfg.apiKey}`, ...sessionHeaders(cfg) },
+      signal: AbortSignal.timeout(15_000),
     },
     `DELETE ${path}`,
     15_000
