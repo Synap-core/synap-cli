@@ -154,3 +154,69 @@ export function thisComputerInstanceIds(agentType: string, idFor: (surface: stri
   const surfaces = [agentType, ...Object.entries(SURFACE_AGENT_TYPE).filter(([, t]) => t === agentType).map(([s]) => s)];
   return new Set(surfaces.map(idFor));
 }
+
+// ─── the seat: the OS user on this computer ──────────────────────────────────
+
+/**
+ * Agents inside a computer (plan "Computer once, agents inside" rev 3, pod
+ * document 31470fd5, D1/D4): an agent is one per (person, computer, SEAT,
+ * engine, job). The seat is the OS user the CLI runs as ("antoine", "agent").
+ * Two OS users on one computer share its machine id, so `deriveInstanceId`
+ * alone cannot tell them apart: on 2 Nov OS user "agent" paired the devbox and
+ * the approval re-keyed the CRM worker of OS user "antoine".
+ */
+
+/** The longest seat the pod takes (`AGENT_SEAT_MAX`, @synap-core/types/agents). */
+export const SEAT_MAX = 64;
+
+/**
+ * An OS user name as the pod accepts it (`isValidSeat`): 1-64 printable
+ * characters with no colon and no whitespace. A Windows name with a space
+ * ("Ada Lovelace") becomes "Ada_Lovelace", the same every run, instead of a
+ * request the pod would refuse. Null when nothing usable is left. Pure.
+ */
+export function normalizeSeat(raw: string | null | undefined): string | null {
+  const cleaned = [...(raw ?? "").trim()]
+    .filter((ch) => ch.charCodeAt(0) > 0x1f && ch.charCodeAt(0) !== 0x7f)
+    .join("")
+    .replace(/[:\s]+/g, "_")
+    .slice(0, SEAT_MAX);
+  return cleaned ? cleaned : null;
+}
+
+/** The OS user this CLI runs as, normalized, or null when the OS names none. */
+export function osSeat(read: () => string | null = osUserName): string | null {
+  return normalizeSeat(read());
+}
+
+function osUserName(): string | null {
+  try {
+    return os.userInfo().username;
+  } catch {
+    // No passwd entry (a bare container uid): the environment may still say.
+    return process.env.USER ?? process.env.USERNAME ?? null;
+  }
+}
+
+/**
+ * The seat's id: `s-` + 32 hex chars of sha256(machine id, seat). Stable for
+ * one OS user on one computer, different for another OS user on the same
+ * computer and for the same name on another computer. The pod mints this
+ * seat's computer key with it as its instance, so approving one seat's
+ * request replaces only that seat's computer key. One-way: neither the raw
+ * machine id nor the OS user name can be read back from it. Pure.
+ */
+export function deriveSeatId(machineId: string, seat: string): string {
+  const digest = createHash("sha256").update(`synap-seat\u0000${machineId}\u0000${seat}`).digest("hex");
+  return `s-${digest.slice(0, 32)}`;
+}
+
+/** This seat and its id, or null when the OS names no user. */
+export function thisSeat(
+  src?: MachineIdSources,
+  read?: () => string | null
+): { seat: string; seatId: string } | null {
+  const seat = osSeat(read);
+  if (!seat) return null;
+  return { seat, seatId: deriveSeatId(readMachineId(src), seat) };
+}

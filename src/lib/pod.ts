@@ -33,6 +33,11 @@ export interface LocalPodConfig {
   keyExpiresAt?: string;
   /** The computer's name on the pod ("devbox"). */
   computerName?: string;
+  /**
+   * The id of `hubApiKey` on the pod (never the secret). Sent back in the
+   * device request's `held` so the pod knows which keys this OS user keeps.
+   */
+  keyId?: string;
 }
 
 /** SSOT for every connect/surface agent identity. The type is derived from this
@@ -83,6 +88,8 @@ export interface SurfaceAgentKey {
    * a surface pointed at another pod falls back to that pod's own profile key.
    */
   podUrl?: string;
+  /** The key's id on the pod (never the secret), for the device request's `held`. */
+  keyId?: string;
 }
 
 /** Agent workspace routing — persisted by `synap connect` wizard. */

@@ -31,6 +31,7 @@ import { buildPairLink, renderTerminalQr } from "../lib/pair-link.js";
 import { buildHandoff } from "../lib/init-handoff.js";
 import { connectAgentsBatch } from "../lib/agent-door.js";
 import { INIT_EXIT, InitExit } from "../lib/init-exit.js";
+import { initJobFor, type AgentJob } from "../lib/agent-jobs.js";
 import { askControlPlaneWherePodIs, podMovedMessage } from "../lib/pod-moved.js";
 import { reserveStdoutForJson } from "../lib/init-output.js";
 import { isManagedPod, keyChoices, type KeyChoice } from "../lib/init-flow.js";
@@ -39,6 +40,7 @@ import { selfHostInstallCommands, SELF_HOST_DOCS_URL } from "../lib/self-host.js
 import {
   computerKeyNeedsRenewal,
   deviceConnect,
+  DeviceJobRefusedError,
   DeviceStartError,
   saveDeviceGrant,
   wireApprovedAgents,
@@ -59,6 +61,12 @@ interface InitOptions {
   json?: boolean;
   /** Set by init: no prompt may run (no terminal, or --yes). */
   unattended?: boolean;
+  /**
+   * The job of the agent this pairing adds (`--as "Agent sessions"`, plan
+   * 31470fd5 D8): one engine (`initJobFor`), sent on the device request to a
+   * pod that knows jobs, refused before anything is sent to one that does not.
+   */
+  as?: string;
 }
 
 const AGENT_CHOICES: readonly DetectableAgent[] = ["claude-code", "codex", "cursor"];
@@ -163,7 +171,13 @@ async function desktopFlow(opts: InitOptions, agents?: DetectableAgent[]): Promi
   const pod = await resolveDesktopPod(opts);
   // The agents asked for WITH the computer: --agents, else the ones found here.
   const wanted = agents ?? detectAgents().filter((r) => r.found).map((r) => r.target);
-  const { key: humanKey, grant } = await ensurePodKey(pod.podUrl, opts, pod.podId, wanted);
+  let jobs: Partial<Record<string, AgentJob>> | undefined;
+  if (opts.as !== undefined) {
+    const planned = initJobFor(opts.as, wanted);
+    if (!planned.ok) throw new InitExit(INIT_EXIT.usage, planned.error);
+    jobs = { [planned.engine]: planned.job };
+  }
+  const { key: humanKey, grant } = await ensurePodKey(pod.podUrl, opts, pod.podId, wanted, jobs);
 
   // Connected just now: the person already chose the agents on the approval
   // page, so connect exactly those.
@@ -317,9 +331,19 @@ async function ensurePodKey(
   podUrl: string,
   opts: InitOptions,
   podId?: string,
-  agents: readonly DetectableAgent[] = []
+  agents: readonly DetectableAgent[] = [],
+  jobs?: Readonly<Partial<Record<string, AgentJob>>>
 ): Promise<{ key: string; grant: DeviceGrant | null }> {
-  if (opts.apiKey) return { key: opts.apiKey, grant: null };
+  // A job rides on the device request only; a computer already connected adds
+  // the agent with its own key instead (flow 2a, one approval, nothing re-keyed).
+  const addLine = () => {
+    const [engine, job] = Object.entries(jobs ?? {})[0] ?? [];
+    return `This computer is already connected to this pod: add the agent with \`synap agents add ${engine} --as "${job?.roleLabel ?? job?.role}"\`.`;
+  };
+  if (opts.apiKey) {
+    if (jobs) throw new InitExit(INIT_EXIT.usage, addLine());
+    return { key: opts.apiKey, grant: null };
+  }
 
   const norm = (u: string) => u.replace(/\/+$/, "");
   const saved = listPodProfiles().find((p) => norm(p.config.podUrl) === norm(podUrl));
@@ -333,6 +357,7 @@ async function ensurePodKey(
       if (renew) {
         log.warn(`This computer's key for this pod expires ${saved.config.keyExpiresAt}. Renew it: ${chalk.cyan("synap login")}`);
       }
+      if (jobs) throw new InitExit(INIT_EXIT.usage, addLine());
       if (!saved.active) setActivePod(saved.name);
       return { key: saved.config.hubApiKey, grant: null };
     }
@@ -348,7 +373,7 @@ async function ensurePodKey(
     }
   }
 
-  const { key, grant } = await connectStep(podUrl, opts, podId, agents);
+  const { key, grant } = await connectStep(podUrl, opts, podId, agents, jobs);
   if (key) return { key, grant };
   throw new InitExit(
     INIT_EXIT.noKey,
@@ -476,7 +501,9 @@ async function connectStep(
   opts: InitOptions,
   podId?: string,
   /** Agents to ask the pod for along with this computer. */
-  agents: readonly string[] = []
+  agents: readonly string[] = [],
+  /** A job per engine (`--as`). */
+  jobs?: Readonly<Partial<Record<string, AgentJob>>>
 ): Promise<{ key: string | null; grant: DeviceGrant | null }> {
   let apiKey = opts.apiKey;
   let grant: DeviceGrant | null = null;
@@ -492,8 +519,10 @@ async function connectStep(
     deviceTried = true;
     let outcome;
     try {
-      outcome = await deviceConnect(podUrl, { agents });
+      outcome = await deviceConnect(podUrl, { agents, jobs });
     } catch (err) {
+      // Nothing was asked: another way in would lose the job, so stop here.
+      if (err instanceof DeviceJobRefusedError) throw new InitExit(INIT_EXIT.noKey, err.message);
       if (err instanceof DeviceStartError && err.status === 404) deviceAvailable = false;
       log.error(err instanceof Error ? err.message : String(err));
       return;

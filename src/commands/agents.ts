@@ -409,6 +409,8 @@ export interface AgentsAddOpts {
   apiKey?: string;
   label?: string;
   pod?: string;
+  /** The agent's job (`--as "CRM worker"`): another agent than the engine's plain one. */
+  as?: string;
 }
 
 /**
@@ -416,6 +418,10 @@ export interface AgentsAddOpts {
  * `lib/agent-door.ts` for the three ways in; this only dispatches.
  */
 export async function agentsAdd(kind: string | undefined, opts: AgentsAddOpts = {}): Promise<void> {
+  if (opts.as !== undefined) {
+    await agentsAddWithJob(kind, opts.as, opts);
+    return;
+  }
   const plan = planAgentAdd(kind, opts);
   if (plan.mode === "existing-key") {
     await registerAgentKey({ ...opts, name: opts.name ?? kind });
@@ -448,6 +454,85 @@ export async function agentsAdd(kind: string | undefined, opts: AgentsAddOpts = 
     ok = await addDetectedAgents(pod, scope);
   }
   if (!ok) process.exitCode = 1;
+}
+
+/**
+ * `synap agents add <engine> --as "<job>"` (plan 31470fd5, flow 2a): one agent
+ * with a job on this computer, minted with the computer's key and approved by
+ * the person; nothing else on the computer is re-keyed (`lib/role-agent.ts`).
+ */
+async function agentsAddWithJob(engine: string | undefined, label: string, opts: AgentsAddOpts): Promise<void> {
+  const { planRoleAgent, addRoleAgent, printRoleAgentAdded } = await import("../lib/role-agent.js");
+  if (!engine) {
+    log.error(`Name the engine that runs it: synap agents add claude-code --as "${label}"`);
+    process.exitCode = 1;
+    return;
+  }
+  if (opts.apiKey || opts.name || opts.template) {
+    log.error("--as takes an engine and a job only (no --api-key, --name or --template).");
+    process.exitCode = 1;
+    return;
+  }
+  const plan = planRoleAgent(engine, label);
+  if (!plan.ok) {
+    log.error(plan.error);
+    process.exitCode = 1;
+    return;
+  }
+  const picked = await resolveAgentPod({});
+  if (!picked) return;
+  const enrol = await ensureComputerEnrolled(picked.podUrl, "run this again");
+  if (!enrol.enrolled) {
+    log.error(enrol.message);
+    process.exitCode = 1;
+    return;
+  }
+  const added = await addRoleAgent(
+    { podUrl: picked.podUrl, computerKey: enrol.computerKey, podName: picked.podName },
+    engine,
+    plan.job,
+    { workspaceId: opts.workspace }
+  );
+  if (!added.ok) {
+    log.error(added.error);
+    process.exitCode = 1;
+    return;
+  }
+  printRoleAgentAdded(plan.job, engine);
+}
+
+/**
+ * `synap agents adopt <job> [--from <engine>]`: the key this OS user holds for
+ * the engine becomes the named agent `<job>` (`adoptHeldKey`). Local only.
+ */
+export async function agentsAdopt(role: string, opts: { from?: string } = {}): Promise<void> {
+  const { adoptHeldKey } = await import("../lib/role-agent.js");
+  const pod = await import("../lib/pod.js");
+  const { fetchKeyState } = await import("../lib/key-state.js");
+  const picked = await resolveAgentPod({});
+  if (!picked) return;
+  const from = opts.from ?? "claude-code";
+  const outcome = await adoptHeldKey(
+    role,
+    { from, podUrl: picked.podUrl, podName: picked.podName },
+    {
+      heldKey: (surface, podUrl) =>
+        (pod.SURFACE_NAMES as readonly string[]).includes(surface)
+          ? pod.getSurfaceAgentKey(surface as import("../lib/pod.js").SurfaceName, podUrl)
+          : null,
+      existing: getAgent,
+      keyState: (podUrl, key) => fetchKeyState(podUrl, key),
+      save: addAgent,
+    }
+  );
+  if (!outcome.ok) {
+    log.error(outcome.error);
+    process.exitCode = 1;
+    return;
+  }
+  log.success(`The ${from} key this OS user holds is now the agent "${role}" (agent ${outcome.agentUserId.slice(0, 8)}…). Nothing was minted or revoked.`);
+  log.dim(`Run it:  synap worker --agent ${role}`);
+  log.dim("Its job on the pod is set on the agent's page, if it is not already.");
 }
 
 /** Deprecated: `synap agents create` → `synap agents add`. */

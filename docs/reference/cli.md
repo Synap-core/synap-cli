@@ -4,7 +4,7 @@
 
 Synap CLI — connect AI agents to your data pod
 
-233 commands. Hidden commands and hidden options are omitted here (5 hidden commands); `cli.json` lists them with `"hidden": true`.
+234 commands. Hidden commands and hidden options are omitted here (5 hidden commands); `cli.json` lists them with `"hidden": true`.
 
 Every command also accepts `-h, --help`.
 
@@ -145,6 +145,7 @@ Every command also accepts `-h, --help`.
 - [`synap agents`](#synap-agents) — Manage agent principals on your pod (one per type for you; local keys are a cache)
   - [`synap agents list`](#synap-agents-list) — List your agents on this pod (one per type). Use --local for ~/.synap cache only.
   - [`synap agents add`](#synap-agents-add) — Bring an agent into the pod: a client (claude-code, cursor, codex, …), your own (--name → URL + key), or pick from this machine (no kind)
+  - [`synap agents adopt`](#synap-agents-adopt) — Save the key this OS user already holds for an engine as the agent <job> (mints and revokes nothing)
   - [`synap agents create`](#synap-agents-create) — Deprecated — use `synap agents add` (same flags)
   - [`synap agents rotate-key`](#synap-agents-rotate-key) — Rotate the Hub Protocol API key for an agent (local cache only)
   - [`synap agents remove`](#synap-agents-remove) — Remove a named agent identity (local cache only)
@@ -271,6 +272,7 @@ Full setup: connect to a Synap pod and install the skill
 | `--api-key <key>` | Hub Protocol API key (skip key generation) |  |
 | `-y, --yes` | Accept the defaults, no prompts (connects the agents found on this machine) |  |
 | `--agents <list>` | Agents to connect, comma-separated: claude-code,codex,cursor |  |
+| `--as <job>` | Give the agent this computer adds a job (e.g. --as "Agent sessions"); one engine |  |
 | `--json` | Print a JSON summary on stdout: {podUrl, connected, notApproved, failed, pairLink, exitCode} |  |
 
 ```text
@@ -1526,6 +1528,8 @@ Run Claude Code unattended here for the sessions handed to an agent
 | Option | Description | Default |
 |---|---|---|
 | `--agent <name>` | The named agent this machine works as (its key comes from ~/.synap) (required) |  |
+| `--runtime <engine>` | First run of an agent with a job: the engine that runs it (e.g. claude-code); asks for the agent on this computer when no key is saved |  |
+| `--no-create` | Never ask for the agent on first run, even with --runtime |  |
 | `--interval <dur>` | How often to check for handed sessions (e.g. 30s, 2m) | `"30s"` |
 | `--once` | Check once, run what is handed, wait for it, exit |  |
 | `--cwd <dir>` | Where code sessions' Claude Code works (default ~/Documents/Code/synap) |  |
@@ -2483,7 +2487,7 @@ synap agents [options] [command]
 
 Manage agent principals on your pod (one per type for you; local keys are a cache)
 
-Subcommands: [`list`](#synap-agents-list), [`add`](#synap-agents-add), [`create`](#synap-agents-create), [`rotate-key`](#synap-agents-rotate-key), [`remove`](#synap-agents-remove), [`info`](#synap-agents-info)
+Subcommands: [`list`](#synap-agents-list), [`add`](#synap-agents-add), [`adopt`](#synap-agents-adopt), [`create`](#synap-agents-create), [`rotate-key`](#synap-agents-rotate-key), [`remove`](#synap-agents-remove), [`info`](#synap-agents-info)
 
 ## `synap agents list`
 
@@ -2520,6 +2524,23 @@ Bring an agent into the pod: a client (claude-code, cursor, codex, …), your ow
 | `--project <id>` | Focus on one project (composable with --workspace) |  |
 | `--api-key <key>` | Register a key you already hold, on this machine only (mints nothing) |  |
 | `--label <label>` | Human-readable description |  |
+| `--as <job>` | Give the agent a job (e.g. --as "CRM worker"): another agent than the engine's plain one, on this computer |  |
+
+## `synap agents adopt`
+
+```
+synap agents adopt [options] <job>
+```
+
+Save the key this OS user already holds for an engine as the agent <job> (mints and revokes nothing)
+
+| Argument | Required | Description |
+|---|---|---|
+| `job` | yes |  |
+
+| Option | Description | Default |
+|---|---|---|
+| `--from <engine>` | The engine whose key is adopted (default: claude-code) |  |
 
 ## `synap agents create`
 

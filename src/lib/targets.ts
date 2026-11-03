@@ -1153,6 +1153,7 @@ export async function provisionAgentKey(
     instanceId,
     fallbackCandidate,
     toolProfile,
+    job,
   }: {
     requireApproval?: boolean;
     idempotent?: boolean;
@@ -1177,11 +1178,20 @@ export async function provisionAgentKey(
      * live key reused by `idempotent` keeps whatever it lists.
      */
     toolProfile?: AgentKeyToolProfile;
+    /**
+     * The agent's JOB (0395): `role` its slug, `roleLabel` its name. Sent only
+     * when set, and only to a pod that knows jobs: the caller checks the pod's
+     * mark first (`pod-features.ts`), since an older pod ignores both and
+     * would mint for the engine's PLAIN agent.
+     */
+    job?: { role: string; roleLabel?: string };
   } = {}
 ): Promise<{
   hubApiKey: string;
   agentUserId: string;
   reused: boolean;
+  /** The new key's id on the pod, when the pod named it (a key that waited for approval). */
+  keyId?: string;
   /** Set only with `deferApproval`: the key is minted but not yet approved. */
   pending?: { pendingToken: string; reviewUrl: string };
 }> {
@@ -1204,7 +1214,7 @@ export async function provisionAgentKey(
     const now = await classifyRecordedPending(recorded);
     if (now.kind === "active") {
       pod.clearPendingAgentKey(surface, podUrl);
-      return { hubApiKey: recorded.hubApiKey, agentUserId: recorded.agentUserId, reused: true };
+      return { hubApiKey: recorded.hubApiKey, agentUserId: recorded.agentUserId, reused: true, keyId: recorded.keyId };
     }
     if (now.kind === "pending" || now.kind === "unknown") {
       if (deferApproval) {
@@ -1224,7 +1234,7 @@ export async function provisionAgentKey(
         pendingToken: recorded.keyId,
         approvalUrl: now.state.approvalUrl ?? recorded.approvalUrl,
       });
-      return { hubApiKey: recorded.hubApiKey, agentUserId: recorded.agentUserId, reused: true };
+      return { hubApiKey: recorded.hubApiKey, agentUserId: recorded.agentUserId, reused: true, keyId: recorded.keyId };
     }
     pod.clearPendingAgentKey(surface, podUrl); // dead: file a fresh request below
   }
@@ -1251,6 +1261,7 @@ export async function provisionAgentKey(
         instanceId: instance,
         instanceLabel: machineInstanceLabel(),
         ...(toolProfile ? { toolProfile } : {}),
+        ...(job ? { role: job.role, ...(job.roleLabel ? { roleLabel: job.roleLabel } : {}) } : {}),
       }),
       signal: AbortSignal.timeout(30000),
     });
@@ -1329,6 +1340,7 @@ export async function provisionAgentKey(
       deferApproval,
       instanceId: instance,
       toolProfile,
+      job,
     });
   }
   if (!body.hubApiKey) {
@@ -1372,7 +1384,7 @@ export async function provisionAgentKey(
       approvalUrl: body.reviewUrl,
     });
     log.success(`  Approved! Writing ${agentType} agent key.`);
-    return { hubApiKey: body.hubApiKey, agentUserId: body.agentUserId, reused: false };
+    return { hubApiKey: body.hubApiKey, agentUserId: body.agentUserId, reused: false, keyId: body.pendingToken };
   }
   // Minted live (no approval asked). Still never hand out a key the pod says
   // is unusable — callers write what this returns into configs.

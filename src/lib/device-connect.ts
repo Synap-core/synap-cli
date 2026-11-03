@@ -17,6 +17,8 @@
 import os from "os";
 import chalk from "chalk";
 import { log } from "../utils/logger.js";
+import type { AgentJob } from "./agent-jobs.js";
+import type { HeldKey } from "./held-keys.js";
 
 /**
  * The agent types the device door accepts (`SURFACE_AGENT_TYPES`,
@@ -57,7 +59,91 @@ export interface DeviceKey {
 
 export interface DeviceGrant {
   computer: DeviceKey & { id: string; name: string };
-  agents: Array<DeviceKey & { agentType: string; agentUserId: string; name: string; displayName: string }>;
+  agents: Array<
+    DeviceKey & {
+      agentType: string;
+      agentUserId: string;
+      name: string;
+      displayName: string;
+      /**
+       * Its job (null = the engine's plain agent) and its OS user, from a pod
+       * that knows agents inside a computer (0395). Absent from an older pod:
+       * it made the engine's plain agent, whatever job was asked.
+       */
+      role?: string | null;
+      seat?: string | null;
+      /** What approving did to it (0395). */
+      action?: "added" | "reconnected";
+    }
+  >;
+}
+
+/** What the device request says about this OS user (plan 31470fd5 §3, flow 3). */
+export interface DeviceSeatEvidence {
+  /** The OS user and its id (`thisSeat`); null when the OS names none. */
+  seat: { seat: string; seatId: string } | null;
+  /** The keys this OS user keeps for the pod, ids only (`collectHeldKeys`). */
+  held: readonly HeldKey[];
+}
+
+/**
+ * The body of `POST /setup/device`. Pure.
+ *
+ * `evidence` null = the pod does not know agents inside a computer (no
+ * `agent-seats` mark, `pod-features.ts`): the body is TODAY's,
+ * byte for byte, `{clientName, hostname, platform, agents}`, and `jobs` are
+ * never sent (the caller refuses a job first). With evidence, the 0395 fields
+ * follow, each only when it has something to say: `seat` + `seatId`, `rows`
+ * (only when an engine has a job; an engine without one stays a plain row on
+ * the pod), and `held` (key ids only, never a secret).
+ */
+export function buildDeviceRequestBody(opts: {
+  clientName?: string;
+  hostname: string;
+  platform: string;
+  agents: readonly string[];
+  /** A job per engine (`--as`); engines without one stay plain. */
+  jobs?: Readonly<Partial<Record<string, AgentJob>>>;
+  evidence: DeviceSeatEvidence | null;
+}): Record<string, unknown> {
+  const agents = deviceAgentsFor(opts.agents);
+  const today = {
+    clientName: opts.clientName ?? "Synap CLI",
+    // The RAW hostname, never the keys' display label (no `.local`, SYNAP_COMPUTER_NAME):
+    // the pod offers "reuse this computer" only on exact equality with the hostname an
+    // enrolled computer asked under (`agentMetadata->>'hostname'`, machine-connect.ts).
+    // The create door takes no display name; the person names the computer on approval.
+    hostname: opts.hostname.slice(0, 253) || "computer",
+    platform: opts.platform,
+    agents,
+  };
+  const evidence = opts.evidence;
+  if (!evidence) return today;
+  const rows = agents
+    .filter((a) => opts.jobs?.[a])
+    .map((a) => {
+      const job = opts.jobs![a]!;
+      return { agentType: a, role: job.role, ...(job.roleLabel ? { roleLabel: job.roleLabel } : {}) };
+    });
+  return {
+    ...today,
+    ...(evidence.seat ? { seat: evidence.seat.seat, seatId: evidence.seat.seatId } : {}),
+    ...(rows.length ? { rows } : {}),
+    ...(evidence.held.length ? { held: evidence.held.map((h) => ({ ...h })) } : {}),
+  };
+}
+
+/** This OS user's seat and the keys it holds for `podUrl`. Never throws. */
+export async function gatherSeatEvidence(podUrl: string): Promise<DeviceSeatEvidence> {
+  const { thisSeat } = await import("./machine-instance.js");
+  const { collectHeldKeys } = await import("./held-keys.js");
+  let seat: DeviceSeatEvidence["seat"] = null;
+  try {
+    seat = thisSeat();
+  } catch {
+    seat = null;
+  }
+  return { seat, held: await collectHeldKeys(podUrl).catch(() => []) };
 }
 
 export type DeviceConnectOutcome =
@@ -73,6 +159,14 @@ export class DeviceStartError extends Error {
   ) {
     super(message);
     this.name = "DeviceStartError";
+  }
+}
+
+/** A job (`--as`) was asked of a pod that cannot honour it: nothing was sent. */
+export class DeviceJobRefusedError extends DeviceStartError {
+  constructor(message: string) {
+    super(null, message);
+    this.name = "DeviceJobRefusedError";
   }
 }
 
@@ -92,6 +186,8 @@ export interface DeviceConnectDeps {
   poll?: typeof import("./approval-poll.js").pollForApproval;
   /** Multiply every server interval/expiry (tests only). Default 1. */
   timeScale?: number;
+  /** Whether the pod knows seats and jobs; default its `/health` mark (`pod-features.ts`). */
+  podFeature?: (podUrl: string) => Promise<import("./pod-features.js").PodFeature>;
 }
 
 const podHost = (podUrl: string): string => {
@@ -110,28 +206,47 @@ const podHost = (podUrl: string): string => {
  */
 export async function deviceConnect(
   podUrl: string,
-  opts: { agents: readonly string[]; clientName?: string; hostname?: string; platform?: string },
+  opts: {
+    agents: readonly string[];
+    clientName?: string;
+    hostname?: string;
+    platform?: string;
+    /** A job per engine (`synap init --as`). */
+    jobs?: Readonly<Partial<Record<string, AgentJob>>>;
+    /** This OS user's seat and held keys; default read from this machine (only for a pod that knows seats). */
+    evidence?: DeviceSeatEvidence;
+  },
   deps: DeviceConnectDeps = {}
 ): Promise<DeviceConnectOutcome> {
   const base = podUrl.replace(/\/+$/, "");
   const scale = deps.timeScale ?? 1;
   const host = podHost(base);
+  // Asked BEFORE the request: an older pod gets today's body, and a job it
+  // cannot honour is refused here, never sent (it would land on the plain agent).
+  const features = await import("./pod-features.js");
+  const feature = await (deps.podFeature ?? ((u: string) => features.podKnowsAgentSeats(u)))(base);
+  const wantsJob = deviceAgentsFor(opts.agents).some((a) => opts.jobs?.[a]);
+  if (wantsJob) {
+    const refusal = features.jobRefusal(feature, host);
+    if (refusal) throw new DeviceJobRefusedError(refusal);
+  }
+  const evidence = feature === "yes" ? (opts.evidence ?? (await gatherSeatEvidence(base))) : null;
 
   let res: Response;
   try {
     res = await fetch(`${base}/api/hub/setup/device`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        clientName: opts.clientName ?? "Synap CLI",
-        // The RAW hostname, never the keys' display label (no `.local`, SYNAP_COMPUTER_NAME):
-        // the pod offers "reuse this computer" only on exact equality with the hostname an
-        // enrolled computer asked under (`agentMetadata->>'hostname'`, machine-connect.ts).
-        // The create door takes no display name; the person names the computer on approval.
-        hostname: (opts.hostname ?? os.hostname()).slice(0, 253) || "computer",
-        platform: opts.platform ?? process.platform,
-        agents: deviceAgentsFor(opts.agents),
-      }),
+      body: JSON.stringify(
+        buildDeviceRequestBody({
+          clientName: opts.clientName,
+          hostname: opts.hostname ?? os.hostname(),
+          platform: opts.platform ?? process.platform,
+          agents: opts.agents,
+          jobs: opts.jobs,
+          evidence,
+        })
+      ),
       signal: AbortSignal.timeout(15_000),
     });
   } catch (err) {
@@ -254,6 +369,9 @@ export async function saveDeviceGrant(
   };
   if (grant.computer.expiresAt) config.keyExpiresAt = grant.computer.expiresAt;
   else delete config.keyExpiresAt;
+  // The key's id (never the secret): the next device request sends it in `held`.
+  if (grant.computer.keyId) config.keyId = grant.computer.keyId;
+  else delete config.keyId;
   pod.addPodProfile(profile.name, config);
 
   for (const a of grant.agents) {
@@ -262,9 +380,25 @@ export async function saveDeviceGrant(
         hubApiKey: a.apiKey,
         agentUserId: a.agentUserId,
         podUrl,
+        ...(a.keyId ? { keyId: a.keyId } : {}),
       });
     }
     presetApprovedKey(a.agentType, { hubApiKey: a.apiKey, agentUserId: a.agentUserId });
+    // An agent with a job is also a named agent, so `synap worker --agent <job>` finds its key.
+    if (a.role) {
+      const { addAgent } = await import("./agents-config.js");
+      addAgent(a.role, {
+        podName: profile.name,
+        podUrl,
+        apiKey: a.apiKey,
+        agentUserId: a.agentUserId,
+        ...(a.keyId ? { keyId: a.keyId } : {}),
+        agentType: a.agentType,
+        role: a.role,
+        label: a.name || a.role,
+        createdAt: new Date().toISOString(),
+      });
+    }
   }
   return config;
 }
