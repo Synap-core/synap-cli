@@ -3177,7 +3177,7 @@ Create or update a frame cell on the pod from ESM source
 | `--name <name>` | Cell display name (required) |  |
 | `--file <path>` | ESM source file (or pipe stdin) |  |
 | `--type-key <key>` | Explicit typeKey (default: generated:<slug>) |  |
-| `--deps <json>` | Dependency map JSON, e.g. '{"recharts":"2.12.0"}' |  |
+| `--deps <json>` | Dependency map JSON. Leave it out: the frame refuses runtime deps, so bundle libraries with `synap cell build` instead |  |
 | `--view-types <list>` | Comma-separated view types this cell can render as a VIEW RENDERER, e.g. "list,table,kanban". Omit to leave an existing affinity untouched; pass "" to clear it |  |
 | `--content-kind <kind>` | What this cell renders — entity-detail \| entity-card \| entity-profile \| collection \| widget (default: widget, which is placeable but never offered as a profile renderer) |  |
 | `--workspace <id>` | Workspace to scope the cell to (default: your active workspace lens — run `synap lens` to see it) |  |
@@ -3193,7 +3193,6 @@ PICKED as a view or profile renderer — it is only placeable on a bento.
 
 Examples:
   synap cell define --name "Revenue Chart" --file ./chart.js
-  synap cell define --name "Revenue Chart" --file ./chart.js --deps '{"recharts":"2.12.0"}'
   synap cell define --name "Deal Board" --file ./board.js --view-types kanban,table --content-kind collection
   synap cell define --name "Contact Page" --file ./contact.js --content-kind entity-detail
   cat chart.js | synap cell define --name "Revenue Chart"
@@ -3214,14 +3213,15 @@ Bundle a multi-file cell/app into a single ESM module the runtime expects
 | Option | Description | Default |
 |---|---|---|
 | `--out <file>` | Output file path (default: <entry>.bundle.js) |  |
-| `--bundle-deps` | Inline all third-party deps into the bundle (only react/react-dom stay external) — output has deps={} and the runtime CSP drops esm.sh entirely |  |
+| `--bundle-deps` | Inline every third-party library into the cell (the default; kept for older scripts). react, react-dom, the JSX runtimes and @synap/kit stay external: the host provides them |  |
+| `--no-bundle-deps` | Keep third-party imports external and emit them as a deps map. The web and desktop frames refuse such a cell |  |
 | `--self-contained` | Build ONE complete HTML document (React, CSS, brand fonts inlined; nothing external) — the code of a rendererType "mcp-app" cell |  |
 | `--fonts` | With --self-contained: require the inlined brand fonts (default: include when @synap-core/design-tokens resolves) |  |
 | `--no-fonts` | With --self-contained: skip the inlined brand fonts |  |
 | `--define` | Chain into cell define after bundling (requires --name) |  |
 | `--name <name>` | Cell name (required with --define) |  |
 | `--type-key <key>` | Explicit typeKey (used with --define) |  |
-| `--deps <json>` | Override dependency versions as JSON, e.g. '{"react":"18.3.0"}' |  |
+| `--deps <json>` | Override the emitted deps map (JSON). The frame refuses runtime deps; leave it out |  |
 | `--view-types <list>` | Comma-separated view-renderer affinity (used with --define), e.g. "list,table" |  |
 | `--content-kind <kind>` | entity-detail \| entity-card \| entity-profile \| collection \| widget (used with --define) |  |
 | `--workspace <id>` | Workspace (used with --define) |  |
@@ -3234,18 +3234,16 @@ Bundle a multi-file cell/app into a single ESM module the runtime expects
 ```text
 Output: a single ESM file.
 
-Default mode: bare imports (react, recharts, …) are externalized and emitted
-as a deps map. At runtime Synap resolves them via esm.sh importmap.
-
---bundle-deps mode: only react/react-dom are externalized (React is
-host-inlined at runtime, never via esm.sh); everything else is bundled into
-the output, so the deps map is empty. A cell built this way reaches no esm.sh
-origin at runtime — the runtime CSP collapses to drop it entirely.
+The frame loads no code from the network (no CDN, no esm.sh). It provides only
+react, react-dom, the JSX runtimes and @synap/kit, resolved by the host; those
+stay external. Every other library (recharts, d3, three, …) is bundled into the
+cell, so the deps map is empty. That is the default, and it is the only shape
+the web and desktop frames accept. Leave `deps` empty; --no-bundle-deps
+exists only for a host that resolves imports itself and the frame refuses it.
 
 Examples:
   synap cell build ./src/chart.tsx --out ./dist/chart.js
   synap cell build ./src/chart.tsx --out ./dist/chart.js --define --name "Revenue Chart"
-  synap cell build ./src/chart.tsx --out ./dist/chart.js --bundle-deps
 ```
 
 ## `synap artifact`
@@ -3628,7 +3626,7 @@ Validate then publish a template (or a standalone cell/view package) to the mark
 | `--json` | Output as JSON |  |
 | `--pod-url <url>` | Pod URL override (for --from-workspace / --from-project) |  |
 | `--api-key <key>` | API key override (for --from-workspace / --from-project) |  |
-| `--no-bundle-deps` | Publish a cell's codeFile with external deps via esm.sh instead of bundling them in (default: bundled) |  |
+| `--no-bundle-deps` | Publish a cell's codeFile with external third-party imports instead of bundling them in (default: bundled). The web and desktop frames refuse an unbundled cell |  |
 
 ## `synap market unpublish`
 
