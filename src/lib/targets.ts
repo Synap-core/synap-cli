@@ -2492,10 +2492,87 @@ const PRESET_POSTURE: Partial<Record<GovernancePreset, string>> = {
   creates: "create-with-undo",
 };
 
+/**
+ * One row of the pod's write-mode list (`AGENT_WRITE_MODE_CHOICES`,
+ * @synap-core/types/agents), served on the governance read: the CLI draws it
+ * and PATCHes `posture` (null = follow the pod default). It never keeps its
+ * own copy, so an older CLI offers what a newer pod knows.
+ */
+interface PodWriteModeChoice {
+  mode: string;
+  label: string;
+  line: string;
+  recommended: boolean;
+  posture: string | null;
+}
+
 /** `GET /agent-users/:id/governance` — the fields the CLI reads. */
 interface AgentGovernanceRead {
   posture: string | null;
   configured: boolean;
+  /** Absent on a pod older than the shared list: the legacy prompt is used. */
+  writeModeChoices?: PodWriteModeChoice[];
+}
+
+/** The pod's list, when this pod serves one the CLI can draw. */
+function podWriteModeChoices(
+  current: AgentGovernanceRead | null
+): PodWriteModeChoice[] | null {
+  const list = current?.writeModeChoices;
+  if (!Array.isArray(list) || list.length === 0) return null;
+  const ok = list.every(
+    (c) =>
+      c &&
+      typeof c.mode === "string" &&
+      typeof c.label === "string" &&
+      typeof c.line === "string" &&
+      (c.posture === null || typeof c.posture === "string")
+  );
+  return ok ? list : null;
+}
+
+/**
+ * Ask with the POD's list and write the chosen posture. Choosing the pod
+ * default for an agent nobody configured writes nothing (its trust is already
+ * the pod's rule).
+ */
+async function promptPodWriteMode(
+  agentUserId: string,
+  hubCfg: HubConfig,
+  current: AgentGovernanceRead,
+  choices: PodWriteModeChoice[]
+): Promise<void> {
+  const initial = Math.max(
+    0,
+    choices.findIndex((c) => c.recommended)
+  );
+  const res = await prompts({
+    type: "select",
+    name: "mode",
+    message: "How should this agent's changes land?",
+    choices: choices.map((c) => ({
+      title: c.recommended ? `${c.label} (recommended)` : c.label,
+      description: c.line,
+      value: c.mode,
+    })),
+    initial,
+  });
+  const picked = choices.find((c) => c.mode === res.mode);
+  if (!picked) return;
+  if (picked.posture === null && !current.configured) {
+    log.dim(`Agent changes: ${picked.label}. ${picked.line}`);
+    return;
+  }
+  try {
+    await hubPatch(
+      `/agent-users/${agentUserId}/governance`,
+      { posture: picked.posture },
+      hubCfg
+    );
+    log.success(`Agent changes: ${picked.label}. ${picked.line}`);
+  } catch (err) {
+    log.warn(`Could not apply agent governance: ${(err as Error).message}`);
+  }
 }
 
 /**
@@ -2615,6 +2692,12 @@ export async function ensureAgentGovernance(
   // nothing: a new agent's trust is the pod's rule, a preset is only ever a
   // stricter (or looser) explicit choice.
   let mode = presetMode;
+  // A pod that serves its own list is asked with it (no legacy presets).
+  const podChoices = presetMode ? null : podWriteModeChoices(current);
+  if (podChoices && current) {
+    await promptPodWriteMode(agentUserId, hubCfg, current, podChoices);
+    return;
+  }
   if (!mode) {
     const res = await prompts({
       type: "select",
