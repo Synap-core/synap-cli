@@ -16,7 +16,7 @@
 
 import chalk from "chalk";
 import { resolveHubConfig, type HubConfig } from "../lib/hub-client.js";
-import { probeAuthStatus } from "../lib/credential-class.js";
+import { probeAuthStatus, KEY_PROBE_LABEL } from "../lib/credential-class.js";
 import {
   buildMcpUrl,
   provisionAgentKey,
@@ -176,7 +176,7 @@ export async function mcpVerify(opts: McpBaseOpts): Promise<void> {
       `  ${chalk.dim("Endpoint")}   ${reachable ? chalk.green("reachable") : chalk.red("unreachable")}${toolCount != null ? chalk.dim(` · ${toolCount} tools`) : ""}`
     );
     console.log(
-      `  ${chalk.dim("API key")}    ${keyProbe === "valid" ? chalk.green("valid") : keyProbe === "unreachable" ? chalk.yellow("could not reach the pod to check") : chalk.red("invalid / expired")}`
+      `  ${chalk.dim("API key")}    ${keyProbe === "valid" ? chalk.green(KEY_PROBE_LABEL.valid) : keyProbe === "unreachable" ? chalk.yellow(KEY_PROBE_LABEL.unreachable) : chalk.red(KEY_PROBE_LABEL.invalid)}`
     );
     if (workspaceId)
       console.log(`  ${chalk.dim("Workspace")}  ${workspaceId}`);

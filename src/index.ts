@@ -446,9 +446,8 @@ program
 
     // Already have pods — show status and offer reconnect if any are unreachable
     const { checkPodHealth } = await import("./lib/pod.js");
-    const { probeAuthStatus } = await import("./lib/credential-class.js");
+    const { probeAuthStatus, KEY_PROBE_LABEL } = await import("./lib/credential-class.js");
     type KeyProbe = import("./lib/credential-class.js").KeyProbe;
-    type HubConfig = import("./lib/hub-client.js").HubConfig;
     const ora = (await import("ora")).default;
     const spinner = ora("Checking pods + credentials...").start();
     const checks = await Promise.all(
@@ -462,7 +461,7 @@ program
           keyProbe = await probeAuthStatus({
             podUrl: p.config.podUrl,
             apiKey: p.config.hubApiKey,
-          } as HubConfig);
+          });
         }
         const keyValid = keyProbe === "valid";
         return { ...p, healthy: h.healthy, keyValid, keyProbe };
@@ -476,7 +475,7 @@ program
       const status = !p.healthy
         ? chalk.red("unreachable")
         : p.keyProbe === "unreachable"
-          ? chalk.yellow("could not reach the pod to check the key")
+          ? chalk.yellow(KEY_PROBE_LABEL.unreachable)
           : p.keyValid
             ? chalk.green("ok")
             : chalk.yellow("key expired");
