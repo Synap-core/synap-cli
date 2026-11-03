@@ -110,6 +110,15 @@ export interface WorkerOptions {
    * (the person's Mac) takes `work-folder` only (`parseProtocols`).
    */
   protocols?: string;
+  /**
+   * First run of an agent with a job (plan 31470fd5 D8): the engine that runs
+   * it. With no key saved for `agent`, the worker asks for the agent with that
+   * job on this computer (the person approves it), then starts. Without it,
+   * the worker prints the `synap agents add` line and stops.
+   */
+  runtime?: string;
+  /** `--no-create`: never ask for the agent, even with `--runtime`. */
+  create?: boolean;
 }
 
 export interface HandedItem {
@@ -1807,12 +1816,39 @@ export function createWorker(opts: WorkerOptions, deps: WorkerDeps): Worker {
 
 // ─── the loop ─────────────────────────────────────────────────────────────────
 
+/**
+ * No key is saved for `agent`. With `--runtime`, ask for the agent with that
+ * job on this computer (`addRoleAgent`: the pod must know jobs, the person
+ * approves it on their phone) and return once it is saved; otherwise throw
+ * what to run. Never interactive (a supervised worker has nobody to answer).
+ */
+async function firstRunOrThrow(agent: string, unknown: string, opts: WorkerOptions): Promise<void> {
+  const { workerFirstRunPlan, addRoleAgent, printRoleAgentAdded } = await import("../lib/role-agent.js");
+  const plan = workerFirstRunPlan(agent, { runtime: opts.runtime, create: opts.create });
+  if (plan.kind === "stop") {
+    throw new Error(opts.runtime ? plan.message : [unknown, plan.message].filter(Boolean).join("\n"));
+  }
+  const cfg = await resolveHubConfig();
+  const enrol = await ensureComputerEnrolled(cfg.podUrl, `run \`synap worker --agent ${agent} --runtime ${plan.engine}\` again`, {
+    interactive: false,
+  });
+  if (!enrol.enrolled) throw new Error(enrol.message);
+  const { findPodNameByUrl } = await import("../lib/pod.js");
+  const added = await addRoleAgent(
+    { podUrl: cfg.podUrl, computerKey: enrol.computerKey, podName: findPodNameByUrl(cfg.podUrl) },
+    plan.engine,
+    plan.job
+  );
+  if (!added.ok) throw new Error(added.error);
+  printRoleAgentAdded(plan.job, plan.engine);
+}
+
 export async function workerCommand(opts: WorkerOptions): Promise<void> {
   const agent = opts.agent;
   // An unknown name would otherwise resolve to the next key in the ladder and
   // the worker would claim another agent's sessions.
   const unknown = unknownAgentMessage(agent);
-  if (unknown) throw new Error(unknown);
+  if (unknown) await firstRunOrThrow(agent, unknown, opts);
   // The named agent's own key and pod (SYNAP_AGENT is the CLI's one door for it).
   process.env.SYNAP_AGENT = agent;
   const cfg = await resolveHubConfig();

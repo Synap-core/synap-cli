@@ -16,6 +16,14 @@ export interface AgentProfile {
   agentUserId?: string;
   /** Optional project focus the agent was added with (pod-wide when absent). */
   projectId?: string;
+  /** The key's id on the pod (never the secret), for the device request's `held`. */
+  keyId?: string;
+  /** The engine that runs it (claude-code, codex…), for an agent with a job. */
+  agentType?: string;
+  /** Its job's slug ("crm-worker"): the agent is (computer, OS user, engine, job). */
+  role?: string;
+  /** The pod it was made on, so `held` sends its key id to that pod only. */
+  podUrl?: string;
 }
 
 interface ConfigWithAgents {

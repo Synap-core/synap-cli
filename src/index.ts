@@ -47,6 +47,7 @@ program
   .addOption(new Option("--skip-is", "deprecated, ignored").hideHelp())
   .option("-y, --yes", "Accept the defaults, no prompts (connects the agents found on this machine)")
   .option("--agents <list>", "Agents to connect, comma-separated: claude-code,codex,cursor")
+  .option("--as <job>", "Give the agent this computer adds a job (e.g. --as \"Agent sessions\"); one engine")
   .option("--json", "Print a JSON summary on stdout: {podUrl, connected, notApproved, failed, pairLink, exitCode}")
   .addHelpText("after", INIT_EXIT_HELP)
   .action(async (opts) => {
@@ -1208,6 +1209,8 @@ program
   .command("worker")
   .description("Run Claude Code unattended here for the sessions handed to an agent")
   .requiredOption("--agent <name>", "The named agent this machine works as (its key comes from ~/.synap)")
+  .option("--runtime <engine>", "First run of an agent with a job: the engine that runs it (e.g. claude-code); asks for the agent on this computer when no key is saved")
+  .option("--no-create", "Never ask for the agent on first run, even with --runtime")
   .option("--interval <dur>", "How often to check for handed sessions (e.g. 30s, 2m)", "30s")
   .option("--once", "Check once, run what is handed, wait for it, exit")
   .option("--cwd <dir>", "Where code sessions' Claude Code works (default ~/Documents/Code/synap)")
@@ -2020,9 +2023,19 @@ agents
   .addOption(new Option("--with-mcp", "deprecated, ignored: Raycast always gets the pod's MCP server").hideHelp())
   .option("--api-key <key>", "Register a key you already hold, on this machine only (mints nothing)")
   .option("--label <label>", "Human-readable description")
+  .option("--as <job>", "Give the agent a job (e.g. --as \"CRM worker\"): another agent than the engine's plain one, on this computer")
   .action(async (kind: string | undefined, opts) => {
     const { agentsAdd } = await import("./commands/agents.js");
     await agentsAdd(kind, opts);
+  });
+
+agents
+  .command("adopt <job>")
+  .description("Save the key this OS user already holds for an engine as the agent <job> (mints and revokes nothing)")
+  .option("--from <engine>", "The engine whose key is adopted (default: claude-code)")
+  .action(async (job: string, opts: { from?: string }) => {
+    const { agentsAdopt } = await import("./commands/agents.js");
+    await agentsAdopt(job, opts);
   });
 
 agents
