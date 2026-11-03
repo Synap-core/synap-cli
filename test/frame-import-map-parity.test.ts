@@ -19,7 +19,7 @@ import { BUNDLE_DEPS_KEEP_EXTERNAL } from "../src/commands/cell.js";
  */
 const FRAME_IMPORT_MAP = join(
   process.cwd(),
-  "../synap-app/packages/core/cell-runtime/src/frame-import-map.ts",
+  "../synap-app/packages/web/src/cell-runtime/frame-import-map.ts",
 );
 
 /** `imports['@synap/view-sdk'] = blobs.viewSdk;` → "@synap/view-sdk" (top-level package name, subpaths folded to their package). */

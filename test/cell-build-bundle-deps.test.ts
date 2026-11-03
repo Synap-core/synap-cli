@@ -115,8 +115,26 @@ describe("cell build --bundle-deps → the emitted deps map", () => {
     expect(deps).toEqual({});
   });
 
-  it("default mode is UNCHANGED — react and chalk both stay in deps", async () => {
+  it("bundles by DEFAULT: no flag still yields an empty deps map (the frame refuses runtime deps)", async () => {
     const deps = await emittedDeps("chalk-cell.ts", {});
-    expect(Object.keys(deps).sort()).toEqual(["chalk", "react"]);
+    expect(deps).toEqual({});
+  });
+
+  it("--no-bundle-deps is the explicit opt-out: react and chalk stay in deps, with a warning", async () => {
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const deps = await emittedDeps("chalk-cell.ts", { bundleDeps: false });
+      expect(Object.keys(deps).sort()).toEqual(["chalk", "react"]);
+      expect(err.mock.calls.flat().join(" ")).toMatch(/refused by the web and desktop frames/);
+    } finally {
+      err.mockRestore();
+    }
+  });
+
+  it("keeps @synap/kit external (the host provides it) and never lists it in deps", async () => {
+    const { externals } = await bundleWithEsbuild(fixture("kit-cell.ts"), { bundleDeps: true });
+    expect(externals).toContain("@synap/kit");
+    const deps = await emittedDeps("kit-cell.ts", {});
+    expect(deps).toEqual({});
   });
 });

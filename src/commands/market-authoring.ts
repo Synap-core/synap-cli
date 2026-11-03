@@ -378,10 +378,9 @@ async function marketPublishStandalone(
   // `lib/kind-package.ts`). Bundling defaults to `--bundle-deps` HERE, on the
   // publish path only: a published cell is exactly the case Chrome MV3's
   // "reviewers must be able to see the code that runs" rationale targets —
-  // our `deps` map otherwise resolves through esm.sh at runtime, so the
+  // our `deps` map otherwise resolves over the network at runtime, so the
   // published artifact is not what actually executes. `synap cell build`
-  // invoked directly keeps its own default (external deps via esm.sh)
-  // unchanged; `--no-bundle-deps` opts a publish back out of this default.
+  // bundles by default as well; `--no-bundle-deps` opts a publish back out.
   let definition = pkg.definition;
   if (pkg.category === "cell") {
     const { definition: resolvedDefinition, errors: codeFileErrors } =

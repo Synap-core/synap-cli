@@ -5,13 +5,13 @@
  * Define and bundle frame cells for the Synap runtime.
  *
  * Usage:
- *   synap cell define --name "My Chart" --file ./chart.js [--type-key my-chart] [--deps '{"recharts":"2.12.0"}'] [--workspace <id>] [--open]
+ *   synap cell define --name "My Chart" --file ./chart.js [--type-key my-chart] [--workspace <id>] [--open]
  *   synap cell define --name "Deal board" --file ./board.js --view-types kanban,table --content-kind collection
  *   cat chart.js | synap cell define --name "My Chart"
  *
  *   synap cell build ./src/chart.tsx --out ./dist/chart.js
  *   synap cell build ./src/chart.tsx --out ./dist/chart.js --define   # bundle then define
- *   synap cell build ./src/chart.tsx --out ./dist/chart.js --bundle-deps   # no esm.sh at runtime
+ *   synap cell build ./src/chart.tsx --out ./dist/chart.js --no-bundle-deps   # NOT accepted by the frame (see below)
  *   synap cell build ./src/card.tsx --out ./dist/card.html --self-contained  # one HTML doc (mcp-app)
  *
  * API:
@@ -34,21 +34,20 @@
  * the flag leaves the stored value untouched (so a source-only re-push can't erase
  * a declared affinity). Pass `--view-types ""` to clear the affinity.
  *
- * cell build runtime contract:
+ * cell build runtime contract (what the frame accepts; the backend skill
+ * `skills/synap/viewframe-cells.md` says the same):
  *   - esbuild bundles to a single ESM file (format: esm, bundle: true)
- *   - default mode: every bare import (react, react-dom, any non-relative) is
- *     externalized; externalized modules become the deps map (version from
- *     package.json if present, else "latest"); at runtime Synap resolves
- *     them via esm.sh importmap
- *   - `--bundle-deps` mode: only react/react-dom are externalized (they are
- *     host-inlined at runtime, never via esm.sh — see
- *     `synap-app/packages/core/cell-runtime/src/frame-react-modules.ts`);
- *     every other bare import is bundled into the output, so the deps map is
- *     `{}` and the frame's runtime CSP drops esm.sh entirely (see
- *     `ViewFrame.buildFrameCsp`'s `fullyBundled` branch) — this mode is
- *     opt-in; the default build is byte-identical to before this flag existed
+ *   - the frame loads NO code from the network (no CDN, no esm.sh). The only
+ *     bare imports the host provides are `react`, `react-dom` (+ `/client`),
+ *     the JSX runtimes and `@synap/kit` (and `@synap/view-sdk`); they stay
+ *     external. Every other bare import is BUNDLED into the output, so the
+ *     deps map is `{}`. This is the DEFAULT; `--bundle-deps` is accepted and
+ *     is the same thing.
+ *   - `--no-bundle-deps` keeps third-party imports external and emits them as a
+ *     deps map. The web and desktop frames REFUSE such a cell, so the flag only
+ *     exists for a host that resolves them itself, and prints a warning.
  *   - the output module default-exports a React component (or plain module)
- *   - default and `--bundle-deps` modes REFUSE an imported `.css` file (a
+ *   - the JS-module modes REFUSE an imported `.css` file (a
  *     `CellBundleError` naming it): the output is one JS module with nowhere to
  *     put a stylesheet, so the CSS could only be lost. `--self-contained` is the
  *     mode that keeps it.
@@ -262,7 +261,12 @@ export const BUNDLE_DEPS_KEEP_EXTERNAL = new Set([
   "react",
   "react-dom",
   "@synap/view-sdk",
+  "@synap/kit",
 ]);
+
+/** The one sentence every help text and warning uses (mirrors viewframe-cells.md). */
+export const FRAME_IMPORTS_RULE =
+  "The frame loads no code from the network: only react, react-dom, the JSX runtimes and @synap/kit are provided by the host; every other library must be bundled into the cell (the default of `synap cell build`) and `deps` must be empty.";
 
 /** Load esbuild from the CLI's own install. */
 async function loadEsbuild(): Promise<typeof import("esbuild")> {
@@ -502,7 +506,7 @@ export function wrapSelfContainedHtml(parts: { js: string; css: string }): strin
 
 export interface BuiltCell {
   code: string;
-  /** Externals → version, ready for the `deps` field the runtime resolves via esm.sh. */
+  /** Externals → version. Empty for a cell the frame accepts (everything bundled). */
   deps: Record<string, string>;
   externals: string[];
 }
@@ -525,12 +529,14 @@ export async function buildCellFromSource(
     fonts?: boolean;
   } = {}
 ): Promise<BuiltCell> {
+  // Bundling is the default: it is the only shape the frame accepts.
+  const bundleDeps = opts.bundleDeps ?? true;
   if (opts.selfContained) {
     // A self-contained document reaches no module origin, so a deps map —
-    // "modules the runtime resolves via esm.sh" — can only be a lie here.
+    // "modules the runtime resolves at load time" — can only be a lie here.
     if (opts.deps) {
       throw new CellBundleError(
-        "--deps does not apply to --self-contained: every import is bundled into the document, nothing resolves via esm.sh."
+        "--deps does not apply to --self-contained: every import is bundled into the document, nothing is resolved at runtime."
       );
     }
     const { code: js, css } = await bundleWithEsbuild(entry, { selfContained: true });
@@ -551,9 +557,7 @@ export async function buildCellFromSource(
     return { code, deps: {}, externals: [] };
   }
 
-  const { code, externals } = await bundleWithEsbuild(entry, {
-    bundleDeps: opts.bundleDeps,
-  });
+  const { code, externals } = await bundleWithEsbuild(entry, { bundleDeps });
 
   // Build deps map: externals → version from nearest package.json.
   //
@@ -572,7 +576,7 @@ export async function buildCellFromSource(
   const pkgJson = findPackageJson(dirname(entry));
   const depsMap: Record<string, string> = {};
   for (const ext of externals) {
-    if (opts.bundleDeps && BUNDLE_DEPS_KEEP_EXTERNAL.has(ext)) continue;
+    if (bundleDeps && BUNDLE_DEPS_KEEP_EXTERNAL.has(ext)) continue;
     depsMap[ext] = pkgJson ? lookupVersion(pkgJson, ext) : "latest";
   }
 
@@ -599,6 +603,7 @@ export async function cellDefine(opts: CellDefineOpts): Promise<void> {
     const userId = await resolveUserId(cfg);
     const workspaceId = opts.workspace ?? cfg.workspaceId;
 
+    if (opts.deps) log.warn(`--deps: ${FRAME_IMPORTS_RULE}`);
     // Parse --deps if provided
     let parsedDeps: Record<string, string> = {};
     if (opts.deps) {
@@ -718,9 +723,15 @@ export async function cellBuild(
       process.exit(1);
     }
 
+    if (opts.bundleDeps === false && !opts.selfContained) {
+      log.warn(`--no-bundle-deps: ${FRAME_IMPORTS_RULE} A cell built this way is refused by the web and desktop frames.`);
+    }
+    if (opts.deps && !opts.selfContained) {
+      log.warn(`--deps: ${FRAME_IMPORTS_RULE}`);
+    }
     log.dim(`Bundling ${entry}…`);
     const { code, deps: depsMap, externals } = await buildCellFromSource(absEntry, {
-      bundleDeps: opts.bundleDeps,
+      bundleDeps: opts.bundleDeps !== false,
       deps: opts.deps,
       selfContained: opts.selfContained,
       fonts: opts.fonts,
@@ -745,7 +756,7 @@ export async function cellBuild(
       log.success(`Bundled → ${outPath}`);
       log.dim(`  size: ${(code.length / 1024).toFixed(1)} KB`);
       if (externals.length > 0) {
-        log.dim(`  externals (runtime deps via esm.sh):`);
+        log.dim(`  externals (deps the frame will refuse; ${FRAME_IMPORTS_RULE}):`);
         for (const [k, v] of Object.entries(depsMap)) {
           log.dim(`    ${k}@${v}`);
         }
