@@ -8839,7 +8839,7 @@
             "path": "synap keys request",
             "name": "request",
             "usage": "[options] [template]",
-            "description": "Ask the person for a scoped key; they approve it on one page, the key never goes through chat",
+            "description": "Ask the person for a scoped key, from a template or with exactly the permissions it needs; they approve it on one page, the key never goes through chat",
             "hidden": false,
             "arguments": [
               {
@@ -8849,6 +8849,13 @@
               }
             ],
             "options": [
+              {
+                "flags": "--permission <pattern>",
+                "long": "--permission",
+                "description": "A permission the key needs, instead of a template (repeatable): entity.company.update, facet.create. The person may narrow it, never widen it",
+                "takesValue": "required",
+                "default": []
+              },
               {
                 "flags": "--out <file>",
                 "long": "--out",
@@ -8876,7 +8883,7 @@
               {
                 "flags": "--expires-days <n>",
                 "long": "--expires-days",
-                "description": "Key lifetime in days (default: the template's)",
+                "description": "Key lifetime in days (default: the template's; with --permission 90, at most 365)",
                 "takesValue": "required"
               },
               {

@@ -23,7 +23,7 @@ import path from "node:path";
 import * as readline from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import chalk from "chalk";
-import { HubRestClient } from "@synap-core/hub-rest-client";
+import { HubApiError, HubRestClient } from "@synap-core/hub-rest-client";
 import { log } from "../utils/logger.js";
 import { renderHubError, resolveHubConfig, type HubConfig } from "../lib/hub-client.js";
 import { pollForApproval } from "../lib/approval-poll.js";
@@ -582,6 +582,108 @@ async function resolveWorkspaceIdFor(
   return byName.get(names[0].toLowerCase())!;
 }
 
+// ─── An agent's credential: ask for a key with the app's reach instead ────────
+
+/**
+ * Is this the pod refusing an AGENT's credential (an app is registered,
+ * connected and keyed by its owner, signed in as themselves: `app-connect.ts`
+ * `assertOwnerCredential` on the pod)? Who may register an app is unchanged.
+ */
+export function isAgentCredentialRefusal(err: unknown): boolean {
+  if (!(err instanceof HubApiError) || err.statusCode !== 403) return false;
+  const body = err.body as { error?: unknown; message?: unknown } | undefined;
+  const words = [err.message, body?.error, body?.message].filter((w): w is string => typeof w === "string");
+  return words.some((w) => /an agent credential cannot/i.test(w));
+}
+
+/** Single-quote an argument when a shell would split or expand it. */
+function shellArg(value: string): string {
+  return /^[A-Za-z0-9_./:@=,+-]+$/.test(value) ? value : `'${value.replace(/'/g, "'\\''")}'`;
+}
+
+const fileSlug = (name: string) =>
+  name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "") || "space";
+
+/**
+ * The `synap keys request` command(s) that ask the person for a key with
+ * exactly this app's reach: one per space its requests name (a requested key
+ * is pinned to one space), each permission once. `workspaceIds` maps a
+ * lower-cased space name to its id; a space it cannot resolve gets a
+ * placeholder and a note, never a guess. `*` cannot be asked for in a list
+ * (the pod refuses it), so that space asks for the full-access template.
+ */
+export function keysRequestCommandsFor(
+  manifest: AppManifest,
+  workspaceIds: ReadonlyMap<string, string>
+): { commands: string[]; notes: string[] } {
+  const spaces = new Map<string, { name: string; permissions: string[] }>();
+  for (const r of manifest.requests) {
+    const name = r.workspace.trim();
+    const key = name.toLowerCase();
+    const space = spaces.get(key) ?? { name, permissions: [] };
+    if (!space.permissions.includes(r.permission)) space.permissions.push(r.permission);
+    spaces.set(key, space);
+  }
+  const several = spaces.size > 1;
+  const envName = manifest.deploy.env.key || "SYNAP_HUB_API_KEY";
+  const commands: string[] = [];
+  const notes: string[] = [];
+  for (const [key, space] of spaces) {
+    const id = workspaceIds.get(key);
+    if (!id) notes.push(`Replace <id of ${space.name}> with the space's id (synap orient lists them).`);
+    const what = space.permissions.includes("*")
+      ? ["full-access"]
+      : space.permissions.flatMap((p) => ["--permission", p]);
+    if (space.permissions.includes("*"))
+      notes.push(
+        `"*" in ${space.name} is full access: a key asked for by permissions cannot carry it, so that command asks for the full-access template (it lasts at most 30 days).`
+      );
+    const args = [
+      "synap",
+      "keys",
+      "request",
+      ...what,
+      "--workspace",
+      id ?? `<id of ${space.name}>`,
+      "--name",
+      several ? `${manifest.name} (${space.name})` : manifest.name,
+      "--out",
+      several ? `synap-key-${fileSlug(space.name)}.env` : "synap-key.env",
+      "--env-name",
+      envName,
+    ];
+    commands.push(args.map(shellArg).join(" "));
+  }
+  return { commands, notes };
+}
+
+/** Print the keys-request command(s) for an agent the pod refused; exit code 1. */
+async function explainAgentRefusal(
+  client: AppConnectClient,
+  manifest: AppManifest,
+  err: HubApiError
+): Promise<void> {
+  const ids = new Map<string, string>();
+  try {
+    for (const w of await client.getWorkspaces()) ids.set(w.name.trim().toLowerCase(), w.id);
+  } catch {
+    // Unreadable spaces: the commands carry placeholders and say so.
+  }
+  const { commands, notes } = keysRequestCommandsFor(manifest, ids);
+  log.error(err.message);
+  log.blank();
+  log.info(
+    `An agent cannot connect an app, but it can ask your person for a key with exactly ${MANIFEST_FILENAME}'s reach. They approve it on one page, and may narrow it:`
+  );
+  for (const c of commands) console.log(`  ${c}`);
+  for (const n of notes) log.hint(n);
+  log.hint("The key is written to that file (0600), not into your deploy target: keep it out of git.");
+  process.exitCode = 1;
+}
+
 /** File the proposal, print the review URL, wait for approval, mint + deploy the key. */
 export async function appConnect(): Promise<void> {
   const root = process.cwd();
@@ -591,11 +693,18 @@ export async function appConnect(): Promise<void> {
   const creds = await resolveAppCredentials(manifest.pod);
   const client = new AppConnectClient({ podUrl: creds.podUrl, apiKey: creds.apiKey });
 
-  // Register first if the manifest has no id yet (spec §5).
-  manifest = await registerIfNeeded(client, manifest, file);
-
-  // ── 1. File ONE proposal naming the app and its requested reach ─────────────
-  const { proposalId, reviewUrl } = await client.connectApp(manifest.id!, manifest.requests);
+  // Register first if the manifest has no id yet (spec §5), then file ONE
+  // proposal naming the app and its requested reach. An agent's credential is
+  // refused both (only the app's owner may): say what it CAN do instead.
+  let filed: ConnectResult;
+  try {
+    manifest = await registerIfNeeded(client, manifest, file);
+    filed = await client.connectApp(manifest.id!, manifest.requests);
+  } catch (err) {
+    if (isAgentCredentialRefusal(err)) return explainAgentRefusal(client, manifest, err as HubApiError);
+    throw err;
+  }
+  const { proposalId, reviewUrl } = filed;
   log.blank();
   log.heading(`Access request filed for "${manifest.name}"`);
   log.info("Approve it on your phone: " + chalk.cyan(reviewUrl));

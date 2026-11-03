@@ -3344,12 +3344,18 @@ keys
 
 keys
   .command("request [template]")
-  .description("Ask the person for a scoped key; they approve it on one page, the key never goes through chat")
+  .description("Ask the person for a scoped key, from a template or with exactly the permissions it needs; they approve it on one page, the key never goes through chat")
+  .option(
+    "--permission <pattern>",
+    "A permission the key needs, instead of a template (repeatable): entity.company.update, facet.create. The person may narrow it, never widen it",
+    (v: string, acc: string[]) => [...acc, v],
+    [] as string[]
+  )
   .option("--out <file>", "Write the key as env lines to this file (mode 0600)")
   .option("--force", "Overwrite --out if it exists")
   .option("--print", "Print the key on stdout (the only way to see it)")
   .option("--name <name>", "Name of the key")
-  .option("--expires-days <n>", "Key lifetime in days (default: the template's)", (v) => parseInt(v, 10))
+  .option("--expires-days <n>", "Key lifetime in days (default: the template's; with --permission 90, at most 365)", (v) => parseInt(v, 10))
   .option("--workspace <id>", "Limit the key to one workspace")
   .option("--env-name <NAME>", "Variable name in --out (default SYNAP_HUB_API_KEY)")
   .option("--wait <duration>", "How long to keep asking, e.g. 90s, 30m, 24h (default 24h)")
@@ -3358,12 +3364,19 @@ keys
   .action(async (template: string | undefined, opts: Record<string, unknown>) => {
     const mod = await import("./commands/keys-request.js");
     if (opts.listTemplates) return mod.keysListTemplates();
-    if (!template) {
-      console.error("Name a template (synap keys request --list-templates).");
+    const permissions = (opts.permission as string[] | undefined) ?? [];
+    if (template && permissions.length > 0) {
+      console.error("Ask for a template or --permission, not both.");
+      process.exit(1);
+    }
+    if (!template && permissions.length === 0) {
+      console.error(
+        "Name a template (synap keys request --list-templates) or the permissions the key needs (--permission <pattern>, repeatable)."
+      );
       process.exit(1);
     }
     await mod.keysRequest({
-      template,
+      ...(permissions.length > 0 ? { permissions } : { template }),
       out: opts.out as string | undefined,
       force: opts.force as boolean | undefined,
       print: opts.print as boolean | undefined,

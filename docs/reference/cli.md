@@ -242,7 +242,7 @@ Every command also accepts `-h, --help`.
   - [`synap providers list-keys`](#synap-providers-list-keys) — List user/workspace-level provider key overrides
 - [`synap keys`](#synap-keys) — Manage pod API keys
   - [`synap keys rotate`](#synap-keys-rotate) — Rotate your CLI key to pick up the latest scope set
-  - [`synap keys request`](#synap-keys-request) — Ask the person for a scoped key; they approve it on one page, the key never goes through chat
+  - [`synap keys request`](#synap-keys-request) — Ask the person for a scoped key, from a template or with exactly the permissions it needs; they approve it on one page, the key never goes through chat
 
 ## `synap`
 
@@ -4190,7 +4190,7 @@ Rotate your CLI key to pick up the latest scope set
 synap keys request [options] [template]
 ```
 
-Ask the person for a scoped key; they approve it on one page, the key never goes through chat
+Ask the person for a scoped key, from a template or with exactly the permissions it needs; they approve it on one page, the key never goes through chat
 
 | Argument | Required | Description |
 |---|---|---|
@@ -4198,11 +4198,12 @@ Ask the person for a scoped key; they approve it on one page, the key never goes
 
 | Option | Description | Default |
 |---|---|---|
+| `--permission <pattern>` | A permission the key needs, instead of a template (repeatable): entity.company.update, facet.create. The person may narrow it, never widen it | `[]` |
 | `--out <file>` | Write the key as env lines to this file (mode 0600) |  |
 | `--force` | Overwrite --out if it exists |  |
 | `--print` | Print the key on stdout (the only way to see it) |  |
 | `--name <name>` | Name of the key |  |
-| `--expires-days <n>` | Key lifetime in days (default: the template's) |  |
+| `--expires-days <n>` | Key lifetime in days (default: the template's; with --permission 90, at most 365) |  |
 | `--workspace <id>` | Limit the key to one workspace |  |
 | `--env-name <NAME>` | Variable name in --out (default SYNAP_HUB_API_KEY) |  |
 | `--wait <duration>` | How long to keep asking, e.g. 90s, 30m, 24h (default 24h) |  |
