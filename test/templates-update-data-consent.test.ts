@@ -248,7 +248,8 @@ describe("templates update — retired templates", () => {
     previewReturns({ ok: true });
     const { marketUpdate } = await import("../src/commands/market.js");
     await marketUpdate([SLUG], { json: true, yes: true });
-    expect(hubPost).not.toHaveBeenCalled();
+    // Nothing applied: the only POST is the catalog refresh asked before the check.
+    expect(hubPost.mock.calls.map((c) => c[0])).toEqual(["/catalog/refresh"]);
     expect(lastJson().templateLifecycle[SLUG]).toEqual({
       lifecycle: "retired",
       replacedBy: "ecosystem",
