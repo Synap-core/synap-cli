@@ -4,7 +4,7 @@
 
 Synap CLI — connect AI agents to your data pod
 
-234 commands. Hidden commands and hidden options are omitted here (5 hidden commands); `cli.json` lists them with `"hidden": true`.
+236 commands. Hidden commands and hidden options are omitted here (5 hidden commands); `cli.json` lists them with `"hidden": true`.
 
 Every command also accepts `-h, --help`.
 
@@ -91,6 +91,8 @@ Every command also accepts `-h, --help`.
 - [`synap box`](#synap-box) — Run scripts in fresh isolated boxes on this computer (run box provisioner)
   - [`synap box serve`](#synap-box-serve) — Lease queued box runs from the pod and run each in a fresh box
   - [`synap box reap`](#synap-box-reap) — Destroy every box no run holds (after a crash)
+- [`synap host`](#synap-host) — Host installed capabilities on this computer (deterministic host runner)
+  - [`synap host serve`](#synap-host-serve) — Lease approved host jobs from the pod and run them: pinned containers, 127.0.0.1 ports, health, cleanup
 - [`synap session`](#synap-session) — Manage focus sessions (goal-bound AI work rooms)
   - [`synap session start`](#synap-session-start) — Start a new focus session and return its ID
   - [`synap session list`](#synap-session-list) — List focus sessions in the active workspace
@@ -1578,6 +1580,29 @@ Destroy every box no run holds (after a crash)
 | Option | Description | Default |
 |---|---|---|
 | `--config <file>` | Provisioner config | `"/etc/synap-box/config.json"` |
+
+## `synap host`
+
+```
+synap host [options] [command]
+```
+
+Host installed capabilities on this computer (deterministic host runner)
+
+Subcommands: [`serve`](#synap-host-serve)
+
+## `synap host serve`
+
+```
+synap host serve [options]
+```
+
+Lease approved host jobs from the pod and run them: pinned containers, 127.0.0.1 ports, health, cleanup
+
+| Option | Description | Default |
+|---|---|---|
+| `--config <file>` | Host runner config (default /etc/synap-host/config.json when present) |  |
+| `--once` | Lease at most one job, work it, exit |  |
 
 ## `synap session`
 
