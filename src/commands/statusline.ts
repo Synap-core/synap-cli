@@ -661,6 +661,8 @@ function render(): void {
     l3.push(`${D}5h${X} ${rateColor(fhPct)}${Math.round(fhPct)}%${X}`);
   }
   if (sdPct !== undefined) l3.push(`${D}7d${X} ${rateColor(sdPct)}${Math.round(sdPct)}%${X}`);
+  const account = claudeSwitchSegment(process.env, claudeSessionId);
+  if (account) l3.push(account);
   if (fhReset !== undefined && (fhPct ?? 0) >= 60) {
     const rem = fhReset - Math.floor(Date.now() / 1000);
     if (rem > 0) l3.push(`${D}resets ${Math.floor(rem / 3600)}h${String(Math.floor((rem % 3600) / 60)).padStart(2, "0")}${X}`);
@@ -692,6 +694,29 @@ function render(): void {
     alive: pidAlive,
   });
   console.log(bridge?.status === "failed" ? `${line} ${D}· ⚑ bridge status ${bridge.why}${X}` : line);
+}
+
+// ── ClaudeSwitch account (line 3, beside the usage it belongs to) ───────
+
+/** The account segment shows at or below this much left. */
+const ACCOUNT_LOW_PCT = 20;
+
+/**
+ * ClaudeSwitch exports `CLAUDE_SWITCH_STATUS="<label> <N>% left"`. Drawn only
+ * when this session was moved (`CLAUDE_SWITCH_MOVED` = `<account it left>:<session id>`
+ * ends with this session's id) or N is at or below 20; otherwise, and when the
+ * value is unset or has no number, nothing (the line renders as it always did).
+ */
+export function claudeSwitchSegment(env: NodeJS.ProcessEnv, sessionId: string | undefined): string {
+  const m = /^(.*?)\s*(\d{1,3})% left\s*$/.exec(env.CLAUDE_SWITCH_STATUS ?? "");
+  if (!m) return "";
+  const left = Number(m[2]);
+  if (left > 100) return "";
+  const moved = env.CLAUDE_SWITCH_MOVED ?? "";
+  const wasMoved = Boolean(sessionId) && moved.endsWith(`:${sessionId}`);
+  if (!wasMoved && left > ACCOUNT_LOW_PCT) return "";
+  const label = safeText(m[1]!.trim());
+  return `${label ? `${D}${label}${X} ` : ""}${rateColor(100 - left)}${left}% left${X}`;
 }
 
 // ── Needs you (line 2) ─────────────────────────────────────────────────
