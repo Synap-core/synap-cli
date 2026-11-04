@@ -182,7 +182,7 @@ function printRow(label: string, value: string) {
   console.log(`  ${chalk.dim(label.padEnd(16))} ${value}`);
 }
 
-interface Drift {
+export interface Drift {
   inSync: boolean;
   message: string;
 }
@@ -220,29 +220,45 @@ async function checkWorkspaceTemplates(): Promise<WorkspaceTemplatesRow> {
       ? `${stamped.length}/${installed.length} stamped`
       : undefined;
 
-  const cpBehindNpm = isNewer(cpInfo?.version, npm);
-  const localBehindNpm = isNewer(local, npm);
+  const drift = templatesDrift({ local, npm, cp: cpInfo?.version });
 
-  let drift: Drift;
+  return { name: "workspace-templates", local, npm, cp: cpInfo?.version, cpSlug: cpInfo?.slug, pod, drift };
+}
+
+/**
+ * The workspace-templates verdict. Three copies of the catalog exist: the CP's
+ * (what pods install), npm's (what a fresh `npm i -g @synap-core/cli` bundles)
+ * and this CLI's bundle. "in sync" only when none is behind another: on
+ * 2026-11-04 the CP was at 0.23.0 while npm's publish step had failed since
+ * August and npm still served 0.12.0, and this printed "in sync".
+ */
+export function templatesDrift(v: { local?: string; npm?: string; cp?: string }): Drift {
+  const { local, npm, cp } = v;
   if (!npm) {
-    drift = { inSync: false, message: "? npm unreachable — cannot verify drift" };
-  } else if (cpBehindNpm) {
-    drift = {
+    return { inSync: false, message: "? npm unreachable — cannot verify drift" };
+  }
+  if (isNewer(cp, npm)) {
+    return {
       inSync: false,
-      message: `CP is behind npm (seeded ${cpInfo?.version}, latest ${npm}) — redeploy CP to propagate`,
+      message: `CP is behind npm (seeded ${cp}, latest ${npm}) — redeploy CP to propagate`,
     };
-  } else if (cpInfo === undefined) {
-    drift = { inSync: false, message: "? CP has no known template package — cannot verify CP drift" };
-  } else if (localBehindNpm) {
-    drift = {
+  }
+  if (cp === undefined) {
+    return { inSync: false, message: "? CP has no known template package — cannot verify CP drift" };
+  }
+  if (isNewer(npm, cp)) {
+    return {
+      inSync: false,
+      message: `npm is behind the CP (npm ${npm}, CP ${cp}) — a fresh CLI install bundles ${npm}; the npm publish of @synap-core/workspace-templates has not landed`,
+    };
+  }
+  if (isNewer(local, npm)) {
+    return {
       inSync: false,
       message: `Local CLI bundle is behind npm (local ${local}, latest ${npm}) — update @synap-core/workspace-templates`,
     };
-  } else {
-    drift = { inSync: true, message: "in sync" };
   }
-
-  return { name: "workspace-templates", local, npm, cp: cpInfo?.version, cpSlug: cpInfo?.slug, pod, drift };
+  return { inSync: true, message: "in sync" };
 }
 
 // ── artifact 2: api-types ───────────────────────────────────────────────────
