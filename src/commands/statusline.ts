@@ -320,7 +320,7 @@ async function refreshShared(cfg: Cfg | null, prev: PodCache | null): Promise<vo
     const ambientMatchesExpected = Boolean(ambientKey && surfaceKey && ambientKey === surfaceKey.hubApiKey);
     const needsIdentityCheck = Boolean(expectedAgentUserId && ambientKey && !ambientMatchesExpected);
     const identityReq = needsIdentityCheck
-      ? hubGet("/users/me", {}, { podUrl: cfg.podUrl, apiKey: ambientKey as string, userId: "cli" })
+      ? hubGet("/users/me", {}, { podUrl: cfg.podUrl, apiKey: ambientKey as string })
       : Promise.resolve(null);
 
     // Needs you — the one actionable ambient signal, counted by the pod's own

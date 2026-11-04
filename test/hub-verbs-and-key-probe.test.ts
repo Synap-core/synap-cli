@@ -1,5 +1,5 @@
 /**
- * Wave 0 (w0-cli): every Hub verb shares pacing + 429 retry, and an
+ * Every Hub verb shares pacing + 429 retry, and an
  * unreachable pod is never read as an invalid key.
  */
 import { describe, it, expect, vi, afterEach } from "vitest";
