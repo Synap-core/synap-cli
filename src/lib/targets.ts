@@ -1818,7 +1818,7 @@ async function installChatGptOAuth(cfg: TargetConnectionConfig): Promise<boolean
   log.info("  1. 'list my Synap pods' (list_pods)");
   log.info("  2. 'connect pod <your-pod>' (connect_pod)");
   log.blank();
-  log.dim(`The Control Plane keeps an encrypted grant. To revoke it: ${agentsPageOf(cfg.podUrl)}.`);
+  log.dim(`Your Synap account keeps an encrypted grant. To revoke it: ${agentsPageOf(cfg.podUrl)}.`);
   log.blank();
   log.dim("See `synap mcp connect-claude` for the identical claude.ai flow.");
 

@@ -89,8 +89,7 @@ describe("a limited key refused at the door", () => {
     podAnswers(403, DOOR_REFUSAL);
     const out = printed(await refusalOf("/workspaces"));
     expect(out).toContain("This key is limited");
-    expect(out).toContain("GET /workspaces");
-    expect(out).toContain("Nothing is wrong with your workspace");
+    expect(out).toContain("signed in as yourself, which the CLI cannot do yet. (GET /workspaces)");
     expect(out).not.toContain("not accessible on this pod");
     expect(out).not.toContain(`Sent workspace ${WS}`);
     expect(out).not.toContain("Workspace not found");

@@ -788,7 +788,7 @@
               {
                 "flags": "--client <name>",
                 "long": "--client",
-                "description": "The client this key is for, one of synap connect --list (default: generic)",
+                "description": "The client this key is for: one of synap connect --list gets its own key, any other name a generic one (default: generic)",
                 "takesValue": "required"
               },
               {

@@ -8,9 +8,8 @@
  * - "Reconnect" is advised ONLY on HTTP 401. A reconnect mints another
  *   computer key, which cannot fix a 400 or a 403.
  * - The pod's raw JSON is never printed: its `error` words, at most, when no
- *   code below explains the refusal.
+ *   code below explains the refusal, and nothing of a 5xx's body.
  */
-import { MANAGED_MCP_URL } from "./auth.js";
 import { podAdminOrigin } from "./safe-open.js";
 
 /** The pod's codes this map explains (synap-backend, the file:line in each entry). */
@@ -82,6 +81,12 @@ export function agentsPageOf(podUrl: string | undefined): string {
   return admin ? `pod admin → Agents (${admin}/agents)` : "pod admin → Agents";
 }
 
+/** Pod admin's home page for this pod (where it says how the pod is), or the words that find it. */
+export function podAdminHomeOf(podUrl: string | undefined): string {
+  const admin = podUrl ? podAdminOrigin(podUrl) : null;
+  return admin ? `pod admin (${admin})` : "pod admin";
+}
+
 /**
  * The one line and the one next step for a pod's refusal. Always answers:
  * a code this map does not know falls back to the pod's own words, with no
@@ -99,6 +104,15 @@ export function explainPodError(r: PodRefusal): PodErrorText {
     };
   }
 
+  // A 5xx says nothing a person can act on, and its body may be a proxy's page
+  // or a stack: never shown.
+  if (r.status >= 500) {
+    return {
+      line: `The pod is not answering right now (HTTP ${r.status}).`,
+      next: `Try again in a minute, or check ${podAdminHomeOf(r.podUrl)}.`,
+    };
+  }
+
   if (code === POD_ERROR_CODES.surfaceAgentTypeRequired) {
     if (r.knownClient === false) {
       return {
@@ -106,16 +120,18 @@ export function explainPodError(r: PodRefusal): PodErrorText {
         next: `Create it in ${agentsPageOf(r.podUrl)}. The CLI cannot sign in as you yet.`,
       };
     }
+    // No release promise, and no Synap-account route: a client that connects
+    // only with a key has none. A generic key works with every client.
     return {
-      line: `Your pod does not know ${who} yet; it is added in the next pod release.`,
-      next: `Meanwhile connect ${who} through your Synap account: add ${MANAGED_MCP_URL} as an MCP server (or connector) in ${who} and sign in there.`,
+      line: `Your pod does not list ${who} yet.`,
+      next: `Connect it with a generic key instead: synap mcp url --client generic prints a URL and a key to paste into ${who}.`,
     };
   }
 
   if (code === POD_ERROR_CODES.grantDoorUnsupported || (!code && SCOPED_KEYS_WORDS.test(fromBody.words ?? ""))) {
     return {
-      line: "This key is limited: it is this computer's key, and this action needs you signed in as yourself, which the CLI cannot do yet.",
-      next: "Do it in the Synap app, signed in as yourself.",
+      line: "This key is limited (this computer's or an AI's key), and this action needs you signed in as yourself, which the CLI cannot do yet.",
+      next: `Do it in the Synap desktop app or in ${podAdminHomeOf(r.podUrl)}, signed in as yourself.`,
     };
   }
 

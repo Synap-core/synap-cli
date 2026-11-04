@@ -635,7 +635,7 @@ function renderHubErrorBody(err: unknown, opts: { personDoor?: string }): void {
   } else if (limitedKeyRefusal) {
     // The words come from the ONE code-to-text map (pod-errors.ts).
     const { line, next } = explainPodError({ status: err.status, code: err.code, podUrl: err.podUrl });
-    log.hint(`${line} The pod refuses ${err.method} ${err.path} to a limited key. Nothing is wrong with your workspace.`);
+    log.hint(`${line} (${err.method} ${err.path})`);
     log.hint(next);
   } else if (grantDenial) {
     const what = grantDenial.action ? `"${grantDenial.action}"` : "this action";
@@ -644,7 +644,7 @@ function renderHubErrorBody(err: unknown, opts: { personDoor?: string }): void {
     );
     log.hint(
       opts.personDoor ??
-        "Do it yourself with full access: in the Synap app or pod admin."
+        "Do it yourself with full access: in the Synap desktop app or pod admin."
     );
   } else if (err.status === 403 && namesWorkspace) {
     // Name the exact workspace + pod this call used: the usual cause is a global
