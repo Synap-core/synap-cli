@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import { BUNDLE_DEPS_KEEP_EXTERNAL } from "../src/commands/cell.js";
+import { HOST_PROVIDED_FRAME_SPECIFIERS, BUNDLE_DEPS_KEEP_EXTERNAL } from "../src/commands/cell.js";
 
 /**
  * `BUNDLE_DEPS_KEEP_EXTERNAL` in `cell.ts` is a hand-maintained mirror of
@@ -22,38 +22,31 @@ const FRAME_IMPORT_MAP = join(
   "../synap-app/packages/web/src/cell-runtime/frame-import-map.ts",
 );
 
-/** `imports['@synap/view-sdk'] = blobs.viewSdk;` → "@synap/view-sdk" (top-level package name, subpaths folded to their package). */
-function hostProvidedPackages(src: string): Set<string> {
-  const names = new Set<string>();
-  for (const m of src.matchAll(/imports\[['"]([^'"]+)['"]\]\s*=/g)) {
-    const path = m[1];
-    const parts = path.split("/");
-    const pkgName =
-      path.startsWith("@") && parts.length >= 2 ? `${parts[0]}/${parts[1]}` : parts[0];
-    names.add(pkgName);
-  }
-  return names;
+/** Every exact specifier the host registers: `imports['react-dom/client'] = …` gives "react-dom/client". */
+function hostProvidedSpecifiers(src: string): Set<string> {
+  return new Set([...src.matchAll(/imports\[['"]([^'"]+)['"]\]\s*=/g)].map((m) => m[1]!));
 }
 
 describe("BUNDLE_DEPS_KEEP_EXTERNAL matches the frame host's import map", () => {
+  // A sibling synap-app checkout without the file is a stale path, never a skip.
+  const siblingExists = existsSync(join(process.cwd(), "../synap-app/packages"));
   const hasHost = existsSync(FRAME_IMPORT_MAP);
 
-  it("the local set is non-vacuous", () => {
+  it("the local set is non-vacuous and exact-specifier", () => {
     expect(BUNDLE_DEPS_KEEP_EXTERNAL.size).toBeGreaterThanOrEqual(2);
+    expect(BUNDLE_DEPS_KEEP_EXTERNAL.has("react-dom/server")).toBe(false);
+    expect(BUNDLE_DEPS_KEEP_EXTERNAL.has("@synap/kit/charts")).toBe(false);
   });
 
-  it.runIf(hasHost)("every host-provided package stays external under --bundle-deps", () => {
+  it.runIf(siblingExists)("the host import-map file exists where this test looks for it", () => {
+    expect(hasHost, `synap-app is checked out beside the CLI but ${FRAME_IMPORT_MAP} is missing: the path went stale`).toBe(true);
+  });
+
+  it.runIf(hasHost)("the host provides exactly the specifiers the CLI keeps external", () => {
     const src = readFileSync(FRAME_IMPORT_MAP, "utf8");
-    expect(src.length, "host import-map source unreadable — assertion would be vacuous").toBeGreaterThan(200);
-
-    const hostPackages = hostProvidedPackages(src);
-    expect(hostPackages.size, "no host-provided packages parsed — the assertion would be vacuous").toBeGreaterThan(0);
-
-    for (const pkg of hostPackages) {
-      expect(
-        BUNDLE_DEPS_KEEP_EXTERNAL.has(pkg),
-        `frame-import-map.ts host-supplies "${pkg}" but BUNDLE_DEPS_KEEP_EXTERNAL in cell.ts does not know it — a --bundle-deps build of a cell importing it will fail`,
-      ).toBe(true);
-    }
+    expect(src.length, "host import-map source unreadable, assertion would be vacuous").toBeGreaterThan(200);
+    const host = hostProvidedSpecifiers(src);
+    expect(host.size, "no host-provided specifiers parsed, assertion would be vacuous").toBeGreaterThan(0);
+    expect([...host].sort()).toEqual([...HOST_PROVIDED_FRAME_SPECIFIERS].sort());
   });
 });

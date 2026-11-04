@@ -2574,7 +2574,7 @@ cell
   .option("--out <file>", "Output file path (default: <entry>.bundle.js)")
   .option(
     "--bundle-deps",
-    "Inline every third-party library into the cell (the default; kept for older scripts). react, react-dom, the JSX runtimes and @synap/kit stay external: the host provides them"
+    "Inline every third-party library into the cell (the default; kept for older scripts). react, react-dom, the JSX runtimes, @synap/kit and @synap/view-sdk stay external: the host provides them"
   )
   .option(
     "--no-bundle-deps",
@@ -2602,7 +2602,7 @@ cell
 Output: a single ESM file.
 
 The frame loads no code from the network (no CDN, no esm.sh). It provides only
-react, react-dom, the JSX runtimes and @synap/kit, resolved by the host; those
+react, react-dom, the JSX runtimes, @synap/kit and @synap/view-sdk, resolved by the host; those
 stay external. Every other library (recharts, d3, three, …) is bundled into the
 cell, so the deps map is empty. That is the default, and it is the only shape
 the web and desktop frames accept. Leave \`deps\` empty; --no-bundle-deps

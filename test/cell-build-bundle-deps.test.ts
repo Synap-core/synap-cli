@@ -51,7 +51,7 @@ describe("bundleWithEsbuild (--bundle-deps)", () => {
       fixture("react-dom-subpath.ts"),
       { bundleDeps: true },
     );
-    expect(externals).toEqual(["react-dom"]);
+    expect(externals).toEqual(["react-dom/client"]);
     expect(code).not.toMatch(/from\s+["']chalk["']/);
     expect(code).toMatch(/from\s+["']react-dom\/client["']/);
   });
@@ -136,5 +136,14 @@ describe("cell build --bundle-deps → the emitted deps map", () => {
     expect(externals).toContain("@synap/kit");
     const deps = await emittedDeps("kit-cell.ts", {});
     expect(deps).toEqual({});
+  });
+
+  it("does not leave a host SUBPATH external: @synap/kit/<sub> is not a specifier the frame provides", async () => {
+    // The frame import map has exactly `@synap/kit`; a subpath left external
+    // would build a cell the pod refuses at define time. It must fail to
+    // resolve here instead (the kit is not an installed package).
+    await expect(
+      bundleWithEsbuild(fixture("kit-subpath-cell.ts"), { bundleDeps: true }),
+    ).rejects.toThrow(/@synap\/kit\/unit-mark/);
   });
 });

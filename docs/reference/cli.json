@@ -6853,7 +6853,7 @@
               {
                 "flags": "--bundle-deps",
                 "long": "--bundle-deps",
-                "description": "Inline every third-party library into the cell (the default; kept for older scripts). react, react-dom, the JSX runtimes and @synap/kit stay external: the host provides them",
+                "description": "Inline every third-party library into the cell (the default; kept for older scripts). react, react-dom, the JSX runtimes, @synap/kit and @synap/view-sdk stay external: the host provides them",
                 "takesValue": "none"
               },
               {
@@ -6955,7 +6955,7 @@
                 "takesValue": "required"
               }
             ],
-            "helpAfter": "Output: a single ESM file.\n\nThe frame loads no code from the network (no CDN, no esm.sh). It provides only\nreact, react-dom, the JSX runtimes and @synap/kit, resolved by the host; those\nstay external. Every other library (recharts, d3, three, …) is bundled into the\ncell, so the deps map is empty. That is the default, and it is the only shape\nthe web and desktop frames accept. Leave `deps` empty; --no-bundle-deps\nexists only for a host that resolves imports itself and the frame refuses it.\n\nExamples:\n  synap cell build ./src/chart.tsx --out ./dist/chart.js\n  synap cell build ./src/chart.tsx --out ./dist/chart.js --define --name \"Revenue Chart\"",
+            "helpAfter": "Output: a single ESM file.\n\nThe frame loads no code from the network (no CDN, no esm.sh). It provides only\nreact, react-dom, the JSX runtimes, @synap/kit and @synap/view-sdk, resolved by the host; those\nstay external. Every other library (recharts, d3, three, …) is bundled into the\ncell, so the deps map is empty. That is the default, and it is the only shape\nthe web and desktop frames accept. Leave `deps` empty; --no-bundle-deps\nexists only for a host that resolves imports itself and the frame refuses it.\n\nExamples:\n  synap cell build ./src/chart.tsx --out ./dist/chart.js\n  synap cell build ./src/chart.tsx --out ./dist/chart.js --define --name \"Revenue Chart\"",
             "subcommands": []
           }
         ]
