@@ -21,7 +21,12 @@ import {
   buildMcpUrl,
   provisionAgentKey,
   enrollAgentIfNeeded,
+  isTargetName,
+  type TargetName,
 } from "../lib/targets.js";
+import { agentTypeOfSurface } from "../lib/machine-instance.js";
+import { SURFACE_NAMES, setSurfaceAgentKey, type SurfaceName } from "../lib/pod.js";
+import { suggestTargets, unknownClientMessage } from "../lib/target-suggest.js";
 import { log } from "../utils/logger.js";
 import { MANAGED_MCP_URL, mcpConnectorUrl } from "../lib/auth.js";
 import { printMcpConnection, redactKey, writeMcpSnippetFiles, MCP_KEY_ENV, mcpRemoteArgs } from "../lib/mcp-snippets.js";
@@ -56,6 +61,25 @@ function resolveMcpTarget(
 }
 
 /**
+ * The client's key on this computer, reused when it is still live: a re-run of
+ * `mcp url` / `mcp ui-setup` must not mint a fresh key (and, once approved,
+ * revoke the one the client already holds) every time. `idempotent` asks the
+ * pod to keep a live key; the key is stored under the client's name, so the
+ * next run finds it (`provisionAgentKey`'s reuse path reads that store).
+ */
+async function mintReusableKey(cfg: HubConfig, surface: TargetName): Promise<{ hubApiKey: string; agentUserId: string }> {
+  const { hubApiKey, agentUserId } = await provisionAgentKey(cfg.podUrl, cfg.apiKey, agentTypeOfSurface(surface), {
+    requireApproval: false,
+    idempotent: true,
+    surfaceName: surface,
+  });
+  if ((SURFACE_NAMES as readonly string[]).includes(surface)) {
+    setSurfaceAgentKey(surface as SurfaceName, { hubApiKey, agentUserId, podUrl: cfg.podUrl });
+  }
+  return { hubApiKey, agentUserId };
+}
+
+/**
  * `synap mcp url` — print a ready-to-paste MCP connection for ANY client.
  *
  * Provisions a DEDICATED agent key (separate identity, revocable) rather than
@@ -70,31 +94,19 @@ export async function mcpUrl(
     const cfg = await resolveHubConfig(opts);
     const { url, workspaceId, projectId } = resolveMcpTarget(cfg, opts);
 
-    // A dedicated agent key — never paste the human's full-scope key into an
-    // external product. requireApproval:false because the user is explicitly
-    // running this command with an already-authed key.
-    // The pod only mints keys for known surface agent types; an arbitrary
-    // client name (e.g. "chatgpt") maps to the "generic" surface. The --client
-    // value stays a display label only.
-    const SURFACE_TYPES = [
-      "claude-code",
-      "claude-desktop",
-      "cursor",
-      "raycast",
-      "codex",
-      "openwebui",
-      "generic",
-    ];
-    const agentType =
-      opts.client && SURFACE_TYPES.includes(opts.client)
-        ? opts.client
-        : "generic";
-    const { hubApiKey, agentUserId } = await provisionAgentKey(
-      cfg.podUrl,
-      cfg.apiKey,
-      agentType,
-      { requireApproval: false }
-    );
+    // A dedicated agent key — never paste the person's key into an external
+    // product. The client names are the CLI's known clients (`TARGETS`), not a
+    // hand list; with no --client, the `generic` client. An unknown name stops
+    // with the closest ones, as `synap connect` does.
+    const surface = opts.client?.trim() || "generic";
+    if (!isTargetName(surface)) {
+      const [first, ...rest] = unknownClientMessage(surface, suggestTargets(surface), { toolHint: false });
+      log.error(first);
+      for (const line of rest) log.hint(line);
+      log.hint("Any other client: synap mcp url --client generic");
+      process.exit(1);
+    }
+    const { hubApiKey, agentUserId } = await mintReusableKey(cfg, surface);
 
     // Enroll the fresh agent into the user's workspace(s). Without this the
     // agent authenticates but sees ZERO workspaces — every ask/capture then
@@ -323,12 +335,7 @@ export async function mcpUiSetup(
     const hubCfg = await resolveHubConfig({ podUrl: opts.podUrl, apiKey: opts.apiKey });
     const { url, workspaceId, projectId } = resolveMcpTarget(hubCfg, { workspace: opts.workspace, project: opts.project });
 
-    const { hubApiKey, agentUserId } = await provisionAgentKey(
-      hubCfg.podUrl,
-      hubCfg.apiKey,
-      "generic",
-      { requireApproval: false }
-    );
+    const { hubApiKey, agentUserId } = await mintReusableKey(hubCfg, "generic");
 
     const normalizedClient = client.toLowerCase().replace(/-/g, "");
     let output = "";

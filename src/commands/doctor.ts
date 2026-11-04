@@ -28,6 +28,7 @@ import { log } from "../utils/logger.js";
 import { reachChecklist } from "../lib/pod-reach.js";
 import { getActivePodConfig, getActiveWorkspaceId, getActiveProjectId, listPodProfiles, checkPodHealth, findPodNameByUrl } from "../lib/pod.js";
 import { resolveHubConfig, hubGet, HubError, type HubConfig } from "../lib/hub-client.js";
+import { explainPodError } from "../lib/pod-errors.js";
 import { formatKeySource, resolveKeySource } from "../lib/key-source.js";
 import { resolveLensProvenance, type LensRung } from "../lib/describe-lens.js";
 import { samePodOrigin } from "../lib/project-ref.js";
@@ -460,7 +461,13 @@ export async function doctor(opts: DoctorOpts = {}): Promise<void> {
         name: "API key authenticates",
         ok: false,
         detail: is401 ? `the pod rejected this key: it ${why}` : `could not verify (${err instanceof Error ? err.message : String(err)})`,
-        fix: is401 ? "See the key health below — run: synap doctor --fix" : `Run: synap login --reconnect ${activeName}`,
+        // "Reconnect" only on a 401: for any other refusal it mints another
+        // computer key and changes nothing (pod-errors.ts says what does).
+        fix: is401
+          ? "See the key health below — run: synap doctor --fix"
+          : err instanceof HubError
+            ? explainPodError({ status: err.status, code: err.code, body: err.rawBody, podUrl: err.podUrl }).next
+            : "Check that the pod is reachable from this computer, then run: synap doctor",
       });
     }
   }

@@ -105,8 +105,8 @@ describe("routeConnect — agent or tool", () => {
   it.each([
     // a known agent client wins the name
     ["cursor", {}, { kind: "agent", target: "cursor" }],
-    // anything else is a tool — NOT a custom agent (that door is `agents add --name`)
-    ["gmail", {}, { kind: "tool", name: "gmail" }],
+    // a tool comes only from --tool: a bare unknown name stops (connect-unknown-name.test.ts)
+    ["gmail", { tool: true }, { kind: "tool", name: "gmail" }],
     // --tool forces the tool reading of a name that is also a client
     ["cursor", { tool: true }, { kind: "tool", name: "cursor" }],
     [undefined, {}, { kind: "pick" }],
