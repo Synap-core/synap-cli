@@ -3,9 +3,12 @@
  *
  * What these tests pin:
  *   • the three outcomes (approved / rejected / timeout) and their exit codes,
- *   • that the status vocabulary is DERIVED from the shared `--status` list and
- *     stays exhaustively classified — the CLI was once narrower than the door it
- *     calls on `expired`, and a hand-mirrored enum is how that happened,
+ *   • that the status vocabulary is the pod's own (`PROPOSAL_STATUSES`,
+ *     `STATUS_ATTENTION`, imported) and stays exhaustively classified — the CLI
+ *     was once narrower than the door it calls on `expired`, and a hand-mirrored
+ *     enum is how that happened,
+ *   • that `approval_failed` ("approved, but the write threw", attention
+ *     `decide`) keeps the wait going instead of reporting a rejection,
  *   • that an unknown status is NOT reported as a decision the pod never made.
  */
 
@@ -13,12 +16,16 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 import {
   awaitProposal,
   classifyProposalStatus,
+  approvalFailedLine,
   exitCodeForOutcome,
   parseDuration,
   statusOf,
   PROPOSAL_ROW_STATUSES,
 } from "../src/commands/proposals-await.js";
-import { PROPOSAL_STATUS_FILTERS } from "../src/commands/data-extra.js";
+import {
+  PROPOSAL_STATUSES,
+  STATUS_ATTENTION,
+} from "@synap-core/types/proposals/attention";
 import type { HubConfig } from "../src/lib/hub-client.js";
 
 const CFG: HubConfig = {
@@ -48,17 +55,32 @@ afterEach(() => {
 });
 
 describe("status vocabulary — derived, never hand-mirrored", () => {
-  it("row statuses are the shared --status list minus the `all` sentinel", () => {
-    expect(PROPOSAL_ROW_STATUSES).toEqual(
-      PROPOSAL_STATUS_FILTERS.filter((s) => s !== "all")
-    );
+  it("row statuses are the pod's PROPOSAL_STATUSES, imported", () => {
+    expect([...PROPOSAL_ROW_STATUSES]).toEqual([...PROPOSAL_STATUSES]);
     expect(PROPOSAL_ROW_STATUSES).not.toContain("all");
   });
 
-  it("every row status the pod can hold is classified — none falls through", () => {
-    for (const status of PROPOSAL_ROW_STATUSES) {
+  it("every status the pod can hold is classified — none falls through", () => {
+    expect(PROPOSAL_STATUSES.length).toBeGreaterThan(5);
+    for (const status of PROPOSAL_STATUSES) {
       expect(classifyProposalStatus(status), status).not.toBe("unknown");
     }
+  });
+
+  it("the bucket follows STATUS_ATTENTION: decide waits, notice/history end", () => {
+    for (const status of PROPOSAL_STATUSES) {
+      const outcome = classifyProposalStatus(status);
+      if (STATUS_ATTENTION[status] === "decide") {
+        expect(outcome, status).toBe("pending");
+      } else {
+        expect(["approved", "rejected"], status).toContain(outcome);
+      }
+    }
+  });
+
+  it("`approval_failed` is a verdict still owed — it waits, it is not a rejection", () => {
+    expect(classifyProposalStatus("approval_failed")).toBe("pending");
+    expect(exitCodeForOutcome(classifyProposalStatus("approval_failed"))).toBe(2);
   });
 
   it("`expired` is terminal-not-approved — the status the CLI once could not see", () => {
@@ -127,6 +149,32 @@ describe("awaitProposal", () => {
     expect(res.outcome).toBe("rejected");
     expect(res.status).toBe("rejected");
     expect(exitCodeForOutcome(res.outcome)).toBe(1);
+  });
+
+  it("keeps waiting on approval_failed, says so ONCE, and ends when the person acts", async () => {
+    mockStatuses(["approval_failed", "approval_failed", "approved"]);
+    const onApprovalFailed = vi.fn();
+    const res = await awaitProposal("p1", CFG, {
+      timeoutMs: 5_000,
+      intervalMs: 5,
+      onApprovalFailed,
+    });
+    expect(res.outcome).toBe("approved");
+    expect(onApprovalFailed).toHaveBeenCalledTimes(1);
+  });
+
+  it("times out with exit 2 (never exit 1) when approval_failed is never acted on", async () => {
+    mockStatuses(["approval_failed"]);
+    const res = await awaitProposal("p1", CFG, { timeoutMs: 60, intervalMs: 10 });
+    expect(res.outcome).toBe("pending");
+    expect(res.status).toBe("approval_failed");
+    expect(exitCodeForOutcome(res.outcome)).toBe(2);
+  });
+
+  it("the wait line names the failed write and where to retry or dismiss it", () => {
+    expect(approvalFailedLine("https://pod/x")).toBe(
+      "Approved, but the write failed: retry or dismiss it at https://pod/x"
+    );
   });
 
   it("times out with exit 2 while the proposal is still pending", async () => {

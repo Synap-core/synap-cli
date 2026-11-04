@@ -24,6 +24,7 @@
 
 import ora from "ora";
 import chalk from "chalk";
+import { humanizeToken } from "@synap-core/types/vocabulary";
 import {
   assembleCatalog,
   computeTemplateUpdates,
@@ -271,13 +272,7 @@ const KIND_HEADINGS: Record<string, string> = {
 const NAME_COL_MAX = 44;
 
 function kindHeading(kind: string): string {
-  return KIND_HEADINGS[kind] ?? humanizeKindToken(kind);
-}
-
-/** Last resort for a kind the CP added and this CLI has not learned yet. */
-function humanizeKindToken(kind: string): string {
-  const words = kind.replace(/[-_]+/g, " ").trim();
-  return words ? words[0].toUpperCase() + words.slice(1) : kind;
+  return KIND_HEADINGS[kind] ?? humanizeToken(kind);
 }
 
 /**

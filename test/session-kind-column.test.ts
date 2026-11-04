@@ -9,15 +9,11 @@
  * `synap session list` printed receipts and runs indistinguishable from a
  * person's own work.
  *
- * `sessionKindLabel` is a LOCAL table, not `@synap-core/types/vocabulary`'s
- * `resolveStatusLabel` — see the doc comment on `SESSION_KIND_LABELS` in
- * `src/commands/sessions.ts` for why this package cannot import that SSOT.
- * The second test below is the tripwire that keeps the local table from
- * drifting, mirroring `test/kind-heading-vocabulary-parity.test.ts`.
+ * `sessionKindLabel` is `@synap-core/types/vocabulary`'s `resolveStatusLabel`
+ * (imported, no local table), so the last describe pins the words the person
+ * reads, not a copy.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { readFileSync, existsSync } from "node:fs";
-import { join } from "node:path";
 
 const hubGet = vi.fn(async () => [] as unknown[]);
 
@@ -86,47 +82,16 @@ describe("session list — --kind forwarding", () => {
   });
 });
 
-describe("session list — KIND column matches the vocabulary registry", () => {
-  const REGISTRY = join(
-    process.cwd(),
-    "../synap-backend/packages/types/src/vocabulary/index.ts",
-  );
-  const SRC = join(process.cwd(), "src/commands/sessions.ts");
-  const cli = readFileSync(SRC, "utf8");
-
-  it("the CLI table is readable and never derives a label from charAt(0)", () => {
-    expect(cli).toContain("const SESSION_KIND_LABELS");
-    expect(cli).not.toMatch(/\.charAt\(0\)\.toUpperCase\(\)/);
+describe("session list — KIND column words come from the vocabulary door", () => {
+  it("prints the registry's words for the three lenses", async () => {
+    const { sessionKindLabel } = await import("../src/commands/sessions.js");
+    expect(sessionKindLabel("work")).toBe("Work");
+    expect(sessionKindLabel("run")).toBe("Run");
+    expect(sessionKindLabel("receipt")).toBe("Receipt");
   });
 
-  it.runIf(existsSync(REGISTRY))(
-    "every SESSION_KIND_LABELS entry equals the registry's STATUS_LABELS",
-    () => {
-      const reg = readFileSync(REGISTRY, "utf8");
-      expect(
-        reg.length,
-        "registry source unreadable — assertion would be vacuous",
-      ).toBeGreaterThan(1000);
-
-      const table = /const SESSION_KIND_LABELS: Record<string, string> = \{([\s\S]*?)\n\};/.exec(
-        cli,
-      )?.[1];
-      expect(table, "SESSION_KIND_LABELS table not found").toBeTruthy();
-
-      const rows = [...table!.matchAll(/^\s*(\w+):\s*"([^"]+)"/gm)];
-      expect(rows.length, "no rows parsed — the assertion would be vacuous").toBe(3);
-
-      for (const [, kind, label] of rows) {
-        // The registry pins these under STATUS_LABELS (session population
-        // lens, not an object kind) — match the exact `kind: "Label"` line.
-        const re = new RegExp(`^\\s*${kind}:\\s*"([^"]+)",?\\s*$`, "m");
-        const registryLabel = re.exec(reg)?.[1];
-        if (!registryLabel) continue; // key not found under this exact spelling — nothing to fork from
-        expect(
-          label,
-          `CLI prints "${label}" for ${kind}; the registry says "${registryLabel}"`,
-        ).toBe(registryLabel);
-      }
-    },
-  );
+  it("a kind the door does not name reads as words, never as the raw token", async () => {
+    const { sessionKindLabel } = await import("../src/commands/sessions.js");
+    expect(sessionKindLabel("stale_run")).toBe("Stale run");
+  });
 });
