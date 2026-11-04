@@ -100,7 +100,8 @@ beforeEach(() => {
   }
 });
 
-const applies = () => hubPost.mock.calls.filter((c) => c[0] !== "/packages/preflight");
+// The preview door and the catalog refresh `market update` asks first are not applies.
+const applies = () => hubPost.mock.calls.filter((c) => c[0] !== "/packages/preflight" && c[0] !== "/catalog/refresh");
 const lastJson = () => JSON.parse(said.at(-1)!);
 const refusal = (status: number, body: Record<string, unknown>) =>
   new HubError({

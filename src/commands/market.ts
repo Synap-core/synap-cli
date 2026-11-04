@@ -67,6 +67,7 @@ import {
 } from "../lib/cp-packages.js";
 import { fetchInstalledSlugs, fetchInstalledTemplates, fetchInstalledInventory, installedRowsToTemplates, fetchWorkspaceAttachments, fetchWorkspaceAttachmentsStrict, verifyStampLanded, INSTALLED_KINDS, type InstalledKind, type InstalledRow, type InstalledTemplateInfo, type WorkspaceAttachment } from "../lib/installed.js";
 import { isSuite } from "../lib/suite.js";
+import { refreshPodCatalogFor, catalogRefreshLine, type CatalogRefresh } from "../lib/catalog-refresh.js";
 import {
   TEMPLATE_STEP_LABELS,
   classifyTemplateStep,
@@ -1982,6 +1983,18 @@ async function previewDataChanges(
   }
 }
 
+/**
+ * Before a command reads the pod's update verdict: ask the pod to refresh its
+ * catalog (`lib/catalog-refresh.ts`) and, unless printing JSON, say so when
+ * it could not. Never blocks the command.
+ */
+async function refreshCatalogFirst(opts: { json?: boolean; podUrl?: string; apiKey?: string }): Promise<CatalogRefresh> {
+  const refresh = await refreshPodCatalogFor(opts);
+  const line = catalogRefreshLine(refresh);
+  if (line && !opts.json) log.warn(line);
+  return refresh;
+}
+
 export async function marketUpdate(
   slugsArg: string[] | undefined,
   opts: {
@@ -1998,6 +2011,9 @@ export async function marketUpdate(
     timeout?: string;
   }
 ): Promise<void> {
+  // Refresh the pod's catalog first, so a template published a minute ago
+  // shows in the verdict below (the pod otherwise refreshes every 10 min).
+  const catalogRefresh = await refreshCatalogFirst(opts);
   const applyTimeoutMs = parseApplyTimeoutMs(opts.timeout);
   const cat = await buildMarketCatalog();
   // THE POD'S ANSWER, never the CLI's: which installed package has an update
@@ -2016,7 +2032,7 @@ export async function marketUpdate(
     const unavailable = e instanceof StandingsUnavailableError ? e.reason : null;
     if (opts.json) {
       console.log(
-        JSON.stringify({ checks: [], loggedIn: cat.loggedIn, error: unavailable ?? "pod-unreachable" }, null, 2)
+        JSON.stringify({ checks: [], loggedIn: cat.loggedIn, catalogRefresh, error: unavailable ?? "pod-unreachable" }, null, 2)
       );
       return;
     }
@@ -2035,7 +2051,7 @@ export async function marketUpdate(
 
   if (standings.length === 0) {
     if (opts.json) {
-      console.log(JSON.stringify({ checks: [], loggedIn: cat.loggedIn, degraded }, null, 2));
+      console.log(JSON.stringify({ checks: [], loggedIn: cat.loggedIn, catalogRefresh, degraded }, null, 2));
       return;
     }
     log.warn("No installed packages found on this pod.");
@@ -2060,7 +2076,7 @@ export async function marketUpdate(
     if (validSlugs.length === 0) {
       if (opts.json) {
         console.log(
-          JSON.stringify({ checks: [], loggedIn: cat.loggedIn, unknownSlugs, applied: [] }, null, 2)
+          JSON.stringify({ checks: [], loggedIn: cat.loggedIn, catalogRefresh, unknownSlugs, applied: [] }, null, 2)
         );
         return;
       }
@@ -2201,6 +2217,7 @@ export async function marketUpdate(
           {
             checks,
             loggedIn: cat.loggedIn,
+            catalogRefresh,
             unknownSlugs,
             applied: [],
             status: noVersionInfo.length > 0 ? "partial" : "clean",
@@ -2225,7 +2242,10 @@ export async function marketUpdate(
     } else if (leaving.length > 0) {
       log.info("No updates to apply.");
     } else {
-      log.success("Nothing to update.");
+      // A clean verdict is only "verified" against a catalog the pod just
+      // refreshed; otherwise it is the pod's last copy, said as such.
+      if (catalogRefresh.state === "refreshed") log.success("Nothing to update.");
+      else log.info("Nothing to update in the pod's last copy of the catalog (not refreshed, see above).");
       // `market update` only checks TEMPLATE-ATTACHED workspaces — a hand-built
       // one (no packageSlug) can't be "behind" a template, so it's silently
       // absent here. Point at the fuller home so "nothing to update" never reads
@@ -2245,6 +2265,7 @@ export async function marketUpdate(
           {
             checks,
             loggedIn: cat.loggedIn,
+            catalogRefresh,
             unknownSlugs,
             applied: [],
             nextSteps: steps,
@@ -2311,6 +2332,7 @@ export async function marketUpdate(
         {
           checks,
           loggedIn: cat.loggedIn,
+          catalogRefresh,
           unknownSlugs,
           applied: results,
           summary,
@@ -2951,6 +2973,9 @@ export async function marketInstalled(opts: {
   // view install was invisible here, to `market update`, and to every drift
   // marker. On a pod too old to serve it, `fetchInstalledInventory` degrades to
   // exactly the old workspace-only behaviour and says so (`degraded`).
+  // Refresh the pod's catalog first, so a template published a minute ago
+  // shows in the verdict below (the pod otherwise refreshes every 10 min).
+  const catalogRefresh = await refreshCatalogFirst(opts);
   const [inv, cat] = await Promise.all([fetchInstalledInventory(), buildMarketCatalog()]);
   const installedTemplates = installedRowsToTemplates(inv.rows);
   const unlinked = collectUnlinked(inv.rows);
@@ -2963,7 +2988,7 @@ export async function marketInstalled(opts: {
     if (opts.json) {
       console.log(
         JSON.stringify(
-          { rows: [], unlinked: [], loggedIn: cat.loggedIn, degraded: inv.degraded, degradedNote },
+          { rows: [], unlinked: [], loggedIn: cat.loggedIn, catalogRefresh, degraded: inv.degraded, degradedNote },
           null,
           2
         )
@@ -3018,6 +3043,7 @@ export async function marketInstalled(opts: {
             layers: graph.layers.map((bucket) => bucket.map((n) => n.slug)),
             cycles: graph.cycles,
             loggedIn: cat.loggedIn,
+            catalogRefresh,
             degraded: inv.degraded,
             nextSteps: steps,
           },
@@ -3063,6 +3089,7 @@ export async function marketInstalled(opts: {
               };
             }),
             loggedIn: cat.loggedIn,
+            catalogRefresh,
             degraded: inv.degraded,
             nextSteps: steps,
           },
@@ -3149,6 +3176,7 @@ export async function marketInstalled(opts: {
                 ...(u.note ? { note: u.note } : {}),
               })),
           loggedIn: cat.loggedIn,
+          catalogRefresh,
           degraded: inv.degraded,
           ...(degradedNote ? { degradedNote } : {}),
           nextSteps: steps,
@@ -3319,11 +3347,14 @@ export async function marketWorkspaces(opts: {
   json?: boolean;
   unattached?: boolean;
 }): Promise<void> {
+  // Refresh the pod's catalog first, so a template published a minute ago
+  // shows in the verdict below (the pod otherwise refreshes every 10 min).
+  const catalogRefresh = await refreshCatalogFirst(opts);
   const [attachments, cat] = await Promise.all([fetchWorkspaceAttachments(), buildMarketCatalog()]);
 
   if (attachments.length === 0) {
     if (opts.json) {
-      console.log(JSON.stringify({ workspaces: [], loggedIn: cat.loggedIn }, null, 2));
+      console.log(JSON.stringify({ workspaces: [], loggedIn: cat.loggedIn, catalogRefresh }, null, 2));
       return;
     }
     log.warn("No workspaces found on this pod.");
@@ -3373,6 +3404,7 @@ export async function marketWorkspaces(opts: {
               : {}),
           })),
           loggedIn: cat.loggedIn,
+          catalogRefresh,
         },
         null,
         2
@@ -3827,6 +3859,9 @@ export async function marketTemplates(opts: {
     process.exit(1);
   }
 
+  // Refresh the pod's catalog first, so a template published a minute ago
+  // shows in the verdict below (the pod otherwise refreshes every 10 min).
+  const catalogRefresh = await refreshCatalogFirst(opts);
   const cat = await buildMarketCatalog();
   // STRICT: this is the consolidated home — "pod unreachable" must never render
   // as "No workspaces found · stand one up", the exact false-empty lie the
@@ -3837,7 +3872,7 @@ export async function marketTemplates(opts: {
   } catch (e) {
     process.exitCode = 1;
     if (opts.json) {
-      console.log(JSON.stringify({ needsAttention: [], upToDate: [], unlinked: [], loggedIn: cat.loggedIn, error: "pod-unreachable" }, null, 2));
+      console.log(JSON.stringify({ needsAttention: [], upToDate: [], unlinked: [], loggedIn: cat.loggedIn, catalogRefresh, error: "pod-unreachable" }, null, 2));
       return;
     }
     log.error("Couldn't reach your pod to read its workspaces — not saying it's empty.");
@@ -3848,7 +3883,7 @@ export async function marketTemplates(opts: {
 
   if (attachments.length === 0) {
     if (opts.json) {
-      console.log(JSON.stringify({ needsAttention: [], upToDate: [], unlinked: [], loggedIn: cat.loggedIn }, null, 2));
+      console.log(JSON.stringify({ needsAttention: [], upToDate: [], unlinked: [], loggedIn: cat.loggedIn, catalogRefresh }, null, 2));
       return;
     }
     log.warn("No workspaces found on this pod.");
@@ -3887,6 +3922,7 @@ export async function marketTemplates(opts: {
           upToDate: ok.map(templateRowToJson),
           unlinked: unlinked.map(templateRowToJson),
           loggedIn: cat.loggedIn,
+          catalogRefresh,
         },
         null,
         2
@@ -3909,7 +3945,8 @@ export async function marketTemplates(opts: {
     for (const r of attention) renderTemplateRow(r);
     log.blank();
   } else {
-    log.success("  Everything attached is up to date.");
+    if (catalogRefresh.state === "refreshed") log.success("  Everything attached is up to date.");
+    else log.info("  Everything attached is up to date in the pod's last copy of the catalog (not refreshed, see above).");
     log.blank();
   }
 
