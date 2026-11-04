@@ -56,11 +56,16 @@ const AI_KEY_REFUSAL = {
 };
 
 describe("a failed agent-key mint", () => {
-  it("400 SURFACE_AGENT_TYPE_REQUIRED for a known client: not known yet, use the Synap account; no reconnect, no JSON", async () => {
+  it("400 SURFACE_AGENT_TYPE_REQUIRED for a known client: not listed yet, a generic key; no release promise, no account route, no reconnect, no JSON", async () => {
     podAnswers(400, SURFACE_REFUSAL);
     const msg = await mintFails("grok");
-    expect(msg).toContain("Your pod does not know Grok yet");
-    expect(msg).toContain("https://mcp.synap.live");
+    expect(msg).toContain("Your pod does not list Grok yet.");
+    expect(msg).toContain("synap mcp url --client generic");
+    // A client that connects only with a key has no Synap-account route, and
+    // the CLI cannot know which pod release adds a client.
+    expect(msg).not.toContain("mcp.synap.live");
+    expect(msg).not.toMatch(/Synap account/i);
+    expect(msg).not.toMatch(/release/i);
     expect(msg).not.toMatch(/reconnect/i);
     expect(msg).not.toContain("{");
     expect(msg).not.toContain("surface agent types");
@@ -78,8 +83,10 @@ describe("a failed agent-key mint", () => {
   it("403 GRANT_DOOR_UNSUPPORTED says it needs you signed in as yourself; no reconnect", async () => {
     podAnswers(403, DOOR_REFUSAL);
     const msg = await mintFails("cursor");
-    expect(msg).toContain("needs you signed in as yourself");
-    expect(msg).toContain("Synap app");
+    expect(msg).toContain("This key is limited (this computer's or an AI's key), and this action needs you signed in as yourself");
+    // Names the app: the desktop app, or pod admin (with its address).
+    expect(msg).toContain("Synap desktop app");
+    expect(msg).toContain("pod admin (https://pod-admin.antoinesrvt.synap.live)");
     expect(msg).not.toMatch(/reconnect/i);
     expect(msg).not.toContain("{");
   });
@@ -93,11 +100,20 @@ describe("a failed agent-key mint", () => {
   });
 
   it("an unknown code shows the pod's words, not its JSON, and no reconnect", async () => {
-    podAnswers(500, { error: "Something broke", code: "SOMETHING_ELSE" });
+    podAnswers(409, { error: "Something conflicted", code: "SOMETHING_ELSE" });
     const msg = await mintFails("cursor");
-    expect(msg).toContain("The pod refused (HTTP 500): Something broke");
+    expect(msg).toContain("The pod refused (HTTP 409): Something conflicted");
     expect(msg).not.toContain("{");
     expect(msg).not.toMatch(/reconnect/i);
+  });
+
+  it("a 5xx shows nothing of its body: the pod is not answering, try again", async () => {
+    podAnswers(502, { error: "upstream connect error at 10.0.3.7:4000", code: "SOMETHING_ELSE" });
+    const msg = await mintFails("cursor");
+    expect(msg).toContain("The pod is not answering right now (HTTP 502).");
+    expect(msg).toContain("Try again in a minute, or check pod admin (https://pod-admin.antoinesrvt.synap.live).");
+    expect(msg).not.toContain("upstream");
+    expect(msg).not.toContain("10.0.3.7");
   });
 
   it("only a 401 advises a reconnect", async () => {

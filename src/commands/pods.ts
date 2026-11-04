@@ -299,15 +299,18 @@ export async function podsUse(name: string, opts: { surface?: SurfaceName; json?
   log.info(`Switching all surfaces to pod '${name}' (${podConfig.podUrl})`);
   log.blank();
 
+  /** Surfaces this switch changed: they now use this pod. */
   const updated: string[] = [];
 
   // Cursor and Claude Desktop keep one MCP entry PER POD, each holding that
   // client's own key (written by `synap connect`). Switching pods rewrites
   // nothing there: never this computer's key, raw, under a second "synap".
+  // So they are never "updated": they already have this pod, or they need it.
+  const alreadySet: Array<{ client: string; serverName: string }> = [];
   const toConnect: Array<{ client: string; command: string }> = [];
   for (const client of POD_ENTRY_CLIENTS) {
     const state = podEntryState(client, name, podConfig.podUrl);
-    if (state.kind === "ready") updated.push(TARGETS[client].label);
+    if (state.kind === "ready") alreadySet.push({ client: TARGETS[client].label, serverName: state.serverName });
     else if (state.kind === "missing") toConnect.push({ client: TARGETS[client].label, command: state.command });
   }
 
@@ -331,23 +334,26 @@ export async function podsUse(name: string, opts: { surface?: SurfaceName; json?
   const steps = FLOW.afterPodUse(name);
 
   if (opts.json) {
-    console.log(JSON.stringify({ pod: name, podUrl: podConfig.podUrl, surfaces: updated, toConnect, nextSteps: steps }, null, 2));
+    console.log(JSON.stringify({ pod: name, podUrl: podConfig.podUrl, surfaces: updated, alreadySet, toConnect, nextSteps: steps }, null, 2));
     return;
   }
 
+  if (updated.length) log.success(`Now on '${name}': ${updated.join(", ")}`);
+  for (const c of alreadySet) {
+    log.info(`${c.client} already has '${c.serverName}' for this pod; nothing to change.`);
+  }
   for (const c of toConnect) {
     log.info(`${c.client} has no entry for '${name}' yet. To add one: ${c.command}`);
   }
 
-  if (updated.length === 0) {
+  if (updated.length + alreadySet.length + toConnect.length === 0) {
     log.warn("Active pod switched, but no agent surface is configured on this machine.");
-    log.dim("Connect one with: synap connect --target=<surface>");
+    log.dim("Connect one with: synap connect <client>  (synap connect --list)");
     renderNextSteps(steps);
     return;
   }
 
-  log.success(`Updated: ${updated.join(", ")}`);
-  log.dim("Restart any open agents to apply the new pod.");
+  if (updated.length) log.dim("Restart any open agents to apply the new pod.");
   log.blank();
   log.dim("Tip: synap pods use <name> --surface <surface>  — switch only one surface");
   renderNextSteps(steps);
@@ -362,8 +368,9 @@ type PodEntryClient = (typeof POD_ENTRY_CLIENTS)[number];
  * up with an entry for this pod, or set up without one (the command that adds
  * it, through the same installer `synap connect` uses, so the entry holds the
  * client's own key). When the pod's entry is there, an older "synap" entry
- * beside it that holds one of this computer's pod keys (what `pods use` used
- * to write) is removed; a "synap" entry holding any other key is left alone.
+ * beside it is removed only when it points at THIS pod and holds one of this
+ * computer's pod keys (what `pods use` used to write): a "synap" entry for
+ * another pod is that pod's only entry, whoever's key it holds.
  */
 export function podEntryState(
   client: PodEntryClient,
@@ -375,10 +382,32 @@ export function podEntryState(
   const servers = readClientConfig<{ mcpServers?: Record<string, unknown> }>(file).mcpServers ?? {};
   const serverName = mcpServerNameFromPodUrl(podUrl);
   if (!servers[serverName]) return { kind: "missing", command: `synap connect ${client} --name ${podName}` };
-  if (serverName !== "synap" && servers["synap"] && holdsComputerKey(servers["synap"])) {
+  const legacy = servers["synap"];
+  if (serverName !== "synap" && legacy && entryIsForPod(legacy, podUrl) && holdsComputerKey(legacy)) {
     removeMcpServerEntry(file, "synap");
   }
   return { kind: "ready", serverName };
+}
+
+/**
+ * True when an MCP entry points at `podUrl`: its `url` (a native HTTP entry)
+ * or an http(s) argument (the mcp-remote bridge) is on the pod's origin.
+ */
+function entryIsForPod(entry: unknown, podUrl: string): boolean {
+  const origin = originOf(podUrl);
+  if (!origin || !entry || typeof entry !== "object") return false;
+  const e = entry as { url?: unknown; args?: unknown };
+  const candidates = [e.url, ...(Array.isArray(e.args) ? e.args : [])];
+  return candidates.some((c) => typeof c === "string" && originOf(c) === origin);
+}
+
+function originOf(url: string): string | null {
+  try {
+    const u = new URL(url);
+    return u.protocol === "http:" || u.protocol === "https:" ? u.origin : null;
+  } catch {
+    return null;
+  }
 }
 
 /** True when an MCP entry carries one of this computer's pod keys (`~/.synap/config.json` profiles). */
