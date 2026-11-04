@@ -126,9 +126,9 @@ program
 program
   .command("connect [thing]")
   .description(
-    "Plug something into your pod: an AI agent (claude-code, cursor, codex, …) or a tool/account (gmail, github, …)"
+    "Plug something into your pod: an AI agent (claude-code, cursor, codex, …), or with --tool a tool/account (gmail, github, …)"
   )
-  .option("--tool", "Treat <thing> as a tool/account even if it is also an agent name (no <thing>: list connectable services)")
+  .option("--tool", "Connect a tool or account (gmail, github, …), not an AI client (no <thing>: list connectable services)")
   .option("--workspace <id>", "Focus on one workspace (default: pod-wide)")
   .option("--project <id>", "Focus on one project (agents only; composable with --workspace)")
   .option("--pod-url <url>", "Synap pod URL")
@@ -328,7 +328,7 @@ const mcp = program
 mcp
   .command("url")
   .description("Print a ready-to-paste MCP connection (URL + key + snippets) for UI clients like ChatGPT")
-  .option("--client <name>", "Name the dedicated agent key after the target client")
+  .option("--client <name>", "The client this key is for, one of synap connect --list (default: generic)")
   .option("--workspace <id>", "Scope to a specific workspace (omit for pod-wide)")
   .option("--project <id>", "Focus the agent on a project (narrows every tool call; orthogonal to --workspace)")
   .option("--json", "Output as JSON")

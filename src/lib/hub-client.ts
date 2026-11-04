@@ -28,6 +28,7 @@ import {
 import { preferClaudeCodeSurfaceKey } from "./key-source.js";
 import { samePodOrigin } from "./project-ref.js";
 import { PodMovedError, podFetch } from "./pod-moved.js";
+import { explainPodError } from "./pod-errors.js";
 import { HubRestClient } from "@synap-core/hub-rest-client";
 import { log } from "../utils/logger.js";
 import chalk from "chalk";
@@ -632,12 +633,10 @@ function renderHubErrorBody(err: unknown, opts: { personDoor?: string }): void {
       log.hint("The pod hit an internal error — check the pod logs for the stack trace.");
     }
   } else if (limitedKeyRefusal) {
-    log.hint(
-      `This key is limited (a computer's or an agent's key), and the pod does not let a limited key use ${err.method} ${err.path}. Nothing is wrong with your workspace.`
-    );
-    log.hint(
-      "Until your pod opens this door to limited keys, do it with full access: in the Synap app, or with a full-access key in SYNAP_HUB_API_KEY."
-    );
+    // The words come from the ONE code-to-text map (pod-errors.ts).
+    const { line, next } = explainPodError({ status: err.status, code: err.code, podUrl: err.podUrl });
+    log.hint(`${line} The pod refuses ${err.method} ${err.path} to a limited key. Nothing is wrong with your workspace.`);
+    log.hint(next);
   } else if (grantDenial) {
     const what = grantDenial.action ? `"${grantDenial.action}"` : "this action";
     log.hint(

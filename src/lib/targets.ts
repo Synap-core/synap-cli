@@ -28,6 +28,7 @@ import {
 } from "./atomic-file.js";
 import { redactKey, mcpRemoteArgs, MCP_REMOTE_PACKAGE } from "./mcp-snippets.js";
 import { MANAGED_MCP_URL } from "./auth.js";
+import { explainPodError, agentsPageOf } from "./pod-errors.js";
 import { installSkills, getDeliverableSkills } from "./skills-installer.js";
 import { TARGET_KEY_MINT, takePreApprovedKey } from "./batch-approval.js";
 import { agentTypeOfSurface, machineInstanceId, machineInstanceLabel } from "./machine-instance.js";
@@ -406,7 +407,8 @@ export function clientKeyFiles(): ClientKeyFile[] {
 }
 
 export function isTargetName(value: string): value is TargetName {
-  return value in TARGETS;
+  // Own keys only: `"constructor" in TARGETS` is true.
+  return Object.prototype.hasOwnProperty.call(TARGETS, value);
 }
 
 // ─── Workspace helpers ────────────────────────────────────────────────────────
@@ -803,7 +805,7 @@ export async function writeClaudeCodeEnv(
   });
   if (!meRes.ok) {
     if (meRes.status === 401)
-      throw new Error(credentialError("claude-code", 401, await meRes.text().catch(() => "")));
+      throw new Error(credentialError("claude-code", 401, await meRes.text().catch(() => ""), cfg.podUrl));
     throw new Error(`Could not reach pod at ${cfg.podUrl} (HTTP ${meRes.status}). Check your pod URL and API key.`);
   }
   const me = await meRes.json() as { id?: string; scopes?: string[] };
@@ -1092,25 +1094,18 @@ export function bridgeInvocationNote(invocation: BridgeInvocation): string | nul
 // ─── Agent key provisioning helper ──────────────────────────────────────────
 
 /**
- * Build an actionable error for a failed agent-key provision. A 401 here almost
- * always means the pod key saved by `synap login` is expired or REVOKED (the
- * `/setup/agent` endpoint accepts a CP JWT, a provisioning token, or a Hub key
- * with the `setup.agent` scope) — so the fix is to re-authenticate, NOT to fiddle
- * with scopes. Don't mislead with "needs hub-protocol.write".
+ * The error for a failed agent-key provision: one line saying what happened
+ * and the one next step, from the ONE code-to-text map (`pod-errors.ts`).
+ * "Reconnect" only on a 401 (the saved key is invalid, expired or revoked):
+ * for a 400 or a 403 a reconnect only mints another computer key, which
+ * cannot help. The pod's raw JSON is never shown.
  */
-function credentialError(agentType: string, status: number, body: string): string {
-  if (status === 401) {
-    return (
-      `Can't provision the agent key for ${agentType} (HTTP 401): your saved pod key is invalid, expired, or revoked.\n` +
-      `Fix: run \`synap login --reconnect\` to re-authenticate this pod and mint a fresh key, then retry.\n` +
-      `(Plain \`synap login\` only health-checks — it won't refresh a revoked key.)\n` +
-      (body ? `Server said: ${body}` : "")
-    );
-  }
-  return (
-    `Failed to provision agent key for ${agentType} (HTTP ${status}): ${body}\n` +
-    `If this persists, re-authenticate with \`synap login --reconnect\`.`
-  );
+export function credentialError(agentType: string, status: number, body: string, podUrl?: string): string {
+  const known = isTargetName(agentType);
+  // "Grok (Grok Build TUI)" → "Grok": the name is said up to three times.
+  const label = known ? TARGETS[agentType].label.replace(/\s*\(.*\)$/, "") : agentType;
+  const { line, next } = explainPodError({ status, body, client: agentType, clientLabel: label, knownClient: known, podUrl });
+  return `Could not connect ${label}. ${line}\n${next}`;
 }
 
 /** Open an http(s) URL in the browser — argv only, never a shell (`safe-open.ts`). */
@@ -1273,7 +1268,7 @@ export async function provisionAgentKey(
   }
   if (!res.ok) {
     const text = await res.text().catch(() => res.statusText);
-    throw new Error(credentialError(agentType, res.status, text));
+    throw new Error(credentialError(agentType, res.status, text, podUrl));
   }
   const body = await res.json() as {
     hubApiKey?: string;
@@ -1823,7 +1818,7 @@ async function installChatGptOAuth(cfg: TargetConnectionConfig): Promise<boolean
   log.info("  1. 'list my Synap pods' (list_pods)");
   log.info("  2. 'connect pod <your-pod>' (connect_pod)");
   log.blank();
-  log.dim("The CP stores an encrypted grant. Revoke in pod-admin → My Connections.");
+  log.dim(`The Control Plane keeps an encrypted grant. To revoke it: ${agentsPageOf(cfg.podUrl)}.`);
   log.blank();
   log.dim("See `synap mcp connect-claude` for the identical claude.ai flow.");
 
@@ -2002,7 +1997,7 @@ async function installVSCode(cfg: TargetConnectionConfig): Promise<boolean> {
  * Derive a stable MCP server name from the pod URL so multi-pod setups
  * (perso + team) don't overwrite each other. e.g. pod.thearch.synap.live → synap-thearch
  */
-function mcpServerNameFromPodUrl(podUrl: string, fallback = "synap"): string {
+export function mcpServerNameFromPodUrl(podUrl: string, fallback = "synap"): string {
   try {
     const host = new URL(podUrl).hostname; // pod.thearch.synap.live
     const parts = host.split(".").filter(Boolean);
@@ -2473,7 +2468,7 @@ export function writeMcpServerEntry(
 }
 
 /** Best-effort remove of a named MCP server entry (e.g. legacy `"synap"`). */
-function removeMcpServerEntry(configPath: string, serverName: string): void {
+export function removeMcpServerEntry(configPath: string, serverName: string): void {
   if (!fs.existsSync(configPath)) return;
   try {
     const config = readClientConfig<{ mcpServers?: Record<string, McpServerConfig> }>(configPath);

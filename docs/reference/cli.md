@@ -12,7 +12,7 @@ Every command also accepts `-h, --help`.
 
 - [`synap init`](#synap-init) — Full setup: connect to a Synap pod and install the skill
 - [`synap launch`](#synap-launch) — Stand up a NEW company/OS on a pod — creates a project + its core workspaces (interactive)
-- [`synap connect`](#synap-connect) — Plug something into your pod: an AI agent (claude-code, cursor, codex, …) or a tool/account (gmail, github, …)
+- [`synap connect`](#synap-connect) — Plug something into your pod: an AI agent (claude-code, cursor, codex, …), or with --tool a tool/account (gmail, github, …)
 - [`synap pods`](#synap-pods) — Manage multiple Synap pod profiles and switch between them
   - [`synap pods list`](#synap-pods-list) — List all configured pod profiles
   - [`synap pods add`](#synap-pods-add) — Connect a new pod and save as a named profile
@@ -308,7 +308,7 @@ Stand up a NEW company/OS on a pod — creates a project + its core workspaces (
 synap connect [options] [thing]
 ```
 
-Plug something into your pod: an AI agent (claude-code, cursor, codex, …) or a tool/account (gmail, github, …)
+Plug something into your pod: an AI agent (claude-code, cursor, codex, …), or with --tool a tool/account (gmail, github, …)
 
 | Argument | Required | Description |
 |---|---|---|
@@ -316,7 +316,7 @@ Plug something into your pod: an AI agent (claude-code, cursor, codex, …) or a
 
 | Option | Description | Default |
 |---|---|---|
-| `--tool` | Treat <thing> as a tool/account even if it is also an agent name (no <thing>: list connectable services) |  |
+| `--tool` | Connect a tool or account (gmail, github, …), not an AI client (no <thing>: list connectable services) |  |
 | `--workspace <id>` | Focus on one workspace (default: pod-wide) |  |
 | `--project <id>` | Focus on one project (agents only; composable with --workspace) |  |
 | `--pod-url <url>` | Synap pod URL |  |
@@ -590,7 +590,7 @@ Print a ready-to-paste MCP connection (URL + key + snippets) for UI clients like
 
 | Option | Description | Default |
 |---|---|---|
-| `--client <name>` | Name the dedicated agent key after the target client |  |
+| `--client <name>` | The client this key is for, one of synap connect --list (default: generic) |  |
 | `--workspace <id>` | Scope to a specific workspace (omit for pod-wide) |  |
 | `--project <id>` | Focus the agent on a project (narrows every tool call; orthogonal to --workspace) |  |
 | `--json` | Output as JSON |  |
