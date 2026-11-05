@@ -18,6 +18,7 @@ import { bootstrapPodOverride } from "./lib/pod.js";
 import { INIT_EXIT_HELP } from "./lib/init-exit.js";
 import { WAIT_HELP } from "./lib/wait-help.js";
 import { cliBuild, formatCliBuild } from "./lib/cli-build.js";
+import { CATALOG_KINDS } from "./commands/catalog.js";
 
 // The version AND the commit this build came from — a stale build is visible.
 const version = formatCliBuild(cliBuild());
@@ -3060,7 +3061,7 @@ for (const verb of ["validate", "diff", "publish"] as const) {
           ? "Show what would change against the live control-plane catalog (new / changed / unchanged)"
           : "Validate, preview the diff, confirm, then publish to the control plane — founder only: --official + a `synap login` session that owns synap-official",
     )
-    .option("--kind <kind>", "Only this kind: workspace | capability | skill | pack | automation")
+    .option("--kind <kind>", `Only this kind: ${CATALOG_KINDS.join(" | ")}`)
     .option("--catalog-dir <dir>", "Path to the catalog package (default: found by walking up from cwd)")
     .option("--json", "Output as JSON");
   if (verb === "publish") {

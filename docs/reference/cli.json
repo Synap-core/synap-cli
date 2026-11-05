@@ -8029,7 +8029,7 @@
               {
                 "flags": "--kind <kind>",
                 "long": "--kind",
-                "description": "Only this kind: workspace | capability | skill | pack | automation",
+                "description": "Only this kind: workspace | capability | skill | pack | automation | view",
                 "takesValue": "required"
               },
               {
@@ -8064,7 +8064,7 @@
               {
                 "flags": "--kind <kind>",
                 "long": "--kind",
-                "description": "Only this kind: workspace | capability | skill | pack | automation",
+                "description": "Only this kind: workspace | capability | skill | pack | automation | view",
                 "takesValue": "required"
               },
               {
@@ -8099,7 +8099,7 @@
               {
                 "flags": "--kind <kind>",
                 "long": "--kind",
-                "description": "Only this kind: workspace | capability | skill | pack | automation",
+                "description": "Only this kind: workspace | capability | skill | pack | automation | view",
                 "takesValue": "required"
               },
               {
