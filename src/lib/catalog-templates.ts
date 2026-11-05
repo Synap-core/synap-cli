@@ -1,24 +1,21 @@
 /**
- * Where `synap bridge setup` reads the agency skills and the bridge automations.
+ * Where `synap bridge setup` and `synap skill add bundled` read catalog content.
  *
- * Their home is the catalog package (`@synap-core/catalog`, or
- * `@synap-core/workspace-templates` before the rename): `skills/<name>/SKILL.md`
- * and `automations/*.automation.json`. The CLI keeps copies under `templates/`
- * for installs whose catalog package does not ship them yet. Resolution is per
- * item: the INSTALLED package wins when it ships the item, the CLI copy is the
- * fallback. The runtime skills (`authoring-*`, `coordinating-*`) have no catalog
- * copy and always come from the CLI.
+ * ONE source (founder, 5 Nov 2026): the agency skills and the bridge automations
+ * live only in the catalog package (`@synap-core/catalog`, or
+ * `@synap-core/workspace-templates` before the rename), as `skills/<name>/` and
+ * `automations/*.automation.json`. The CLI reads them from the INSTALLED package
+ * and keeps no copy. What stays under the CLI's `templates/` is not catalog
+ * content: the runtime skills (`authoring-*`, `coordinating-*`, which have no
+ * catalog twin) and the box runner (`templates/box/runner.py`, a program).
  *
- * Retirement: once the installed package ships an item, its CLI copy is dead
- * weight that can silently fork. `catalogRetirementViolations` names those
- * copies; `test/catalog-templates.test.ts` fails on any, so the pin bump that
- * brings them in also deletes the CLI copies.
+ * `test/catalog-no-copy.tripwire.test.ts` fails on any CLI file that copies
+ * catalog content, against the real installed package.
  */
 
 import fs from "node:fs";
 import path from "node:path";
 import { createRequire } from "node:module";
-import { fileURLToPath } from "node:url";
 import { discoverSkillDirs } from "./skill-import.js";
 
 /** Package names the catalog may be installed under (new name first). */
@@ -37,8 +34,11 @@ export const AGENCY_SKILLS = [
   "stellar-scf-grants-advisor",
 ] as const;
 
-/** `<cli package root>/templates` (same depth from `src/lib` and `dist/lib`). */
-export const CLI_TEMPLATES_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "templates");
+/**
+ * The domain-agnostic automations bridge-setup seeds (`<name>.automation.json`
+ * in the catalog's `automations/`). Pinned for the same reason as AGENCY_SKILLS.
+ */
+export const BRIDGE_AUTOMATIONS = ["bookmark-enrichment", "mail-feed", "url-bookmark-capture"] as const;
 
 /**
  * Root directory of the installed catalog package, or null when none resolves.
@@ -77,17 +77,19 @@ function catalogAutomationFiles(catalogRoot: string | null): string[] {
 }
 
 /**
- * The SKILL.md directories bridge-setup seeds: each agency skill from the
- * installed catalog when it ships it, else from the CLI; plus every CLI runtime
- * skill. `fromCatalog` names the skills read from the catalog.
+ * The SKILL.md directories to seed: every CLI runtime skill, plus each agency
+ * skill from the installed catalog. An agency skill the catalog does not ship is
+ * named in `missing` (never taken from anywhere else). `fromCatalog` names the
+ * skills read from the catalog.
  */
 export function resolveAgencySkillDirs(opts: {
   cliSkillsDir: string | null;
   catalogRoot: string | null;
-}): { dirs: string[]; fromCatalog: string[] } {
+}): { dirs: string[]; fromCatalog: string[]; missing: string[] } {
   const agency = new Set<string>(AGENCY_SKILLS);
   const dirs: string[] = [];
   const fromCatalog: string[] = [];
+  const missing: string[] = [];
   const cliDirs = opts.cliSkillsDir ? discoverSkillDirs(opts.cliSkillsDir) : [];
   for (const cliDir of cliDirs) if (!agency.has(path.basename(cliDir))) dirs.push(cliDir);
   for (const name of AGENCY_SKILLS) {
@@ -95,40 +97,40 @@ export function resolveAgencySkillDirs(opts: {
     if (fromPkg) {
       dirs.push(fromPkg);
       fromCatalog.push(name);
-      continue;
-    }
-    const cliDir = cliDirs.find((d) => path.basename(d) === name);
-    if (cliDir) dirs.push(cliDir);
+    } else missing.push(name);
   }
-  return { dirs, fromCatalog };
+  return { dirs, fromCatalog, missing };
 }
 
 /**
- * The automation templates directory: the `override` (AUTOMATION_TEMPLATES_DIR)
- * when set (null if it does not exist), else the installed catalog's
- * `automations/` when it ships any `*.automation.json`, else the CLI copy.
+ * The automation files bridge-setup seeds. With `override` (AUTOMATION_TEMPLATES_DIR)
+ * set: every `*.automation.json` in it (`dir` null when it does not exist).
+ * Otherwise each BRIDGE_AUTOMATIONS file from the installed catalog's
+ * `automations/`; one the catalog does not ship is named in `missing` (never
+ * taken from anywhere else). The catalog's other automations (e.g. `ship-a-change-*`)
+ * belong to the templates that declare them and are never seeded here.
  */
-export function resolveAutomationTemplatesDir(opts: {
+export function resolveBridgeAutomationFiles(opts: {
   override?: string;
   catalogRoot: string | null;
-  cliDir: string;
-}): string | null {
-  if (opts.override) return fs.existsSync(opts.override) ? opts.override : null;
-  if (opts.catalogRoot && catalogAutomationFiles(opts.catalogRoot).length > 0)
-    return path.join(opts.catalogRoot, "automations");
-  return fs.existsSync(opts.cliDir) ? opts.cliDir : null;
-}
-
-/**
- * CLI copies the installed catalog makes redundant, as paths relative to the CLI
- * package root (`templates/skills/<name>`, `templates/automations/<file>`).
- */
-export function catalogRetirementViolations(catalogRoot: string | null, cliTemplatesDir: string): string[] {
-  const out: string[] = [];
-  for (const name of AGENCY_SKILLS)
-    if (catalogSkillDir(catalogRoot, name) && fs.existsSync(path.join(cliTemplatesDir, "skills", name)))
-      out.push(`templates/skills/${name}`);
-  for (const file of catalogAutomationFiles(catalogRoot))
-    if (fs.existsSync(path.join(cliTemplatesDir, "automations", file))) out.push(`templates/automations/${file}`);
-  return out;
+}): { dir: string | null; files: string[]; missing: string[] } {
+  if (opts.override) {
+    if (!fs.existsSync(opts.override)) return { dir: null, files: [], missing: [] };
+    const files = fs
+      .readdirSync(opts.override)
+      .filter((f) => f.endsWith(".automation.json"))
+      .sort()
+      .map((f) => path.join(opts.override!, f));
+    return { dir: opts.override, files, missing: [] };
+  }
+  const shipped = new Set(catalogAutomationFiles(opts.catalogRoot));
+  const dir = opts.catalogRoot ? path.join(opts.catalogRoot, "automations") : null;
+  const files: string[] = [];
+  const missing: string[] = [];
+  for (const name of BRIDGE_AUTOMATIONS) {
+    const file = `${name}.automation.json`;
+    if (dir && shipped.has(file)) files.push(path.join(dir, file));
+    else missing.push(name);
+  }
+  return { dir, files, missing };
 }

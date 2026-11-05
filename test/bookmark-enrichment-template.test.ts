@@ -1,5 +1,5 @@
 /**
- * Shape tripwire for the bundled bookmark automation templates.
+ * Shape tripwire for the bridge automation templates (read from the installed catalog).
  *
  * These files are DATA — nothing typechecks them, and `bridge-setup.ts` seeds
  * them verbatim over the Hub REST door whose `FlowDefinitionSchema` accepts
@@ -14,13 +14,12 @@ import { describe, it, expect } from "vitest";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
+import { BRIDGE_AUTOMATIONS, resolveBridgeAutomationFiles, resolveInstalledCatalogRoot } from "../src/lib/catalog-templates.js";
 
-const templatesDir = path.resolve(
-  path.dirname(fileURLToPath(import.meta.url)),
-  "..",
-  "templates",
-  "automations"
-);
+// The files bridge-setup seeds, read where it reads them: the installed catalog
+// package (their one source; the CLI keeps no copy).
+const bridge = resolveBridgeAutomationFiles({ catalogRoot: resolveInstalledCatalogRoot() });
+const templatesDir = bridge.dir ?? "";
 
 type Node = { id: string; type: string; data: Record<string, unknown> };
 type Edge = { id: string; source: string; target: string; sourceHandle?: string };
@@ -79,7 +78,12 @@ const KNOWN_NODE_TYPES = new Set([
 // the StepContext the executor builds). Anything else silently yields "".
 const KNOWN_SCOPES = new Set(["trigger", "steps", "loop", "item", "automation"]);
 
-describe.each(fs.readdirSync(templatesDir).filter((f) => f.endsWith(".automation.json")))(
+it("the installed catalog ships every bridge automation (non-vacuity)", () => {
+  expect(bridge.missing).toEqual([]);
+  expect(bridge.files.length).toBe(BRIDGE_AUTOMATIONS.length);
+});
+
+describe.each(bridge.files.map((f) => path.basename(f)))(
   "%s — structural invariants",
   (file) => {
     const tpl = load(file);

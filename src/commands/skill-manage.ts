@@ -29,6 +29,7 @@ import {
   importSkill,
 } from "../lib/skill-import.js";
 import { resolveBundledSkillsDir } from "./bridge-setup.js";
+import { resolveAgencySkillDirs, resolveInstalledCatalogRoot } from "../lib/catalog-templates.js";
 
 interface SkillManageOpts {
   podUrl?: string;
@@ -64,10 +65,17 @@ function parseGitHubShorthand(
  */
 function resolveSource(source: string): { dirs: string[]; cleanup?: () => void } {
   // 1. Bundled Synap-native skills
+  // The CLI's runtime skills, plus the agency skills from the installed catalog
+  // package (their one source; the CLI keeps no copy).
   if (source === "bundled" || source === "synap") {
-    const dir = resolveBundledSkillsDir();
-    if (!dir) throw new Error("Bundled skills not found in this CLI install");
-    return { dirs: discoverSkillDirs(dir) };
+    const { dirs, missing } = resolveAgencySkillDirs({
+      cliSkillsDir: resolveBundledSkillsDir(),
+      catalogRoot: resolveInstalledCatalogRoot(),
+    });
+    if (dirs.length === 0) throw new Error("Bundled skills not found in this CLI install");
+    if (missing.length)
+      log.warn(`The installed catalog package does not ship: ${missing.join(", ")} — update @synap-core/workspace-templates.`);
+    return { dirs };
   }
 
   // 2. Local path (incl. ~/.claude/skills/)
