@@ -179,10 +179,10 @@ export async function startSession(
     if (opts.track) body.trackId = opts.track;
     if (opts.taskId) body.correlationId = `task:${opts.taskId}`;
     // `--no-template` → opts.template === false → send an explicit `null`,
-    // which SKIPS matching (`TEMPLATE_OPT_OUT` in match-session-template.ts).
-    // `--template <id>` → send that id, the one way a playbook binds. Neither
-    // → omit, so the start comes back with the pod's playbooks to choose from
-    // (suggestions; nothing is applied).
+    // which skips the ranked playbook suggestions (facts may still bind).
+    // `--template <id>` → send that id. Neither → omit: the start comes back
+    // with the pod's playbooks to choose from (suggestions, never applied).
+    // Words never bind; facts or templateId do (the reply's `binding` line).
     if (opts.template === false) body.templateId = null;
     else if (opts.template) body.templateId = opts.template;
     // Detour push: the pod records `session --spawned_from--> session` and (with
