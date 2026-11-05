@@ -990,7 +990,7 @@ Import files, folders, or URLs into the pod (AI capture pipeline, or Superwhispe
 | `--limit <n>` | Max Superwhisper units to process |  |
 | `--concurrency <n>` | Parallel unit uploads (1–4) |  |
 | `--no-resume` | Ignore local import ledger (re-import all) |  |
-| `--job-status <jobId>` | Re-poll a background corpus import started by an earlier run (no waiting) |  |
+| `--job-status <jobId>` | Re-poll a background import started by an earlier run (no waiting); with --source superwhisper, a bulk store-first job |  |
 
 ## `synap upload`
 

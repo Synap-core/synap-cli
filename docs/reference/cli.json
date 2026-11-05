@@ -1754,7 +1754,7 @@
           {
             "flags": "--job-status <jobId>",
             "long": "--job-status",
-            "description": "Re-poll a background corpus import started by an earlier run (no waiting)",
+            "description": "Re-poll a background import started by an earlier run (no waiting); with --source superwhisper, a bulk store-first job",
             "takesValue": "required"
           }
         ],

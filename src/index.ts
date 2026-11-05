@@ -786,9 +786,14 @@ program
   .option("--no-resume", "Ignore local import ledger (re-import all)")
   .option(
     "--job-status <jobId>",
-    "Re-poll a background corpus import started by an earlier run (no waiting)"
+    "Re-poll a background import started by an earlier run (no waiting); with --source superwhisper, a bulk store-first job"
   )
   .action(async (inputs: string[], opts) => {
+    if (opts.jobStatus && opts.source === "superwhisper") {
+      const { importSuperwhisperJobStatus } = await import("./lib/superwhisper-import.js");
+      await importSuperwhisperJobStatus(opts.jobStatus, opts);
+      return;
+    }
     const mod = await import("./commands/import.js");
     if (opts.jobStatus) {
       await mod.importJobStatus(opts.jobStatus, opts);
