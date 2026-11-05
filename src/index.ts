@@ -2452,14 +2452,18 @@ program
 
 const doc = program
   .command("doc")
-  .description("Create and update markdown documents on the pod");
+  .description("Create and update documents on the pod (markdown, or an html page)");
 
 doc
   .command("create")
-  .description("Create a new markdown document")
+  .description("Create a new document: markdown, or an html page pod admin runs")
   .requiredOption("--title <title>", "Document title")
-  .option("--content <text>", "Markdown content (inline)")
-  .option("--file <path>", "Read content from a file")
+  .option("--content <text>", "Content (inline)")
+  .option("--file <path>", "Read content from a file (.html / .htm means --type html)")
+  .option(
+    "--type <type>",
+    "markdown (default) or html: a page pod admin runs at /open/<id> in an isolated frame (inline only, no CDN, at most 2 MB)"
+  )
   .option("--workspace <id>", "Workspace to create the document in")
   .option("--open", "Open in the Synap desktop app after creation")
   .option("--json", "JSON output")
@@ -2470,6 +2474,7 @@ Examples:
   synap doc create --title "My Notes" --content "# Hello"
   synap doc create --title "My Notes" --file ./notes.md --open
   echo "# Draft" | synap doc create --title "Draft"
+  synap doc create --title "Weekly report" --file ./report.html
   `)
   .action(async (opts) => {
     const { docCreate } = await import("./commands/doc.js");

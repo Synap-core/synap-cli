@@ -178,8 +178,8 @@ Every command also accepts `-h, --help`.
   - [`synap view arrange`](#synap-view-arrange) — Replace the widget arrangement of a bento view
 - [`synap explain`](#synap-explain) — Full capability map — what Synap can do and how (no network required)
 - [`synap open`](#synap-open) — Open in the Synap desktop app. Use: open <kind> <id> or open <id> (auto-resolves type)
-- [`synap doc`](#synap-doc) — Create and update markdown documents on the pod
-  - [`synap doc create`](#synap-doc-create) — Create a new markdown document
+- [`synap doc`](#synap-doc) — Create and update documents on the pod (markdown, or an html page)
+  - [`synap doc create`](#synap-doc-create) — Create a new document: markdown, or an html page pod admin runs
   - [`synap doc update`](#synap-doc-update) — Update a document's content: the whole body, or one section (--section). Governed: an agent's edit is proposed.
   - [`synap doc reference`](#synap-doc-reference) — Create an external reference document (points at a URL — no bytes stored)
 - [`synap cell`](#synap-cell) — Define and bundle frame cells for the Synap runtime
@@ -3066,7 +3066,7 @@ Open in the Synap desktop app. Use: open <kind> <id> or open <id> (auto-resolves
 synap doc [options] [command]
 ```
 
-Create and update markdown documents on the pod
+Create and update documents on the pod (markdown, or an html page)
 
 Subcommands: [`create`](#synap-doc-create), [`update`](#synap-doc-update), [`reference`](#synap-doc-reference)
 
@@ -3076,13 +3076,14 @@ Subcommands: [`create`](#synap-doc-create), [`update`](#synap-doc-update), [`ref
 synap doc create [options]
 ```
 
-Create a new markdown document
+Create a new document: markdown, or an html page pod admin runs
 
 | Option | Description | Default |
 |---|---|---|
 | `--title <title>` | Document title (required) |  |
-| `--content <text>` | Markdown content (inline) |  |
-| `--file <path>` | Read content from a file |  |
+| `--content <text>` | Content (inline) |  |
+| `--file <path>` | Read content from a file (.html / .htm means --type html) |  |
+| `--type <type>` | markdown (default) or html: a page pod admin runs at /open/<id> in an isolated frame (inline only, no CDN, at most 2 MB) |  |
 | `--workspace <id>` | Workspace to create the document in |  |
 | `--open` | Open in the Synap desktop app after creation |  |
 | `--json` | JSON output |  |
@@ -3094,6 +3095,7 @@ Examples:
   synap doc create --title "My Notes" --content "# Hello"
   synap doc create --title "My Notes" --file ./notes.md --open
   echo "# Draft" | synap doc create --title "Draft"
+  synap doc create --title "Weekly report" --file ./report.html
 ```
 
 ## `synap doc update`

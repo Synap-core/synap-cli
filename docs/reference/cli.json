@@ -6541,7 +6541,7 @@
         "path": "synap doc",
         "name": "doc",
         "usage": "[options] [command]",
-        "description": "Create and update markdown documents on the pod",
+        "description": "Create and update documents on the pod (markdown, or an html page)",
         "hidden": false,
         "arguments": [],
         "options": [],
@@ -6550,7 +6550,7 @@
             "path": "synap doc create",
             "name": "create",
             "usage": "[options]",
-            "description": "Create a new markdown document",
+            "description": "Create a new document: markdown, or an html page pod admin runs",
             "hidden": false,
             "arguments": [],
             "options": [
@@ -6564,13 +6564,19 @@
               {
                 "flags": "--content <text>",
                 "long": "--content",
-                "description": "Markdown content (inline)",
+                "description": "Content (inline)",
                 "takesValue": "required"
               },
               {
                 "flags": "--file <path>",
                 "long": "--file",
-                "description": "Read content from a file",
+                "description": "Read content from a file (.html / .htm means --type html)",
+                "takesValue": "required"
+              },
+              {
+                "flags": "--type <type>",
+                "long": "--type",
+                "description": "markdown (default) or html: a page pod admin runs at /open/<id> in an isolated frame (inline only, no CDN, at most 2 MB)",
                 "takesValue": "required"
               },
               {
@@ -6604,7 +6610,7 @@
                 "takesValue": "required"
               }
             ],
-            "helpAfter": "Examples:\n  synap doc create --title \"My Notes\" --content \"# Hello\"\n  synap doc create --title \"My Notes\" --file ./notes.md --open\n  echo \"# Draft\" | synap doc create --title \"Draft\"",
+            "helpAfter": "Examples:\n  synap doc create --title \"My Notes\" --content \"# Hello\"\n  synap doc create --title \"My Notes\" --file ./notes.md --open\n  echo \"# Draft\" | synap doc create --title \"Draft\"\n  synap doc create --title \"Weekly report\" --file ./report.html",
             "subcommands": []
           },
           {
