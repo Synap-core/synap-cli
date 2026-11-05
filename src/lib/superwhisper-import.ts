@@ -595,6 +595,7 @@ async function putFile(ticket: UploadTicket, path: string): Promise<void> {
     signal: AbortSignal.timeout(300_000),
   });
   if (!res.ok) {
+    // empty-ok: the upload already failed and is thrown below with its HTTP status; an unreadable body only drops the extra detail
     const text = await res.text().catch(() => "");
     throw new Error(`upload failed (HTTP ${res.status}) ${text.slice(0, 200)}`);
   }
