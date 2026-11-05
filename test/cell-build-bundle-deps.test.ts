@@ -51,7 +51,7 @@ describe("bundleWithEsbuild (--bundle-deps)", () => {
       fixture("react-dom-subpath.ts"),
       { bundleDeps: true },
     );
-    expect(externals).toEqual(["react-dom"]);
+    expect(externals).toEqual(["react-dom/client"]);
     expect(code).not.toMatch(/from\s+["']chalk["']/);
     expect(code).toMatch(/from\s+["']react-dom\/client["']/);
   });
@@ -115,8 +115,35 @@ describe("cell build --bundle-deps → the emitted deps map", () => {
     expect(deps).toEqual({});
   });
 
-  it("default mode is UNCHANGED — react and chalk both stay in deps", async () => {
+  it("bundles by DEFAULT: no flag still yields an empty deps map (the frame refuses runtime deps)", async () => {
     const deps = await emittedDeps("chalk-cell.ts", {});
-    expect(Object.keys(deps).sort()).toEqual(["chalk", "react"]);
+    expect(deps).toEqual({});
+  });
+
+  it("--no-bundle-deps is the explicit opt-out: react and chalk stay in deps, with a warning", async () => {
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const deps = await emittedDeps("chalk-cell.ts", { bundleDeps: false });
+      expect(Object.keys(deps).sort()).toEqual(["chalk", "react"]);
+      expect(err.mock.calls.flat().join(" ")).toMatch(/refused by the web and desktop frames/);
+    } finally {
+      err.mockRestore();
+    }
+  });
+
+  it("keeps @synap/kit external (the host provides it) and never lists it in deps", async () => {
+    const { externals } = await bundleWithEsbuild(fixture("kit-cell.ts"), { bundleDeps: true });
+    expect(externals).toContain("@synap/kit");
+    const deps = await emittedDeps("kit-cell.ts", {});
+    expect(deps).toEqual({});
+  });
+
+  it("does not leave a host SUBPATH external: @synap/kit/<sub> is not a specifier the frame provides", async () => {
+    // The frame import map has exactly `@synap/kit`; a subpath left external
+    // would build a cell the pod refuses at define time. It must fail to
+    // resolve here instead (the kit is not an installed package).
+    await expect(
+      bundleWithEsbuild(fixture("kit-subpath-cell.ts"), { bundleDeps: true }),
+    ).rejects.toThrow(/@synap\/kit\/unit-mark/);
   });
 });

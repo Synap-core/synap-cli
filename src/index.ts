@@ -2527,7 +2527,7 @@ cell
   .option("--type-key <key>", "Explicit typeKey (default: generated:<slug>)")
   .option(
     "--deps <json>",
-    'Dependency map JSON, e.g. \'{"recharts":"2.12.0"}\''
+    'Dependency map JSON. Leave it out: the frame refuses runtime deps, so bundle libraries with `synap cell build` instead'
   )
   .option(
     "--view-types <list>",
@@ -2558,7 +2558,6 @@ PICKED as a view or profile renderer — it is only placeable on a bento.
 
 Examples:
   synap cell define --name "Revenue Chart" --file ./chart.js
-  synap cell define --name "Revenue Chart" --file ./chart.js --deps '{"recharts":"2.12.0"}'
   synap cell define --name "Deal Board" --file ./board.js --view-types kanban,table --content-kind collection
   synap cell define --name "Contact Page" --file ./contact.js --content-kind entity-detail
   cat chart.js | synap cell define --name "Revenue Chart"
@@ -2574,7 +2573,11 @@ cell
   .option("--out <file>", "Output file path (default: <entry>.bundle.js)")
   .option(
     "--bundle-deps",
-    "Inline all third-party deps into the bundle (only react/react-dom stay external) — output has deps={} and the runtime CSP drops esm.sh entirely"
+    "Inline every third-party library into the cell (the default; kept for older scripts). react, react-dom, the JSX runtimes, @synap/kit and @synap/view-sdk stay external: the host provides them"
+  )
+  .option(
+    "--no-bundle-deps",
+    "Keep third-party imports external and emit them as a deps map. The web and desktop frames refuse such a cell"
   )
   .option("--self-contained", 'Build ONE complete HTML document (React, CSS, brand fonts inlined; nothing external) — the code of a rendererType "mcp-app" cell')
   .option("--fonts", "With --self-contained: require the inlined brand fonts (default: include when @synap-core/design-tokens resolves)")
@@ -2584,7 +2587,7 @@ cell
   .option("--type-key <key>", "Explicit typeKey (used with --define)")
   .option(
     "--deps <json>",
-    "Override dependency versions as JSON, e.g. '{\"react\":\"18.3.0\"}'"
+    "Override the emitted deps map (JSON). The frame refuses runtime deps; leave it out"
   )
   .option("--view-types <list>", 'Comma-separated view-renderer affinity (used with --define), e.g. "list,table"')
   .option("--content-kind <kind>", "entity-detail | entity-card | entity-profile | collection | widget (used with --define)")
@@ -2597,18 +2600,16 @@ cell
   .addHelpText("after", `
 Output: a single ESM file.
 
-Default mode: bare imports (react, recharts, …) are externalized and emitted
-as a deps map. At runtime Synap resolves them via esm.sh importmap.
-
---bundle-deps mode: only react/react-dom are externalized (React is
-host-inlined at runtime, never via esm.sh); everything else is bundled into
-the output, so the deps map is empty. A cell built this way reaches no esm.sh
-origin at runtime — the runtime CSP collapses to drop it entirely.
+The frame loads no code from the network (no CDN, no esm.sh). It provides only
+react, react-dom, the JSX runtimes, @synap/kit and @synap/view-sdk, resolved by the host; those
+stay external. Every other library (recharts, d3, three, …) is bundled into the
+cell, so the deps map is empty. That is the default, and it is the only shape
+the web and desktop frames accept. Leave \`deps\` empty; --no-bundle-deps
+exists only for a host that resolves imports itself and the frame refuses it.
 
 Examples:
   synap cell build ./src/chart.tsx --out ./dist/chart.js
   synap cell build ./src/chart.tsx --out ./dist/chart.js --define --name "Revenue Chart"
-  synap cell build ./src/chart.tsx --out ./dist/chart.js --bundle-deps
   `)
   .action(async (entry: string, opts) => {
     const { cellBuild } = await import("./commands/cell.js");
@@ -2995,10 +2996,10 @@ market
   .option("--api-key <key>", "API key override (for --from-workspace / --from-project)")
   // Default ON for a cell package's `codeFile` resolution — see `cell build
   // --bundle-deps`'s doc comment for why: a published cell's `deps` map is
-  // otherwise resolved through esm.sh at RUNTIME, so the artifact reviewed at
-  // publish time isn't what actually executes. `synap cell build` invoked
-  // directly is unaffected — its own default stays external-deps-via-esm.sh.
-  .option("--no-bundle-deps", "Publish a cell's codeFile with external deps via esm.sh instead of bundling them in (default: bundled)")
+  // otherwise resolved over the network at RUNTIME, so the artifact reviewed at
+  // publish time isn't what actually executes. `synap cell build` bundles by
+  // default too (the frame accepts nothing else).
+  .option("--no-bundle-deps", "Publish a cell's codeFile with external third-party imports instead of bundling them in (default: bundled). The web and desktop frames refuse an unbundled cell")
   .action(async (targets: string[] | undefined, _opts, cmd) => {
     // Same parent/child `--json` collision as `market install` — see its comment.
     const opts = cmd.optsWithGlobals();
