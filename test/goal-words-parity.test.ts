@@ -20,6 +20,8 @@ import * as words from "../src/lib/goal-words.js";
 const VOCAB = join(process.cwd(), "../synap-backend/packages/types/src/vocabulary");
 const INDEX = join(VOCAB, "index.ts");
 const PARTICIPANTS = join(VOCAB, "track-participant-words.ts");
+// A dependency-free leaf since backend 8ad64612a (1 Nov 2026); the index re-exports it.
+const GOAL_FIELDS = join(VOCAB, "goal-fields.ts");
 const present =
   existsSync(INDEX) && readFileSync(INDEX, "utf8").includes("export const TRACK_STATUS_LABELS");
 
@@ -43,7 +45,7 @@ const TABLES: Array<[string, string, keyof typeof words]> = [
   [INDEX, "TRACK_UNCERTAINTY_LABELS", "TRACK_UNCERTAINTY_LABELS"],
   [INDEX, "GOAL_CRITERION_MARK_LABELS", "GOAL_CRITERION_MARK_LABELS"],
   [INDEX, "WAITING_ON_REASON_LABELS", "WAITING_ON_REASON_LABELS"],
-  [INDEX, "GOAL_FIELD_LABELS", "GOAL_FIELD_LABELS"],
+  [GOAL_FIELDS, "GOAL_FIELD_LABELS", "GOAL_FIELD_LABELS"],
   [PARTICIPANTS, "TRACK_PARTICIPANT_ROLE_LABELS", "TRACK_PARTICIPANT_ROLE_LABELS"],
   [PARTICIPANTS, "TRACK_COMMITMENT_STATE_LABELS", "TRACK_COMMITMENT_STATE_LABELS"],
 ];

@@ -158,7 +158,8 @@ export async function contextSummary(opts: ContextOpts): Promise<void> {
     } else {
       for (const item of knowledge) {
         const props = (item.properties ?? {}) as Record<string, unknown>;
-        const type = String(props.ek_type ?? "–");
+        // `knowledgeForm` is the one discriminator; `ek_type` only on historic rows.
+        const type = String(props.knowledgeForm ?? props.ek_type ?? "–");
         const claim = String(props.ek_claim ?? item.name ?? "–");
         const tags = Array.isArray(props.ek_tags) && (props.ek_tags as unknown[]).length > 0
           ? chalk.dim(`  [${(props.ek_tags as unknown[]).join(", ")}]`)

@@ -32,6 +32,7 @@ import path from "node:path";
 import { writeFileAtomic } from "../lib/atomic-file.js";
 import { unknownAgentMessage } from "../lib/agents-config.js";
 import { findOnPath } from "./worker-github-broker.js";
+import { parseProtocols } from "./worker.js";
 
 export const LABEL_PREFIX = "live.synap.worker-";
 /** Every worker service file this command recognises, its own and a hand-made one. */
@@ -81,6 +82,8 @@ export interface ServiceOptions {
   githubApp?: string;
   allowedTools?: string;
   skipPermissions?: boolean;
+  /** Which runs this computer takes (`code`, `work-folder`); absent = the worker's default, every protocol. */
+  protocols?: string;
   /** Extra environment for the service, KEY=VALUE each. Never a secret. */
   env?: string[];
 }
@@ -141,6 +144,8 @@ export function buildServiceSpec(opts: ServiceOptions, ctx: ServiceContext): Ser
   if (opts.githubApp) args.push("--github-app", abs(opts.githubApp));
   if (opts.allowedTools) args.push("--allowed-tools", opts.allowedTools);
   if (opts.skipPermissions) args.push("--skip-permissions");
+  // Checked here, not at the first restart: a typo must never become a service that dies every 30 s.
+  if (opts.protocols !== undefined) args.push("--protocols", [...parseProtocols(opts.protocols)].join(","));
 
   const pathDirs = [
     path.dirname(ctx.nodePath),
@@ -581,8 +586,17 @@ function liveDeps(): ServiceDeps {
   return { home: os.homedir(), uid: process.getuid?.() ?? 0, platform: process.platform, launchctl: defaultLaunchctl };
 }
 
-export async function workerInstallCommand(opts: ServiceOptions & { replace?: boolean }): Promise<void> {
+export async function workerInstallCommand(
+  opts: ServiceOptions & { replace?: boolean; runtime?: string }
+): Promise<void> {
   const unknown = unknownAgentMessage(opts.agent);
+  // --runtime asks the pod for the agent on its first run; a service restarting every 30 s must never
+  // ask again and again, so that first run happens once, in a terminal, before the service exists.
+  if (unknown && opts.runtime) {
+    throw new Error(
+      `${unknown}\nRun \`synap worker --agent ${opts.agent} --runtime ${opts.runtime} --once\` in a terminal first, then \`synap worker install\`.`
+    );
+  }
   if (unknown) throw new Error(unknown);
   const deps = liveDeps();
   const spec = buildServiceSpec(opts, {

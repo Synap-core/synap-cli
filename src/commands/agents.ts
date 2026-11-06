@@ -33,6 +33,7 @@ import {
   resolveAgentPod,
 } from "../lib/agent-door.js";
 import { provisionAgentKey } from "../lib/targets.js";
+import { isPresenceRefusal, needsYouInPodAdmin } from "../lib/presence-refusal.js";
 import { connectionLines, type PodConnection } from "../lib/agent-connections.js";
 import { thisComputerInstanceIds } from "../lib/machine-instance.js";
 import { ensureComputerEnrolled } from "../lib/device-connect.js";
@@ -409,6 +410,8 @@ export interface AgentsAddOpts {
   apiKey?: string;
   label?: string;
   pod?: string;
+  /** The agent's job (`--as "CRM worker"`): another agent than the engine's plain one. */
+  as?: string;
 }
 
 /**
@@ -416,6 +419,10 @@ export interface AgentsAddOpts {
  * `lib/agent-door.ts` for the three ways in; this only dispatches.
  */
 export async function agentsAdd(kind: string | undefined, opts: AgentsAddOpts = {}): Promise<void> {
+  if (opts.as !== undefined) {
+    await agentsAddWithJob(kind, opts.as, opts);
+    return;
+  }
   const plan = planAgentAdd(kind, opts);
   if (plan.mode === "existing-key") {
     await registerAgentKey({ ...opts, name: opts.name ?? kind });
@@ -450,15 +457,109 @@ export async function agentsAdd(kind: string | undefined, opts: AgentsAddOpts = 
   if (!ok) process.exitCode = 1;
 }
 
+/**
+ * `synap agents add <engine> --as "<job>"` (plan 31470fd5, flow 2a): one agent
+ * with a job on this computer, minted with the computer's key and approved by
+ * the person; nothing else on the computer is re-keyed (`lib/role-agent.ts`).
+ */
+async function agentsAddWithJob(engine: string | undefined, label: string, opts: AgentsAddOpts): Promise<void> {
+  const { planRoleAgent, addRoleAgent, printRoleAgentAdded } = await import("../lib/role-agent.js");
+  if (!engine) {
+    log.error(`Name the engine that runs it: synap agents add claude-code --as "${label}"`);
+    process.exitCode = 1;
+    return;
+  }
+  if (opts.apiKey || opts.name || opts.template) {
+    log.error("--as takes an engine and a job only (no --api-key, --name or --template).");
+    process.exitCode = 1;
+    return;
+  }
+  const plan = planRoleAgent(engine, label);
+  if (!plan.ok) {
+    log.error(plan.error);
+    process.exitCode = 1;
+    return;
+  }
+  const picked = await resolveAgentPod({});
+  if (!picked) return;
+  const enrol = await ensureComputerEnrolled(picked.podUrl, "run this again");
+  if (!enrol.enrolled) {
+    log.error(enrol.message);
+    process.exitCode = 1;
+    return;
+  }
+  const added = await addRoleAgent(
+    { podUrl: picked.podUrl, computerKey: enrol.computerKey, podName: picked.podName },
+    engine,
+    plan.job,
+    { workspaceId: opts.workspace }
+  );
+  if (!added.ok) {
+    log.error(added.error);
+    process.exitCode = 1;
+    return;
+  }
+  printRoleAgentAdded(plan.job, engine);
+}
+
+/**
+ * `synap agents adopt <job> [--from <engine>]`: the key this OS user holds for
+ * the engine becomes the named agent `<job>` (`adoptHeldKey`). Local only.
+ */
+export async function agentsAdopt(role: string, opts: { from?: string } = {}): Promise<void> {
+  const { adoptHeldKey } = await import("../lib/role-agent.js");
+  const pod = await import("../lib/pod.js");
+  const { fetchKeyState } = await import("../lib/key-state.js");
+  const picked = await resolveAgentPod({});
+  if (!picked) return;
+  const from = opts.from ?? "claude-code";
+  const outcome = await adoptHeldKey(
+    role,
+    { from, podUrl: picked.podUrl, podName: picked.podName },
+    {
+      heldKey: (surface, podUrl) =>
+        (pod.SURFACE_NAMES as readonly string[]).includes(surface)
+          ? pod.getSurfaceAgentKey(surface as import("../lib/pod.js").SurfaceName, podUrl)
+          : null,
+      existing: getAgent,
+      keyState: (podUrl, key) => fetchKeyState(podUrl, key),
+      save: addAgent,
+    }
+  );
+  if (!outcome.ok) {
+    log.error(outcome.error);
+    process.exitCode = 1;
+    return;
+  }
+  log.success(`The ${from} key this OS user holds is now the agent "${role}" (agent ${outcome.agentUserId.slice(0, 8)}…). Nothing was minted or revoked.`);
+  log.dim(`Run it:  synap worker --agent ${role}`);
+  log.dim("Its job on the pod is set on the agent's page, if it is not already.");
+}
+
 /** Deprecated: `synap agents create` → `synap agents add`. */
 export async function agentsCreate(opts: Omit<AgentsAddOpts, "apiKey"> = {}): Promise<void> {
   log.dim("`synap agents create` is now `synap agents add` — same flags.");
   await agentsAdd(opts.template && opts.template !== "custom" ? undefined : "custom", opts);
 }
 
+/** A tRPC error as the pod sends it (`data.reasonCode`: its typed refusal). */
+interface TrpcError {
+  message: string;
+  code?: string | number;
+  data?: { reasonCode?: string };
+}
+
+/** A tRPC answer, plain or superjson-wrapped (`{ json: … }`, the pod's transformer). */
 interface TrpcResponse<T> {
-  result?: { data?: T };
-  error?: { message: string; code?: string };
+  result?: { data?: T | { json?: T } };
+  error?: TrpcError | { json?: TrpcError };
+}
+
+/** A tRPC result's data, unwrapped from the superjson envelope when there is one. */
+function trpcData<T>(data: T | { json?: T } | undefined): T | undefined {
+  return data && typeof data === "object" && !Array.isArray(data) && "json" in data
+    ? (data as { json?: T }).json
+    : (data as T | undefined);
 }
 
 async function trpcMutation<T>(
@@ -478,11 +579,18 @@ async function trpcMutation<T>(
     signal: AbortSignal.timeout(15_000),
   });
   const body = (await res.json()) as TrpcResponse<T>;
-  if (!res.ok || body.error) {
-    throw new Error(body.error?.message ?? `HTTP ${res.status}`);
+  const error =
+    body.error && "json" in body.error ? body.error.json : (body.error as TrpcError | undefined);
+  if (!res.ok || error) {
+    // The pod's typed refusal (`data.reasonCode`, e.g. PRESENCE_REQUIRED)
+    // rides on the error, so a caller tells "needs the person" from a failure.
+    throw Object.assign(new Error(error?.message ?? `HTTP ${res.status}`), {
+      reasonCode: error?.data?.reasonCode,
+    });
   }
-  if (!body.result?.data) throw new Error("Unexpected empty response from tRPC");
-  return body.result.data;
+  const value = trpcData(body.result?.data);
+  if (value === undefined || value === null) throw new Error("Unexpected empty response from tRPC");
+  return value;
 }
 
 // ─── rotate-key ───────────────────────────────────────────────────────────────
@@ -551,7 +659,7 @@ export async function agentsRotateKey(nameOrId: string): Promise<void> {
 
     if (keysResult.ok) {
       const keysBody = (await keysResult.json()) as TrpcResponse<Array<{ id: string; keyPrefix: string; keyName: string; isActive: boolean }>>;
-      const keys = keysBody.result?.data ?? [];
+      const keys = trpcData(keysBody.result?.data) ?? [];
       // Match by keyName pattern used in agentsCreate
       const agentKeyName = profile.label ?? name;
       const match = keys.find(
@@ -596,6 +704,15 @@ export async function agentsRotateKey(nameOrId: string): Promise<void> {
     displayNewKey(rotated.key);
     updateLocalKey(name, profile, rotated.key);
   } catch (err) {
+    if (isPresenceRefusal(err)) {
+      spinner.stop();
+      needsYouInPodAdmin({
+        podUrl: podProfile.config.podUrl,
+        page: profile.agentUserId ? `/agents/${profile.agentUserId}` : "/agents",
+        what: "rotate this agent's key",
+      });
+      return;
+    }
     spinner.fail("Key rotation failed.");
     log.error(err instanceof Error ? err.message : String(err));
   }

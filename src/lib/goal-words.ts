@@ -3,14 +3,14 @@
  * work, uncertainty, criterion marks, what it waits on, who is on it, the
  * end state's label.
  *
- * `@synap-core/types/vocabulary` is the one door for these words, but this
- * package cannot import it (the CLI links only `@synap-core/hub-rest-client`
- * and `@synap-core/workspace-templates`). So each table here is a COPY of the
- * vocabulary's own, held EQUAL — keys and words — by
- * `test/goal-words-parity.test.ts`, which reads the vocabulary's source in
- * the sibling `synap-backend`. Delete this file for a plain import once the
- * CLI depends on a published `@synap-core/types` carrying them.
+ * `@synap-core/types/vocabulary` is the one door for these words. Each table
+ * here is still a COPY of the vocabulary's own, held EQUAL — keys and words —
+ * by `test/goal-words-parity.test.ts`, which reads the vocabulary's source in
+ * the sibling `synap-backend`. The fallback for a token no table names is the
+ * door's own `humanizeToken`, imported, never copied.
  */
+
+import { humanizeToken } from "@synap-core/types/vocabulary";
 
 /** `TRACK_STATUS_LABELS` */
 export const TRACK_STATUS_LABELS: Readonly<Record<string, string>> = {
@@ -70,7 +70,8 @@ export const WAITING_ON_REASON_LABELS: Readonly<Record<string, string>> = {
   approval: "Approval",
   access: "Access",
   another_work: "Other work",
-  outside_world: "Outside world",
+  // Merged into `external` (backend 017224207, D-R4): an old value reads the same.
+  outside_world: "Outside party",
   external: "Outside party",
   date: "A date",
 };
@@ -101,20 +102,6 @@ export const GOAL_FIELD_LABELS: Readonly<Record<string, string>> = {
   uncertainty: "How well the way is known",
   dropConditions: "Drop it if",
 };
-
-/**
- * The vocabulary's fallback (`humanizeToken`, minus its cased-words list): a
- * value no table names reads as words, never as the raw token.
- */
-export function humanizeToken(token: string): string {
-  const tail = token.includes(".") ? token.slice(token.lastIndexOf(".") + 1) : token;
-  const words = tail
-    .replace(/[_-]+/g, " ")
-    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
-    .trim()
-    .toLowerCase();
-  return words ? words.charAt(0).toUpperCase() + words.slice(1) : "";
-}
 
 /** A token through its table, else humanized — `""` for none. */
 export function goalWord(

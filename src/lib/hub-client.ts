@@ -28,6 +28,7 @@ import {
 import { preferClaudeCodeSurfaceKey } from "./key-source.js";
 import { samePodOrigin } from "./project-ref.js";
 import { PodMovedError, podFetch } from "./pod-moved.js";
+import { explainPodError, POD_ERROR_CODES } from "./pod-errors.js";
 import { HubRestClient } from "@synap-core/hub-rest-client";
 import { log } from "../utils/logger.js";
 import chalk from "chalk";
@@ -79,6 +80,50 @@ function resolveProjectIdForPod(
 }
 
 /**
+ * The pod's `code` on a 403 that refused a LIMITED key at the door (a key
+ * whose grant is not unbounded full access), whatever the door: a read no
+ * grant bounds yet, or a door that acts on everything the person owns.
+ * synap-backend `routers/hub-protocol/_middleware/auth.ts`.
+ */
+export const GRANT_DOOR_UNSUPPORTED_CODE = "GRANT_DOOR_UNSUPPORTED";
+
+/**
+ * The code a pod puts on a 403 that refused a write the calling key's GRANT
+ * does not cover (synap-backend `utils/grant-write-check.ts` `GRANT_DENIED`,
+ * added to every Hub REST denial by `_middleware/grant-denial-code.ts`), as
+ * `code` (or `reasonCode`, when the door set its own `code`), with the refused
+ * `action`.
+ */
+export const GRANT_DENIED_CODE = "GRANT_DENIED";
+
+/**
+ * How an OLDER pod words the same refusal, with no code (`{ error }` only):
+ * read only when the body carries no `GRANT_DENIED` code.
+ */
+export const GRANT_DENIAL_PREFIX = "This key's grant does not allow";
+
+/**
+ * A 403 the pod sent because the calling key's grant leaves the action out:
+ * a limited key (a computer's or an agent's) refused by design, never a
+ * missing workspace. `action` is the refused action key when the pod named it
+ * (`workspace.update`). The code first; the words only for an older pod.
+ */
+export function grantDenialOf(err: unknown): { action?: string } | null {
+  if (!(err instanceof HubError) || err.status !== 403) return null;
+  const body =
+    err.body && typeof err.body === "object" && !Array.isArray(err.body)
+      ? (err.body as Record<string, unknown>)
+      : undefined;
+  if (err.code === GRANT_DENIED_CODE || body?.reasonCode === GRANT_DENIED_CODE) {
+    return typeof body?.action === "string" && body.action ? { action: body.action } : {};
+  }
+  const said = err.detail ?? "";
+  if (!said.startsWith(GRANT_DENIAL_PREFIX)) return null;
+  const named = /^This key's grant does not allow "([^"]+)"/.exec(said);
+  return named ? { action: named[1] } : {};
+}
+
+/**
  * A failed Hub call, carrying the structured facts callers need to branch on.
  *
  * `message` is HUMAN-READABLE and is what the many `log.error((err as Error).message)`
@@ -91,6 +136,13 @@ export class HubError extends Error {
   readonly status: number;
   readonly code?: string;
   readonly reason?: string;
+  /**
+   * What the pod itself said, without the `Hub <METHOD> <path> failed` prefix
+   * `message` carries. Read a hint's words from here, never from `message`:
+   * the path is in `message`, so `/workspace/i` over it matched every refusal
+   * on a `/workspaces` route (finding de33a075).
+   */
+  readonly detail?: string;
   readonly body?: unknown;
   readonly rawBody: string;
   readonly path: string;
@@ -104,6 +156,7 @@ export class HubError extends Error {
     message: string;
     status: number;
     code?: string;
+    detail?: string;
     reason?: string;
     body?: unknown;
     rawBody: string;
@@ -117,6 +170,7 @@ export class HubError extends Error {
     this.status = init.status;
     this.code = init.code;
     this.reason = init.reason;
+    this.detail = init.detail;
     this.body = init.body;
     this.rawBody = init.rawBody;
     this.path = init.path;
@@ -386,6 +440,7 @@ function hubError(
     status,
     code,
     reason,
+    detail,
     body: parsed,
     rawBody,
     path,
@@ -439,14 +494,24 @@ export function helpFooterLine(): void {
  * in utils/logger so the logger stays domain-agnostic and the taxonomy and its
  * presentation sit in one file. Always closes with the one-time help footer.
  */
-export function renderHubError(err: unknown): void {
-  renderHubErrorBody(err);
+export function renderHubError(
+  err: unknown,
+  opts: {
+    /**
+     * Where the PERSON does what a limited key was refused (a grant denial):
+     * the command knows its own door, this module does not. Without it the
+     * hint names full access in general.
+     */
+    personDoor?: string;
+  } = {}
+): void {
+  renderHubErrorBody(err, opts);
   // ONE central place every failed Hub command flows through — append the help
   // footer here so it prints once per failed command (guarded), not per line.
   helpFooterLine();
 }
 
-function renderHubErrorBody(err: unknown): void {
+function renderHubErrorBody(err: unknown, opts: { personDoor?: string }): void {
   // Hints use log.hint (stderr), not log.dim (stdout): a hint belongs to the
   // error it explains, and splitting one message across two streams means
   // `2>/dev/null` shows a bare hint with no error above it.
@@ -462,6 +527,18 @@ function renderHubErrorBody(err: unknown): void {
   }
   if (!(err instanceof HubError)) {
     log.error(err instanceof Error ? err.message : String(err));
+    return;
+  }
+  // A sensitive act the pod keeps for the person (proof of presence): say so
+  // and where, never the raw refusal.
+  if (err.code === POD_ERROR_CODES.presenceRequired) {
+    const { line, next } = explainPodError({
+      status: err.status,
+      code: err.code,
+      podUrl: err.podUrl,
+    });
+    log.error(line);
+    log.hint(next);
     return;
   }
   // Connection-class failure — the execute door returns 424 with a machine
@@ -527,7 +604,16 @@ function renderHubErrorBody(err: unknown): void {
     );
     return;
   }
-  log.error(err.message);
+  // A 4xx refusal that carries the pod's own words (a 400 naming what to fix):
+  // a person reads those first, not "Hub POST /path failed (HTTP 400):". The
+  // 401/403/404 hints below read the path, so those keep the full line.
+  const podWordsFirst =
+    err.status >= 400 &&
+    err.status < 500 &&
+    ![401, 403, 404].includes(err.status) &&
+    err.body !== undefined &&
+    !!err.detail;
+  log.error(podWordsFirst ? err.detail! : err.message);
   // A 500 carries an `errorId` (the egress sanitizer logs the real cause under
   // it server-side) — surface it so "quote errorId when reporting it" is
   // actionable rather than a dead end.
@@ -545,15 +631,42 @@ function renderHubErrorBody(err: unknown): void {
   // gave nothing better than the status phrase.
   const hasSpecificCause =
     !!err.rawBody && !err.message.endsWith("the pod hit an internal error");
-  // A 403/message naming a workspace: the real cause is almost always "that
-  // workspace doesn't exist or isn't accessible ON THIS POD" (a stale saved
-  // workspace id after a pod switch), not a scopes problem — name it + the
-  // exact next command instead of the generic "credentials" hint.
-  const namesWorkspace = /workspace/i.test(err.message);
+  // A limited key refused at the door: the pod says so in a structured `code`
+  // (synap-backend access/grant-door-fence.ts, the Hub auth middleware), for a
+  // read door no grant bounds yet and for a door that acts on everything the
+  // person owns. It says nothing about any workspace.
+  const limitedKeyRefusal =
+    err.status === 403 && err.code === GRANT_DOOR_UNSUPPORTED_CODE;
+  // A limited key whose grant leaves this action out (no code: the pod's
+  // words, `grantDenialOf`). Refused by design; its words often name a
+  // workspace ("workspace.update", "in workspace <id>"), which is no reason to
+  // say the workspace is missing.
+  const grantDenial = grantDenialOf(err);
+  // A 403 whose OWN words name a workspace: the real cause is almost always
+  // "that workspace doesn't exist or isn't accessible ON THIS POD" (a stale
+  // saved workspace id after a pod switch), not a scopes problem — name it +
+  // the exact next command instead of the generic "credentials" hint. The
+  // pod's words (`detail`), never `message`: that one carries the path.
+  const namesWorkspace =
+    !limitedKeyRefusal && !grantDenial && /workspace/i.test(err.detail ?? "");
   if (err.status >= 500) {
     if (!hasSpecificCause) {
       log.hint("The pod hit an internal error — check the pod logs for the stack trace.");
     }
+  } else if (limitedKeyRefusal) {
+    // The words come from the ONE code-to-text map (pod-errors.ts).
+    const { line, next } = explainPodError({ status: err.status, code: err.code, podUrl: err.podUrl });
+    log.hint(`${line} (${err.method} ${err.path})`);
+    log.hint(next);
+  } else if (grantDenial) {
+    const what = grantDenial.action ? `"${grantDenial.action}"` : "this action";
+    log.hint(
+      `This key may not do ${what}: it is a limited key (a computer's or an agent's), and its grant leaves that out on purpose. Nothing is wrong with your workspace.`
+    );
+    log.hint(
+      opts.personDoor ??
+        "Do it yourself with full access: in the Synap desktop app or pod admin."
+    );
   } else if (err.status === 403 && namesWorkspace) {
     // Name the exact workspace + pod this call used: the usual cause is a global
     // active workspace left over from ANOTHER pod (a stale `synap use` after a
@@ -793,7 +906,8 @@ export async function resolveHubConfig(opts?: { podUrl?: string; apiKey?: string
 //
 // ONE store, two rungs of the SAME lens mechanism:
 //
-//   env SYNAP_SESSION_ID  ›  session lens (per Claude tab)  ›  directory lens
+//   env SYNAP_SESSION_ID  ›  env SYNAP_POD_SESSION (the bridge's binding of this
+//   conversation)  ›  session lens (per Claude tab)  ›  directory lens
 //
 // The directory rung supplies a session only OUTSIDE a Claude Code conversation
 // (`effectiveDirectoryLens`): inside one, the session belongs to the
@@ -855,6 +969,11 @@ function migrateLegacySessionFile(): void {
 export function resolveActiveSessionId(podUrl?: string): string | undefined {
   const fromEnv = process.env.SYNAP_SESSION_ID;
   if (fromEnv) return fromEnv;
+  // synap-bridge binds a Claude conversation to a pod session and exports it to
+  // every child shell; without this a bound conversation's CLI writes carry no
+  // session (the directory lens no longer supplies one inside a conversation).
+  const fromBridge = process.env.SYNAP_POD_SESSION;
+  if (fromBridge) return fromBridge;
   migrateLegacySessionFile();
   const fromSessionLens = resolveActiveLensForPod(podUrl)?.focusSessionId;
   if (fromSessionLens) return fromSessionLens;
@@ -885,15 +1004,22 @@ export function attachActiveSessionId(sessionId: string): SessionAttachTarget {
 }
 
 /**
- * Detach — clear the focus session from BOTH lens rungs, and return whatever
- * was active. Clearing only the top rung would "detach" into the lower one,
- * which reads as the command failing.
+ * Detach — clear the focus session from the lens rungs that SUPPLY one here,
+ * and return whatever was active. Outside a conversation that is the directory
+ * lens; inside one it is the session lens only (the directory rung supplies
+ * nothing there, and belongs to the plain terminals of the tree).
  */
 export function detachActiveSessionId(podUrl?: string): string | undefined {
   const previous = resolveActiveSessionId(podUrl);
   const claudeSession = getClaudeSessionId();
-  if (claudeSession) clearLensField(claudeSession, "focusSessionId");
-  clearDirectoryLensField("focusSessionId");
+  if (claudeSession) {
+    // Inside a conversation the directory lens supplies no session (resolve
+    // ignores it), so it is not ours to clear: a plain terminal in this tree
+    // keeps its own.
+    clearLensField(claudeSession, "focusSessionId");
+  } else {
+    clearDirectoryLensField("focusSessionId");
+  }
   return previous;
 }
 
@@ -903,7 +1029,7 @@ export function detachActiveSessionId(podUrl?: string): string | undefined {
  * Claude Code conversation the call comes from (`conversation-headers.ts`) — so
  * the work it lands can be traced back to, and reopened in, that conversation.
  */
-function sessionHeaders(cfg?: HubConfig): Record<string, string> {
+function sessionHeaders(cfg?: Pick<HubConfig, "podUrl">): Record<string, string> {
   const id = resolveActiveSessionId(cfg?.podUrl);
   return {
     ...clientHeader("synap-cli"),
@@ -1049,12 +1175,13 @@ async function waitOutRateLimit(
 /**
  * fetch with client pacing + automatic 429 backoff.
  *
- * `timeoutMs` mirrors the AbortSignal.timeout() the caller put on `init` — it is
- * only used to say how long we waited when the signal fires.
+ * The timeout signal is built per attempt: one signal made before the loop
+ * would be spent by the time a 429 wait (default ~62s) ends, and every retry
+ * would abort at once and read as a timeout.
  */
 async function hubFetchWithRetry(
   url: string,
-  init: RequestInit,
+  init: Omit<RequestInit, "signal">,
   label: string,
   timeoutMs: number
 ): Promise<Response> {
@@ -1065,7 +1192,7 @@ async function hubFetchWithRetry(
     await acquireHubSlot();
     let res: Response;
     try {
-      res = await podFetch(url, init);
+      res = await podFetch(url, { ...init, signal: AbortSignal.timeout(timeoutMs) });
     } catch (err) {
       if (err instanceof PodMovedError) throw err;
       throw networkError(err, url, labelMethod, labelPath, timeoutMs);
@@ -1078,7 +1205,9 @@ async function hubFetchWithRetry(
 export async function hubGet(
   path: string,
   params: Record<string, string | number | undefined>,
-  cfg: HubConfig,
+  // A read needs only where and with what key; a caller with no full config
+  // (a saved pod's credential check) passes just those two.
+  cfg: Pick<HubConfig, "podUrl" | "apiKey">,
   // Default 15s suits reads. A long-poll door (`/answers/wait`) holds the
   // request open for its own `timeoutSeconds`; its caller passes more.
   timeoutMs = 15_000
@@ -1091,7 +1220,6 @@ export async function hubGet(
     url.toString(),
     {
       headers: { Authorization: `Bearer ${cfg.apiKey}`, ...sessionHeaders(cfg) },
-      signal: AbortSignal.timeout(timeoutMs),
     },
     `GET ${path}`,
     timeoutMs
@@ -1135,7 +1263,6 @@ export async function hubPost(
         ...sessionHeaders(cfg),
       },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(timeoutMs),
     },
     `POST ${path}`,
     timeoutMs
@@ -1169,7 +1296,6 @@ export async function hubPostMultipart(
       method: "POST",
       headers: { Authorization: `Bearer ${cfg.apiKey}`, ...sessionHeaders(cfg) },
       body: form,
-      signal: AbortSignal.timeout(timeoutMs),
     },
     `POST multipart ${path}`,
     timeoutMs
@@ -1220,19 +1346,16 @@ export async function hubPostMultipartRetryable(
 }
 
 export async function hubPatch(path: string, body: unknown, cfg: HubConfig): Promise<unknown> {
-  const url = `${cfg.podUrl}/api/hub${path}`;
-  let res: Response;
-  try {
-    res = await podFetch(url, {
+  const res = await hubFetchWithRetry(
+    `${cfg.podUrl}/api/hub${path}`,
+    {
       method: "PATCH",
       headers: { Authorization: `Bearer ${cfg.apiKey}`, "Content-Type": "application/json", ...sessionHeaders(cfg) },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(15_000),
-    });
-  } catch (err) {
-    if (err instanceof PodMovedError) throw err;
-    throw networkError(err, url, "PATCH", path, 15_000);
-  }
+    },
+    `PATCH ${path}`,
+    15_000
+  );
   if (!res.ok) {
     const bodyText = await res.text().catch(() => "");
     throw hubError("PATCH", path, res.status, bodyText, undefined, {
@@ -1244,18 +1367,15 @@ export async function hubPatch(path: string, body: unknown, cfg: HubConfig): Pro
 }
 
 export async function hubDelete(path: string, cfg: HubConfig): Promise<unknown> {
-  const url = `${cfg.podUrl}/api/hub${path}`;
-  let res: Response;
-  try {
-    res = await podFetch(url, {
+  const res = await hubFetchWithRetry(
+    `${cfg.podUrl}/api/hub${path}`,
+    {
       method: "DELETE",
       headers: { Authorization: `Bearer ${cfg.apiKey}`, ...sessionHeaders(cfg) },
-      signal: AbortSignal.timeout(15_000),
-    });
-  } catch (err) {
-    if (err instanceof PodMovedError) throw err;
-    throw networkError(err, url, "DELETE", path, 15_000);
-  }
+    },
+    `DELETE ${path}`,
+    15_000
+  );
   if (!res.ok) {
     const bodyText = await res.text().catch(() => "");
     throw hubError("DELETE", path, res.status, bodyText, undefined, cfg);

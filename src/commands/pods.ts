@@ -30,11 +30,12 @@ import {
 import { samePodOrigin } from "../lib/project-ref.js";
 import {
   TARGETS,
-  writeMcpServerEntry,
   writeClaudeCodeEnv,
+  mcpServerNameFromPodUrl,
+  removeMcpServerEntry,
 } from "../lib/targets.js";
+import { readClientConfig } from "../lib/atomic-file.js";
 import { renderNextSteps, FLOW } from "../lib/next-steps.js";
-import { mcpRemoteArgs } from "../lib/mcp-snippets.js";
 
 
 // ─── list ─────────────────────────────────────────────────────────────────────
@@ -287,7 +288,7 @@ export async function podsUse(name: string, opts: { surface?: SurfaceName; json?
       return;
     }
     log.info(`${SURFACE_LABELS[opts.surface]} → pod '${name}' (${podConfig.podUrl})`);
-    await applySurfaceConfig(opts.surface, podConfig);
+    await applySurfaceConfig(opts.surface, podConfig, name);
     log.blank();
     log.dim("Other surfaces are unchanged. Run without --surface to switch all.");
     return;
@@ -298,28 +299,19 @@ export async function podsUse(name: string, opts: { surface?: SurfaceName; json?
   log.info(`Switching all surfaces to pod '${name}' (${podConfig.podUrl})`);
   log.blank();
 
+  /** Surfaces this switch changed: they now use this pod. */
   const updated: string[] = [];
 
-  // Claude Desktop
-  const desktopPath = TARGETS["claude-desktop"].mcpConfigPath?.();
-  if (desktopPath && fs.existsSync(desktopPath)) {
-    writeMcpServerEntry(desktopPath, "synap", {
-      command: "npx",
-      // Pinned bridge; the key rides in env (0600 file), never in argv.
-      args: mcpRemoteArgs(`${podConfig.podUrl.replace(/\/$/, "")}/mcp`),
-      env: { SYNAP_AUTH: `Bearer ${podConfig.hubApiKey}` },
-    });
-    updated.push("Claude Desktop");
-  }
-
-  // Cursor
-  const cursorPath = TARGETS["cursor"].mcpConfigPath?.();
-  if (cursorPath && fs.existsSync(cursorPath)) {
-    writeMcpServerEntry(cursorPath, "synap", {
-      url: `${podConfig.podUrl}/mcp`,
-      headers: { Authorization: `Bearer ${podConfig.hubApiKey}` },
-    });
-    updated.push("Cursor");
+  // Cursor and Claude Desktop keep one MCP entry PER POD, each holding that
+  // client's own key (written by `synap connect`). Switching pods rewrites
+  // nothing there: never this computer's key, raw, under a second "synap".
+  // So they are never "updated": they already have this pod, or they need it.
+  const alreadySet: Array<{ client: string; serverName: string }> = [];
+  const toConnect: Array<{ client: string; command: string }> = [];
+  for (const client of POD_ENTRY_CLIENTS) {
+    const state = podEntryState(client, name, podConfig.podUrl);
+    if (state.kind === "ready") alreadySet.push({ client: TARGETS[client].label, serverName: state.serverName });
+    else if (state.kind === "missing") toConnect.push({ client: TARGETS[client].label, command: state.command });
   }
 
   // Claude Code
@@ -342,52 +334,105 @@ export async function podsUse(name: string, opts: { surface?: SurfaceName; json?
   const steps = FLOW.afterPodUse(name);
 
   if (opts.json) {
-    console.log(JSON.stringify({ pod: name, podUrl: podConfig.podUrl, surfaces: updated, nextSteps: steps }, null, 2));
+    console.log(JSON.stringify({ pod: name, podUrl: podConfig.podUrl, surfaces: updated, alreadySet, toConnect, nextSteps: steps }, null, 2));
     return;
   }
 
-  if (updated.length === 0) {
+  if (updated.length) log.success(`Now on '${name}': ${updated.join(", ")}`);
+  for (const c of alreadySet) {
+    log.info(`${c.client} already has '${c.serverName}' for this pod; nothing to change.`);
+  }
+  for (const c of toConnect) {
+    log.info(`${c.client} has no entry for '${name}' yet. To add one: ${c.command}`);
+  }
+
+  if (updated.length + alreadySet.length + toConnect.length === 0) {
     log.warn("Active pod switched, but no agent surface is configured on this machine.");
-    log.dim("Connect one with: synap connect --target=<surface>");
+    log.dim("Connect one with: synap connect <client>  (synap connect --list)");
     renderNextSteps(steps);
     return;
   }
 
-  log.success(`Updated: ${updated.join(", ")}`);
-  log.dim("Restart any open agents to apply the new pod.");
+  if (updated.length) log.dim("Restart any open agents to apply the new pod.");
   log.blank();
   log.dim("Tip: synap pods use <name> --surface <surface>  — switch only one surface");
   renderNextSteps(steps);
 }
 
+/** Clients whose MCP config holds one entry per pod, written by `synap connect`. */
+const POD_ENTRY_CLIENTS = ["claude-desktop", "cursor"] as const;
+type PodEntryClient = (typeof POD_ENTRY_CLIENTS)[number];
+
+/**
+ * Where a per-pod client stands for one pod: not set up on this computer, set
+ * up with an entry for this pod, or set up without one (the command that adds
+ * it, through the same installer `synap connect` uses, so the entry holds the
+ * client's own key). When the pod's entry is there, an older "synap" entry
+ * beside it is removed only when it points at THIS pod and holds one of this
+ * computer's pod keys (what `pods use` used to write): a "synap" entry for
+ * another pod is that pod's only entry, whoever's key it holds.
+ */
+export function podEntryState(
+  client: PodEntryClient,
+  podName: string,
+  podUrl: string
+): { kind: "absent" } | { kind: "ready"; serverName: string } | { kind: "missing"; command: string } {
+  const file = TARGETS[client].mcpConfigPath?.();
+  if (!file || !fs.existsSync(file)) return { kind: "absent" };
+  const servers = readClientConfig<{ mcpServers?: Record<string, unknown> }>(file).mcpServers ?? {};
+  const serverName = mcpServerNameFromPodUrl(podUrl);
+  if (!servers[serverName]) return { kind: "missing", command: `synap connect ${client} --name ${podName}` };
+  const legacy = servers["synap"];
+  if (serverName !== "synap" && legacy && entryIsForPod(legacy, podUrl) && holdsComputerKey(legacy)) {
+    removeMcpServerEntry(file, "synap");
+  }
+  return { kind: "ready", serverName };
+}
+
+/**
+ * True when an MCP entry points at `podUrl`: its `url` (a native HTTP entry)
+ * or an http(s) argument (the mcp-remote bridge) is on the pod's origin.
+ */
+function entryIsForPod(entry: unknown, podUrl: string): boolean {
+  const origin = originOf(podUrl);
+  if (!origin || !entry || typeof entry !== "object") return false;
+  const e = entry as { url?: unknown; args?: unknown };
+  const candidates = [e.url, ...(Array.isArray(e.args) ? e.args : [])];
+  return candidates.some((c) => typeof c === "string" && originOf(c) === origin);
+}
+
+function originOf(url: string): string | null {
+  try {
+    const u = new URL(url);
+    return u.protocol === "http:" || u.protocol === "https:" ? u.origin : null;
+  } catch {
+    return null;
+  }
+}
+
+/** True when an MCP entry carries one of this computer's pod keys (`~/.synap/config.json` profiles). */
+function holdsComputerKey(entry: unknown): boolean {
+  const text = JSON.stringify(entry);
+  return listPodProfiles().some((p) => !!p.config.hubApiKey && text.includes(p.config.hubApiKey));
+}
+
 /** Apply a pod config to a single surface's external config file. */
-async function applySurfaceConfig(surface: SupportedUseSurface, podConfig: import("../lib/pod.js").LocalPodConfig): Promise<void> {
+async function applySurfaceConfig(
+  surface: SupportedUseSurface,
+  podConfig: import("../lib/pod.js").LocalPodConfig,
+  podName: string
+): Promise<void> {
   switch (surface) {
-    case "claude-desktop": {
-      const p = TARGETS["claude-desktop"].mcpConfigPath?.();
-      if (p && fs.existsSync(p)) {
-        writeMcpServerEntry(p, "synap", {
-          command: "npx",
-          args: mcpRemoteArgs(`${podConfig.podUrl.replace(/\/$/, "")}/mcp`),
-          env: { SYNAP_AUTH: `Bearer ${podConfig.hubApiKey}` },
-        });
-        log.success("Claude Desktop MCP config updated.");
-        log.dim("Quit + relaunch Claude Desktop to apply.");
-      } else {
-        log.dim("Claude Desktop config not found — run `synap connect --target=claude-desktop` first.");
-      }
-      break;
-    }
+    case "claude-desktop":
     case "cursor": {
-      const p = TARGETS["cursor"].mcpConfigPath?.();
-      if (p && fs.existsSync(p)) {
-        writeMcpServerEntry(p, "synap", {
-          url: `${podConfig.podUrl}/mcp`,
-          headers: { Authorization: `Bearer ${podConfig.hubApiKey}` },
-        });
-        log.success("Cursor MCP config updated.");
+      const label = TARGETS[surface].label;
+      const state = podEntryState(surface, podName, podConfig.podUrl);
+      if (state.kind === "ready") {
+        log.success(`${label} already has '${state.serverName}' for this pod.`);
+      } else if (state.kind === "missing") {
+        log.info(`${label} has no entry for '${podName}' yet. To add one: ${state.command}`);
       } else {
-        log.dim("Cursor config not found — run `synap connect --target=cursor` first.");
+        log.dim(`${label} is not set up on this computer. To connect it: synap connect ${surface} --name ${podName}`);
       }
       break;
     }

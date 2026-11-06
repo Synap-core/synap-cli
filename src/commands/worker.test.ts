@@ -22,6 +22,8 @@ import {
   quietIsOwnRun,
   runProcessIdentity,
   runEndHeaders,
+  foldRunEvent as foldOne,
+  RUN_ENV_BLOCKLIST,
 } from "./worker.js";
 import { createMcpClient, lastJsonPayload } from "../lib/mcp-call.js";
 
@@ -141,7 +143,7 @@ describe("the run's MCP server is pinned to the worker agent's own key", () => {
         [RUN_MCP_SERVER]: {
           type: "http",
           url: "https://pod.example/mcp",
-          headers: { Authorization: "Bearer synap_hub_k" },
+          headers: { Authorization: "Bearer synap_hub_k", "X-Synap-Model-Provider": "anthropic" },
         },
       },
     });
@@ -153,6 +155,7 @@ describe("the run's MCP server is pinned to the worker agent's own key", () => {
     expect(cfg.mcpServers[RUN_MCP_SERVER]!.headers).toEqual({
       Authorization: "Bearer k",
       "X-Synap-Conversation": `claude-code:${sid}`,
+      "X-Synap-Model-Provider": "anthropic",
     });
   });
 
@@ -641,6 +644,7 @@ describe("a run's process and end, as the pod reads them", () => {
       "X-Synap-Conversation": `claude-code:${sid}`,
       "X-Synap-Process": "devbox:1:1792000000000",
       "X-Synap-Runner-State": "ended",
+      "X-Synap-Model-Provider": "anthropic",
     });
     expect(runEndHeaders({ process: "devbox:1:1792000000000" })).toBeUndefined();
     expect(runEndHeaders({ claudeSessionId: sid })).toBeUndefined();
@@ -722,5 +726,73 @@ describe("an MCP call's own headers", () => {
     expect(calls[0].headers.Authorization).toBe("Bearer k");
     expect(calls[1].headers["X-Synap-Runner"]).toBeUndefined();
     for (const s of sent.filter((s) => s.method !== "tools/call")) expect(s.headers["X-Synap-Runner"]).toBeUndefined();
+  });
+});
+
+describe("what a run runs on, as the pod reads it (X-Synap-Model / X-Synap-Model-Provider)", () => {
+  const sid = "8c34a72b-b1c1-4c37-9c1f-02920b69ccb2";
+  const headersOf = (cfg: { mcpServers: Record<string, unknown> }) =>
+    (cfg.mcpServers[RUN_MCP_SERVER] as { headers: Record<string, string> }).headers;
+
+  it("the run's config names the subscription's provider always, and the model once known", () => {
+    expect(headersOf(runMcpConfig("https://pod.example", "k", sid, "devbox:1:1792000000000"))).not.toHaveProperty("X-Synap-Model");
+    expect(headersOf(runMcpConfig("https://pod.example", "k", sid, "devbox:1:1792000000000", "claude-opus-5-5"))).toMatchObject({
+      "X-Synap-Model": "claude-opus-5-5",
+      "X-Synap-Model-Provider": "anthropic",
+    });
+  });
+
+  it("the model is read from the stream's init; a non-id (a synthetic marker, a URL) is never reported", () => {
+    const init = (model: unknown) => foldOne({}, { type: "system", subtype: "init", session_id: sid, model });
+    expect(init("claude-opus-5-5").model).toBe("claude-opus-5-5");
+    expect(init("claude-opus-4-6[1m]").model).toBe("claude-opus-4-6[1m]");
+    expect(init("<synthetic>").model).toBeUndefined();
+    expect(init("https://gw.example/v1").model).toBeUndefined();
+    expect(init(42).model).toBeUndefined();
+  });
+
+  it("the end-of-run calls carry the model the run said, beside the subscription's provider", () => {
+    expect(runEndHeaders({ claudeSessionId: sid, process: "devbox:1:1792000000000", model: "claude-opus-5-5" })).toMatchObject({
+      "X-Synap-Model": "claude-opus-5-5",
+      "X-Synap-Model-Provider": "anthropic",
+    });
+  });
+});
+
+describe("workerEnv never passes a provider switch: a run reports anthropic only because it runs on it", () => {
+  const worker = {
+    PATH: "/usr/bin",
+    CLAUDE_CONFIG_DIR: "/cc",
+    CLAUDE_CODE_OAUTH_TOKEN: "oauth",
+    CLAUDE_CODE_SUBAGENT_MODEL: "claude-haiku-5-5",
+    CLAUDE_CODE_USE_POWERSHELL_TOOL: "1",
+    CLAUDE_CODE_USE_BEDROCK: "1",
+    CLAUDE_CODE_USE_VERTEX: "1",
+    CLAUDE_CODE_USE_FOUNDRY: "1",
+    CLAUDE_CODE_USE_MANTLE: "1",
+    CLAUDE_CODE_USE_ANTHROPIC_AWS: "1",
+    CLAUDE_CODE_SKIP_BEDROCK_AUTH: "1",
+    CLAUDE_CODE_SKIP_VERTEX_AUTH: "1",
+    CLAUDE_CODE_SKIP_FOUNDRY_AUTH: "1",
+    CLAUDE_CODE_SKIP_MANTLE_AUTH: "1",
+    CLAUDE_CODE_SKIP_ANTHROPIC_AWS_AUTH: "1",
+    CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST: "1",
+  };
+  it("blocks every provider switch, a future CLAUDE_CODE_USE_<provider> too", () => {
+    const env = workerEnv({ ...worker, CLAUDE_CODE_USE_SOMECLOUD: "1" });
+    for (const k of Object.keys(worker).filter((k) => /USE_(?!POWERSHELL)|SKIP_.*_AUTH|MANAGED_BY_HOST/.test(k))) {
+      expect(env[k], k).toBeUndefined();
+    }
+    expect(env.CLAUDE_CODE_USE_SOMECLOUD).toBeUndefined();
+  });
+  it("keeps the Claude vars a run needs, the one non-provider USE_ flag included", () => {
+    expect(workerEnv(worker)).toEqual({
+      PATH: "/usr/bin",
+      CLAUDE_CONFIG_DIR: "/cc",
+      CLAUDE_CODE_OAUTH_TOKEN: "oauth",
+      CLAUDE_CODE_SUBAGENT_MODEL: "claude-haiku-5-5",
+      CLAUDE_CODE_USE_POWERSHELL_TOOL: "1",
+    });
+    expect(RUN_ENV_BLOCKLIST.some((re) => re.test("CLAUDE_CONFIG_DIR"))).toBe(false);
   });
 });

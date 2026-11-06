@@ -7,7 +7,7 @@
  * the person must be told which proposal brings the button.
  *
  * Covers the pure line builder; that both apply paths print it is a call each
- * in `market.ts` (marketInstall, applyOnePackage) and is not asserted here.
+ * in `market.ts` (marketInstall) and is not asserted here.
  */
 import { describe, it, expect } from "vitest";
 import { deferredPlacementLines } from "../src/commands/market.js";

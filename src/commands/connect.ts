@@ -8,8 +8,9 @@
  * Usage:
  *   synap connect                         (interactive: an AI agent, or a tool/account?)
  *   synap connect cursor                  (a client → synap agents add cursor)
- *   synap connect gmail                   (anything else → synap cap connect gmail)
- *   synap connect gmail --tool            (force the tool reading when a name is both)
+ *   synap connect --tool gmail            (a tool or account → synap cap connect gmail)
+ *   synap connect cursor --tool           (the tool reading of a name that is also a client)
+ *   synap connect gmial                   (unknown name: stops, suggests the closest clients)
  *   synap connect claude-code --project <id>   (scope; default pod-wide)
  *   synap connect raycast                 (extension key + Raycast AI's HTTP MCP entry)
  *
@@ -20,6 +21,7 @@
 import prompts from "prompts";
 import { log, banner } from "../utils/logger.js";
 import { isTargetName, listTargets, type TargetName } from "../lib/targets.js";
+import { suggestTargets, unknownClientMessage } from "../lib/target-suggest.js";
 import { connectKnownAgent, resolveAgentPod } from "../lib/agent-door.js";
 
 interface ConnectOptions {
@@ -42,18 +44,21 @@ interface ConnectOptions {
 export type ConnectRoute =
   | { kind: "agent"; target: TargetName }
   | { kind: "tool"; name?: string }
+  | { kind: "unknown"; name: string; suggestions: TargetName[] }
   | { kind: "pick" };
 
 /**
- * A known agent client wins a name; everything else is a tool. `--tool`
- * forces the tool reading (and, with no name, opens the tool picker).
+ * A known agent client wins a name. A tool comes ONLY from `--tool` (with no
+ * name, it opens the tool picker). Any other name stops with the closest
+ * client names: a typo (`generic.`) must never be sent to the tools path,
+ * where it fails with a refusal that says nothing about the typo.
  */
 export function routeConnect(thing: string | undefined, opts: { tool?: boolean } = {}): ConnectRoute {
   const t = thing?.trim() || undefined;
   if (opts.tool) return { kind: "tool", name: t };
   if (!t) return { kind: "pick" };
   if (isTargetName(t)) return { kind: "agent", target: t };
-  return { kind: "tool", name: t };
+  return { kind: "unknown", name: t, suggestions: suggestTargets(t) };
 }
 
 export async function connect(thing: string | undefined, opts: ConnectOptions = {}): Promise<void> {
@@ -74,9 +79,18 @@ export async function connect(thing: string | undefined, opts: ConnectOptions = 
   };
   let route = routeConnect(thing ?? opts.target, { tool: opts.tool });
 
+  if (route.kind === "unknown") {
+    const [first, ...rest] = unknownClientMessage(route.name, route.suggestions);
+    log.error(first);
+    for (const line of rest) log.hint(line);
+    process.exitCode = 1;
+    return;
+  }
+
   if (route.kind === "pick") {
     if (!process.stdin.isTTY) {
-      log.error("Say what to connect: synap connect <client|tool>  (synap connect --list)");
+      log.error("Say what to connect: synap connect <client>, or synap connect --tool <service>.");
+      log.hint("All clients: synap connect --list");
       process.exitCode = 1;
       return;
     }

@@ -19,7 +19,6 @@
  */
 
 import chalk from "chalk";
-import { HubError } from "./hub-client.js";
 
 // ── Data changes ────────────────────────────────────────────────────────────
 
@@ -40,8 +39,6 @@ export interface DataChange {
   /** Destructive only: the command an operator runs (dry run first). */
   operatorCommand?: string;
 }
-
-export const DATA_CHANGES_CONSENT_CODE = "DATA_CHANGES_NEED_CONSENT";
 
 /**
  * Read `dataChanges` off a pod response.
@@ -127,52 +124,6 @@ export function parseUpdateProposal(row: Record<string, unknown>): { id: string 
   return raw && typeof raw.id === "string" && raw.id ? { id: raw.id } : null;
 }
 
-/** The data changes a 409 consent refusal carries, or null when the error is something else. */
-export function dataChangesFromRefusal(err: unknown): DataChange[] | null {
-  if (!(err instanceof HubError)) return null;
-  const body = err.body as Record<string, unknown> | undefined;
-  const code = err.code ?? (typeof body?.code === "string" ? body.code : undefined);
-  if (err.status !== 409 || code !== DATA_CHANGES_CONSENT_CODE) return null;
-  return parseDataChanges(body) ?? [];
-}
-
-/**
- * True when a 409 consent refusal is about WHO asked, not what was agreed: the
- * caller is an agent, and only a person can agree to a data change. The pod
- * says so with `needsPerson`; an older pod is read from its shape — it refuses
- * a person only for a missing agreement, so an empty `missing` beside an owed
- * agreeable change can only be an agent's refusal.
- */
-export function consentNeedsPerson(err: unknown): boolean {
-  if (dataChangesFromRefusal(err) === null) return false;
-  const body = (err as HubError).body as Record<string, unknown> | undefined;
-  if (typeof body?.needsPerson === "boolean") return body.needsPerson;
-  const owed = parseDataChanges(body) ?? [];
-  return Array.isArray(body?.missing) && body.missing.length === 0 && owed.some((d) => !d.destructive);
-}
-
-/**
- * The pod's two other data-change refusals, in plain words. `null` for any
- * other error (the caller's generic failure path renders those).
- * - 403 `DATA_CHANGES_NEED_POD_ADMIN`: you agreed, but a data change rewrites
- *   its kind pod-wide, so only a pod owner or admin may run it.
- * - 409 `DATA_CHANGES_FAILED`: a change failed mid-run; the template was NOT
- *   applied. Changes that ran stay applied, so a re-run lists only the rest.
- */
-export function dataChangeRefusalMessage(err: unknown): string | null {
-  if (!(err instanceof HubError)) return null;
-  const body = err.body as Record<string, unknown> | undefined;
-  const code = err.code ?? (typeof body?.code === "string" ? body.code : undefined);
-  if (err.status === 403 && code === "DATA_CHANGES_NEED_POD_ADMIN") {
-    return "Its data changes rewrite records across the whole pod, so only a pod owner or admin can run them. Nothing was written.";
-  }
-  if (err.status === 409 && code === "DATA_CHANGES_FAILED") {
-    const detail = typeof body?.error === "string" && body.error.trim() ? ` ${body.error.trim()}` : "";
-    return `A data change failed, so the template was not applied.${detail} The changes that ran stay done; run the update again to finish.`;
-  }
-  return null;
-}
-
 function countPhrase(n: number | null): string {
   if (n === null) return "count not reported";
   return `${n} ${n === 1 ? "record" : "records"}`;
@@ -253,35 +204,6 @@ export function decideConsent(
 export function consentRerunCommand(slug: string, changes: DataChange[]): string {
   const keys = changes.filter((d) => !d.destructive).map((d) => d.opKey);
   return `synap templates update ${slug} --accept-data-changes ${keys.join(",")}`;
-}
-
-/**
- * What the CLI says when the pod refuses an update for its data changes (409
- * `DATA_CHANGES_NEED_CONSENT`). `person` = `consentNeedsPerson`: the refusal is
- * about WHO ran it. The person may well be at this terminal with an agent key
- * configured, so the hint says how to tell: `synap whoami` must say
- * "Is agent: no" for the agreement to count.
- */
-export function consentRefusalLines(
-  name: string,
-  slug: string,
-  owed: DataChange[],
-  person: boolean
-): { warn: string; hints: string[] } {
-  const warn = person
-    ? `${name} was not updated: only a person can agree to its data changes, and this ran with an agent's key. Nothing was written.`
-    : `${name} was not updated: it carries data changes you have not agreed to. Nothing was written.`;
-  if (!owed.some((d) => !d.destructive)) return { warn, hints: [] };
-  const rerun = consentRerunCommand(slug, owed);
-  return {
-    warn,
-    hints: person
-      ? [
-          `A person runs, in their own terminal: ${rerun}`,
-          "Check the key first: `synap whoami` must say Is agent: no.",
-        ]
-      : [`To agree and update: ${rerun}`],
-  };
 }
 
 // ── Template lifecycle (retired / unlisted / unknown) ───────────────────────

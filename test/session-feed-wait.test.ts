@@ -18,6 +18,7 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 import {
   SessionFeedReadFailure,
   SessionMessagesUnsupportedError,
+  WAKE_HOOK_DEFAULT_KINDS,
   isWakeEvent,
   renderFeedEvent,
   waitForSessionFeed,
@@ -159,6 +160,33 @@ describe("isWakeEvent", () => {
     expect(isWakeEvent(mail("c", "t", "fyi", false))).toBe(false);
     expect(isWakeEvent({ kind: "owner_message", id: "o", at: "t", untrusted: true, fenced: "f", message: { id: "o", text: "x", authorId: "u" } })).toBe(true);
     expect(isWakeEvent({ kind: "stage_moved", id: "s", at: "t", from: "a", to: "b" })).toBe(false);
+  });
+
+  // Backend plan 07f8a997 W1: the pod stamps `wake` on every event; the CLI
+  // keeps no kind list of its own.
+  it("rings on the pod's `wake` verdict when the event carries one, whatever its kind", () => {
+    const ev = (kind: string, wake?: boolean) =>
+      ({ kind, id: kind, at: "t", ...(wake === undefined ? {} : { wake }) }) as unknown as SessionFeedEvent;
+    for (const kind of ["blocker_ended", "pr_merged", "checks_finished", "status_moved", "signal_raised", "proposal_decided"]) {
+      expect(isWakeEvent(ev(kind, true)), kind).toBe(true);
+      expect(isWakeEvent(ev(kind, false)), kind).toBe(false);
+    }
+    // An answer the reading agent relayed itself: the pod says false, and that wins.
+    expect(isWakeEvent(ev("answer", false))).toBe(false);
+    expect(isWakeEvent(ev("owner_message", false))).toBe(false);
+    expect(isWakeEvent(ev("stage_moved", true))).toBe(true);
+  });
+
+  it("on a pod that sends no `wake`, falls back to the person's words and marked mail", () => {
+    const ev = (kind: string) => ({ kind, id: kind, at: "t" }) as unknown as SessionFeedEvent;
+    expect(isWakeEvent(ev("answer"))).toBe(true);
+    expect(isWakeEvent(ev("owner_message"))).toBe(true);
+    expect(isWakeEvent(ev("blocker_ended"))).toBe(false);
+    expect(isWakeEvent(ev("pr_merged"))).toBe(false);
+  });
+
+  it("the hook asks the feed for every kind: which ring is the pod's call", () => {
+    expect([...WAKE_HOOK_DEFAULT_KINDS]).toEqual(["all"]);
   });
 });
 

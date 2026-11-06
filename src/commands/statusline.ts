@@ -43,7 +43,7 @@ import { resolveHubConfig, hubGet } from "../lib/hub-client.js";
 import { resolveActiveLens } from "../lib/session-lens.js";
 import { describeLens } from "../lib/describe-lens.js";
 import { getSurfaceAgentKey, SURFACE_NAMES } from "../lib/pod.js";
-import { buildNowLine, readRegistry } from "../lib/now-line.js";
+import { age, buildNowLine, readRegistry } from "../lib/now-line.js";
 import { buildBridgeLine, readBridgeStatus } from "../lib/bridge-status.js";
 import {
   defaultTranscriptPath,
@@ -53,20 +53,26 @@ import {
   updateIndex,
   type TranscriptIndex,
 } from "../lib/transcript-index.js";
+import { convCachePath, convLockPath, podCacheFile, podLockFile, writeStatuslineFile } from "../lib/statusline-store.js";
 import { pidAlive, pruneWaits, readWaits } from "../lib/wait-state.js";
+import {
+  BOLD_BLUE as BB,
+  BOLD_GREEN as G,
+  BOLD_RED as R,
+  BOLD_YELLOW as Y,
+  CYAN as C,
+  DIM as D,
+  MAGENTA as M,
+  RESET as X,
+  osc8,
+  safeText,
+} from "../lib/term.js";
 
-const CACHE_FILE = "/tmp/synap-statusline-cache.json"; // pod-wide fields, shared by every conversation
-const LOCK_FILE = "/tmp/synap-statusline-refresh.lock";
-/** A session id as a file-name part. */
-function convKey(claudeSessionId: string | undefined): string {
-  return (claudeSessionId ?? "").replace(/[^A-Za-z0-9_-]/g, "") || "_nosession";
-}
-export function convCacheFile(claudeSessionId: string | undefined): string {
-  return `/tmp/synap-statusline-conv-${convKey(claudeSessionId)}.json`;
-}
-function convLockFile(claudeSessionId: string | undefined): string {
-  return `/tmp/synap-statusline-conv-${convKey(claudeSessionId)}.lock`;
-}
+// Caches and locks live under ~/.synap/statusline/ (0700, files 0600; lib/statusline-store.ts), never /tmp.
+const CACHE_FILE = podCacheFile(); // pod-wide fields, shared by every conversation
+const LOCK_FILE = podLockFile();
+export const convCacheFile = convCachePath;
+const convLockFile = convLockPath;
 /** Render reads at most this many new transcript bytes; more is left to the detached refresh. */
 const RENDER_TRANSCRIPT_BYTES = 2 * 1024 * 1024;
 // The pod sits behind a strict edge rate-limiter (15-min window) shared with
@@ -77,21 +83,8 @@ const RENDER_TRANSCRIPT_BYTES = 2 * 1024 * 1024;
 const REFRESH_TTL_MS = 120_000;
 const LOCK_STALE_MS = 30_000; // a lock older than this is considered dead
 
-// ── ANSI + OSC 8 helpers ───────────────────────────────────────────────
-
-const G = "\x1b[01;32m"; // green bold
-const Y = "\x1b[01;33m"; // yellow bold
-const R = "\x1b[01;31m"; // red bold
-const C = "\x1b[36m"; // cyan
-const BB = "\x1b[01;34m"; // bold blue — used for the pinned PROJECT (prominence)
-const M = "\x1b[35m"; // magenta
-const D = "\x1b[2m"; // dim
-const X = "\x1b[0m"; // reset
-
-function osc8(url: string, text: string): string {
-  if (!url) return text;
-  return `\x1b]8;;${url}\x1b\\${text}\x1b]8;;\x1b\\`;
-}
+// ── Colour helpers (codes and OSC 8 in lib/term.ts) ────────────────────
+// BB, bold blue, is the pinned PROJECT's colour (prominence).
 
 function ctxColor(pct: number): string {
   if (pct >= 80) return R;
@@ -139,6 +132,14 @@ interface PodCache {
   needsYouCount: number;
   needsYouTruncated: boolean; // the pod's count is a floor (a scan hit its cap)
   needsYouFetched: boolean; // false only until the first successful refresh ever completes
+  /**
+   * When `needsYouCount` was last MEASURED (ms). A failed read keeps the
+   * count and this time, so the line can say how old the number is instead
+   * of passing it off as fresh. Absent = a cache an older CLI wrote.
+   */
+  needsYouAt?: number;
+  /** Whether the latest attempt read the count (false = the number shown is an older one). Absent = older CLI. */
+  needsYouOk?: boolean;
   sessionGoal: string;
   sessionId: string;
   totalEntities: number;
@@ -199,7 +200,7 @@ function lockIsFresh(file = LOCK_FILE): boolean {
 function takeLock(file: string): boolean {
   if (lockIsFresh(file)) return false; // another refresh owns the window
   try {
-    fs.writeFileSync(file, String(process.pid));
+    writeStatuslineFile(file, String(process.pid));
   } catch {
     /* ignore */
   }
@@ -319,7 +320,7 @@ async function refreshShared(cfg: Cfg | null, prev: PodCache | null): Promise<vo
     const ambientMatchesExpected = Boolean(ambientKey && surfaceKey && ambientKey === surfaceKey.hubApiKey);
     const needsIdentityCheck = Boolean(expectedAgentUserId && ambientKey && !ambientMatchesExpected);
     const identityReq = needsIdentityCheck
-      ? hubGet("/users/me", {}, { podUrl: cfg.podUrl, apiKey: ambientKey as string, userId: "cli" })
+      ? hubGet("/users/me", {}, { podUrl: cfg.podUrl, apiKey: ambientKey as string })
       : Promise.resolve(null);
 
     // Needs you — the one actionable ambient signal, counted by the pod's own
@@ -364,11 +365,13 @@ async function refreshShared(cfg: Cfg | null, prev: PodCache | null): Promise<vo
       }
     }
 
-    // A failed or malformed read keeps the last-good count (unknown until one
-    // has ever succeeded); only a well-shaped `count` is a measurement.
+    // A failed or malformed read keeps the last-good count AND its time, and
+    // says it failed (`needsYouOk: false`): render then shows it as old, never
+    // as fresh. Only a well-shaped `count` is a measurement.
     const read = needsYou.status === "fulfilled" ? parseNeedsYouCount(needsYou.value) : null;
     const needsYouCount = read ? read.count : prev?.needsYouCount ?? 0;
     const needsYouTruncated = read ? read.truncated : prev?.needsYouTruncated ?? false;
+    const needsYouAt = read ? Date.now() : prev?.needsYouAt ?? 0;
 
     const out: SharedCache = {
       ts: Date.now(),
@@ -380,12 +383,14 @@ async function refreshShared(cfg: Cfg | null, prev: PodCache | null): Promise<vo
       needsYouCount,
       needsYouTruncated,
       needsYouFetched: read !== null || (prev?.needsYouFetched ?? false),
+      needsYouAt,
+      needsYouOk: read !== null,
       totalEntities,
       actingAgentLabel,
       identityMismatch,
     };
 
-    fs.writeFileSync(CACHE_FILE, JSON.stringify(out));
+    writeStatuslineFile(CACHE_FILE, JSON.stringify(out));
   } catch {
     // Preserve last good cache, mark it not-ok so render can dim the dot, and
     // STAMP THE ATTEMPT: without it the next render refreshes immediately and a
@@ -394,7 +399,7 @@ async function refreshShared(cfg: Cfg | null, prev: PodCache | null): Promise<vo
     // With no previous cache at all, write the empty one for the same reason.
     try {
       const failed = { ...(prev ?? emptyCache()), ok: false, attemptedTs: Date.now() };
-      fs.writeFileSync(CACHE_FILE, JSON.stringify(failed));
+      writeStatuslineFile(CACHE_FILE, JSON.stringify(failed));
     } catch {}
   }
 }
@@ -452,8 +457,9 @@ async function refreshConv(cfg: Cfg | null, prev: ConvCache | null, file: string
     let projectName = resolvedProjectId ? prev?.projectName ?? "" : "";
     const projectId = resolvedProjectId ?? "";
     if (project.status === "fulfilled" && project.value) {
-      const p = (project.value as { projects?: Array<{ id: string; name: string }> })?.projects?.find((x) => x.id === resolvedProjectId);
-      projectName = p?.name?.slice(0, 30) ?? "";
+      // The single-row route answers the row itself ({ id, name, … }).
+      const name = (project.value as { name?: unknown }).name;
+      projectName = typeof name === "string" ? name.slice(0, 30) : "";
     }
 
     const out: ConvCache = {
@@ -467,11 +473,11 @@ async function refreshConv(cfg: Cfg | null, prev: ConvCache | null, file: string
       sessionGoal,
       sessionId,
     };
-    fs.writeFileSync(file, JSON.stringify(out));
+    writeStatuslineFile(file, JSON.stringify(out));
   } catch {
     // Same backoff as the shared cache: keep the last good values, stamp the attempt.
     try {
-      fs.writeFileSync(file, JSON.stringify({ ...(prev ?? emptyConv()), ok: false, attemptedTs: Date.now() }));
+      writeStatuslineFile(file, JSON.stringify({ ...(prev ?? emptyConv()), ok: false, attemptedTs: Date.now() }));
     } catch {}
   }
 }
@@ -539,15 +545,20 @@ function render(): void {
   // file — a shared cache written by an older CLI carries another
   // conversation's session and project, which must not show here.
   const c = conv ?? emptyConv();
+  const base: PodCache = { ...emptyCache(), ...(shared ?? {}) };
+  // Every pod string is scrubbed of control characters here, before any of it
+  // reaches the terminal (lib/term.ts): a name holding ESC or OSC 8 would
+  // otherwise recolour the line or plant a link of its own.
   const pod: PodCache = {
-    ...emptyCache(),
-    ...(shared ?? {}),
-    activeWorkspaceId: c.activeWorkspaceId,
-    projectName: c.projectName,
-    projectId: c.projectId,
-    sessionGoal: c.sessionGoal,
-    sessionId: c.sessionId,
-    podUrl: shared?.podUrl || c.podUrl,
+    ...base,
+    workspaces: (Array.isArray(base.workspaces) ? base.workspaces : []).map((w) => ({ ...w, name: safeText(String(w.name ?? "")) })),
+    actingAgentLabel: safeText(String(base.actingAgentLabel ?? "")),
+    activeWorkspaceId: safeText(String(c.activeWorkspaceId ?? "")),
+    projectName: safeText(String(c.projectName ?? "")),
+    projectId: safeText(String(c.projectId ?? "")),
+    sessionGoal: safeText(String(c.sessionGoal ?? "")),
+    sessionId: safeText(String(c.sessionId ?? "")),
+    podUrl: safeText(String(shared?.podUrl || c.podUrl || "")),
   };
 
   // ── Claude Code fields ───────────────────────────────────────────────
@@ -636,21 +647,7 @@ function render(): void {
     const sg = pod.sessionId ? osc8(`synap://open/session/${pod.sessionId}`, pod.sessionGoal) : pod.sessionGoal;
     l2.push(`${D}▸${X} ${Y}${sg}${X}`);
   }
-  if (pod.needsYouCount > 0) {
-    // cmd/ctrl-click opens the review queue via the pod's /open bounce (bare
-    // `proposals` keyword): the one door the pod URL alone reaches. Pod admin's
-    // Home lists every needs-you kind, but it lives on its own host.
-    const needsYouLink = pod.podUrl ? `${pod.podUrl}/open/proposals` : "";
-    const label = `${pod.needsYouCount}${pod.needsYouTruncated ? "+" : ""} need you`;
-    l2.push(`${D}↳${X} ${Y}${needsYouLink ? osc8(needsYouLink, label) : label}${X}`);
-  } else if (pod.needsYouFetched) {
-    // Genuinely fetched and empty — distinct from "never fetched" so the line
-    // never silently omits a signal a user might mistake for "not checked yet".
-    l2.push(`${D}↳ 0 need you${X}`);
-  } else {
-    // No successful refresh has completed yet (fresh cache / all refreshes failed).
-    l2.push(`${D}↳ need you —${X}`);
-  }
+  l2.push(needsYouSegment(pod, Date.now()));
   console.log(l2.join(" · "));
 
   // ─═─ LINE 3 — cost · rate limits · session stats ─═─────────────────────
@@ -664,6 +661,8 @@ function render(): void {
     l3.push(`${D}5h${X} ${rateColor(fhPct)}${Math.round(fhPct)}%${X}`);
   }
   if (sdPct !== undefined) l3.push(`${D}7d${X} ${rateColor(sdPct)}${Math.round(sdPct)}%${X}`);
+  const account = claudeSwitchSegment(process.env, claudeSessionId);
+  if (account) l3.push(account);
   if (fhReset !== undefined && (fhPct ?? 0) >= 60) {
     const rem = fhReset - Math.floor(Date.now() / 1000);
     if (rem > 0) l3.push(`${D}resets ${Math.floor(rem / 3600)}h${String(Math.floor((rem % 3600) / 60)).padStart(2, "0")}${X}`);
@@ -695,6 +694,68 @@ function render(): void {
     alive: pidAlive,
   });
   console.log(bridge?.status === "failed" ? `${line} ${D}· ⚑ bridge status ${bridge.why}${X}` : line);
+}
+
+// ── ClaudeSwitch account (line 3, beside the usage it belongs to) ───────
+
+/** The account segment shows at or below this much left. */
+const ACCOUNT_LOW_PCT = 20;
+
+/**
+ * ClaudeSwitch exports `CLAUDE_SWITCH_STATUS="<label> <N>% left"`. Drawn only
+ * when this session was moved (`CLAUDE_SWITCH_MOVED` = `<account it left>:<session id>`
+ * ends with this session's id) or N is at or below 20; otherwise, and when the
+ * value is unset or has no number, nothing (the line renders as it always did).
+ */
+export function claudeSwitchSegment(env: NodeJS.ProcessEnv, sessionId: string | undefined): string {
+  const m = /^(.*?)\s*(\d{1,3})% left\s*$/.exec(env.CLAUDE_SWITCH_STATUS ?? "");
+  if (!m) return "";
+  const left = Number(m[2]);
+  if (left > 100) return "";
+  const moved = env.CLAUDE_SWITCH_MOVED ?? "";
+  const wasMoved = Boolean(sessionId) && moved.endsWith(`:${sessionId}`);
+  if (!wasMoved && left > ACCOUNT_LOW_PCT) return "";
+  const label = safeText(m[1]!.trim());
+  return `${label ? `${D}${label}${X} ` : ""}${rateColor(100 - left)}${left}% left${X}`;
+}
+
+// ── Needs you (line 2) ─────────────────────────────────────────────────
+
+/**
+ * Where "N need you" opens: the desktop's Inbox, the whole pod — the page
+ * the browser opens for needs-you (its Home door, and the landing of every
+ * older needs-you link: browser `navigation/resolveDeepLink.test.ts`), whose
+ * rows are the same rule the count is (`GET /needs-you`). Named directly:
+ * the pod's `/open/proposals` bounce reached it only through two retired
+ * aliases (proposals → governance → inbox), and its "View in browser"
+ * fallback is pod admin's review queue, a subset of the count.
+ */
+export const NEEDS_YOU_LINK = "synap://open/app/inbox?scope=pod";
+
+type NeedsYouFields = Pick<
+  PodCache,
+  "ok" | "ts" | "needsYouCount" | "needsYouTruncated" | "needsYouFetched" | "needsYouAt" | "needsYouOk"
+>;
+
+/**
+ * Line 2's needs-you segment. A count is drawn as fresh only when the latest
+ * attempt read it and it is younger than the pod dot's own staleness bound;
+ * otherwise it is dimmed and says how old it is (`⚑ 12m old`), or that its
+ * age is unknown (`⚑ not read`). Never measured is `need you —`, never 0.
+ */
+export function needsYouSegment(pod: NeedsYouFields, now: number): string {
+  if (!pod.needsYouFetched) return `${D}↳ need you —${X}`; // no read has ever succeeded
+  const label = `${pod.needsYouCount}${pod.needsYouTruncated ? "+" : ""} need you`;
+  // A cache from an older CLI has no measurement time: its `ts` is the claim it made.
+  const at = pod.needsYouAt ?? pod.ts;
+  const fresh = pod.ok && pod.needsYouOk !== false && at > 0 && now - at <= REFRESH_TTL_MS * 3;
+  if (!fresh) {
+    const old = at > 0 ? `⚑ ${age(now - at)} old` : "⚑ not read";
+    return `${D}↳ ${pod.needsYouCount > 0 ? osc8(NEEDS_YOU_LINK, label) : label} · ${old}${X}`;
+  }
+  // Genuinely fetched and empty — distinct from "never fetched".
+  if (pod.needsYouCount === 0) return `${D}↳ 0 need you${X}`;
+  return `${D}↳${X} ${Y}${osc8(NEEDS_YOU_LINK, label)}${X}`;
 }
 
 // ── Entry ──────────────────────────────────────────────────────────────

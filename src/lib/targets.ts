@@ -9,6 +9,7 @@
  *   - how to render a one-shot install for the given pod + API key
  */
 
+import { agentTemplateFor } from "./agent-template.js";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -19,6 +20,7 @@ import chalk from "chalk";
 import ora from "ora";
 import prompts from "prompts";
 import { log } from "../utils/logger.js";
+import { isPresenceRefusal, needsYouInPodAdmin } from "./presence-refusal.js";
 import {
   writeSecretFile,
   ensureSecretDir,
@@ -28,6 +30,7 @@ import {
 } from "./atomic-file.js";
 import { redactKey, mcpRemoteArgs, MCP_REMOTE_PACKAGE } from "./mcp-snippets.js";
 import { MANAGED_MCP_URL } from "./auth.js";
+import { explainPodError, agentsPageOf } from "./pod-errors.js";
 import { installSkills, getDeliverableSkills } from "./skills-installer.js";
 import { TARGET_KEY_MINT, takePreApprovedKey } from "./batch-approval.js";
 import { agentTypeOfSurface, machineInstanceId, machineInstanceLabel } from "./machine-instance.js";
@@ -406,7 +409,8 @@ export function clientKeyFiles(): ClientKeyFile[] {
 }
 
 export function isTargetName(value: string): value is TargetName {
-  return value in TARGETS;
+  // Own keys only: `"constructor" in TARGETS` is true.
+  return Object.prototype.hasOwnProperty.call(TARGETS, value);
 }
 
 // ─── Workspace helpers ────────────────────────────────────────────────────────
@@ -803,7 +807,7 @@ export async function writeClaudeCodeEnv(
   });
   if (!meRes.ok) {
     if (meRes.status === 401)
-      throw new Error(credentialError("claude-code", 401, await meRes.text().catch(() => "")));
+      throw new Error(credentialError("claude-code", 401, await meRes.text().catch(() => ""), cfg.podUrl));
     throw new Error(`Could not reach pod at ${cfg.podUrl} (HTTP ${meRes.status}). Check your pod URL and API key.`);
   }
   const me = await meRes.json() as { id?: string; scopes?: string[] };
@@ -902,6 +906,8 @@ export async function writeClaudeCodeEnv(
 export function registerClaudeCodeMcp(mcpUrl: string, apiKey: string, serverName: string): void {
   const header = `Authorization: Bearer ${apiKey}`;
   const bridge = claudeCodeMcpTransport() === "bridge";
+  const invocation = bridge ? resolveBridgeInvocation() : null;
+  const bridgeCommand = invocation ? synapBridgeCommand(mcpUrl, invocation) : [];
   try {
     // Remove legacy single-name entry and any prior pod-derived name.
     for (const name of new Set(["synap", serverName])) {
@@ -919,13 +925,15 @@ export function registerClaudeCodeMcp(mcpUrl: string, apiKey: string, serverName
           // server's env, as the header does for http.
           // `-e` is variadic in Claude Code's CLI: the server name must come
           // BEFORE it, or `-e` swallows it as an env var.
-          ["mcp", "add", "--scope", "user", serverName, "-e", `SYNAP_MCP_API_KEY=${apiKey}`, "--", ...synapBridgeCommand(mcpUrl)]
+          ["mcp", "add", "--scope", "user", serverName, "-e", `SYNAP_MCP_API_KEY=${apiKey}`, "--", ...bridgeCommand]
         : ["mcp", "add", "--transport", "http", serverName, mcpUrl, "--header", header, "--scope", "user"],
       { stdio: "ignore" }
     );
     log.success(
       `MCP server '${serverName}' registered with Claude Code (\`claude mcp add\`, user scope${bridge ? ", via the synap stdio bridge" : ""}). Relaunch Claude Code to load the tools.`
     );
+    const note = invocation && bridgeInvocationNote(invocation);
+    if (note) log.dim(note);
     if (serverName !== "synap") {
       log.dim(
         "Multi-pod: connect each profile separately — server names are derived from the pod host so they don't overwrite:"
@@ -947,7 +955,7 @@ export function registerClaudeCodeMcp(mcpUrl: string, apiKey: string, serverName
       log.dim(`  source ${keyFile}`);
       log.dim(
         bridge
-          ? `  claude mcp add --scope user ${serverName} -e SYNAP_MCP_API_KEY="$SYNAP_MCP_KEY" -- ${synapBridgeCommand(mcpUrl).map(shellQuote).join(" ")}`
+          ? `  claude mcp add --scope user ${serverName} -e SYNAP_MCP_API_KEY="$SYNAP_MCP_KEY" -- ${bridgeCommand.map(shellQuote).join(" ")}`
           : `  claude mcp add --transport http ${serverName} ${mcpUrl} --header 'Authorization: Bearer \${SYNAP_MCP_KEY}' --scope user`
       );
     } catch {
@@ -1005,42 +1013,101 @@ export function setClaudeCodeMcpTransport(transport: "http" | "bridge"): string 
 }
 
 /**
- * The command Claude Code spawns for the bridge: THIS CLI by absolute path (the
- * one running `use-bridge` is the one known to have the bridge — a `synap` on
- * PATH may be an older install without it), unless this run is a throwaway
- * `npx` copy, whose cache path can vanish; then the `synap` on PATH.
+ * Which copy of the CLI is running, and the entry Claude Code should spawn for
+ * the bridge. The one running `use-bridge` is the one known to have the
+ * bridge (a `synap` on PATH may be an older install without it), so it is
+ * named by absolute path, with one rule on WHICH path:
+ *
+ *   installed — an npm install (`npm i -g @synap-core/cli`): the bin npm put
+ *               on PATH (`<prefix>/bin/synap`), never its resolved target, so
+ *               the next `npm i -g` is what the bridge runs, with no
+ *               re-registration.
+ *   linked    — the same bin, but the install is a link to a source checkout
+ *               (`npm link`): registered the same way, and said.
+ *   checkout  — run straight from a checkout build (`node …/dist/index.js`):
+ *               kept, and said, since nothing installed is running.
+ *   npx       — a throwaway `npx` copy, whose cache path can vanish: the
+ *               `synap` on PATH.
+ *
+ * Until 2026-11-02 every case registered the resolved path, so a global
+ * install that was an `npm link` wrote the checkout's `dist/index.js` into
+ * `~/.claude.json`, and the bridge followed that checkout from then on.
  */
-function synapBridgeCommand(mcpUrl: string): string[] {
-  const args = ["mcp", "bridge", "--url", mcpUrl];
-  const self = process.argv[1];
-  if (self && !self.includes(`${path.sep}_npx${path.sep}`)) {
-    return [process.execPath, fs.realpathSync(self), ...args];
+export interface BridgeInvocation {
+  kind: "installed" | "linked" | "checkout" | "npx";
+  /** argv for Claude Code to spawn, before `mcp bridge …`. */
+  command: string[];
+  /** Where the code actually runs from (the resolved entry). */
+  realEntry?: string;
+}
+
+export function resolveBridgeInvocation(
+  self: string | undefined = process.argv[1],
+  execPath: string = process.execPath
+): BridgeInvocation {
+  const nm = `${path.sep}node_modules${path.sep}`;
+  if (!self || self.includes(`${path.sep}_npx${path.sep}`)) return { kind: "npx", command: ["synap"] };
+  const entry = path.resolve(self);
+  const realEntry = fs.realpathSync(entry);
+  const isLink = fs.lstatSync(entry).isSymbolicLink();
+  if (!isLink && !entry.includes(nm)) return { kind: "checkout", command: [execPath, realEntry], realEntry };
+  // Run through the package path (`<prefix>/lib/node_modules/@synap-core/cli/dist/index.js`):
+  // the bin npm installed next to it, when it leads to this same entry.
+  let installed = entry;
+  const pkgDir = `${nm}@synap-core${path.sep}cli${path.sep}`;
+  const at = entry.lastIndexOf(pkgDir);
+  if (!isLink && at >= 0) {
+    const prefix = entry.slice(0, at);
+    const bins = [
+      path.join(path.dirname(prefix), "bin", "synap"), // global: <prefix>/lib/node_modules → <prefix>/bin
+      path.join(prefix, "node_modules", ".bin", "synap"), // local: <dir>/node_modules → <dir>/node_modules/.bin
+    ];
+    for (const bin of bins) {
+      try {
+        if (fs.realpathSync(bin) === realEntry) {
+          installed = bin;
+          break;
+        }
+      } catch {
+        /* no such bin — try the next */
+      }
+    }
   }
-  return ["synap", ...args];
+  return { kind: realEntry.includes(nm) ? "installed" : "linked", command: [execPath, installed], realEntry };
+}
+
+/** The command Claude Code spawns for the bridge (see `resolveBridgeInvocation`). */
+function synapBridgeCommand(mcpUrl: string, invocation: BridgeInvocation): string[] {
+  return [...invocation.command, "mcp", "bridge", "--url", mcpUrl];
+}
+
+/** One line on what the bridge runs, when it is not an installed release. */
+export function bridgeInvocationNote(invocation: BridgeInvocation): string | null {
+  const install = "To run a release instead: `npm install -g @synap-core/cli@next`, then `synap mcp use-bridge`.";
+  if (invocation.kind === "checkout") {
+    return `The MCP bridge runs this checkout build (${invocation.realEntry}), not an installed CLI. ${install}`;
+  }
+  if (invocation.kind === "linked") {
+    return `The MCP bridge runs the installed \`synap\` (${invocation.command[1]}), which is a link to a checkout (${invocation.realEntry}). ${install}`;
+  }
+  return null;
 }
 
 // ─── Agent key provisioning helper ──────────────────────────────────────────
 
 /**
- * Build an actionable error for a failed agent-key provision. A 401 here almost
- * always means the pod key saved by `synap login` is expired or REVOKED (the
- * `/setup/agent` endpoint accepts a CP JWT, a provisioning token, or a Hub key
- * with the `setup.agent` scope) — so the fix is to re-authenticate, NOT to fiddle
- * with scopes. Don't mislead with "needs hub-protocol.write".
+ * The error for a failed agent-key provision: one line saying what happened
+ * and the one next step, from the ONE code-to-text map (`pod-errors.ts`).
+ * "Reconnect" only on a 401 (the saved key is invalid, expired or revoked):
+ * for a 400 or a 403 a reconnect only mints another computer key, which
+ * cannot help. The pod's raw JSON is never shown.
  */
-function credentialError(agentType: string, status: number, body: string): string {
-  if (status === 401) {
-    return (
-      `Can't provision the agent key for ${agentType} (HTTP 401): your saved pod key is invalid, expired, or revoked.\n` +
-      `Fix: run \`synap login --reconnect\` to re-authenticate this pod and mint a fresh key, then retry.\n` +
-      `(Plain \`synap login\` only health-checks — it won't refresh a revoked key.)\n` +
-      (body ? `Server said: ${body}` : "")
-    );
-  }
-  return (
-    `Failed to provision agent key for ${agentType} (HTTP ${status}): ${body}\n` +
-    `If this persists, re-authenticate with \`synap login --reconnect\`.`
-  );
+export function credentialError(agentType: string, status: number, body: string, podUrl?: string): string {
+  const known = isTargetName(agentType);
+  // "Grok (Grok Build TUI)" → "Grok": the name is said up to three times.
+  const label = known ? TARGETS[agentType].label.replace(/\s*\(.*\)$/, "") : agentType;
+  const { line, next } = explainPodError({ status, body, client: agentType, clientLabel: label, knownClient: known, podUrl });
+  return `Could not connect ${label}. ${line}\n${next}`;
 }
 
 /** Open an http(s) URL in the browser — argv only, never a shell (`safe-open.ts`). */
@@ -1083,6 +1150,7 @@ export async function provisionAgentKey(
     instanceId,
     fallbackCandidate,
     toolProfile,
+    job,
   }: {
     requireApproval?: boolean;
     idempotent?: boolean;
@@ -1107,11 +1175,20 @@ export async function provisionAgentKey(
      * live key reused by `idempotent` keeps whatever it lists.
      */
     toolProfile?: AgentKeyToolProfile;
+    /**
+     * The agent's JOB (0395): `role` its slug, `roleLabel` its name. Sent only
+     * when set, and only to a pod that knows jobs: the caller checks the pod's
+     * mark first (`pod-features.ts`), since an older pod ignores both and
+     * would mint for the engine's PLAIN agent.
+     */
+    job?: { role: string; roleLabel?: string };
   } = {}
 ): Promise<{
   hubApiKey: string;
   agentUserId: string;
   reused: boolean;
+  /** The new key's id on the pod, when the pod named it (a key that waited for approval). */
+  keyId?: string;
   /** Set only with `deferApproval`: the key is minted but not yet approved. */
   pending?: { pendingToken: string; reviewUrl: string };
 }> {
@@ -1123,6 +1200,7 @@ export async function provisionAgentKey(
   }
   const surface = surfaceName ?? agentType;
   const instance = instanceId ?? machineInstanceId(surface);
+  const template = agentTemplateFor(agentType);
   const podBase = podUrl.replace(/\/$/, "");
   const pod = await import("./pod.js");
 
@@ -1134,7 +1212,7 @@ export async function provisionAgentKey(
     const now = await classifyRecordedPending(recorded);
     if (now.kind === "active") {
       pod.clearPendingAgentKey(surface, podUrl);
-      return { hubApiKey: recorded.hubApiKey, agentUserId: recorded.agentUserId, reused: true };
+      return { hubApiKey: recorded.hubApiKey, agentUserId: recorded.agentUserId, reused: true, keyId: recorded.keyId };
     }
     if (now.kind === "pending" || now.kind === "unknown") {
       if (deferApproval) {
@@ -1154,7 +1232,7 @@ export async function provisionAgentKey(
         pendingToken: recorded.keyId,
         approvalUrl: now.state.approvalUrl ?? recorded.approvalUrl,
       });
-      return { hubApiKey: recorded.hubApiKey, agentUserId: recorded.agentUserId, reused: true };
+      return { hubApiKey: recorded.hubApiKey, agentUserId: recorded.agentUserId, reused: true, keyId: recorded.keyId };
     }
     pod.clearPendingAgentKey(surface, podUrl); // dead: file a fresh request below
   }
@@ -1181,6 +1259,11 @@ export async function provisionAgentKey(
         instanceId: instance,
         instanceLabel: machineInstanceLabel(),
         ...(toolProfile ? { toolProfile } : {}),
+        ...(job ? { role: job.role, ...(job.roleLabel ? { roleLabel: job.roleLabel } : {}) } : {}),
+        // The agent template this type is an instance of (D9), from the
+        // installed catalog: the pod applies it with the SAME approval that
+        // connects the agent. An older pod ignores it; none found = none sent.
+        ...(template ? { template } : {}),
       }),
       signal: AbortSignal.timeout(30000),
     });
@@ -1192,7 +1275,7 @@ export async function provisionAgentKey(
   }
   if (!res.ok) {
     const text = await res.text().catch(() => res.statusText);
-    throw new Error(credentialError(agentType, res.status, text));
+    throw new Error(credentialError(agentType, res.status, text, podUrl));
   }
   const body = await res.json() as {
     hubApiKey?: string;
@@ -1259,6 +1342,7 @@ export async function provisionAgentKey(
       deferApproval,
       instanceId: instance,
       toolProfile,
+      job,
     });
   }
   if (!body.hubApiKey) {
@@ -1302,7 +1386,7 @@ export async function provisionAgentKey(
       approvalUrl: body.reviewUrl,
     });
     log.success(`  Approved! Writing ${agentType} agent key.`);
-    return { hubApiKey: body.hubApiKey, agentUserId: body.agentUserId, reused: false };
+    return { hubApiKey: body.hubApiKey, agentUserId: body.agentUserId, reused: false, keyId: body.pendingToken };
   }
   // Minted live (no approval asked). Still never hand out a key the pod says
   // is unusable — callers write what this returns into configs.
@@ -1741,7 +1825,7 @@ async function installChatGptOAuth(cfg: TargetConnectionConfig): Promise<boolean
   log.info("  1. 'list my Synap pods' (list_pods)");
   log.info("  2. 'connect pod <your-pod>' (connect_pod)");
   log.blank();
-  log.dim("The CP stores an encrypted grant. Revoke in pod-admin → My Connections.");
+  log.dim(`Your Synap account keeps an encrypted grant. To revoke it: ${agentsPageOf(cfg.podUrl)}.`);
   log.blank();
   log.dim("See `synap mcp connect-claude` for the identical claude.ai flow.");
 
@@ -1920,7 +2004,7 @@ async function installVSCode(cfg: TargetConnectionConfig): Promise<boolean> {
  * Derive a stable MCP server name from the pod URL so multi-pod setups
  * (perso + team) don't overwrite each other. e.g. pod.thearch.synap.live → synap-thearch
  */
-function mcpServerNameFromPodUrl(podUrl: string, fallback = "synap"): string {
+export function mcpServerNameFromPodUrl(podUrl: string, fallback = "synap"): string {
   try {
     const host = new URL(podUrl).hostname; // pod.thearch.synap.live
     const parts = host.split(".").filter(Boolean);
@@ -2391,7 +2475,7 @@ export function writeMcpServerEntry(
 }
 
 /** Best-effort remove of a named MCP server entry (e.g. legacy `"synap"`). */
-function removeMcpServerEntry(configPath: string, serverName: string): void {
+export function removeMcpServerEntry(configPath: string, serverName: string): void {
   if (!fs.existsSync(configPath)) return;
   try {
     const config = readClientConfig<{ mcpServers?: Record<string, McpServerConfig> }>(configPath);
@@ -2422,10 +2506,95 @@ const PRESET_POSTURE: Partial<Record<GovernancePreset, string>> = {
   creates: "create-with-undo",
 };
 
+/**
+ * One row of the pod's write-mode list (`AGENT_WRITE_MODE_CHOICES`,
+ * @synap-core/types/agents), served on the governance read: the CLI draws it
+ * and PATCHes `posture` (null = follow the pod default). It never keeps its
+ * own copy, so an older CLI offers what a newer pod knows.
+ */
+interface PodWriteModeChoice {
+  mode: string;
+  label: string;
+  line: string;
+  recommended: boolean;
+  posture: string | null;
+}
+
 /** `GET /agent-users/:id/governance` — the fields the CLI reads. */
 interface AgentGovernanceRead {
   posture: string | null;
   configured: boolean;
+  /** Absent on a pod older than the shared list: the legacy prompt is used. */
+  writeModeChoices?: PodWriteModeChoice[];
+}
+
+/** The pod's list, when this pod serves one the CLI can draw. */
+function podWriteModeChoices(
+  current: AgentGovernanceRead | null
+): PodWriteModeChoice[] | null {
+  const list = current?.writeModeChoices;
+  if (!Array.isArray(list) || list.length === 0) return null;
+  const ok = list.every(
+    (c) =>
+      c &&
+      typeof c.mode === "string" &&
+      typeof c.label === "string" &&
+      typeof c.line === "string" &&
+      (c.posture === null || typeof c.posture === "string")
+  );
+  return ok ? list : null;
+}
+
+/**
+ * Ask with the POD's list and write the chosen posture. Choosing the pod
+ * default for an agent nobody configured writes nothing (its trust is already
+ * the pod's rule).
+ */
+async function promptPodWriteMode(
+  agentUserId: string,
+  hubCfg: HubConfig,
+  current: AgentGovernanceRead,
+  choices: PodWriteModeChoice[]
+): Promise<void> {
+  const initial = Math.max(
+    0,
+    choices.findIndex((c) => c.recommended)
+  );
+  const res = await prompts({
+    type: "select",
+    name: "mode",
+    message: "How should this agent's changes land?",
+    choices: choices.map((c) => ({
+      title: c.recommended ? `${c.label} (recommended)` : c.label,
+      description: c.line,
+      value: c.mode,
+    })),
+    initial,
+  });
+  const picked = choices.find((c) => c.mode === res.mode);
+  if (!picked) return;
+  if (picked.posture === null && !current.configured) {
+    log.dim(`Agent changes: ${picked.label}. ${picked.line}`);
+    return;
+  }
+  try {
+    await hubPatch(
+      `/agent-users/${agentUserId}/governance`,
+      { posture: picked.posture },
+      hubCfg
+    );
+    log.success(`Agent changes: ${picked.label}. ${picked.line}`);
+  } catch (err) {
+    if (isPresenceRefusal(err)) {
+      needsYouInPodAdmin({
+        podUrl: hubCfg.podUrl,
+        page: `/agents/${agentUserId}`,
+        what: "choose how this agent's changes land",
+      });
+      return;
+    }
+    log.warn(`Could not apply agent governance: ${(err as Error).message}`);
+  }
 }
 
 /**
@@ -2545,6 +2714,12 @@ export async function ensureAgentGovernance(
   // nothing: a new agent's trust is the pod's rule, a preset is only ever a
   // stricter (or looser) explicit choice.
   let mode = presetMode;
+  // A pod that serves its own list is asked with it (no legacy presets).
+  const podChoices = presetMode ? null : podWriteModeChoices(current);
+  if (podChoices && current) {
+    await promptPodWriteMode(agentUserId, hubCfg, current, podChoices);
+    return;
+  }
   if (!mode) {
     const res = await prompts({
       type: "select",
@@ -2623,6 +2798,14 @@ export async function ensureAgentGovernance(
             : `Agent approval: "${legacyMode}".`
     );
   } catch (err) {
+    if (isPresenceRefusal(err)) {
+      needsYouInPodAdmin({
+        podUrl: hubCfg.podUrl,
+        page: `/agents/${agentUserId}`,
+        what: "choose how this agent's changes land",
+      });
+      return;
+    }
     log.warn(`Could not apply agent governance: ${(err as Error).message}`);
   }
 }

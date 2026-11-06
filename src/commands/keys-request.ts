@@ -1,5 +1,7 @@
 /**
- * synap keys request <template> — a machine asks for a scoped pod key.
+ * synap keys request <template> | --permission <p>… — a machine asks for a
+ * scoped pod key: from a template, or naming the exact grant patterns it
+ * needs (2 Nov 2026), which the pod makes the request's ceiling.
  *
  * The device-flow the pod speaks (`synap-backend/.../services/key-requests.ts`):
  * file a request with this machine's own key, the person approves (or narrows)
@@ -33,7 +35,10 @@ const RETRY_S = 30;
 const DEFAULT_ENV_NAME = "SYNAP_HUB_API_KEY";
 
 export interface KeysRequestOpts {
-  template: string;
+  /** A template id. Exactly one of this and `permissions`. */
+  template?: string;
+  /** The exact grant patterns the key needs (`entity.company.update`, `facet.create`). */
+  permissions?: string[];
   name?: string;
   expiresDays?: number;
   workspace?: string;
@@ -102,8 +107,17 @@ interface PendingRequest {
   reviewUrl: string;
   interval: number;
   expiresAt: number;
-  template: string;
+  /** The template asked for (also kept so an older state file still reads). */
+  template?: string;
+  /** What was asked (`askKey`): a rerun resumes only the same ask. */
+  ask?: string;
   podUrl: string;
+}
+
+/** One ask, whatever the order of its permissions: `template:<id>` or `permissions:<a,b>`. */
+export function askKey(opts: Pick<KeysRequestOpts, "template" | "permissions">): string {
+  if (opts.permissions) return `permissions:${[...new Set(opts.permissions)].sort().join(",")}`;
+  return `template:${opts.template ?? ""}`;
 }
 
 export const statePath = (out: string) => `${out}.request`;
@@ -116,7 +130,8 @@ function loadPending(out: string | undefined, opts: KeysRequestOpts, deps: KeysR
   } catch {
     return null;
   }
-  if (p.template !== opts.template || p.podUrl !== deps.podUrl || p.expiresAt <= deps.now()) {
+  const saved = p.ask ?? `template:${p.template ?? ""}`;
+  if (saved !== askKey(opts) || p.podUrl !== deps.podUrl || p.expiresAt <= deps.now()) {
     dropPending(out);
     return null;
   }
@@ -133,6 +148,12 @@ export function envLines(podUrl: string, envName: string, key: string): string {
 
 /** Refuse before filing anything: an approval with nowhere to put the key wastes the person's tap. */
 export function checkDestination(opts: KeysRequestOpts): string | null {
+  if (opts.template && opts.permissions?.length) {
+    return "Ask for a template or --permission, not both.";
+  }
+  if (!opts.template && !opts.permissions?.length) {
+    return "Name a template (synap keys request --list-templates) or the exact permissions the key needs (--permission entity.note.read, repeatable).";
+  }
   if (!opts.out && !opts.print) {
     return "Say where the key goes: --out <file> (0600 env lines) or --print (stdout).";
   }
@@ -175,7 +196,7 @@ export async function runKeysRequest(opts: KeysRequestOpts, deps: KeysRequestDep
       for (;;) {
         try {
           filed = (await deps.post("/keys/requests", {
-            template: opts.template,
+            ...(opts.permissions?.length ? { permissions: opts.permissions } : { template: opts.template }),
             ...(opts.name ? { name: opts.name } : {}),
             ...(opts.expiresDays ? { expiresInDays: opts.expiresDays } : {}),
             ...(opts.workspace ? { workspaceId: opts.workspace } : {}),
@@ -200,7 +221,8 @@ export async function runKeysRequest(opts: KeysRequestOpts, deps: KeysRequestDep
           reviewUrl: filed.review_url,
           interval: filed.interval,
           expiresAt: deps.now() + filed.expires_in * 1000,
-          template: opts.template,
+          ...(opts.template ? { template: opts.template } : {}),
+          ask: askKey(opts),
           podUrl: deps.podUrl,
         };
         writeFileAtomic(statePath(opts.out), JSON.stringify(state), { mode: 0o600 });

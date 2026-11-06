@@ -18,6 +18,7 @@ import { bootstrapPodOverride } from "./lib/pod.js";
 import { INIT_EXIT_HELP } from "./lib/init-exit.js";
 import { WAIT_HELP } from "./lib/wait-help.js";
 import { cliBuild, formatCliBuild } from "./lib/cli-build.js";
+import { CATALOG_KINDS } from "./commands/catalog.js";
 
 // The version AND the commit this build came from — a stale build is visible.
 const version = formatCliBuild(cliBuild());
@@ -47,6 +48,7 @@ program
   .addOption(new Option("--skip-is", "deprecated, ignored").hideHelp())
   .option("-y, --yes", "Accept the defaults, no prompts (connects the agents found on this machine)")
   .option("--agents <list>", "Agents to connect, comma-separated: claude-code,codex,cursor")
+  .option("--as <job>", "Give the agent this computer adds a job (e.g. --as \"Agent sessions\"); one engine")
   .option("--json", "Print a JSON summary on stdout: {podUrl, connected, notApproved, failed, pairLink, exitCode}")
   .addHelpText("after", INIT_EXIT_HELP)
   .action(async (opts) => {
@@ -125,9 +127,9 @@ program
 program
   .command("connect [thing]")
   .description(
-    "Plug something into your pod: an AI agent (claude-code, cursor, codex, …) or a tool/account (gmail, github, …)"
+    "Plug something into your pod: an AI agent (claude-code, cursor, codex, …), or with --tool a tool/account (gmail, github, …)"
   )
-  .option("--tool", "Treat <thing> as a tool/account even if it is also an agent name (no <thing>: list connectable services)")
+  .option("--tool", "Connect a tool or account (gmail, github, …), not an AI client (no <thing>: list connectable services)")
   .option("--workspace <id>", "Focus on one workspace (default: pod-wide)")
   .option("--project <id>", "Focus on one project (agents only; composable with --workspace)")
   .option("--pod-url <url>", "Synap pod URL")
@@ -327,7 +329,7 @@ const mcp = program
 mcp
   .command("url")
   .description("Print a ready-to-paste MCP connection (URL + key + snippets) for UI clients like ChatGPT")
-  .option("--client <name>", "Name the dedicated agent key after the target client")
+  .option("--client <name>", "The client this key is for: one of synap connect --list gets its own key, any other name a generic one (default: generic)")
   .option("--workspace <id>", "Scope to a specific workspace (omit for pod-wide)")
   .option("--project <id>", "Focus the agent on a project (narrows every tool call; orthogonal to --workspace)")
   .option("--json", "Output as JSON")
@@ -446,6 +448,8 @@ program
 
     // Already have pods — show status and offer reconnect if any are unreachable
     const { checkPodHealth } = await import("./lib/pod.js");
+    const { probeAuthStatus, KEY_PROBE_LABEL } = await import("./lib/credential-class.js");
+    type KeyProbe = import("./lib/credential-class.js").KeyProbe;
     const ora = (await import("ora")).default;
     const spinner = ora("Checking pods + credentials...").start();
     const checks = await Promise.all(
@@ -454,22 +458,15 @@ program
         // A pod can be HEALTHY (public /health) while the saved key is REVOKED.
         // Validate the actual credential too — otherwise a dead key looks "ok"
         // and the user gets cryptic 401s downstream (the connect trap).
-        let keyValid = false;
+        let keyProbe: KeyProbe | null = null;
         if (h.healthy && p.config.hubApiKey) {
-          try {
-            const res = await fetch(
-              `${p.config.podUrl.replace(/\/$/, "")}/api/hub/auth/status`,
-              {
-                headers: { Authorization: `Bearer ${p.config.hubApiKey}` },
-                signal: AbortSignal.timeout(6000),
-              }
-            );
-            keyValid = res.ok;
-          } catch {
-            keyValid = false;
-          }
+          keyProbe = await probeAuthStatus({
+            podUrl: p.config.podUrl,
+            apiKey: p.config.hubApiKey,
+          });
         }
-        return { ...p, healthy: h.healthy, keyValid };
+        const keyValid = keyProbe === "valid";
+        return { ...p, healthy: h.healthy, keyValid, keyProbe };
       })
     );
     spinner.stop();
@@ -479,9 +476,11 @@ program
       const active = p.active ? chalk.green(" ● ") : "   ";
       const status = !p.healthy
         ? chalk.red("unreachable")
-        : p.keyValid
-          ? chalk.green("ok")
-          : chalk.yellow("key expired");
+        : p.keyProbe === "unreachable"
+          ? chalk.yellow(KEY_PROBE_LABEL.unreachable)
+          : p.keyValid
+            ? chalk.green("ok")
+            : chalk.yellow("key expired");
       console.log(`  ${active}${chalk.bold(p.name.padEnd(14))} ${status}  ${chalk.dim(p.config.podUrl)}`);
     }
     console.log();
@@ -502,7 +501,7 @@ program
     }
 
     // Anything that won't authenticate — unreachable OR a revoked/expired key.
-    const needsReconnect = checks.filter((p) => !renewed.has(p.name) && (!p.healthy || !p.keyValid));
+    const needsReconnect = checks.filter((p) => !renewed.has(p.name) && (!p.healthy || (!p.keyValid && p.keyProbe !== "unreachable")));
     if (needsReconnect.length > 0) {
       console.log(chalk.yellow(`  ${needsReconnect.length} pod(s) need re-authentication. Refresh credentials:`));
       for (const p of needsReconnect) {
@@ -788,9 +787,14 @@ program
   .option("--no-resume", "Ignore local import ledger (re-import all)")
   .option(
     "--job-status <jobId>",
-    "Re-poll a background corpus import started by an earlier run (no waiting)"
+    "Re-poll a background import started by an earlier run (no waiting); with --source superwhisper, a bulk store-first job"
   )
   .action(async (inputs: string[], opts) => {
+    if (opts.jobStatus && opts.source === "superwhisper") {
+      const { importSuperwhisperJobStatus } = await import("./lib/superwhisper-import.js");
+      await importSuperwhisperJobStatus(opts.jobStatus, opts);
+      return;
+    }
     const mod = await import("./commands/import.js");
     if (opts.jobStatus) {
       await mod.importJobStatus(opts.jobStatus, opts);
@@ -1212,6 +1216,8 @@ const worker = program
   // Not requiredOption: commander checks a parent's required options for its
   // subcommands too, and `worker status|start|stop` act on every agent without it.
   .option("--agent <name>", "The named agent this machine works as (its key comes from ~/.synap); required")
+  .option("--runtime <engine>", "First run of an agent with a job: the engine that runs it (e.g. claude-code); asks for the agent on this computer when no key is saved")
+  .option("--no-create", "Never ask for the agent on first run, even with --runtime")
   .option("--interval <dur>", "How often to check for handed sessions (e.g. 30s, 2m)", "30s")
   .option("--once", "Check once, run what is handed, wait for it, exit")
   .option("--cwd <dir>", "Where code sessions' Claude Code works (default ~/Documents/Code/synap)")
@@ -1230,6 +1236,10 @@ const worker = program
   .option("--allowed-tools <list>", "Comma-separated Claude tools allowed without asking (the pod MCP server is always added)")
   .option("--skip-permissions", "Launch with --dangerously-skip-permissions instead of an allow-list")
   .option("--dry-run", "Claim and log what would launch, without launching Claude")
+  .option(
+    "--protocols <list>",
+    "Which runs this computer takes: code, work-folder (comma-separated; default both). A computer that runs no code, like the person's Mac, takes work-folder only; a design run counts as code"
+  )
   .action(async (opts: import("./commands/worker.js").WorkerOptions, cmd: Command) => {
     if (!opts.agent) cmd.error("error: required option '--agent <name>' not specified");
     const { workerCommand } = await import("./commands/worker.js");
@@ -1496,9 +1506,9 @@ session
   )
   .option(
     "--events <kinds>",
-    "Wait on the session change feed: comma list of answer, proposal_decided, stage_moved, owner_message, session_message (a message from another session's agent), or all"
+    "Wait on the session change feed: comma list of answer, proposal_decided, stage_moved, owner_message, session_message (a message from another session's agent), pr_merged, pr_closed, checks_finished, status_moved, hold_set, blocker_ended, signal_raised, or all"
   )
-  .option("--wake-only", "Stop only on what should wake an agent: answers, owner messages, and agent messages the pod marked wake (the rest is read and skipped)")
+  .option("--wake-only", "Stop only on what the pod marks `wake` (answers, owner messages, agent messages sent to wake you, decided proposals, merged or closed PRs, finished checks, ended blockers, signals, a pause it resumed); the rest is read and skipped. The default when --events is not given")
   .option("--once", "One read, no waiting loop")
   .option("--peek", "Mark nothing picked up or read (a watcher that is not the agent doing the work)")
   .option("--hook", "Run as a Claude Code asyncRewake Stop hook: wait for a wake-worthy event, print it on stderr, exit 2 (see: synap hooks install-wake)")
@@ -2075,9 +2085,19 @@ agents
   .addOption(new Option("--with-mcp", "deprecated, ignored: Raycast always gets the pod's MCP server").hideHelp())
   .option("--api-key <key>", "Register a key you already hold, on this machine only (mints nothing)")
   .option("--label <label>", "Human-readable description")
+  .option("--as <job>", "Give the agent a job (e.g. --as \"CRM worker\"): another agent than the engine's plain one, on this computer")
   .action(async (kind: string | undefined, opts) => {
     const { agentsAdd } = await import("./commands/agents.js");
     await agentsAdd(kind, opts);
+  });
+
+agents
+  .command("adopt <job>")
+  .description("Save the key this OS user already holds for an engine as the agent <job> (mints and revokes nothing)")
+  .option("--from <engine>", "The engine whose key is adopted (default: claude-code)")
+  .action(async (job: string, opts: { from?: string }) => {
+    const { agentsAdopt } = await import("./commands/agents.js");
+    await agentsAdopt(job, opts);
   });
 
 agents
@@ -2490,14 +2510,18 @@ program
 
 const doc = program
   .command("doc")
-  .description("Create and update markdown documents on the pod");
+  .description("Create and update documents on the pod (markdown, or an html page)");
 
 doc
   .command("create")
-  .description("Create a new markdown document")
+  .description("Create a new document: markdown, or an html page pod admin runs")
   .requiredOption("--title <title>", "Document title")
-  .option("--content <text>", "Markdown content (inline)")
-  .option("--file <path>", "Read content from a file")
+  .option("--content <text>", "Content (inline)")
+  .option("--file <path>", "Read content from a file (.html / .htm means --type html)")
+  .option(
+    "--type <type>",
+    "markdown (default) or html: a page pod admin runs at /open/<id> in an isolated frame (inline only, no CDN, at most 2 MB)"
+  )
   .option("--workspace <id>", "Workspace to create the document in")
   .option("--open", "Open in the Synap desktop app after creation")
   .option("--json", "JSON output")
@@ -2508,6 +2532,7 @@ Examples:
   synap doc create --title "My Notes" --content "# Hello"
   synap doc create --title "My Notes" --file ./notes.md --open
   echo "# Draft" | synap doc create --title "Draft"
+  synap doc create --title "Weekly report" --file ./report.html
   `)
   .action(async (opts) => {
     const { docCreate } = await import("./commands/doc.js");
@@ -2570,7 +2595,7 @@ cell
   .option("--type-key <key>", "Explicit typeKey (default: generated:<slug>)")
   .option(
     "--deps <json>",
-    'Dependency map JSON, e.g. \'{"recharts":"2.12.0"}\''
+    'Dependency map JSON. Leave it out: the frame refuses runtime deps, so bundle libraries with `synap cell build` instead'
   )
   .option(
     "--view-types <list>",
@@ -2601,7 +2626,6 @@ PICKED as a view or profile renderer — it is only placeable on a bento.
 
 Examples:
   synap cell define --name "Revenue Chart" --file ./chart.js
-  synap cell define --name "Revenue Chart" --file ./chart.js --deps '{"recharts":"2.12.0"}'
   synap cell define --name "Deal Board" --file ./board.js --view-types kanban,table --content-kind collection
   synap cell define --name "Contact Page" --file ./contact.js --content-kind entity-detail
   cat chart.js | synap cell define --name "Revenue Chart"
@@ -2617,7 +2641,11 @@ cell
   .option("--out <file>", "Output file path (default: <entry>.bundle.js)")
   .option(
     "--bundle-deps",
-    "Inline all third-party deps into the bundle (only react/react-dom stay external) — output has deps={} and the runtime CSP drops esm.sh entirely"
+    "Inline every third-party library into the cell (the default; kept for older scripts). react, react-dom, the JSX runtimes, @synap/kit and @synap/view-sdk stay external: the host provides them"
+  )
+  .option(
+    "--no-bundle-deps",
+    "Keep third-party imports external and emit them as a deps map. The web and desktop frames refuse such a cell"
   )
   .option("--self-contained", 'Build ONE complete HTML document (React, CSS, brand fonts inlined; nothing external) — the code of a rendererType "mcp-app" cell')
   .option("--fonts", "With --self-contained: require the inlined brand fonts (default: include when @synap-core/design-tokens resolves)")
@@ -2627,7 +2655,7 @@ cell
   .option("--type-key <key>", "Explicit typeKey (used with --define)")
   .option(
     "--deps <json>",
-    "Override dependency versions as JSON, e.g. '{\"react\":\"18.3.0\"}'"
+    "Override the emitted deps map (JSON). The frame refuses runtime deps; leave it out"
   )
   .option("--view-types <list>", 'Comma-separated view-renderer affinity (used with --define), e.g. "list,table"')
   .option("--content-kind <kind>", "entity-detail | entity-card | entity-profile | collection | widget (used with --define)")
@@ -2640,18 +2668,16 @@ cell
   .addHelpText("after", `
 Output: a single ESM file.
 
-Default mode: bare imports (react, recharts, …) are externalized and emitted
-as a deps map. At runtime Synap resolves them via esm.sh importmap.
-
---bundle-deps mode: only react/react-dom are externalized (React is
-host-inlined at runtime, never via esm.sh); everything else is bundled into
-the output, so the deps map is empty. A cell built this way reaches no esm.sh
-origin at runtime — the runtime CSP collapses to drop it entirely.
+The frame loads no code from the network (no CDN, no esm.sh). It provides only
+react, react-dom, the JSX runtimes, @synap/kit and @synap/view-sdk, resolved by the host; those
+stay external. Every other library (recharts, d3, three, …) is bundled into the
+cell, so the deps map is empty. That is the default, and it is the only shape
+the web and desktop frames accept. Leave \`deps\` empty; --no-bundle-deps
+exists only for a host that resolves imports itself and the frame refuses it.
 
 Examples:
   synap cell build ./src/chart.tsx --out ./dist/chart.js
   synap cell build ./src/chart.tsx --out ./dist/chart.js --define --name "Revenue Chart"
-  synap cell build ./src/chart.tsx --out ./dist/chart.js --bundle-deps
   `)
   .action(async (entry: string, opts) => {
     const { cellBuild } = await import("./commands/cell.js");
@@ -3023,8 +3049,8 @@ market
 
 market
   .command("publish [targets...]")
-  .description("Validate then publish a template (or a standalone cell/view package) to the marketplace (private by default) — pass a file, --from-workspace <id>, or --from-project <id>. Non-official publish never uses the synap-official vendor. Founder: --official [slug...] publishes the official catalog from the monorepo checkout (alias of `synap catalog publish --official --kind workspace`)")
-  .option("--official", "Publish the OFFICIAL Synap catalog (all templates, or the named slugs) from the monorepo checkout — requires a `synap login` session that owns the synap-official vendor; previews and asks first")
+  .description("Validate then publish a template (or a standalone cell/view package) to the marketplace (private by default) — pass a file, --from-workspace <id>, or --from-project <id>. Non-official publish never uses the synap-official vendor. --official [slug...] republishes the official catalog from the monorepo checkout: owner only, for an emergency republish; CI normally publishes on every push to app-bases main (alias of `synap catalog publish --official --kind workspace`)")
+  .option("--official", "Emergency republish of the OFFICIAL Synap catalog (all templates, or the named slugs) from the monorepo checkout — owner only (a `synap login` session that owns the synap-official vendor); CI normally publishes on every push to app-bases main; previews and asks first")
   .option("--templates-dir <dir>", "With --official: path to the catalog package — synap-app/packages/catalog or workspace-templates (default: found by walking up from cwd)")
   .option("--dry-run", "With --official: preview what would change against the live catalog, publish nothing")
   .option("--yes", "With --official: skip the confirmation prompt")
@@ -3038,10 +3064,10 @@ market
   .option("--api-key <key>", "API key override (for --from-workspace / --from-project)")
   // Default ON for a cell package's `codeFile` resolution — see `cell build
   // --bundle-deps`'s doc comment for why: a published cell's `deps` map is
-  // otherwise resolved through esm.sh at RUNTIME, so the artifact reviewed at
-  // publish time isn't what actually executes. `synap cell build` invoked
-  // directly is unaffected — its own default stays external-deps-via-esm.sh.
-  .option("--no-bundle-deps", "Publish a cell's codeFile with external deps via esm.sh instead of bundling them in (default: bundled)")
+  // otherwise resolved over the network at RUNTIME, so the artifact reviewed at
+  // publish time isn't what actually executes. `synap cell build` bundles by
+  // default too (the frame accepts nothing else).
+  .option("--no-bundle-deps", "Publish a cell's codeFile with external third-party imports instead of bundling them in (default: bundled). The web and desktop frames refuse an unbundled cell")
   .action(async (targets: string[] | undefined, _opts, cmd) => {
     // Same parent/child `--json` collision as `market install` — see its comment.
     const opts = cmd.optsWithGlobals();
@@ -3080,7 +3106,7 @@ market
 
 const catalog = program
   .command("catalog")
-  .description("Validate, diff and publish the OFFICIAL template catalog (workspaces, capabilities, skills, packs, automations) from the monorepo checkout");
+  .description("Validate, diff and publish the OFFICIAL template catalog (workspaces, capabilities, skills, packs, automations, views) from the monorepo checkout; CI publishes it on every push to app-bases main");
 
 for (const verb of ["validate", "diff", "publish"] as const) {
   const sub = catalog
@@ -3090,9 +3116,9 @@ for (const verb of ["validate", "diff", "publish"] as const) {
         ? "Validate the catalog (per-kind schema, cross-kind refs, goal grammar, duplicates) — offline"
         : verb === "diff"
           ? "Show what would change against the live control-plane catalog (new / changed / unchanged)"
-          : "Validate, preview the diff, confirm, then publish to the control plane — founder only: --official + a `synap login` session that owns synap-official",
+          : "Validate, preview the diff, confirm, then publish to the control plane — owner only, for an emergency republish; CI normally publishes on every push to app-bases main (--official + a `synap login` session that owns synap-official)",
     )
-    .option("--kind <kind>", "Only this kind: workspace | capability | skill | pack | automation")
+    .option("--kind <kind>", `Only this kind: ${CATALOG_KINDS.join(" | ")}`)
     .option("--catalog-dir <dir>", "Path to the catalog package (default: found by walking up from cwd)")
     .option("--json", "Output as JSON");
   if (verb === "publish") {
@@ -3399,12 +3425,18 @@ keys
 
 keys
   .command("request [template]")
-  .description("Ask the person for a scoped key; they approve it on one page, the key never goes through chat")
+  .description("Ask the person for a scoped key, from a template or with exactly the permissions it needs; they approve it on one page, the key never goes through chat")
+  .option(
+    "--permission <pattern>",
+    "A permission the key needs, instead of a template (repeatable): entity.company.update, facet.create. The person may narrow it, never widen it",
+    (v: string, acc: string[]) => [...acc, v],
+    [] as string[]
+  )
   .option("--out <file>", "Write the key as env lines to this file (mode 0600)")
   .option("--force", "Overwrite --out if it exists")
   .option("--print", "Print the key on stdout (the only way to see it)")
   .option("--name <name>", "Name of the key")
-  .option("--expires-days <n>", "Key lifetime in days (default: the template's)", (v) => parseInt(v, 10))
+  .option("--expires-days <n>", "Key lifetime in days (default: the template's; with --permission 90, at most 365)", (v) => parseInt(v, 10))
   .option("--workspace <id>", "Limit the key to one workspace")
   .option("--env-name <NAME>", "Variable name in --out (default SYNAP_HUB_API_KEY)")
   .option("--wait <duration>", "How long to keep asking, e.g. 90s, 30m, 24h (default 24h)")
@@ -3413,12 +3445,19 @@ keys
   .action(async (template: string | undefined, opts: Record<string, unknown>) => {
     const mod = await import("./commands/keys-request.js");
     if (opts.listTemplates) return mod.keysListTemplates();
-    if (!template) {
-      console.error("Name a template (synap keys request --list-templates).");
+    const permissions = (opts.permission as string[] | undefined) ?? [];
+    if (template && permissions.length > 0) {
+      console.error("Ask for a template or --permission, not both.");
+      process.exit(1);
+    }
+    if (!template && permissions.length === 0) {
+      console.error(
+        "Name a template (synap keys request --list-templates) or the permissions the key needs (--permission <pattern>, repeatable)."
+      );
       process.exit(1);
     }
     await mod.keysRequest({
-      template,
+      ...(permissions.length > 0 ? { permissions } : { template }),
       out: opts.out as string | undefined,
       force: opts.force as boolean | undefined,
       print: opts.print as boolean | undefined,

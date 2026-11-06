@@ -183,6 +183,15 @@ describe("service label and plist", () => {
     expect(() => buildServiceSpec({ agent: "a" }, { ...ctx, synapPath: "/u/.npm/_npx/abc/node_modules/.bin/synap" })).toThrow(/npx/);
   });
 
+  it("carries --protocols, so the Mac's service takes work-folder runs only; a typo is refused at install", () => {
+    const spec = buildServiceSpec({ agent: "a", protocols: " work-folder " }, ctx);
+    expect(spec.programArguments.slice(-2)).toEqual(["--protocols", "work-folder"]);
+    // Absent: the service follows the worker's own default (every protocol).
+    expect(buildServiceSpec({ agent: "a" }, ctx).programArguments).not.toContain("--protocols");
+    expect(() => buildServiceSpec({ agent: "a", protocols: "work-folders" }, ctx)).toThrow(/--protocols takes/);
+    expect(() => buildServiceSpec({ agent: "a", protocols: "" }, ctx)).toThrow(/--protocols takes/);
+  });
+
   it("keeps a bare claude name when it is not on PATH", () => {
     const spec = buildServiceSpec({ agent: "a" }, { ...ctx, searchPath: "/nowhere" });
     expect(spec.programArguments.slice(-2)).toEqual(["--claude-bin", "claude"]);

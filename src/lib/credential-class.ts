@@ -85,8 +85,33 @@ export interface KeyAccess {
 }
 
 /** Introspect a key. `apiKey` overrides `cfg.apiKey` (used by `whoami` to probe both sides of a divergence). */
-export async function fetchAuthStatus(cfg: HubConfig, apiKey?: string): Promise<AuthStatus> {
+export async function fetchAuthStatus(cfg: Pick<HubConfig, "podUrl" | "apiKey">, apiKey?: string): Promise<AuthStatus> {
   return (await hubGet("/auth/status", {}, apiKey ? { ...cfg, apiKey } : cfg)) as AuthStatus;
+}
+
+export type KeyProbe = "valid" | "invalid" | "unreachable";
+
+/** One wording for a key that could not be checked, shared by every command that shows it. */
+export const KEY_PROBE_LABEL: Record<KeyProbe, string> = {
+  valid: "valid",
+  invalid: "invalid / expired",
+  unreachable: "could not reach the pod to check the key",
+};
+
+/**
+ * Is this key good? Three answers, never two: a pod that cannot be reached
+ * says NOTHING about the key, so it is `unreachable`, not `invalid`. Only the
+ * pod's own refusal (401/403) is `invalid`. Goes through `fetchAuthStatus`,
+ * so it shares the hub client's pacing, 429 retry and error shapes.
+ */
+export async function probeAuthStatus(cfg: Pick<HubConfig, "podUrl" | "apiKey">): Promise<KeyProbe> {
+  try {
+    await fetchAuthStatus(cfg);
+    return "valid";
+  } catch (err) {
+    if (err instanceof HubError && (err.status === 401 || err.status === 403)) return "invalid";
+    return "unreachable";
+  }
 }
 
 const agentUserIdCache = new Map<string, string>();

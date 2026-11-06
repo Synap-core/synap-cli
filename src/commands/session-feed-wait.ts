@@ -84,6 +84,8 @@ export async function waitSessionFeedCommand(
   } catch (e) {
     return fail((e as Error).message);
   }
+  // No `--events`: every kind, and only what the pod marks `wake` stops the wait.
+  const wakeOnly = opts.wakeOnly === true || !opts.events;
   const timeoutMs = parseDuration(opts.timeout, DEFAULT_TIMEOUT_MS);
   if (timeoutMs === null) {
     return fail("Unparseable duration. Use a number with a unit: 500ms, 30s, 15m, 2h (bare number = seconds).");
@@ -104,7 +106,7 @@ export async function waitSessionFeedCommand(
     sessionId = resolved;
     if (!opts.json) {
       log.dim(
-        `Waiting on session ${sessionId.slice(0, 8)} for ${kinds.join(", ")}${opts.wakeOnly ? " (wake-worthy only)" : ""} — up to ${timeoutMs < 120_000 ? `${Math.round(timeoutMs / 1000)}s` : `${Math.round(timeoutMs / 60_000)}m`}.`
+        `Waiting on session ${sessionId.slice(0, 8)} for ${kinds.join(", ")}${wakeOnly ? " (wake-worthy only)" : ""} — up to ${timeoutMs < 120_000 ? `${Math.round(timeoutMs / 1000)}s` : `${Math.round(timeoutMs / 60_000)}m`}.`
       );
     }
     result = await waitForSessionFeed(sessionId, cfg, {
@@ -116,7 +118,7 @@ export async function waitSessionFeedCommand(
       limit,
       stamp: !opts.peek,
       once: opts.once,
-      ...(opts.wakeOnly ? { accept: isWakeEvent } : {}),
+      ...(wakeOnly ? { accept: isWakeEvent } : {}),
     });
   } catch (e) {
     if (e instanceof SessionMessagesUnsupportedError) return fail(e.message);
@@ -125,7 +127,7 @@ export async function waitSessionFeedCommand(
     return;
   }
 
-  const resume = `synap session wait ${sessionId} --events ${kinds.join(",")}${opts.wakeOnly ? " --wake-only" : ""} --since ${result.nextSince ?? "<cursor>"}`;
+  const resume = `synap session wait ${sessionId} --events ${kinds.join(",")}${wakeOnly ? " --wake-only" : ""} --since ${result.nextSince ?? "<cursor>"}`;
   if (opts.json) {
     console.log(
       JSON.stringify(

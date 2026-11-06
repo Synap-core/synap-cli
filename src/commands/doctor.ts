@@ -28,6 +28,7 @@ import { log } from "../utils/logger.js";
 import { reachChecklist } from "../lib/pod-reach.js";
 import { getActivePodConfig, getActiveWorkspaceId, getActiveProjectId, listPodProfiles, checkPodHealth, findPodNameByUrl } from "../lib/pod.js";
 import { resolveHubConfig, hubGet, HubError, type HubConfig } from "../lib/hub-client.js";
+import { explainPodError, type PodErrorText } from "../lib/pod-errors.js";
 import { formatKeySource, resolveKeySource } from "../lib/key-source.js";
 import { resolveLensProvenance, type LensRung } from "../lib/describe-lens.js";
 import { samePodOrigin } from "../lib/project-ref.js";
@@ -195,6 +196,16 @@ export interface KeyPrincipal {
  * An AI on NO computer is named as such (revoking a computer does not stop
  * it), with the way to bind it to this one.
  */
+/**
+ * The "fix" line of a key check the pod refused with something other than a
+ * 401: a 5xx gets the map's next step (try again, pod admin), any other
+ * refusal the map's line alone. Never the map's own fallback "run synap
+ * doctor": this is synap doctor.
+ */
+export function doctorFixOf(explained: PodErrorText, status: number): string {
+  return status >= 500 ? explained.next : explained.line;
+}
+
 export function keyHolderCheck(me: unknown): CheckResult | null {
   const p = (me as { principal?: KeyPrincipal | null } | null)?.principal;
   if (!p || typeof p.id !== "string") return null;
@@ -460,7 +471,15 @@ export async function doctor(opts: DoctorOpts = {}): Promise<void> {
         name: "API key authenticates",
         ok: false,
         detail: is401 ? `the pod rejected this key: it ${why}` : `could not verify (${err instanceof Error ? err.message : String(err)})`,
-        fix: is401 ? "See the key health below — run: synap doctor --fix" : `Run: synap login --reconnect ${activeName}`,
+        // "Reconnect" only on a 401: for any other refusal it mints another
+        // computer key and changes nothing (pod-errors.ts says what does).
+        // Never "run synap doctor": this IS synap doctor. A 5xx gets the map's
+        // next step (try again, pod admin); any other refusal its line alone.
+        fix: is401
+          ? "See the key health below — run: synap doctor --fix"
+          : err instanceof HubError
+            ? doctorFixOf(explainPodError({ status: err.status, code: err.code, body: err.rawBody, podUrl: err.podUrl }), err.status)
+            : "Check that the pod is reachable from this computer, then try again.",
       });
     }
   }

@@ -2,7 +2,9 @@
  * `synap catalog validate|diff|publish [--kind k] [slug...] [--official] [--dry-run]`
  * ==========================================================================
  *
- * The team's ONE door to the official catalog (every installable kind). This
+ * The team's by-hand door to the official catalog (every installable kind).
+ * CI on app-bases main is the normal publisher (every push publishes every
+ * kind, through the same lib); `publish` here is an emergency republish. This
  * file is a THIN caller: loading, validation, the diff against the live
  * catalog, the `synap-official` preflight and the POSTs are ONE lib in the
  * monorepo checkout — `scripts/catalog-lib.mjs` of the catalog package
@@ -17,7 +19,7 @@
  *
  * ONE READ PATH: every kind — capabilities included — is read from the catalog
  * package by `loadCatalog` (its default kind dirs). The CLI never reads the
- * control-plane repo; the CP's capability JSON is only a guarded mirror now.
+ * control-plane repo; no repo holds a copy of the catalog any more (CLI #91, CP 2c755f8e).
  *
  * ONE ERROR TABLE: every code the lib throws (and every refusal of this
  * command) maps to ONE next step in `CATALOG_ERROR_HINTS`.
@@ -50,7 +52,7 @@ import { log } from "../utils/logger.js";
 /** Package names the catalog checkout may carry (new name first). */
 export const CATALOG_PACKAGE_NAMES = ["@synap-core/catalog", "@synap-core/workspace-templates"] as const;
 export const CATALOG_LIB_PATH = "scripts/catalog-lib.mjs";
-export const CATALOG_KINDS = ["workspace", "capability", "skill", "pack", "automation"] as const;
+export const CATALOG_KINDS = ["workspace", "capability", "skill", "pack", "automation", "view", "agent"] as const;
 export type CatalogKind = (typeof CATALOG_KINDS)[number];
 export const CATALOG_VERBS = ["validate", "diff", "publish"] as const;
 export type CatalogVerb = (typeof CATALOG_VERBS)[number];
@@ -276,7 +278,7 @@ export function catalogUsageError(verb: string, slugs: string[], opts: CatalogOp
     return null;
   }
   if (!opts.official) {
-    return "catalog publish writes the OFFICIAL catalog — pass --official (founder: a `synap login` session that owns the synap-official vendor).";
+    return "catalog publish writes the OFFICIAL catalog — pass --official (owner only, for an emergency republish: a `synap login` session that owns the synap-official vendor). CI normally publishes on every push to app-bases main.";
   }
   return null;
 }
@@ -407,6 +409,21 @@ export function selectTombstones(
   );
 }
 
+/**
+ * The ONE rule for a stamp move (the catalog lib's `stampMoveLine` is its twin; keep them equal): only a
+ * `changed` row whose stamp moved says anything, in people's words.
+ */
+export function stampMoveLine(r: CatalogDiffRow): string | null {
+  if (r.status !== "changed") return null;
+  const before = r.sourcePackage?.before?.version;
+  const after = r.sourcePackage?.after?.version;
+  if ((before ?? "none") === (after ?? "none")) return null;
+  const words = (v?: string) => v ?? "unstamped";
+  return r.hashAfter && r.hashBefore === r.hashAfter
+    ? `~ stamp only: ${words(before)} → ${words(after)} (content unchanged)`
+    : `~ published as: ${words(before)} → ${words(after)}`;
+}
+
 export function formatDiff(
   allRows: CatalogDiffRow[],
   formatRetirement?: CatalogLib["formatRetirement"],
@@ -428,11 +445,8 @@ export function formatDiff(
     if (r.status === "changed" && r.hashBefore && r.hashAfter && r.hashBefore !== r.hashAfter) {
       detail.push("      ~ definition: new content version");
     }
-    const spBefore = r.sourcePackage?.before?.version ?? "none";
-    const spAfter = r.sourcePackage?.after?.version ?? "none";
-    if (r.status === "changed" && spBefore !== spAfter) {
-      detail.push(`      ~ sourcePackage: ${spBefore} → ${spAfter}`);
-    }
+    const stamp = stampMoveLine(r);
+    if (stamp) detail.push(`      ${stamp}`);
     if (r.status === "changed" && Array.isArray(r.columns)) {
       for (const c of r.columns) detail.push(`      ~ ${c.column}: ${shortValue(c.before)} → ${shortValue(c.after)}`);
     }

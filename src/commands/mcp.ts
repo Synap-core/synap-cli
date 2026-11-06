@@ -16,11 +16,17 @@
 
 import chalk from "chalk";
 import { resolveHubConfig, type HubConfig } from "../lib/hub-client.js";
+import { probeAuthStatus, KEY_PROBE_LABEL } from "../lib/credential-class.js";
 import {
   buildMcpUrl,
   provisionAgentKey,
   enrollAgentIfNeeded,
+  isTargetName,
+  type TargetName,
 } from "../lib/targets.js";
+import { agentTypeOfSurface } from "../lib/machine-instance.js";
+import { SURFACE_NAMES, setSurfaceAgentKey, type SurfaceName } from "../lib/pod.js";
+import { suggestTargets } from "../lib/target-suggest.js";
 import { log } from "../utils/logger.js";
 import { MANAGED_MCP_URL, mcpConnectorUrl } from "../lib/auth.js";
 import { printMcpConnection, redactKey, writeMcpSnippetFiles, MCP_KEY_ENV, mcpRemoteArgs } from "../lib/mcp-snippets.js";
@@ -55,6 +61,25 @@ function resolveMcpTarget(
 }
 
 /**
+ * The client's key on this computer, reused when it is still live: a re-run of
+ * `mcp url` / `mcp ui-setup` must not mint a fresh key (and, once approved,
+ * revoke the one the client already holds) every time. `idempotent` asks the
+ * pod to keep a live key; the key is stored under the client's name, so the
+ * next run finds it (`provisionAgentKey`'s reuse path reads that store).
+ */
+async function mintReusableKey(cfg: HubConfig, surface: TargetName): Promise<{ hubApiKey: string; agentUserId: string }> {
+  const { hubApiKey, agentUserId } = await provisionAgentKey(cfg.podUrl, cfg.apiKey, agentTypeOfSurface(surface), {
+    requireApproval: false,
+    idempotent: true,
+    surfaceName: surface,
+  });
+  if ((SURFACE_NAMES as readonly string[]).includes(surface)) {
+    setSurfaceAgentKey(surface as SurfaceName, { hubApiKey, agentUserId, podUrl: cfg.podUrl });
+  }
+  return { hubApiKey, agentUserId };
+}
+
+/**
  * `synap mcp url` — print a ready-to-paste MCP connection for ANY client.
  *
  * Provisions a DEDICATED agent key (separate identity, revocable) rather than
@@ -69,31 +94,21 @@ export async function mcpUrl(
     const cfg = await resolveHubConfig(opts);
     const { url, workspaceId, projectId } = resolveMcpTarget(cfg, opts);
 
-    // A dedicated agent key — never paste the human's full-scope key into an
-    // external product. requireApproval:false because the user is explicitly
-    // running this command with an already-authed key.
-    // The pod only mints keys for known surface agent types; an arbitrary
-    // client name (e.g. "chatgpt") maps to the "generic" surface. The --client
-    // value stays a display label only.
-    const SURFACE_TYPES = [
-      "claude-code",
-      "claude-desktop",
-      "cursor",
-      "raycast",
-      "codex",
-      "openwebui",
-      "generic",
-    ];
-    const agentType =
-      opts.client && SURFACE_TYPES.includes(opts.client)
-        ? opts.client
-        : "generic";
-    const { hubApiKey, agentUserId } = await provisionAgentKey(
-      cfg.podUrl,
-      cfg.apiKey,
-      agentType,
-      { requireApproval: false }
-    );
+    // A dedicated agent key — never paste the person's key into an external
+    // product. A known client (`TARGETS`) gets its own key; with no --client,
+    // the `generic` client. Any other name is a display label for a product
+    // the CLI does not know (the catalog's setups pass their own, e.g.
+    // `--client claude-managed-agents`): its key is the generic client's.
+    // `synap connect`, which writes a client's config, stops on an unknown
+    // name instead; here a near-miss of a known name only gets a hint.
+    const label = opts.client?.trim() || "generic";
+    const surface: TargetName = isTargetName(label) ? label : "generic";
+    if (surface !== label && !opts.json) {
+      const near = suggestTargets(label);
+      log.hint(`\`${label}\` is not one of the CLI's clients: it gets a generic client's key.`);
+      if (near.length) log.hint(`Did you mean: ${near.map((n) => `\`${n}\``).join(", ")}? (synap mcp url --client ${near[0]})`);
+    }
+    const { hubApiKey, agentUserId } = await mintReusableKey(cfg, surface);
 
     // Enroll the fresh agent into the user's workspace(s). Without this the
     // agent authenticates but sees ZERO workspaces — every ask/capture then
@@ -158,20 +173,13 @@ export async function mcpVerify(opts: McpBaseOpts): Promise<void> {
     }
 
     // 2. Key validity (authed call).
-    let keyValid = false;
-    try {
-      const res = await fetch(`${podBase}/api/hub/auth/status`, {
-        headers: { Authorization: `Bearer ${cfg.apiKey}` },
-        signal: AbortSignal.timeout(30000),
-      });
-      keyValid = res.ok;
-    } catch {
-      keyValid = false;
-    }
+    // Three answers: an unreachable pod says nothing about the key.
+    const keyProbe = await probeAuthStatus(cfg);
+    const keyValid = keyProbe === "valid";
 
     if (opts.json) {
       console.log(
-        JSON.stringify({ url, reachable, toolCount, keyValid }, null, 2)
+        JSON.stringify({ url, reachable, toolCount, keyValid, keyProbe }, null, 2)
       );
       return;
     }
@@ -182,7 +190,7 @@ export async function mcpVerify(opts: McpBaseOpts): Promise<void> {
       `  ${chalk.dim("Endpoint")}   ${reachable ? chalk.green("reachable") : chalk.red("unreachable")}${toolCount != null ? chalk.dim(` · ${toolCount} tools`) : ""}`
     );
     console.log(
-      `  ${chalk.dim("API key")}    ${keyValid ? chalk.green("valid") : chalk.red("invalid / expired")}`
+      `  ${chalk.dim("API key")}    ${keyProbe === "valid" ? chalk.green(KEY_PROBE_LABEL.valid) : keyProbe === "unreachable" ? chalk.yellow(KEY_PROBE_LABEL.unreachable) : chalk.red(KEY_PROBE_LABEL.invalid)}`
     );
     if (workspaceId)
       console.log(`  ${chalk.dim("Workspace")}  ${workspaceId}`);
@@ -329,12 +337,7 @@ export async function mcpUiSetup(
     const hubCfg = await resolveHubConfig({ podUrl: opts.podUrl, apiKey: opts.apiKey });
     const { url, workspaceId, projectId } = resolveMcpTarget(hubCfg, { workspace: opts.workspace, project: opts.project });
 
-    const { hubApiKey, agentUserId } = await provisionAgentKey(
-      hubCfg.podUrl,
-      hubCfg.apiKey,
-      "generic",
-      { requireApproval: false }
-    );
+    const { hubApiKey, agentUserId } = await mintReusableKey(hubCfg, "generic");
 
     const normalizedClient = client.toLowerCase().replace(/-/g, "");
     let output = "";
@@ -496,8 +499,8 @@ export async function mcpUiSetup(
  * stdout IS the protocol — nothing but JSON-RPC may be written to it.
  */
 export async function mcpBridge(opts: { url?: string }): Promise<void> {
-  const { runMcpBridge } = await import("../lib/mcp-bridge.js");
-  const { mcpBridgeHeaders } = await import("../lib/conversation-headers.js");
+  const { modelHandoffPath, runMcpBridge } = await import("../lib/mcp-bridge.js");
+  const { claudeCodeProcess, mcpBridgeHeaders } = await import("../lib/conversation-headers.js");
   const fromEnv = process.env.SYNAP_MCP_API_KEY || process.env.SYNAP_HUB_API_KEY;
   const cfg = fromEnv && opts.url ? null : await resolveHubConfig();
   const apiKey = fromEnv || cfg?.apiKey;
@@ -507,10 +510,14 @@ export async function mcpBridge(opts: { url?: string }): Promise<void> {
     process.exit(1);
   }
   // The spawn-time id (a stdio server's env), never a lens fallback.
+  const sessionId = process.env.CLAUDE_CODE_SESSION_ID;
   await runMcpBridge({
     url,
     apiKey,
-    headers: mcpBridgeHeaders(process.env.CLAUDE_CODE_SESSION_ID),
+    // Claude Code's own process (the parent), read once: only inside Claude Code.
+    headers: mcpBridgeHeaders(sessionId, process.cwd(), sessionId ? claudeCodeProcess() : undefined),
+    // What the conversation runs on, handed over by the synap-bridge plugin.
+    modelFile: modelHandoffPath(sessionId),
   });
 }
 

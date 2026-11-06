@@ -9,7 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { createWorker, WORK_FOLDER_EXTRA_TOOLS } from "../src/commands/worker.js";
+import { createWorker, parseProtocols, refusedProtocolLine, WORK_FOLDER_EXTRA_TOOLS } from "../src/commands/worker.js";
 import type { McpCallClient } from "../src/lib/mcp-call.js";
 
 const CODE = "33333333-3333-4333-8333-333333333333";
@@ -162,5 +162,115 @@ describe("the worker picks the protocol per session", () => {
     expect(fakeRuns()).toEqual([]);
     expect(w.state.runs[RUN]).toBeUndefined();
     expect(said.join("\n")).toContain("could not read how to run it");
+  });
+});
+
+/** A pod that also records posts and counts session reads; DESIGN carries a design outcome. */
+const DESIGN = "55555555-5555-4555-8555-555555555555";
+function recordingPod(handed: string[], room: Record<string, unknown[]> = {}) {
+  const posts: Array<Record<string, unknown>> = [];
+  const reads: string[] = [];
+  const sessions: Record<string, Record<string, unknown>> = {
+    ...SESSIONS,
+    [DESIGN]: { id: DESIGN, goal: "design the page", playbookId: null, channelId: "room-design" },
+  };
+  const mcp: McpCallClient = {
+    async call(tool, args = {}) {
+      if (tool === "synap_orient") {
+        const items = handed.map((id) => ({ id, goal: sessions[id].goal }));
+        return { isError: false, text: JSON.stringify({ startHere: { handedToYou: { count: items.length, items } } }) };
+      }
+      if (tool === "synap_get_session") {
+        const id = args.sessionId as string;
+        reads.push(id);
+        const o = id === DESIGN ? { status: "ok", outcomes: [{ key: "d", kind: "design", label: "Design" }] } : outcomes;
+        return { isError: false, text: JSON.stringify({ session: sessions[id], outcomes: o }) };
+      }
+      if (tool === "synap_get_thread_context") {
+        return { isError: false, text: JSON.stringify({ messages: room[args.threadId as string] ?? [] }) };
+      }
+      if (tool === "synap_post_message") {
+        posts.push(args);
+        return { isError: false, text: JSON.stringify({ success: true }) };
+      }
+      if (tool === "synap_update_session") return { isError: false, text: "{}" };
+      throw new Error(`unexpected tool ${tool}`);
+    },
+  };
+  return { mcp, posts, reads };
+}
+
+describe("--protocols: a computer takes only the runs it is for", () => {
+  it("parses the list; an unknown or empty one is refused, never widened", () => {
+    expect([...parseProtocols(undefined)].sort()).toEqual(["code", "work-folder"]);
+    expect([...parseProtocols("work-folder")]).toEqual(["work-folder"]);
+    expect([...parseProtocols(" code , work-folder ")].sort()).toEqual(["code", "work-folder"]);
+    expect(() => parseProtocols("workfolder")).toThrow(/--protocols takes code, work-folder/);
+    expect(() => parseProtocols(" , ")).toThrow(/--protocols/);
+  });
+
+  it("work-folder only: the playbook run launches; a code and a design session never do, and each room is told once", async () => {
+    const said: string[] = [];
+    const pod = recordingPod([CODE, DESIGN, RUN]);
+    const w = createWorker(
+      { agent: "proto-wf", claudeBin: fakeClaude, cwd: tmp, workRoot: path.join(tmp, "synap-work"), maxParallel: "3", protocols: "work-folder" },
+      { mcp: pod.mcp, podUrl: "https://pod.example", apiKey: "k", selfAgentId: "self", say: (l) => said.push(l) }
+    );
+    await w.tick();
+    await w.waitForChildren();
+    await w.tick();
+    await w.waitForChildren();
+
+    const runs = fakeRuns();
+    expect(runs).toHaveLength(1);
+    expect(runs[0].argv[1]).toContain(`Session: ${RUN}`);
+    expect(w.state.runs[RUN]).toMatchObject({ protocol: "work-folder" });
+    expect(w.state.runs[CODE]).toBeUndefined();
+    expect(w.state.runs[DESIGN]).toBeUndefined();
+
+    // One line per refused room, across ticks; the refused sessions are read once.
+    const refusedPosts = pod.posts.filter((p) => p.channelId === "room-code" || p.channelId === "room-design");
+    expect(refusedPosts).toHaveLength(2);
+    for (const p of refusedPosts) {
+      expect(p.content).toBe(refusedProtocolLine("code", new Set(["work-folder"])));
+      expect(p.idempotencyKey).toMatch(/^worker-refused:proto-wf:/);
+    }
+    expect(pod.reads.filter((id) => id === CODE)).toHaveLength(1);
+    expect(pod.reads.filter((id) => id === DESIGN)).toHaveLength(1);
+    expect(said.join("\n")).toContain("takes work-folder runs only");
+  });
+
+  it("work-folder only: an answer in the room never resumes a code run launched before the filter", async () => {
+    const room: Record<string, unknown[]> = {};
+    const before = createWorker(
+      { agent: "proto-resume", claudeBin: fakeClaude, cwd: tmp, workRoot: path.join(tmp, "synap-work") },
+      { mcp: recordingPod([CODE], room).mcp, podUrl: "https://pod.example", apiKey: "k", selfAgentId: "self", say: () => {} }
+    );
+    await before.tick();
+    await before.waitForChildren();
+    expect(fakeRuns()).toHaveLength(1);
+    expect(before.state.runs[CODE]).toMatchObject({ protocol: "code" });
+
+    room["room-code"] = [{ id: "m1", content: "Go on", timestamp: new Date(Date.now() + 60_000).toISOString(), authorType: "human" }];
+    const after = createWorker(
+      { agent: "proto-resume", claudeBin: fakeClaude, cwd: tmp, workRoot: path.join(tmp, "synap-work"), protocols: "work-folder" },
+      { mcp: recordingPod([CODE], room).mcp, podUrl: "https://pod.example", apiKey: "k", selfAgentId: "self", say: () => {} }
+    );
+    await after.tick();
+    await after.waitForChildren();
+    expect(fakeRuns()).toHaveLength(1);
+    expect(after.state.runs[CODE].resumes).toBeUndefined();
+  });
+
+  it("by default a worker still takes both protocols", async () => {
+    const pod = recordingPod([CODE, RUN]);
+    const w = createWorker(
+      { agent: "proto-all", claudeBin: fakeClaude, cwd: tmp, workRoot: path.join(tmp, "synap-work"), maxParallel: "2" },
+      { mcp: pod.mcp, podUrl: "https://pod.example", apiKey: "k", selfAgentId: "self", say: () => {} }
+    );
+    await w.tick();
+    await w.waitForChildren();
+    expect(fakeRuns()).toHaveLength(2);
+    expect(pod.posts.filter((p) => String(p.content ?? "").startsWith("This computer's worker does not take"))).toHaveLength(0);
   });
 });

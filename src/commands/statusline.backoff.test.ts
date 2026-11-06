@@ -12,9 +12,10 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { podCacheFile, podLockFile } from "../lib/statusline-store.js";
 
-const CACHE_FILE = "/tmp/synap-statusline-cache.json";
-const LOCK_FILE = "/tmp/synap-statusline-refresh.lock";
+const CACHE_FILE = podCacheFile();
+const LOCK_FILE = podLockFile();
 
 const files = new Map<string, string>();
 
@@ -34,6 +35,9 @@ vi.mock("node:fs", () => {
       return { mtimeMs: Date.now() };
     },
     existsSync: (p: unknown) => files.has(String(p)),
+    mkdirSync: () => undefined,
+    chmodSync: () => undefined,
+    constants: { O_WRONLY: 1, O_CREAT: 64, O_TRUNC: 512, O_NOFOLLOW: 0 },
   };
   return { default: fs, ...fs };
 });

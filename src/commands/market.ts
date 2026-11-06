@@ -24,6 +24,7 @@
 
 import ora from "ora";
 import chalk from "chalk";
+import { humanizeToken } from "@synap-core/types/vocabulary";
 import {
   assembleCatalog,
   computeTemplateUpdates,
@@ -64,8 +65,9 @@ import {
   type CpMineRow,
   type TierInfo,
 } from "../lib/cp-packages.js";
-import { fetchInstalledSlugs, fetchInstalledTemplates, fetchInstalledInventory, fetchInstalledInventoryStrict, installedRowsToTemplates, fetchWorkspaceAttachments, fetchWorkspaceAttachmentsStrict, verifyStampLanded, INSTALLED_KINDS, type InstalledKind, type InstalledRow, type InstalledTemplateInfo, type WorkspaceAttachment } from "../lib/installed.js";
+import { fetchInstalledSlugs, fetchInstalledTemplates, fetchInstalledInventory, installedRowsToTemplates, fetchWorkspaceAttachments, fetchWorkspaceAttachmentsStrict, verifyStampLanded, INSTALLED_KINDS, type InstalledKind, type InstalledRow, type InstalledTemplateInfo, type WorkspaceAttachment } from "../lib/installed.js";
 import { isSuite } from "../lib/suite.js";
+import { refreshPodCatalogFor, catalogRefreshLine, type CatalogRefresh } from "../lib/catalog-refresh.js";
 import {
   TEMPLATE_STEP_LABELS,
   classifyTemplateStep,
@@ -79,15 +81,18 @@ import { capabilityAdd } from "./capability.js";
 import { bundledTemplatesVersion } from "../lib/bundle-version.js";
 import { HubNetworkError } from "../lib/hub-client.js";
 import {
+  checksFromStandings,
+  fetchPackageStandings,
+  StandingsUnavailableError,
+  type PackageStanding,
+} from "../lib/package-updates.js";
+import { podAdminOrigin } from "../lib/safe-open.js";
+import {
   parseDataChanges,
-  dataChangesFromRefusal,
-  consentNeedsPerson,
-  dataChangeRefusalMessage,
   printDataChanges,
   parseAcceptList,
   decideConsent,
   consentRerunCommand,
-  consentRefusalLines,
   lifecycleNotice,
   overlayNotice,
   overlayNeedsAttention,
@@ -256,8 +261,8 @@ const KIND_HEADINGS: Record<string, string> = {
   // (`GET /installed`) calls the same thing `automation`. Both tokens reach
   // `kindHeading()` — `market --list` speaks CP, `market installed` speaks pod —
   // so both are mapped, to the ONE plural the registry says.
-  workflow: "Rules",
-  automation: "Rules",
+  workflow: "Automations",
+  automation: "Automations",
   view: "Views",
   cell: "Cards",
   workspace: "Spaces",
@@ -267,13 +272,7 @@ const KIND_HEADINGS: Record<string, string> = {
 const NAME_COL_MAX = 44;
 
 function kindHeading(kind: string): string {
-  return KIND_HEADINGS[kind] ?? humanizeKindToken(kind);
-}
-
-/** Last resort for a kind the CP added and this CLI has not learned yet. */
-function humanizeKindToken(kind: string): string {
-  const words = kind.replace(/[-_]+/g, " ").trim();
-  return words ? words[0].toUpperCase() + words.slice(1) : kind;
+  return KIND_HEADINGS[kind] ?? humanizeToken(kind);
 }
 
 /**
@@ -565,8 +564,8 @@ function printSeedOutcomes(
   }
 }
 
-// ── Apply-outcome honesty — shared by `marketInstall` + `applyOnePackage` ───
-// Both hit the same `/packages/apply` door and must render the SAME honest
+// ── Apply-outcome honesty — `marketInstall`'s reading of `/packages/apply` ───
+// Every install reads the same `/packages/apply` answer and must render the SAME honest
 // verdict from its response: a partial capability-seed failure, a version
 // stamp that silently didn't take, or a compose-overlay result are never a
 // plain "✓ success" — in the human text OR in `--json`.
@@ -645,8 +644,8 @@ export function podApplyState(
 }
 
 /**
- * The verdict of one `/packages/apply` response — the ONE reader both
- * `marketInstall` and `applyOnePackage` call. Layer 2's outcome comes from the
+ * The verdict of one `/packages/apply` response — the ONE reader
+ * `marketInstall` calls. Layer 2's outcome comes from the
  * pod's own state (`podApplyState`): an apply the pod says is unfinished is
  * never "updated", and never a stamp contradiction (the pod held the version
  * on purpose — redeploying fixes nothing).
@@ -677,12 +676,11 @@ export function classifyApplyResponse(
 }
 
 /**
- * Classify one `/packages/apply` response into the honest verdict both
- * `marketInstall` and `applyOnePackage` print (and both put in `--json`).
+ * Classify one `/packages/apply` response into the honest verdict
+ * `marketInstall` prints (and puts in `--json`).
  * `wasUnstamped` = the slug was already installed with no recorded version
  * BEFORE this call (only `marketInstall` can detect this today — see its
- * `fetchInstalledTemplates` call; `applyOnePackage` only ever re-applies
- * already-versioned slugs, so it always passes `false`).
+ * `fetchInstalledTemplates` call).
  */
 export function classifyApplyResult(
   entry: CatalogEntry,
@@ -768,7 +766,7 @@ export function heldVersionLine(res: Record<string, unknown>): string | null {
   return typeof res.templateApplyWarning === "string" ? res.templateApplyWarning : null;
 }
 
-/** Render a `classifyApplyResult` verdict — the ONE honest-text door for both `marketInstall` and `applyOnePackage`. */
+/** Render a `classifyApplyResult` verdict — the ONE honest-text door of `marketInstall`. */
 export function printApplyVerdict(entry: CatalogEntry, verdict: ApplyVerdict): void {
   switch (verdict.status) {
     case "installed":
@@ -1667,39 +1665,65 @@ export interface UpdateCheck extends TemplateUpdateCheck {
    * see `InstalledTemplateInfo.version`'s doc in `lib/installed.ts`.
    */
   noVersionInfo: boolean;
-  /** The installed row's kind (absent = `"workspace"`, the only kind an older pod reports). Picks the update door — see {@link updateDoorFor}. */
+  /** The installed row's kind (absent = `"workspace"`, the only kind an older pod reports). */
   kind?: InstalledKind;
+  /** The pod's reason when it could not compare this package (`market update`). */
+  reason?: string;
 }
 
 /**
- * Which pod door UPDATES an installed package of this kind, or `null` when the
- * pod has no per-package updater for it.
- *
- * ⚠️ Never default to `/packages/apply`. That is the WORKSPACE door: it mints a
- * workspace for any body carrying a `_meta.slug`. On 2026-10-12 `market update`
- * sent the `creative-director` SKILL through it and the pod created an empty
- * "New Workspace" — the update-time twin of the 2026-09-05 install bug that
- * {@link declaredCategoryOf} fixed.
- *
- *  - view / skill / automation converge through the source-linked 3-way-merge
- *    reconcile (`POST /configs/reconcile`) — the SAME comparator whose dry run
- *    marked the row drifted (`GET /installed?drift`). Re-running `market.install`
- *    is not an update: the skill arm always creates (unique slug ⇒ fails), the
- *    automation arm returns "reused".
- *  - cell / capability have no per-package updater here: `null`.
+ * The slugs with an update that `synap market update <slug>` can apply. Every
+ * installed kind (space, capability, view, skill, automation) updates through
+ * the pod's ONE update door (`POST /package-updates/{slug}/apply`), so every
+ * slug with an update is offered; what only the person can do is said by the
+ * pod at apply time (`NEEDS_PERSON`), never guessed here. Next-step
+ * suggestions use it.
  */
-export type UpdateDoor = "packages-apply" | "configs-reconcile";
-export function updateDoorFor(kind: InstalledKind | undefined): UpdateDoor | null {
-  switch (kind ?? "workspace") {
-    case "workspace":
-      return "packages-apply";
-    case "view":
-    case "skill":
-    case "automation":
-      return "configs-reconcile";
-    default:
-      return null;
+export function cliUpdatableSlugs(
+  checks: ReadonlyArray<{ slug: string; kind?: InstalledKind; updateAvailable: boolean }>
+): string[] {
+  return checks.filter((c) => c.updateAvailable).map((c) => c.slug);
+}
+
+/** The status of an update left for the person to apply in pod admin (not a failure). */
+export const APPLY_IN_POD_ADMIN = "apply-in-pod-admin";
+
+/**
+ * Where the person finishes ONE package's update: pod admin's review page for
+ * it (`/marketplace/updates/<slug>`), when the pod-admin origin derives from
+ * the pod's; else the pod's own link (`reviewUrl`, pod-relative
+ * `/open/update/<slug>`, which the pod sends on to pod admin); else the
+ * Updates tab's words.
+ */
+export function packageReviewLink(podUrl: string, slug: string, reviewUrl?: unknown): string | undefined {
+  const admin = podAdminOrigin(podUrl);
+  if (admin) return `${admin}/marketplace/updates/${encodeURIComponent(slug)}`;
+  if (typeof reviewUrl === "string" && reviewUrl.startsWith("/")) return `${podUrl.replace(/\/+$/, "")}${reviewUrl}`;
+  if (typeof reviewUrl === "string" && /^https?:\/\//.test(reviewUrl)) return reviewUrl;
+  return undefined;
+}
+
+/** The one row for an update only the person can finish: on pod admin, not a failure. */
+function applyInPodAdminResult(
+  c: { slug: string; kind?: InstalledKind },
+  podUrl: string | undefined,
+  json: boolean | undefined,
+  pod: { why?: string; reviewUrl?: unknown } = {}
+) {
+  const link = podUrl ? packageReviewLink(podUrl, c.slug, pod.reviewUrl) : undefined;
+  if (!json) {
+    log.warn(
+      `${c.slug} is a ${c.kind ?? "workspace"} — to apply in pod admin${pod.why ? `: ${pod.why}` : "."} Nothing was written.`
+    );
+    log.hint(link ? `Apply it yourself: ${link}` : podUrl ? marketUpdatesDoor(podUrl) : "Apply it yourself from pod admin → Marketplace → Updates.");
   }
+  return {
+    slug: c.slug,
+    outcome: APPLY_IN_POD_ADMIN,
+    status: APPLY_IN_POD_ADMIN,
+    warnings: [] as string[],
+    ...(link ? { reviewUrl: link } : {}),
+  };
 }
 
 /**
@@ -1772,134 +1796,161 @@ export function dedupeBySlug(checks: UpdateCheck[]): UpdateCheck[] {
   return checks.filter((c) => (seen.has(c.slug) ? false : (seen.add(c.slug), true)));
 }
 
-/**
- * Apply one package via the SAME door `marketInstall` uses
- * (`POST /packages/apply`) — for an already-installed slug this re-runs the
- * pod's idempotent-create path, which reconciles when the pod build supports
- * it (see the `applyOnePackage` caveat below for what "created" means here).
- */
-async function applyOnePackage(
-  entry: CatalogEntry,
-  cat: MarketCatalog,
-  cfg: HubConfig,
-  opts: { json?: boolean },
-  applyTimeoutMs: number = APPLY_TIMEOUT_MS,
-  extra: {
-    /** Already-resolved payload (the preview resolved it) — saves a second CP fetch. */
-    payload?: InstallPayload | null;
-    /** opKeys the person agreed to. Sent only when non-empty; never more than were agreed. */
-    acceptDataChanges?: string[];
-  } = {}
-): Promise<{
+/** One update's outcome, as `market update` reports it. */
+export interface UpdateApplyResult {
   slug: string;
   outcome: string;
-  /** Honest coarse status from `classifyApplyResult` — see its doc. Early-return branches (locked/fetch-failed/proposed/failed/timed-out) reuse `outcome` as `status` verbatim. */
+  /** The coarse status the summary counts (see `summarizeApplyResults`). */
   status: string;
   warnings: string[];
   error?: string;
-  dependencies?: ResolvedDependencyLike[];
-  seedSummary?: SeedSummary;
-  /** Set when the pod refused for lack of consent — the changes it still needs agreement on. */
+  /** The catalog definition's failing fields, when the pod refused it. */
+  fieldErrors?: Record<string, string[]>;
+  /** Set when the update was filed for the person's approval. */
+  proposalId?: string;
+  proposalIds?: string[];
+  /** Where the person approves it, or finishes it on pod admin. */
+  reviewUrl?: string;
   pendingDataChanges?: DataChange[];
-}> {
-  if (cat.lockedSlugs.has(entry.slug)) {
-    const tier = cat.tierBySlug.get(entry.slug)?.requiredTier;
-    if (!opts.json)
-      log.warn(`"${entry.name}" requires the ${tier ?? "a higher"} tier — skipping.`);
-    return { slug: entry.slug, outcome: "locked", status: "locked", warnings: [] };
-  }
+}
 
-  const cpToken = getStoredToken()?.token;
-  // Same honest payload as `marketInstall` (see `resolveInstallPayload`).
-  const payload =
-    extra.payload !== undefined ? extra.payload : await resolveInstallPayload(entry.slug, cat, cpToken);
-  if (!payload) {
-    if (!opts.json) {
-      log.error(`Couldn't fetch "${entry.name}"'s definition from the control plane.`);
-      if (!cat.loggedIn) log.hint("It may be private — try: synap login");
-    }
-    return { slug: entry.slug, outcome: "fetch-failed", status: "fetch-failed", warnings: [] };
-  }
-  const pkg =
-    extra.acceptDataChanges && extra.acceptDataChanges.length > 0
-      ? { ...payload.pkg, acceptDataChanges: extra.acceptDataChanges }
-      : payload.pkg;
+/** The pod's typed refusals of an update (`services/package-updates/refusals.ts`). */
+const NEEDS_THE_PERSON = new Set(["NEEDS_PERSON", "CHOICES_NEEDED"]);
 
-  const s = opts.json ? null : ora(`Updating ${entry.name}…`).start();
+/**
+ * Apply ONE installed package's update through the pod's ONE update door,
+ * `POST /package-updates/{slug}/apply`, whatever its kind (space, capability,
+ * view, skill, automation) and whoever holds the key. The pod applies the
+ * rule (backend `services/package-updates/`): a person's apply lands; an
+ * agent key's is filed for the person's approval (`proposed`) and lands when
+ * they approve it; what only the person can do (agree to changes to existing
+ * records, choose for a field both sides changed, change a view) is
+ * `NEEDS_PERSON` / `CHOICES_NEEDED` with that package's review page. An
+ * older pod that refuses an agent here (403, no `reasonCode`) keeps today's
+ * line: to apply in pod admin.
+ */
+export async function applyUpdateThroughDoor(
+  c: { slug: string; kind?: InstalledKind; latestVersion?: string },
+  cfg: HubConfig,
+  opts: { json?: boolean },
+  applyTimeoutMs: number = APPLY_TIMEOUT_MS,
+  acceptDataChanges: string[] = []
+): Promise<UpdateApplyResult> {
+  if (!c.latestVersion) {
+    const error = "the pod named no catalog version to update to";
+    if (!opts.json) log.error(`${c.slug} not updated — ${error}.`);
+    return { slug: c.slug, outcome: "failed", status: "failed", warnings: [], error };
+  }
+  const body = {
+    expectedVersion: c.latestVersion,
+    choices: {},
+    ...(acceptDataChanges.length > 0 ? { acceptDataChanges } : {}),
+  };
+  const s = opts.json ? null : ora(`Updating ${c.slug}…`).start();
   try {
-    const res = (await hubPost("/packages/apply", pkg, cfg, applyTimeoutMs)) as Record<string, unknown>;
+    const res = (await hubPost(
+      `/package-updates/${encodeURIComponent(c.slug)}/apply`,
+      body,
+      cfg,
+      applyTimeoutMs
+    )) as Record<string, unknown> | null;
     s?.stop();
-
-    if (writeGovernance(res) === "proposed") {
-      const proposalId = res.proposalId ? String(res.proposalId) : undefined;
+    if (res?.status === "proposed") {
+      const proposalIds = Array.isArray(res.proposalIds) ? res.proposalIds.map(String) : [];
+      const links = proposalIds.map((id) => approvalLink(cfg.podUrl, id, undefined) ?? `${cfg.podUrl.replace(/\/+$/, "")}/open/${encodeURIComponent(id)}`);
       if (!opts.json) {
-        log.info(`${entry.name} — update proposed (under review, not live yet).`);
-        if (proposalId) log.hint(`Review and approve: synap open proposal ${proposalId}`);
-      }
-      return { slug: entry.slug, outcome: "proposed", status: "proposed", warnings: [] };
-    }
-
-    const ws = res.workspace as WorkspaceApplyResult | undefined;
-    const dependencies = res.dependencies as ResolvedDependencyLike[] | undefined;
-    const seedSummary = res.seedSummary as SeedSummary | undefined;
-    // `wasUnstamped: false` — `applyOnePackage` is only ever reached (from
-    // `marketUpdate`) for a slug that already had `updateAvailable: true`,
-    // which by construction means it already carried a recorded version. The
-    // stamp-contradiction check is therefore a no-op here by design; it's
-    // `marketInstall`'s job to catch it on a first-time/unstamped install.
-    const verdict = classifyApplyResponse(entry, res, {
-      remoteVersionSent: payload.catalogVersion,
-      wasUnstamped: false,
-    });
-    if (!opts.json) {
-      printApplyVerdict(entry, verdict);
-      printSeedOutcomes(dependencies, seedSummary);
-      printLayerOutcomes(ws?.layers);
-      for (const line of deferredPlacementLines(res)) log.info(line);
-    }
-    return {
-      slug: entry.slug,
-      outcome: ws?.outcome ?? ws?.status ?? "unknown",
-      status: verdict.status,
-      warnings: verdict.warnings,
-      dependencies,
-      seedSummary,
-    };
-  } catch (e) {
-    s?.stop();
-    // The pod refused: data changes are owed that the person has not agreed to.
-    // Nothing was written. Show the list and the exact command that agrees.
-    const owed = dataChangesFromRefusal(e);
-    if (owed) {
-      if (!opts.json) {
-        const said = consentRefusalLines(entry.name, entry.slug, owed, consentNeedsPerson(e));
-        log.warn(said.warn);
-        printDataChanges(entry.slug, owed);
-        for (const hint of said.hints) log.hint(hint);
+        log.info(`${c.slug} — update filed for your approval (not applied yet).`);
+        for (const link of links) log.hint(`Approve it: ${link}`);
       }
       return {
-        slug: entry.slug,
-        outcome: "needs-consent",
-        status: "needs-consent",
+        slug: c.slug,
+        outcome: "proposed",
+        status: "proposed",
         warnings: [],
-        pendingDataChanges: owed,
+        ...(proposalIds[0] ? { proposalId: proposalIds[0], proposalIds } : {}),
+        ...(links[0] ? { reviewUrl: links[0] } : {}),
+      };
+    }
+    if (res?.status === "applied") {
+      const warning = typeof res.warning === "string" && res.warning ? res.warning : undefined;
+      const receipt = res.receipt as { changes?: unknown[] } | null | undefined;
+      // A field update whose every field stayed yours changed nothing.
+      const unchanged = !!receipt && Array.isArray(receipt.changes) && receipt.changes.length === 0;
+      const status = warning ? "updated-with-failures" : unchanged ? "unchanged" : "updated";
+      if (!opts.json) {
+        if (warning) log.warn(`${c.slug} — updated, not finished: ${warning}`);
+        else log.success(`${c.slug} — ${status}`);
+      }
+      return { slug: c.slug, outcome: status, status, warnings: warning ? [warning] : [] };
+    }
+    const error = "the pod answered with a result this CLI can't read — not assuming it updated";
+    if (!opts.json) log.error(`${c.slug} — ${error}`);
+    return { slug: c.slug, outcome: "failed", status: "failed", warnings: [], error };
+  } catch (e) {
+    s?.stop();
+    const refusal = e instanceof HubError ? ((e.body ?? {}) as Record<string, unknown>) : {};
+    const reasonCode = typeof refusal.reasonCode === "string" ? refusal.reasonCode : undefined;
+    const said = e instanceof HubError ? (e.detail ?? e.message) : e instanceof Error ? e.message : String(e);
+    if (reasonCode && NEEDS_THE_PERSON.has(reasonCode)) {
+      return applyInPodAdminResult(c, cfg.podUrl, opts.json, { why: said, reviewUrl: refusal.reviewUrl });
+    }
+    // An older pod refuses an agent's space or capability update here: today's line.
+    if (e instanceof HubError && e.status === 403 && !reasonCode && /\bagent\b/i.test(said)) {
+      return applyInPodAdminResult(c, cfg.podUrl, opts.json);
+    }
+    if (reasonCode === "INVALID_CATALOG_DEFINITION") {
+      const fieldErrors = (refusal.fieldErrors ?? undefined) as Record<string, string[]> | undefined;
+      if (!opts.json) {
+        log.error(`${c.slug} not updated — ${said}`);
+        for (const [field, messages] of Object.entries(fieldErrors ?? {}))
+          log.dim(`  ${field || "(the definition)"}: ${messages.join("; ")}`);
+      }
+      return {
+        slug: c.slug,
+        outcome: "failed",
+        status: "failed",
+        warnings: [],
+        error: said,
+        ...(fieldErrors ? { fieldErrors } : {}),
       };
     }
     const timedOut = e instanceof HubNetworkError && e.code === "TIMEOUT";
-    const refusal = dataChangeRefusalMessage(e);
     if (!opts.json) {
-      log.error(`${entry.name} update failed`);
-      if (refusal) log.warn(refusal);
-      else renderHubError(e);
+      log.error(`${c.slug} update failed`);
+      renderHubError(e, { personDoor: marketUpdatesDoor(cfg.podUrl) });
     }
     return {
-      slug: entry.slug,
+      slug: c.slug,
       outcome: timedOut ? "timed-out" : "failed",
       status: timedOut ? "timed-out" : "failed",
       warnings: [],
-      error: e instanceof Error ? e.message : String(e),
+      error: said,
     };
   }
+}
+
+/**
+ * Where the person approves a filed update: pod admin's proposal page, the
+ * approval door (`/proposal/<id>`), when the pod-admin origin derives from the
+ * pod's; else the link the pod sent (`reviewUrl`); else nothing.
+ */
+export function approvalLink(podUrl: string, proposalId: string | undefined, reviewUrl: unknown): string | undefined {
+  const admin = podAdminOrigin(podUrl);
+  if (admin && proposalId) return `${admin}/proposal/${encodeURIComponent(proposalId)}`;
+  return typeof reviewUrl === "string" && reviewUrl.length > 0 ? reviewUrl : undefined;
+}
+
+/**
+ * Where the person applies a package update a limited key may not apply
+ * (a computer key's grant leaves out `workspace.update`, by design: applying a
+ * workspace package is the person's act). Pod admin's Marketplace, Updates
+ * tab, named by URL when the pod-admin origin derives from the pod's.
+ */
+export function marketUpdatesDoor(podUrl: string): string {
+  const admin = podAdminOrigin(podUrl);
+  return admin
+    ? `Apply it yourself from pod admin → Marketplace → Updates: ${admin}/marketplace/updates`
+    : "Apply it yourself from pod admin → Marketplace → Updates.";
 }
 
 /** What the pod's write-free preview says an update would do to existing data. */
@@ -1932,58 +1983,16 @@ async function previewDataChanges(
   }
 }
 
-/** `POST /configs/reconcile`'s report (pod `reconcile-standalone-configs-to-templates.ts`). */
-interface StandaloneReconcileReport {
-  updated?: Array<{ kind: string; packageSlug?: string; name: string; reason: string }>;
-  ownerOwnedSkipped?: Array<{ kind: string; packageSlug?: string; name: string; reason: string }>;
-  skipped?: Array<{ kind: string; packageSlug?: string; name: string; reason: string }>;
-  conflicts?: Array<{ kind: string; packageSlug?: string; name: string; reason: string }>;
-}
-
-/** One slug's outcome out of the shared pod-wide config reconcile. */
-async function reconcileOutcome(
-  c: UpdateCheck,
-  report: Promise<StandaloneReconcileReport>,
-  opts: { json?: boolean }
-): Promise<{ slug: string; outcome: string; status: string; warnings: string[]; error?: string }> {
-  let r: StandaloneReconcileReport;
-  try {
-    r = await report;
-  } catch (e) {
-    if (!opts.json) {
-      log.error(`${c.slug} update failed`);
-      renderHubError(e);
-    }
-    return { slug: c.slug, outcome: "failed", status: "failed", warnings: [], error: e instanceof Error ? e.message : String(e) };
-  }
-  // A report this CLI cannot read is a FAILED read — never "up to date".
-  const lists = [r?.updated, r?.ownerOwnedSkipped, r?.skipped, r?.conflicts];
-  if (!lists.some(Array.isArray) || lists.some((l) => l !== undefined && !Array.isArray(l))) {
-    const error = "the pod's reconcile answered with a report this CLI can't read — not assuming it updated";
-    if (!opts.json) log.error(`${c.slug} — ${error}`);
-    return { slug: c.slug, outcome: "failed", status: "failed", warnings: [], error };
-  }
-  const mine = (rows?: StandaloneReconcileReport["updated"]) => (rows ?? []).filter((e) => e.packageSlug === c.slug);
-  const conflicts = mine(r.conflicts);
-  const owned = mine(r.ownerOwnedSkipped);
-  const updated = mine(r.updated);
-  const warnings = owned.map((e) => `${e.name}: kept your edits — ${e.reason}`);
-  if (conflicts.length > 0) {
-    const error = conflicts.map((e) => `${e.name}: ${e.reason}`).join("; ");
-    if (!opts.json) log.error(`${c.slug} update failed — ${error}`);
-    return { slug: c.slug, outcome: "failed", status: updated.length > 0 ? "updated-with-failures" : "failed", warnings, error };
-  }
-  if (!opts.json) for (const w of warnings) log.warn(`${c.slug} — ${w}`);
-  if (updated.length > 0 || owned.length > 0) {
-    // Every field it could advance did; a field you edited stays yours (warned above).
-    const status = updated.length > 0 ? "updated" : "unchanged";
-    if (!opts.json) log.success(`${c.slug} — ${status}`);
-    return { slug: c.slug, outcome: status, status, warnings };
-  }
-  // Skipped (cache miss, unresolved definition…) or not reported at all: NOT updated — never "current".
-  const error = mine(r.skipped).map((e) => `${e.name}: ${e.reason}`).join("; ") || "the pod's reconcile did not report this package";
-  if (!opts.json) log.warn(`${c.slug} was not updated — ${error}`);
-  return { slug: c.slug, outcome: "not-updated", status: "not-updated", warnings, error };
+/**
+ * Before a command reads the pod's update verdict: ask the pod to refresh its
+ * catalog (`lib/catalog-refresh.ts`) and, unless printing JSON, say so when
+ * it could not. Never blocks the command.
+ */
+async function refreshCatalogFirst(opts: { json?: boolean; podUrl?: string; apiKey?: string }): Promise<CatalogRefresh> {
+  const refresh = await refreshPodCatalogFor(opts);
+  const line = catalogRefreshLine(refresh);
+  if (line && !opts.json) log.warn(line);
+  return refresh;
 }
 
 export async function marketUpdate(
@@ -2002,26 +2011,33 @@ export async function marketUpdate(
     timeout?: string;
   }
 ): Promise<void> {
+  // Refresh the pod's catalog first, so a template published a minute ago
+  // shows in the verdict below (the pod otherwise refreshes every 10 min).
+  const catalogRefresh = await refreshCatalogFirst(opts);
   const applyTimeoutMs = parseApplyTimeoutMs(opts.timeout);
-  // STRICT fetch: distinguish "pod unreachable" (transient — don't claim the
-  // pod is empty, that reads as data loss) from "genuinely nothing installed".
   const cat = await buildMarketCatalog();
-  let installedTemplates: InstalledTemplateInfo[];
-  // Whether the pod answered from the ONE read door (`GET /installed`, all six
-  // kinds) or is old enough that only workspace packages were visible. An old
-  // pod is not an empty pod — say which, rather than letting a narrower list
-  // read as the whole truth.
-  let degraded = false;
+  // THE POD'S ANSWER, never the CLI's: which installed package has an update
+  // is derived once on the pod, for every kind, with one rule (Hub
+  // `GET /package-updates` → `installed[]`), and pod admin's Updates tab reads
+  // the same list. A pod that cannot answer is said out loud, never replaced
+  // by a verdict computed here (that fork is how the CLI said "content
+  // changed" while pod admin said nothing, 2 Nov 2026).
+  let standings: PackageStanding[];
   try {
-    const inv = await fetchInstalledInventoryStrict();
-    installedTemplates = installedRowsToTemplates(inv.rows);
-    degraded = inv.degraded;
+    standings = await fetchPackageStandings(await resolveHubConfig(opts));
   } catch (e) {
     // Unreachable ≠ success — a script checking `$?` (or `&&`-chaining) must see
     // failure, not exit 0, even though the JSON payload also carries the reason.
     process.exitCode = 1;
+    const unavailable = e instanceof StandingsUnavailableError ? e.reason : null;
     if (opts.json) {
-      console.log(JSON.stringify({ checks: [], loggedIn: cat.loggedIn, error: "pod-unreachable" }, null, 2));
+      console.log(
+        JSON.stringify({ checks: [], loggedIn: cat.loggedIn, catalogRefresh, error: unavailable ?? "pod-unreachable" }, null, 2)
+      );
+      return;
+    }
+    if (e instanceof StandingsUnavailableError) {
+      log.error(e.message);
       return;
     }
     log.error("Couldn't reach your pod to read what's installed — not saying it's empty.");
@@ -2029,30 +2045,23 @@ export async function marketUpdate(
     log.hint("Check the pod is up / you're on the right --pod, then retry.");
     return;
   }
+  // Kept in the JSON for readers of the older shape: the pod's list covers
+  // every kind, so it is never the workspace-only view of an old pod.
+  const degraded = false;
 
-  const degradedNote = degraded
-    ? "This pod does not serve GET /api/hub/installed — only workspace packages were checked. Capability / view / skill / automation / card installs were NOT (upgrade the pod to include them)."
-    : undefined;
-
-  if (installedTemplates.length === 0) {
+  if (standings.length === 0) {
     if (opts.json) {
-      console.log(
-        JSON.stringify({ checks: [], loggedIn: cat.loggedIn, degraded, ...(degradedNote ? { degradedNote } : {}) }, null, 2)
-      );
+      console.log(JSON.stringify({ checks: [], loggedIn: cat.loggedIn, catalogRefresh, degraded }, null, 2));
       return;
     }
     log.warn("No installed packages found on this pod.");
-    if (degradedNote) log.dim(degradedNote);
     log.hint("Install one: synap market install <slug>");
     return;
   }
 
-  // ONE ROW PER SLUG. `GET /installed` reports one row per installed OBJECT —
-  // a views pack that installed four views is four rows — and an update is
-  // applied per PACKAGE, not per object. Without this the preview listed
-  // `task-views-pack` four times and the "N up to date" tally counted it four
-  // times. `market installed` has always deduped the same way.
-  let checks = dedupeBySlug(computeUpdates(installedTemplates, cat));
+  // One check per slug: the pod answers per package (slug + kind); a slug
+  // installed as two kinds is updated per kind by its own door, but listed once.
+  let checks: UpdateCheck[] = dedupeBySlug(checksFromStandings(standings));
   const entryBySlug = new Map(cat.entries.map((e) => [e.slug, e]));
   const explicitSlugs = !!slugsArg && slugsArg.length > 0;
   let unknownSlugs: string[] = [];
@@ -2067,7 +2076,7 @@ export async function marketUpdate(
     if (validSlugs.length === 0) {
       if (opts.json) {
         console.log(
-          JSON.stringify({ checks: [], loggedIn: cat.loggedIn, unknownSlugs, applied: [] }, null, 2)
+          JSON.stringify({ checks: [], loggedIn: cat.loggedIn, catalogRefresh, unknownSlugs, applied: [] }, null, 2)
         );
         return;
       }
@@ -2124,8 +2133,9 @@ export async function marketUpdate(
       process.exit(1);
     }
     for (const c of withUpdates) {
-      // The data-change preview is the workspace door's (`/packages/preflight`).
-      if (updateDoorFor(c.kind) !== "packages-apply") continue;
+      // Only a space's update changes existing records: the preview of its
+      // data changes is the template door's (`/packages/preflight`).
+      if ((c.kind ?? "workspace") !== "workspace") continue;
       const entry = entryBySlug.get(c.slug);
       if (entry) previews.set(c.slug, await previewDataChanges(entry, cat, cfg));
     }
@@ -2163,6 +2173,8 @@ export async function marketUpdate(
 
     log.heading("  Installed packages");
     log.blank();
+    // The slug column fits the longest slug (capped), with at least 2 spaces after it.
+    const slugW = Math.min(Math.max(28, ...checks.map((c) => c.slug.length + 2)), 46);
     for (const c of checks) {
       // ONE label door. This was a hand-rolled second copy that diverged from
       // `installedStatusLabel` in two ways that both LIED: it had no cache-cold
@@ -2177,7 +2189,7 @@ export async function marketUpdate(
             entryBySlug.get(c.slug)?.isPrivate ?? false,
             cat.loggedIn
           );
-      console.log("    " + chalk.cyan(c.slug.padEnd(28)) + label);
+      console.log("    " + chalk.cyan(clip(c.slug, slugW - 2).padEnd(slugW)) + label);
     }
     log.blank();
     if (noVersionInfo.length > 0) {
@@ -2185,7 +2197,6 @@ export async function marketUpdate(
         `${noVersionInfo.length} installed without a version stamp — can't check ${noVersionInfo.length === 1 ? "it" : "them"} for updates.`
       );
     }
-    if (degradedNote) log.dim(degradedNote);
   }
 
   // What the JSON carries for the new facts: per slug, the pod's data changes
@@ -2206,6 +2217,7 @@ export async function marketUpdate(
           {
             checks,
             loggedIn: cat.loggedIn,
+            catalogRefresh,
             unknownSlugs,
             applied: [],
             status: noVersionInfo.length > 0 ? "partial" : "clean",
@@ -2230,7 +2242,10 @@ export async function marketUpdate(
     } else if (leaving.length > 0) {
       log.info("No updates to apply.");
     } else {
-      log.success("Nothing to update.");
+      // A clean verdict is only "verified" against a catalog the pod just
+      // refreshed; otherwise it is the pod's last copy, said as such.
+      if (catalogRefresh.state === "refreshed") log.success("Nothing to update.");
+      else log.info("Nothing to update in the pod's last copy of the catalog (not refreshed, see above).");
       // `market update` only checks TEMPLATE-ATTACHED workspaces — a hand-built
       // one (no packageSlug) can't be "behind" a template, so it's silently
       // absent here. Point at the fuller home so "nothing to update" never reads
@@ -2241,13 +2256,16 @@ export async function marketUpdate(
   }
 
   if (!shouldApply) {
-    const steps = FLOW.afterMarketUpdateCheck(withUpdates.map((c) => c.slug));
+    // Every update applies through the pod's one update door, so every one
+    // is offered; what only the person can do is said when it is applied.
+    const steps = FLOW.afterMarketUpdateCheck(cliUpdatableSlugs(withUpdates));
     if (opts.json) {
       console.log(
         JSON.stringify(
           {
             checks,
             loggedIn: cat.loggedIn,
+            catalogRefresh,
             unknownSlugs,
             applied: [],
             nextSteps: steps,
@@ -2269,40 +2287,8 @@ export async function marketUpdate(
   }
 
   const acceptList = parseAcceptList(opts.acceptDataChanges);
-  const results: Array<{
-    slug: string;
-    outcome: string;
-    status: string;
-    warnings: string[];
-    error?: string;
-    dependencies?: ResolvedDependencyLike[];
-    seedSummary?: SeedSummary;
-    pendingDataChanges?: DataChange[];
-  }> = [];
-  // One pod-wide reconcile serves every view/skill/automation update — run it
-  // at most once, lazily, and read each slug's outcome from its report.
-  let configsReport: Promise<StandaloneReconcileReport> | undefined;
+  const results: UpdateApplyResult[] = [];
   for (const c of withUpdates) {
-    const door = updateDoorFor(c.kind);
-    if (door === null) {
-      if (!opts.json)
-        log.warn(`${c.slug} is a ${c.kind} — the pod has no per-package update for this kind, so it was not updated. Nothing was written.`);
-      results.push({ slug: c.slug, outcome: "no-updater", status: "no-updater", warnings: [] });
-      continue;
-    }
-    if (door === "configs-reconcile") {
-      configsReport ??= hubPost("/configs/reconcile", {}, cfg!, applyTimeoutMs) as Promise<StandaloneReconcileReport>;
-      results.push(await reconcileOutcome(c, configsReport, { json: opts.json }));
-      continue;
-    }
-    const entry = entryBySlug.get(c.slug);
-    if (!entry) {
-      // Absent from the catalog THIS CLI read — not proof it left the catalog
-      // (that is the pod's `unlisted`, shown above, and only after a complete sync).
-      if (!opts.json) log.warn(`Couldn't find "${c.slug}" in the catalog read just now — skipping.`);
-      results.push({ slug: c.slug, outcome: "not-in-catalog", status: "not-in-catalog", warnings: [] });
-      continue;
-    }
     const pv = previews.get(c.slug);
     const pending = pv?.changes ?? [];
     let accepted: string[] = [];
@@ -2327,19 +2313,14 @@ export async function marketUpdate(
       }
       if (missing.length > 0) {
         if (!opts.json) {
-          log.warn(`${entry.name} not updated: you have not agreed to its data changes. Nothing was written.`);
+          log.warn(`${c.slug} not updated: you have not agreed to its data changes. Nothing was written.`);
           log.hint(`To agree and update: ${consentRerunCommand(c.slug, missing)}`);
         }
         results.push({ slug: c.slug, outcome: "needs-consent", status: "needs-consent", warnings: [], pendingDataChanges: missing });
         continue;
       }
     }
-    results.push(
-      await applyOnePackage(entry, cat, cfg!, { json: opts.json }, applyTimeoutMs, {
-        payload: pv?.payload,
-        acceptDataChanges: accepted,
-      })
-    );
+    results.push(await applyUpdateThroughDoor(c, cfg!, { json: opts.json }, applyTimeoutMs, accepted));
   }
   if (results.some((r) => r.status === "needs-consent")) process.exitCode = 1;
 
@@ -2351,6 +2332,7 @@ export async function marketUpdate(
         {
           checks,
           loggedIn: cat.loggedIn,
+          catalogRefresh,
           unknownSlugs,
           applied: results,
           summary,
@@ -2370,20 +2352,22 @@ export async function marketUpdate(
 }
 
 /**
- * One-line rollup over a batch of `applyOnePackage` outcomes — computed from
- * the SAME per-item `status` (`classifyApplyResult`'s honest verdict) the
+ * One-line rollup over a batch of update outcomes (`applyUpdateThroughDoor`) — computed from
+ * the SAME per-item `status` the
  * loop already collects, not a separate tally. `"installed"`/`"updated"`/
  * `"composed"`/`"legacy-unknown"` count as a clean update, `"unchanged"` as
  * already-current, the `*-with-failures` and `"stamp-contradiction"` statuses
  * get their OWN bucket — a partial capability-seed failure or a stamp that
  * silently didn't take is never folded into a clean "updated" count.
- * `"timed-out"` is broken out from the generic `"failed"` bucket; everything
- * else (locked/proposed/fetch-failed/not-in-catalog/no-workspace/unknown)
- * rolls into "failed".
+ * `"timed-out"` is broken out from the generic `"failed"` bucket;
+ * `"proposed"`/`"awaiting-approval"` count as waiting for the person's
+ * approval (never failed); everything else
+ * (locked/fetch-failed/not-in-catalog/no-workspace/unknown) rolls into
+ * "failed".
  */
 export function summarizeApplyResults(
   results: Array<{ slug: string; status: string }>
-): { updated: number; unchanged: number; withFailures: number; failed: number; timedOut: number; proposed: number; needsConsent: number; line: string } {
+): { updated: number; unchanged: number; withFailures: number; failed: number; timedOut: number; proposed: number; needsConsent: number; toApplyInPodAdmin: number; line: string } {
   let updated = 0;
   let unchanged = 0;
   let withFailures = 0;
@@ -2391,6 +2375,7 @@ export function summarizeApplyResults(
   let failed = 0;
   let proposed = 0;
   let needsConsent = 0;
+  let toApplyInPodAdmin = 0;
   for (const r of results) {
     switch (r.status) {
       case "installed":
@@ -2425,23 +2410,28 @@ export function summarizeApplyResults(
       case "needs-consent":
         needsConsent++;
         break;
+      // The person's act (pod admin → Marketplace → Updates): nothing failed.
+      case APPLY_IN_POD_ADMIN:
+        toApplyInPodAdmin++;
+        break;
       default:
         failed++;
     }
   }
   const parts = [`${updated} updated`, `${unchanged} already current`];
-  if (proposed > 0) parts.push(`${proposed} proposed (awaiting review)`);
+  if (proposed > 0) parts.push(`${proposed} waiting for your approval`);
   // The vocabulary's `unfinished` ("Not finished"): one state, one name on
   // every surface — never "completed with failures" (review2 UX §1 #2).
   if (withFailures > 0) parts.push(`${withFailures} ${templateStepPhrase("unfinished")}`);
+  if (toApplyInPodAdmin > 0) parts.push(`${toApplyInPodAdmin} to apply in pod admin`);
   if (failed > 0) parts.push(`${failed} failed`);
   if (timedOut > 0) parts.push(`${timedOut} timed out`);
   if (needsConsent > 0) parts.push(`${needsConsent} waiting for your agreement to data changes`);
   const clean = withFailures === 0 && failed === 0 && timedOut === 0 && needsConsent === 0;
   // Proposed isn't a failure (never ⚠) but isn't live yet (not a bare ✓) —
-  // a distinct "→ awaiting review" marker keeps the summary honest.
-  const marker = !clean ? "⚠" : proposed > 0 ? "→" : "✓";
-  const color = !clean ? chalk.yellow : proposed > 0 ? chalk.cyan : chalk.green;
+  // a distinct "→ waiting for your approval" marker keeps the summary honest.
+  const marker = !clean ? "⚠" : proposed > 0 || toApplyInPodAdmin > 0 ? "→" : "✓";
+  const color = !clean ? chalk.yellow : proposed > 0 || toApplyInPodAdmin > 0 ? chalk.cyan : chalk.green;
   return {
     updated,
     unchanged,
@@ -2450,6 +2440,7 @@ export function summarizeApplyResults(
     timedOut,
     proposed,
     needsConsent,
+    toApplyInPodAdmin,
     line: color(`${marker} ${parts.join(" · ")}`),
   };
 }
@@ -2982,6 +2973,9 @@ export async function marketInstalled(opts: {
   // view install was invisible here, to `market update`, and to every drift
   // marker. On a pod too old to serve it, `fetchInstalledInventory` degrades to
   // exactly the old workspace-only behaviour and says so (`degraded`).
+  // Refresh the pod's catalog first, so a template published a minute ago
+  // shows in the verdict below (the pod otherwise refreshes every 10 min).
+  const catalogRefresh = await refreshCatalogFirst(opts);
   const [inv, cat] = await Promise.all([fetchInstalledInventory(), buildMarketCatalog()]);
   const installedTemplates = installedRowsToTemplates(inv.rows);
   const unlinked = collectUnlinked(inv.rows);
@@ -2994,7 +2988,7 @@ export async function marketInstalled(opts: {
     if (opts.json) {
       console.log(
         JSON.stringify(
-          { rows: [], unlinked: [], loggedIn: cat.loggedIn, degraded: inv.degraded, degradedNote },
+          { rows: [], unlinked: [], loggedIn: cat.loggedIn, catalogRefresh, degraded: inv.degraded, degradedNote },
           null,
           2
         )
@@ -3038,7 +3032,7 @@ export async function marketInstalled(opts: {
 
   if (opts.layers) {
     const graph = await buildInstallationGraph(installedTemplates, cat, checks);
-    const steps = FLOW.afterMarketInstalledCheck(rows.filter((c) => c.updateAvailable).map((c) => c.slug));
+    const steps = FLOW.afterMarketInstalledCheck(cliUpdatableSlugs(rows));
 
     if (opts.json) {
       console.log(
@@ -3049,6 +3043,7 @@ export async function marketInstalled(opts: {
             layers: graph.layers.map((bucket) => bucket.map((n) => n.slug)),
             cycles: graph.cycles,
             loggedIn: cat.loggedIn,
+            catalogRefresh,
             degraded: inv.degraded,
             nextSteps: steps,
           },
@@ -3073,7 +3068,7 @@ export async function marketInstalled(opts: {
 
   if (opts.tree) {
     const { packages, leafRows } = await buildCompositionTrees(rows, cat, installedTemplates, workspaceCountBySlug);
-    const steps = FLOW.afterMarketInstalledCheck(rows.filter((c) => c.updateAvailable).map((c) => c.slug));
+    const steps = FLOW.afterMarketInstalledCheck(cliUpdatableSlugs(rows));
 
     if (opts.json) {
       console.log(
@@ -3094,6 +3089,7 @@ export async function marketInstalled(opts: {
               };
             }),
             loggedIn: cat.loggedIn,
+            catalogRefresh,
             degraded: inv.degraded,
             nextSteps: steps,
           },
@@ -3145,7 +3141,7 @@ export async function marketInstalled(opts: {
   }
 
   if (opts.json) {
-    const steps = FLOW.afterMarketInstalledCheck(rows.filter((c) => c.updateAvailable).map((c) => c.slug));
+    const steps = FLOW.afterMarketInstalledCheck(cliUpdatableSlugs(rows));
     console.log(
       JSON.stringify(
         {
@@ -3180,6 +3176,7 @@ export async function marketInstalled(opts: {
                 ...(u.note ? { note: u.note } : {}),
               })),
           loggedIn: cat.loggedIn,
+          catalogRefresh,
           degraded: inv.degraded,
           ...(degradedNote ? { degradedNote } : {}),
           nextSteps: steps,
@@ -3275,7 +3272,7 @@ export async function marketInstalled(opts: {
 
   if (degradedNote) log.dim(degradedNote);
   if (!cat.loggedIn) log.dim("Not logged in — private template updates aren't visible. Run: synap login");
-  renderNextSteps(FLOW.afterMarketInstalledCheck(rows.filter((c) => c.updateAvailable).map((c) => c.slug)));
+  renderNextSteps(FLOW.afterMarketInstalledCheck(cliUpdatableSlugs(rows)));
 }
 
 // ── `synap market workspaces` — workspace-centric attachment discovery ───────
@@ -3350,11 +3347,14 @@ export async function marketWorkspaces(opts: {
   json?: boolean;
   unattached?: boolean;
 }): Promise<void> {
+  // Refresh the pod's catalog first, so a template published a minute ago
+  // shows in the verdict below (the pod otherwise refreshes every 10 min).
+  const catalogRefresh = await refreshCatalogFirst(opts);
   const [attachments, cat] = await Promise.all([fetchWorkspaceAttachments(), buildMarketCatalog()]);
 
   if (attachments.length === 0) {
     if (opts.json) {
-      console.log(JSON.stringify({ workspaces: [], loggedIn: cat.loggedIn }, null, 2));
+      console.log(JSON.stringify({ workspaces: [], loggedIn: cat.loggedIn, catalogRefresh }, null, 2));
       return;
     }
     log.warn("No workspaces found on this pod.");
@@ -3404,6 +3404,7 @@ export async function marketWorkspaces(opts: {
               : {}),
           })),
           loggedIn: cat.loggedIn,
+          catalogRefresh,
         },
         null,
         2
@@ -3858,6 +3859,9 @@ export async function marketTemplates(opts: {
     process.exit(1);
   }
 
+  // Refresh the pod's catalog first, so a template published a minute ago
+  // shows in the verdict below (the pod otherwise refreshes every 10 min).
+  const catalogRefresh = await refreshCatalogFirst(opts);
   const cat = await buildMarketCatalog();
   // STRICT: this is the consolidated home — "pod unreachable" must never render
   // as "No workspaces found · stand one up", the exact false-empty lie the
@@ -3868,7 +3872,7 @@ export async function marketTemplates(opts: {
   } catch (e) {
     process.exitCode = 1;
     if (opts.json) {
-      console.log(JSON.stringify({ needsAttention: [], upToDate: [], unlinked: [], loggedIn: cat.loggedIn, error: "pod-unreachable" }, null, 2));
+      console.log(JSON.stringify({ needsAttention: [], upToDate: [], unlinked: [], loggedIn: cat.loggedIn, catalogRefresh, error: "pod-unreachable" }, null, 2));
       return;
     }
     log.error("Couldn't reach your pod to read its workspaces — not saying it's empty.");
@@ -3879,7 +3883,7 @@ export async function marketTemplates(opts: {
 
   if (attachments.length === 0) {
     if (opts.json) {
-      console.log(JSON.stringify({ needsAttention: [], upToDate: [], unlinked: [], loggedIn: cat.loggedIn }, null, 2));
+      console.log(JSON.stringify({ needsAttention: [], upToDate: [], unlinked: [], loggedIn: cat.loggedIn, catalogRefresh }, null, 2));
       return;
     }
     log.warn("No workspaces found on this pod.");
@@ -3918,6 +3922,7 @@ export async function marketTemplates(opts: {
           upToDate: ok.map(templateRowToJson),
           unlinked: unlinked.map(templateRowToJson),
           loggedIn: cat.loggedIn,
+          catalogRefresh,
         },
         null,
         2
@@ -3940,7 +3945,8 @@ export async function marketTemplates(opts: {
     for (const r of attention) renderTemplateRow(r);
     log.blank();
   } else {
-    log.success("  Everything attached is up to date.");
+    if (catalogRefresh.state === "refreshed") log.success("  Everything attached is up to date.");
+    else log.info("  Everything attached is up to date in the pod's last copy of the catalog (not refreshed, see above).");
     log.blank();
   }
 

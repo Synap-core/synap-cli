@@ -18,7 +18,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { createWorker, type WorkerDeps } from "../src/commands/worker.js";
+import {
+  MAX_LIMIT_RESUMES,
+  MAX_SETTLE_ATTEMPTS,
+  createWorker,
+  deadRunSentence,
+  type ExecFn,
+  type RunRecord,
+  type WorkerDeps,
+} from "../src/commands/worker.js";
 import type { McpCallClient } from "../src/lib/mcp-call.js";
 
 const VERSION = (JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string }).version;
@@ -43,7 +51,8 @@ fs.appendFileSync(process.env.SYNAP_FAKE_CLAUDE_LOG, JSON.stringify({ argv, mcp:
 const out = (o) => process.stdout.write(JSON.stringify(o) + "\\n");
 const r = argv.indexOf("--resume");
 out({ type: "system", subtype: "init", session_id: r >= 0 ? argv[r + 1] : "${CLAUDE_SID}" });
-out({ type: "result", subtype: "success", is_error: false, result: "Did it.\\nWORKER-RESULT: " + process.env.SYNAP_FAKE_VERDICT });
+const verdict = process.env.SYNAP_FAKE_VERDICT;
+out({ type: "result", subtype: "success", is_error: false, result: "Did it." + (verdict === "none" ? "" : "\\nWORKER-RESULT: " + verdict) });
 process.exitCode = Number(process.env.SYNAP_FAKE_EXIT || 0);
 `;
 
@@ -61,15 +70,21 @@ interface Call {
  * A pod whose orient lists `handed` (mutable between ticks) and records every
  * call, and when each room post landed. `outcomesFailFrom`: from that
  * synap_get_session read on (1-based), the outcomes read says `unavailable`.
+ * `blips`: the next N room posts throw like a dropped connection, `lost` before
+ * they land, `unacked` after (the pod has the line, the worker never heard).
+ * The room keeps one line per `idempotencyKey`, as the pod does (post-message.ts),
+ * and the room read returns its lines as the worker agent's own (`self`).
  */
 function stubPod(
   handed: { items: Array<Record<string, unknown>> },
   outcomes: Array<Record<string, unknown>> = [],
-  outcomesFailFrom = Infinity
+  outcomesFailFrom = Infinity,
+  blips: { n: number; mode: "lost" | "unacked" } = { n: 0, mode: "lost" }
 ) {
   const calls: Call[] = [];
   let sessionReads = 0;
   const postedAt: string[] = [];
+  const room = new Map<string, { id: string; content: string; timestamp: string; authorType: string; routedTeammateId: string }>();
   const mcp: McpCallClient = {
     async call(tool, args = {}, extras = {}) {
       calls.push({ tool, args, headers: extras.headers ?? {} });
@@ -87,13 +102,28 @@ function stubPod(
           }),
         };
       }
-      if (tool === "synap_get_thread_context") return { isError: false, text: JSON.stringify({ messages: [] }) };
-      if (tool === "synap_post_message") postedAt.push(new Date().toISOString());
+      if (tool === "synap_get_thread_context") return { isError: false, text: JSON.stringify({ messages: [...room.values()] }) };
+      if (tool === "synap_post_message") {
+        if (blips.n > 0 && blips.mode === "lost") {
+          blips.n--;
+          throw new Error("fetch failed");
+        }
+        const key = String(args.idempotencyKey ?? `nokey-${calls.length}`);
+        if (!room.has(key)) {
+          const at = new Date().toISOString();
+          room.set(key, { id: key, content: String(args.content), timestamp: at, authorType: "agent", routedTeammateId: "self" });
+          postedAt.push(at);
+        }
+        if (blips.n > 0) {
+          blips.n--;
+          throw new Error("fetch failed");
+        }
+      }
       if (tool === "synap_post_message" || tool === "synap_update_session") return { isError: false, text: "{}" };
       throw new Error(`unexpected tool ${tool}`);
     },
   };
-  return { mcp, calls, postedAt };
+  return { mcp, calls, postedAt, room };
 }
 
 const mk = (agent: string, mcp: McpCallClient, lines: string[] = [], extra: Partial<WorkerDeps> = {}) =>
@@ -167,7 +197,12 @@ describe("the verdict goes on the session itself", () => {
 
     const posts = pod.calls.filter((c) => c.tool === "synap_post_message");
     expect(posts).toHaveLength(1);
-    expect(posts[0].args).toEqual({ channelId: `room-${A.slice(0, 8)}`, kind: "update", content: "Result: blocked — waiting on the person" });
+    expect(posts[0].args).toEqual({
+      channelId: `room-${A.slice(0, 8)}`,
+      kind: "update",
+      content: "Result: blocked — waiting on the person",
+      idempotencyKey: `result:${A}:${w.state.runs[A].process}`,
+    });
     expect(pod.calls.some((c) => c.tool === "synap_update_session")).toBe(false);
     expect(pod.calls.some((c) => /capture|complete_session/.test(c.tool))).toBe(false);
     expect(w.state.runs[A].result).toBe("blocked — waiting on the person");
@@ -189,7 +224,15 @@ describe("the verdict goes on the session itself", () => {
     const writes = pod.calls.filter((c) => c.tool === "synap_update_session" || c.tool === "synap_post_message");
     expect(writes.map((c) => [c.tool, c.args])).toEqual([
       ["synap_update_session", { sessionId: A, completeOutput: "video" }],
-      ["synap_post_message", { channelId: `room-${A.slice(0, 8)}`, kind: "update", content: "Result: done — the cut is filed" }],
+      [
+        "synap_post_message",
+        {
+          channelId: `room-${A.slice(0, 8)}`,
+          kind: "update",
+          content: "Result: done — the cut is filed",
+          idempotencyKey: `result:${A}:${w.state.runs[A].process}`,
+        },
+      ],
     ]);
   });
 
@@ -350,5 +393,171 @@ describe("a session handed back to resume never launches fresh", () => {
     } finally {
       w.stop();
     }
+  });
+});
+
+const posts = (calls: Call[]) => calls.filter((c) => c.tool === "synap_post_message");
+const stateFile = (agent: string) => path.join(os.homedir(), ".synap", "worker", agent, "state.json");
+
+describe("the Result post survives a blip or a crash (task 57f66aae)", () => {
+  it("a post lost to a blip is retried on the next tick under the same key, then never again", async () => {
+    const lines: string[] = [];
+    const pod = stubPod({ items: [{ id: A, goal: "g" }] }, [], Infinity, { n: 1, mode: "lost" });
+    const w = mk("settle1", pod.mcp, lines);
+    await w.tick();
+    await w.waitForChildren();
+    expect(posts(pod.calls)).toHaveLength(1);
+    expect(pod.room.size).toBe(0);
+    expect(w.state.runs[A].unsettled).toBeDefined();
+    expect(w.state.runs[A].settledAt).toBeUndefined();
+    expect(lines.some((l) => l.includes(A) && l.includes("retried next tick"))).toBe(true);
+
+    await w.tick();
+    await w.waitForChildren();
+    const sent = posts(pod.calls);
+    expect(sent).toHaveLength(2);
+    expect(sent[1].args.idempotencyKey).toBe(`result:${A}:${w.state.runs[A].process}`);
+    expect(sent[1].args.idempotencyKey).toBe(sent[0].args.idempotencyKey);
+    expect([...pod.room.values()].map((m) => m.content)).toEqual(["Result: blocked — waiting on the person"]);
+    expect(w.state.runs[A].unsettled).toBeUndefined();
+    expect(w.state.runs[A].settledAt).toBeDefined();
+
+    await w.tick();
+    await w.waitForChildren();
+    expect(posts(pod.calls)).toHaveLength(2);
+    expect(fakeRuns()).toHaveLength(1); // its own Result line never woke it
+  });
+
+  it("a post that landed but whose answer was lost: the retry returns it, the room has ONE line", async () => {
+    const pod = stubPod({ items: [{ id: A, goal: "g" }] }, [], Infinity, { n: 1, mode: "unacked" });
+    const w = mk("settle2", pod.mcp);
+    await w.tick();
+    await w.waitForChildren();
+    await w.tick();
+    await w.waitForChildren();
+    expect(posts(pod.calls)).toHaveLength(2);
+    expect(pod.room.size).toBe(1);
+    expect(w.state.runs[A].unsettled).toBeUndefined();
+  });
+
+  it("the worker died before its post landed: the next worker on this computer posts it", async () => {
+    const first = stubPod({ items: [{ id: A, goal: "g" }] }, [], Infinity, { n: 1, mode: "lost" });
+    const w1 = mk("settle3", first.mcp);
+    await w1.tick();
+    await w1.waitForChildren();
+    const process1 = w1.state.runs[A].process;
+    expect(JSON.parse(fs.readFileSync(stateFile("settle3"), "utf8")).runs[A].unsettled).toBeDefined();
+
+    const second = stubPod({ items: [] });
+    const w2 = mk("settle3", second.mcp);
+    await w2.tick();
+    const sent = posts(second.calls);
+    expect(sent).toHaveLength(1);
+    expect(sent[0].args).toMatchObject({ content: "Result: blocked — waiting on the person", idempotencyKey: `result:${A}:${process1}` });
+    expect(sent[0].headers).toMatchObject({ "X-Synap-Runner-State": "ended", "X-Synap-Process": process1 });
+  });
+
+  it(`gives up after ${MAX_SETTLE_ATTEMPTS} tries, and says so`, async () => {
+    const lines: string[] = [];
+    const pod = stubPod({ items: [{ id: A, goal: "g" }] }, [], Infinity, { n: Infinity, mode: "lost" });
+    const w = mk("settle4", pod.mcp, lines);
+    await w.tick();
+    await w.waitForChildren();
+    for (let i = 1; i < MAX_SETTLE_ATTEMPTS + 2; i++) await w.tick();
+    expect(posts(pod.calls)).toHaveLength(MAX_SETTLE_ATTEMPTS);
+    expect(w.state.runs[A].unsettled).toBeUndefined();
+    expect(lines.some((l) => l.includes(A) && l.includes(`gave up after ${MAX_SETTLE_ATTEMPTS} tries`))).toBe(true);
+  });
+});
+
+describe("a run that dies says so in its room (task e337af57)", () => {
+  it("exit non-zero with no WORKER-RESULT: one `Result: failed` line saying how it ended", async () => {
+    vi.stubEnv("SYNAP_FAKE_VERDICT", "none");
+    vi.stubEnv("SYNAP_FAKE_EXIT", "2");
+    const pod = stubPod({ items: [{ id: A, goal: "g" }] }, [{ key: "video", kind: "file", owner: "agent", met: false }]);
+    const w = mk("dead1", pod.mcp);
+    await w.tick();
+    await w.waitForChildren();
+    expect(w.state.runs[A]).toMatchObject({ status: "failed", result: "Did it." });
+    expect(posts(pod.calls).map((c) => c.args.content)).toEqual(["Result: failed — the run exited 2 without a verdict: Did it."]);
+    expect(pod.calls.some((c) => c.tool === "synap_update_session")).toBe(false);
+
+    // Its own line is no follow-up: the next tick resumes nothing.
+    expect((await w.tick()).launched).toBe(0);
+    expect(fakeRuns()).toHaveLength(1);
+  });
+
+  it("the worker restarted while a run was in flight: the pod hears that runner end, and the room why", async () => {
+    const proc = "box:4242:1793600000000";
+    fs.mkdirSync(path.dirname(stateFile("dead2")), { recursive: true });
+    const running: RunRecord = {
+      sessionId: A,
+      status: "running",
+      startedAt: "2026-11-01T10:00:00.000Z",
+      launchedAt: "2026-11-01T10:00:00.000Z",
+      mode: "print",
+      pid: 999_999,
+      claudeSessionId: CLAUDE_SID,
+      process: proc,
+    };
+    fs.writeFileSync(stateFile("dead2"), JSON.stringify({ runs: { [A]: running } }));
+    const pod = stubPod({ items: [] });
+    const w = mk("dead2", pod.mcp);
+    await w.tick();
+    const read = pod.calls.find((c) => c.tool === "synap_get_session");
+    expect(read?.headers).toMatchObject({ "X-Synap-Runner-State": "ended", "X-Synap-Process": proc, "X-Synap-Conversation": `claude-code:${CLAUDE_SID}` });
+    expect(posts(pod.calls).map((c) => c.args.content)).toEqual([
+      "Result: failed — the run ended without a verdict: worker restarted while this run was in flight",
+    ]);
+    expect(posts(pod.calls)[0].args.idempotencyKey).toBe(`result:${A}:${proc}`);
+  });
+
+  it("a run cut off by usage limits too many times: failed, and said in the room", async () => {
+    const pod = stubPod({ items: [{ id: A, goal: "g" }] });
+    const w = mk("dead3", pod.mcp);
+    w.state.runs[A] = {
+      sessionId: A,
+      status: "limited",
+      startedAt: "2026-11-01T10:00:00.000Z",
+      finishedAt: "2026-11-01T11:00:00.000Z",
+      limitResumes: MAX_LIMIT_RESUMES,
+      claudeSessionId: CLAUDE_SID,
+      process: "box:1:1793600000000",
+    };
+    expect((await w.tick()).launched).toBe(0);
+    expect(w.state.runs[A].status).toBe("failed");
+    expect(posts(pod.calls).map((c) => c.args.content)).toEqual([
+      `Result: failed — the run ended without a verdict: stopped: cut off by a usage limit ${MAX_LIMIT_RESUMES + 1} times`,
+    ]);
+    expect(fakeRuns()).toHaveLength(0);
+  });
+
+  it("a background run that vanished: failed, and said in the room", async () => {
+    const exec: ExecFn = async (_bin, args) => ({ code: 0, stdout: args[0] === "agents" ? "[]" : "", stderr: "" });
+    const pod = stubPod({ items: [] });
+    const w = mk("dead4", pod.mcp, [], { exec });
+    w.state.runs[A] = {
+      sessionId: A,
+      status: "running",
+      mode: "bg",
+      bgId: "bg1",
+      startedAt: "2026-11-01T10:00:00.000Z",
+      launchedAt: "2026-11-01T10:00:00.000Z",
+      claudeSessionId: CLAUDE_SID,
+      process: "box:1:1793600000000",
+    };
+    await w.tick();
+    expect(w.state.runs[A].status).toBe("failed");
+    expect(posts(pod.calls).map((c) => c.args.content)).toEqual([
+      "Result: failed — the run ended without a verdict: background session no longer listed by claude agents",
+    ]);
+  });
+
+  it("the synthesised sentence is one line of at most 300 characters", () => {
+    expect(deadRunSentence({ result: "a\n\n  b", exitCode: 1 })).toBe("the run exited 1 without a verdict: a b");
+    expect(deadRunSentence({})).toBe("the run ended without a verdict");
+    const long = deadRunSentence({ result: "x".repeat(500) });
+    expect(long).toHaveLength(300);
+    expect(long.endsWith("…")).toBe(true);
   });
 });

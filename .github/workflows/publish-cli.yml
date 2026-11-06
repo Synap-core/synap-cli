@@ -38,29 +38,43 @@ name: Publish CLI
 # than performed. Everything below works TODAY without it.
 
 on:
-  # `workflow_dispatch` is the ONLY trigger — a CLI release is a decision, not a
-  # side effect of merging.
+  # TWO CHANNELS (founder, 2026-11-02, session 1aff9699: "publish the CLI on
+  # every merge to a 'next' channel and install it globally on the Mac").
   #
-  # This file previously carried that sentence directly above a
-  # `push: branches: [main], paths: [src/**, …]` trigger, i.e. the comment
-  # asserted the opposite of the config, and the config won: every merge that
-  # touched `src/` published a patch to npm. That is exactly the incident the
-  # sibling workflows' headers record — an accidental publish of an artifact
-  # nobody decided to release. The `push:` trigger is deleted rather than the
-  # sentence, because the sentence is the one that reflects how this package is
-  # actually released: it is versioned by this workflow (`npm version patch`),
-  # so an automatic trigger would also mean the version number is chosen by
-  # whoever merged, not by whoever released.
+  #   latest — `workflow_dispatch` on main: a release to everyone is a
+  #            decision, not a side effect of merging. It waits for the
+  #            `production` reviewer, DERIVES the next patch
+  #            (`scripts/release-version.mjs latest`), publishes under
+  #            `latest`, then pushes the tag `v<version>`.
+  #            It never commits: main is protected (ruleset "main: PR only, no
+  #            deletion or force push", bypass OrganizationAdmin only, founder
+  #            2 Nov 2026, session b46b66d3), and GITHUB_TOKEN cannot be a
+  #            ruleset bypass actor, so a bump pushed to main would be refused.
+  #   next   — every push to main that changes what ships. The version is
+  #            DERIVED in the job (`scripts/release-version.mjs next`:
+  #            `<next patch>-next.<YYYYMMDD>.<sha7>`), published under the
+  #            dist-tag `next` ONLY, and never committed: no bump lands on main
+  #            and `latest` never moves. A machine opts in with
+  #            `npm install -g @synap-core/cli@next`.
+  #
+  # An earlier `push:` trigger (removed in September) published a PATCH under
+  # `latest` on every merge, numbered by whoever merged. A `next` prerelease
+  # does neither: `npm install @synap-core/cli` still resolves `latest`, and
+  # the version is derived from the commit.
+  push:
+    branches: [main]
+    # What the published tarball is built from. Skills come from the backend
+    # sibling at publish time, so a skill change alone ships with the next CLI
+    # merge (or a dispatch), not on its own.
+    paths:
+      - "src/**"
+      - "templates/**"
+      - "scripts/**"
+      - "package.json"
+      - "package-lock.json"
+      - "tsconfig.json"
+      - ".github/workflows/publish-cli.yml"
   workflow_dispatch:
-
-# One publish at a time. Two concurrent runs would each `npm version patch`
-# from the same base, race on the push, and the loser would try to publish a
-# version the winner already put on the registry (EPUBLISHCONFLICT).
-# `cancel-in-progress: false` on purpose: a run that has already published must
-# be allowed to finish its post-publish verification.
-concurrency:
-  group: publish-cli
-  cancel-in-progress: false
 
 # Least privilege: jobs that need more declare it themselves.
 permissions:
@@ -69,15 +83,35 @@ permissions:
 jobs:
   publish:
     runs-on: ubuntu-latest
-    # D16: a release from main waits for the `production` environment's
-    # required reviewer; a run dispatched on another branch uses none.
-    environment: ${{ github.ref == 'refs/heads/main' && 'production' || '' }}
+    # D16: a `latest` release from main waits for the `production`
+    # environment's required reviewer; a run dispatched on another branch uses
+    # none. A `next` publish runs in `npm-next`: no reviewer (a merge is not a
+    # release decision), deployment branches limited to `main`, so only a merge
+    # can publish under `next`. npm trusts each environment through its own
+    # Trusted Publisher entry (repo Synap-core/synap-cli, workflow
+    # publish-cli.yml, environment `production`, and a second one with
+    # environment `npm-next`); without the second, a `next` publish fails at
+    # "Publish to npm" (ENEEDAUTH, as on 2026-10-16) and nothing is published.
+    environment: ${{ github.event_name == 'push' && 'npm-next' || (github.ref == 'refs/heads/main' && 'production' || '') }}
+    # One publish per channel at a time. Two `latest` runs would each
+    # `npm version patch` from the same base, race on the push, and the loser
+    # would try to publish a version the winner already put on the registry
+    # (EPUBLISHCONFLICT). `cancel-in-progress: false` on purpose: a run that has
+    # already published must be allowed to finish its post-publish
+    # verification. Two `next` runs never collide (each sha is its own
+    # version); a newer queued merge replaces an older queued one.
+    concurrency:
+      group: publish-cli-${{ github.event_name == 'workflow_dispatch' && 'latest' || 'next' }}
+      cancel-in-progress: false
+    env:
+      # The npm dist-tag this run publishes under. A push can only ever say `next`.
+      CHANNEL: ${{ github.event_name == 'workflow_dispatch' && 'latest' || 'next' }}
     # Least privilege.
     #
-    # `contents: write` is REQUIRED, not decorative: the "Commit the version bump"
-    # step pushes with GITHUB_TOKEN, and an org (or repo) whose default workflow
-    # permission is read-only makes that push fail. Under the old ordering that
-    # failure was silent-but-fatal — see the step's own comment.
+    # `contents: write` is REQUIRED, not decorative: the "Tag the release"
+    # step (a dispatch only; a `next` run pushes nothing) pushes a tag with
+    # GITHUB_TOKEN, and an org (or repo) whose default workflow permission is
+    # read-only makes that push fail.
     #
     # `id-token: write` is required for npm Trusted Publishing (OIDC). It is
     # inert until npm is told to trust this workflow, so it is safe to declare
@@ -90,14 +124,11 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: cli
-          # `actions/checkout` defaults to a DETACHED HEAD at the triggering
-          # SHA. Committing there works, but `git push` with no refspec fails
-          # ("HEAD does not match any"), which is one of the three ways the old
-          # publish-then-push ordering could leave npm ahead of the repo. Naming
-          # the branch puts us on it, so the final `git push` is an ordinary
-          # fast-forward — and a non-fast-forward (someone merged meanwhile)
-          # fails the run BEFORE anything is published.
-          ref: ${{ github.ref_name }}
+          # Both channels check out the triggering commit itself, never the
+          # branch tip: the version is derived from it and a `latest` release
+          # tags it, so the tree built must be its tree. Nothing is pushed to a
+          # branch, so a detached HEAD is fine.
+          ref: ${{ github.sha }}
 
       # `actions/checkout` cannot write outside $GITHUB_WORKSPACE, so the
       # sibling lands NEXT TO `cli/` rather than at a literal `../`. Running
@@ -192,37 +223,48 @@ jobs:
         working-directory: cli
         run: npm run build
 
-      - name: Bump patch version
+      # npm's `latest` is read from the registry, not from package.json: on
+      # 2026-10-27 1.13.0 was published by hand while main still said 1.12.2.
+      - name: Read npm's current latest
+        id: npm-latest
         working-directory: cli
-        run: npm version patch --no-git-tag-version
+        run: echo "version=$(npm view @synap-core/cli dist-tags.latest --prefer-online)" >> "$GITHUB_OUTPUT"
 
-      # ── ORDERING IS THE WHOLE POINT ──────────────────────────────────────────
-      # The bump is committed and pushed BEFORE `npm publish`, never after.
-      #
-      # The other order wedges the pipeline permanently. `npm version patch`
-      # runs, `npm publish` puts 1.12.1 on the registry, and then the push
-      # fails — read-only GITHUB_TOKEN, a detached HEAD, or a merge that landed
-      # meanwhile. npm now says 1.12.1 and the repo still says 1.12.0, so the
-      # NEXT run bumps to 1.12.1 again and dies on EPUBLISHCONFLICT, and so
-      # does every run after it, until a human hand-edits the version. That is
-      # how this package sat at 1.11.0 while the repo claimed 1.12.0.
-      #
-      # Pushing first inverts the failure into the harmless direction: if the
-      # push fails, the job stops here and NOTHING was published. If the push
-      # succeeds and a later step fails, the repo is one patch ahead of the
-      # registry — the next release simply skips a version number, which costs
-      # nothing and wedges nothing.
-      - name: Commit the version bump (BEFORE publish — see above)
+      # `next`: the version is derived from the commit and written into this
+      # job's package.json only. Nothing is committed, so main never carries a
+      # prerelease number and two merges never race on a bump.
+      - name: Set the next version (derived, never committed)
+        if: github.event_name == 'push'
         working-directory: cli
+        env:
+          LATEST: ${{ steps.npm-latest.outputs.version }}
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add package.json package-lock.json
-          # No `|| true`: `npm version patch` always rewrites package.json, so
-          # an empty commit here means the bump did not happen and the run must
-          # not continue to publish.
-          git commit -m "chore: publish @synap-core/cli [skip ci]"
-          git push
+          VERSION=$(node scripts/release-version.mjs next --latest "$LATEST" --sha "$GITHUB_SHA")
+          npm version "$VERSION" --no-git-tag-version
+          echo "Publishing $VERSION under the next dist-tag (latest stays $LATEST)"
+
+      # `latest`: derived the same way (the higher of package.json and npm's
+      # latest, plus one patch) and never committed. main is protected, and
+      # the registry is what says which number was released last.
+      - name: Set the latest version (derived, never committed)
+        if: github.event_name == 'workflow_dispatch'
+        working-directory: cli
+        env:
+          LATEST: ${{ steps.npm-latest.outputs.version }}
+        run: |
+          VERSION=$(node scripts/release-version.mjs latest --latest "$LATEST")
+          npm version "$VERSION" --no-git-tag-version
+          echo "Publishing $VERSION under the latest dist-tag (was $LATEST)"
+
+      # npm moves `latest` to whatever is published under it, even a LOWER
+      # version: from a main behind the registry, the bump would publish
+      # 1.12.3 over 1.13.0. Stop before anything is tagged or published.
+      - name: The bumped version is ahead of npm's latest
+        if: github.event_name == 'workflow_dispatch'
+        working-directory: cli
+        env:
+          LATEST: ${{ steps.npm-latest.outputs.version }}
+        run: node scripts/release-version.mjs ahead --latest "$LATEST"
 
       # PRE-publish gate: pack this tree with `npm pack` (the same packer
       # `npm publish` uses — `pnpm pack` would rewrite the very protocols we are
@@ -235,13 +277,32 @@ jobs:
 
       # `--provenance` signs a SLSA attestation with this job's OIDC token
       # (`id-token: write`; this repo is public, which npm requires).
-      # NODE_AUTH_TOKEN stays as the fallback until the npm Trusted Publisher
-      # is configured — removing it is a founder step (SECURITY-RELEASE-RUNBOOK.md).
+      # Authentication is npm Trusted Publishing (OIDC): 1.12.2 (run
+      # 39163073354) published with an empty NODE_AUTH_TOKEN, and on
+      # 2026-11-02 no NPM_TOKEN is set on this repo or its `production`
+      # environment. The line below only keeps a token usable if one is ever
+      # added. `--tag` is explicit: a merge publishes under `next` and can never
+      # move `latest` (npm also refuses a prerelease without it).
       - name: Publish to npm
         working-directory: cli
-        run: npm publish --access public --provenance
+        run: npm publish --access public --provenance --tag "$CHANNEL"
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      # The record of a `latest` release is the tag `v<version>`, pushed AFTER
+      # `npm publish`. Nothing is committed: main accepts only pull requests.
+      # The order is safe either way now that the number is derived from npm's
+      # latest: if this push fails, the next dispatch still derives the next
+      # patch from the registry, so nothing wedges. (The old flow committed a
+      # bump to main and wedged on EPUBLISHCONFLICT whenever npm got ahead of
+      # main: the package sat at 1.11.0 while the repo claimed 1.12.0.)
+      - name: Tag the release
+        if: github.event_name == 'workflow_dispatch'
+        working-directory: cli
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          git tag "v$VERSION" HEAD
+          git push origin "refs/tags/v$VERSION"
 
       # POST-publish ground truth: re-download what the registry now actually
       # serves. A local pack proves what your packer produced; only this proves
@@ -275,3 +336,13 @@ jobs:
           ./node_modules/.bin/synap --version
           ./node_modules/.bin/synap market scaffold smoke-probe --kind capability
           ./node_modules/.bin/synap market validate smoke-probe.capability.json
+
+      # A `next` publish must leave `latest` where it found it.
+      - name: npm's latest did not move
+        if: github.event_name == 'push'
+        env:
+          LATEST: ${{ steps.npm-latest.outputs.version }}
+        run: |
+          NOW=$(npm view @synap-core/cli dist-tags.latest --prefer-online)
+          echo "latest before: $LATEST, after: $NOW"
+          test "$NOW" = "$LATEST"

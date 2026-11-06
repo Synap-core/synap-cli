@@ -30,6 +30,12 @@ interface FeedEventBase {
   id: string;
   /** Millisecond ISO; the cursor axis (except `stage_moved`). */
   at: string;
+  /**
+   * THE pod's wake verdict for this reader (`isWakeWorthy`, `@synap-core/types`,
+   * backend plan 07f8a997 W1): true when the event should start the agent's
+   * turn. Absent on a pod that predates it (`isWakeEvent` then falls back).
+   */
+  wake?: boolean;
 }
 
 export type SessionFeedEvent =
@@ -113,8 +119,12 @@ function isAnswerOnlyPage(data: unknown): boolean {
   return d.status === "answered" || (d.status === "timeout" && !d.state);
 }
 
-/** The kinds `synap session wait --hook` waits on when `--events` is not given. */
-export const WAKE_HOOK_DEFAULT_KINDS = ["session_message", "answer", "owner_message"] as const;
+/**
+ * What `synap session wait --hook` (and `--wake-only` with no `--events`) asks
+ * the feed for: every kind. Which of them ring is the POD's call (`wake` on
+ * each event, `isWakeEvent`), never a list kept here.
+ */
+export const WAKE_HOOK_DEFAULT_KINDS = ["all"] as const;
 
 /** The feed kind a pod without coordination posts rejects. */
 export const SESSION_MESSAGE_KIND = "session_message";
@@ -131,13 +141,18 @@ export function parseEventKinds(raw: string): string[] {
 }
 
 /**
- * Worth WAKING an agent for: what the person said (an answer, a message they
- * typed in the room) and a coordination post the pod stamped `wake: true`
- * (blocked_on_you / handoff, inside the hop and rate guards, not yet read).
- * Everything else — fyi / done, a held wake, a proposal decision, a stage
- * move — is delivered but never rings the doorbell.
+ * Worth WAKING an agent for: the pod says so on every event (`wake`, its ONE
+ * rule: an answer, the owner's words, a coordination post it marked, a decided
+ * proposal, a PR merged or closed, finished checks, an ended blocker, a
+ * signal, a pause it resumed; never what the reading agent caused itself).
+ *
+ * Fallback, for a pod that sends no `wake` (one older than backend plan
+ * 07f8a997 W1): the rule this CLI kept before, what the person said (an answer,
+ * a message they typed in the room) and a coordination post the pod stamped
+ * `wake: true`. Remove it once every pod stamps `wake`.
  */
 export function isWakeEvent(e: SessionFeedEvent): boolean {
+  if (e.kind !== "session_message" && typeof e.wake === "boolean") return e.wake;
   if (e.kind === "answer" || e.kind === "owner_message") return true;
   if (e.kind === "session_message") return e.wake === true;
   return false;
