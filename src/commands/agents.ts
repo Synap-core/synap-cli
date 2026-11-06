@@ -578,7 +578,7 @@ async function trpcMutation<T>(
     body: JSON.stringify({ json: input }),
     signal: AbortSignal.timeout(15_000),
   });
-  const body = (await res.json().catch(() => ({}))) as TrpcResponse<T>;
+  const body = (await res.json()) as TrpcResponse<T>;
   const error =
     body.error && "json" in body.error ? body.error.json : (body.error as TrpcError | undefined);
   if (!res.ok || error) {
