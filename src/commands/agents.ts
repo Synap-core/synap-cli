@@ -33,6 +33,7 @@ import {
   resolveAgentPod,
 } from "../lib/agent-door.js";
 import { provisionAgentKey } from "../lib/targets.js";
+import { isPresenceRefusal, needsYouInPodAdmin } from "../lib/presence-refusal.js";
 import { connectionLines, type PodConnection } from "../lib/agent-connections.js";
 import { thisComputerInstanceIds } from "../lib/machine-instance.js";
 import { ensureComputerEnrolled } from "../lib/device-connect.js";
@@ -541,9 +542,24 @@ export async function agentsCreate(opts: Omit<AgentsAddOpts, "apiKey"> = {}): Pr
   await agentsAdd(opts.template && opts.template !== "custom" ? undefined : "custom", opts);
 }
 
+/** A tRPC error as the pod sends it (`data.reasonCode`: its typed refusal). */
+interface TrpcError {
+  message: string;
+  code?: string | number;
+  data?: { reasonCode?: string };
+}
+
+/** A tRPC answer, plain or superjson-wrapped (`{ json: … }`, the pod's transformer). */
 interface TrpcResponse<T> {
-  result?: { data?: T };
-  error?: { message: string; code?: string };
+  result?: { data?: T | { json?: T } };
+  error?: TrpcError | { json?: TrpcError };
+}
+
+/** A tRPC result's data, unwrapped from the superjson envelope when there is one. */
+function trpcData<T>(data: T | { json?: T } | undefined): T | undefined {
+  return data && typeof data === "object" && !Array.isArray(data) && "json" in data
+    ? (data as { json?: T }).json
+    : (data as T | undefined);
 }
 
 async function trpcMutation<T>(
@@ -563,11 +579,18 @@ async function trpcMutation<T>(
     signal: AbortSignal.timeout(15_000),
   });
   const body = (await res.json()) as TrpcResponse<T>;
-  if (!res.ok || body.error) {
-    throw new Error(body.error?.message ?? `HTTP ${res.status}`);
+  const error =
+    body.error && "json" in body.error ? body.error.json : (body.error as TrpcError | undefined);
+  if (!res.ok || error) {
+    // The pod's typed refusal (`data.reasonCode`, e.g. PRESENCE_REQUIRED)
+    // rides on the error, so a caller tells "needs the person" from a failure.
+    throw Object.assign(new Error(error?.message ?? `HTTP ${res.status}`), {
+      reasonCode: error?.data?.reasonCode,
+    });
   }
-  if (!body.result?.data) throw new Error("Unexpected empty response from tRPC");
-  return body.result.data;
+  const value = trpcData(body.result?.data);
+  if (value === undefined || value === null) throw new Error("Unexpected empty response from tRPC");
+  return value;
 }
 
 // ─── rotate-key ───────────────────────────────────────────────────────────────
@@ -636,7 +659,7 @@ export async function agentsRotateKey(nameOrId: string): Promise<void> {
 
     if (keysResult.ok) {
       const keysBody = (await keysResult.json()) as TrpcResponse<Array<{ id: string; keyPrefix: string; keyName: string; isActive: boolean }>>;
-      const keys = keysBody.result?.data ?? [];
+      const keys = trpcData(keysBody.result?.data) ?? [];
       // Match by keyName pattern used in agentsCreate
       const agentKeyName = profile.label ?? name;
       const match = keys.find(
@@ -681,6 +704,15 @@ export async function agentsRotateKey(nameOrId: string): Promise<void> {
     displayNewKey(rotated.key);
     updateLocalKey(name, profile, rotated.key);
   } catch (err) {
+    if (isPresenceRefusal(err)) {
+      spinner.stop();
+      needsYouInPodAdmin({
+        podUrl: podProfile.config.podUrl,
+        page: profile.agentUserId ? `/agents/${profile.agentUserId}` : "/agents",
+        what: "rotate this agent's key",
+      });
+      return;
+    }
     spinner.fail("Key rotation failed.");
     log.error(err instanceof Error ? err.message : String(err));
   }
