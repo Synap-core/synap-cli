@@ -207,16 +207,16 @@ Every command also accepts `-h, --help`.
   - [`synap market attach`](#synap-market-attach) — Reconcile a marketplace template onto an existing workspace + version-stamp it — how you relink a workspace installed before the marketplace
   - [`synap market scaffold`](#synap-market-scaffold) — Write a minimal valid <slug>.template.yaml to edit in place (refuses to overwrite)
   - [`synap market validate`](#synap-market-validate) — Validate a local template file against the shared template validator — fast author feedback
-  - [`synap market publish`](#synap-market-publish) — Validate then publish a template (or a standalone cell/view package) to the marketplace (private by default) — pass a file, --from-workspace <id>, or --from-project <id>. Non-official publish never uses the synap-official vendor. Founder: --official [slug...] publishes the official catalog from the monorepo checkout (alias of `synap catalog publish --official --kind workspace`)
+  - [`synap market publish`](#synap-market-publish) — Validate then publish a template (or a standalone cell/view package) to the marketplace (private by default) — pass a file, --from-workspace <id>, or --from-project <id>. Non-official publish never uses the synap-official vendor. --official [slug...] republishes the official catalog from the monorepo checkout: owner only, for an emergency republish; CI normally publishes on every push to app-bases main (alias of `synap catalog publish --official --kind workspace`)
   - [`synap market unpublish`](#synap-market-unpublish) — Flip a published package back to private (owner only)
 - [`synap templates`](#synap-templates) — See every workspace's template status (attached, drifted, or unattached) and connect them — the one home for template health
   - [`synap templates attach`](#synap-templates-attach) — Connect a workspace (by NAME or id) to a template — suggests the right one so you don't guess a slug
   - [`synap templates update`](#synap-templates-update) — Apply template updates — 'update all' (or --yes) for every drifted workspace, or name specific slugs. Bare 'update' previews what's available.
   - [`synap templates retire`](#synap-templates-retire) — Move a retired template's space into its replacement (by template slug, workspace name or id). Shows the plan, asks, then moves through the pod — never deletes.
-- [`synap catalog`](#synap-catalog) — Validate, diff and publish the OFFICIAL template catalog (workspaces, capabilities, skills, packs, automations) from the monorepo checkout
+- [`synap catalog`](#synap-catalog) — Validate, diff and publish the OFFICIAL template catalog (workspaces, capabilities, skills, packs, automations, views) from the monorepo checkout; CI publishes it on every push to app-bases main
   - [`synap catalog validate`](#synap-catalog-validate) — Validate the catalog (per-kind schema, cross-kind refs, goal grammar, duplicates) — offline
   - [`synap catalog diff`](#synap-catalog-diff) — Show what would change against the live control-plane catalog (new / changed / unchanged)
-  - [`synap catalog publish`](#synap-catalog-publish) — Validate, preview the diff, confirm, then publish to the control plane — founder only: --official + a `synap login` session that owns synap-official
+  - [`synap catalog publish`](#synap-catalog-publish) — Validate, preview the diff, confirm, then publish to the control plane — owner only, for an emergency republish; CI normally publishes on every push to app-bases main (--official + a `synap login` session that owns synap-official)
 - [`synap capability`](#synap-capability) — The one capability-first root: list, add, enable, connect, show, run a capability pack
   - [`synap capability list`](#synap-capability-list) — List capabilities — one row per pack, with status, connection, and verbs
   - [`synap capability add`](#synap-capability-add) — Install a capability from the catalog — omit the name to pick from a list
@@ -3608,7 +3608,7 @@ Validate a local template file against the shared template validator — fast au
 synap market publish [options] [targets...]
 ```
 
-Validate then publish a template (or a standalone cell/view package) to the marketplace (private by default) — pass a file, --from-workspace <id>, or --from-project <id>. Non-official publish never uses the synap-official vendor. Founder: --official [slug...] publishes the official catalog from the monorepo checkout (alias of `synap catalog publish --official --kind workspace`)
+Validate then publish a template (or a standalone cell/view package) to the marketplace (private by default) — pass a file, --from-workspace <id>, or --from-project <id>. Non-official publish never uses the synap-official vendor. --official [slug...] republishes the official catalog from the monorepo checkout: owner only, for an emergency republish; CI normally publishes on every push to app-bases main (alias of `synap catalog publish --official --kind workspace`)
 
 | Argument | Required | Description |
 |---|---|---|
@@ -3616,7 +3616,7 @@ Validate then publish a template (or a standalone cell/view package) to the mark
 
 | Option | Description | Default |
 |---|---|---|
-| `--official` | Publish the OFFICIAL Synap catalog (all templates, or the named slugs) from the monorepo checkout — requires a `synap login` session that owns the synap-official vendor; previews and asks first |  |
+| `--official` | Emergency republish of the OFFICIAL Synap catalog (all templates, or the named slugs) from the monorepo checkout — owner only (a `synap login` session that owns the synap-official vendor); CI normally publishes on every push to app-bases main; previews and asks first |  |
 | `--templates-dir <dir>` | With --official: path to the catalog package — synap-app/packages/catalog or workspace-templates (default: found by walking up from cwd) |  |
 | `--dry-run` | With --official: preview what would change against the live catalog, publish nothing |  |
 | `--yes` | With --official: skip the confirmation prompt |  |
@@ -3735,7 +3735,7 @@ Move a retired template's space into its replacement (by template slug, workspac
 synap catalog [options] [command]
 ```
 
-Validate, diff and publish the OFFICIAL template catalog (workspaces, capabilities, skills, packs, automations) from the monorepo checkout
+Validate, diff and publish the OFFICIAL template catalog (workspaces, capabilities, skills, packs, automations, views) from the monorepo checkout; CI publishes it on every push to app-bases main
 
 Subcommands: [`validate`](#synap-catalog-validate), [`diff`](#synap-catalog-diff), [`publish`](#synap-catalog-publish)
 
@@ -3753,7 +3753,7 @@ Validate the catalog (per-kind schema, cross-kind refs, goal grammar, duplicates
 
 | Option | Description | Default |
 |---|---|---|
-| `--kind <kind>` | Only this kind: workspace \| capability \| skill \| pack \| automation \| view |  |
+| `--kind <kind>` | Only this kind: workspace \| capability \| skill \| pack \| automation \| view \| agent |  |
 | `--catalog-dir <dir>` | Path to the catalog package (default: found by walking up from cwd) |  |
 | `--json` | Output as JSON |  |
 
@@ -3771,7 +3771,7 @@ Show what would change against the live control-plane catalog (new / changed / u
 
 | Option | Description | Default |
 |---|---|---|
-| `--kind <kind>` | Only this kind: workspace \| capability \| skill \| pack \| automation \| view |  |
+| `--kind <kind>` | Only this kind: workspace \| capability \| skill \| pack \| automation \| view \| agent |  |
 | `--catalog-dir <dir>` | Path to the catalog package (default: found by walking up from cwd) |  |
 | `--json` | Output as JSON |  |
 
@@ -3781,7 +3781,7 @@ Show what would change against the live control-plane catalog (new / changed / u
 synap catalog publish [options] [slugs...]
 ```
 
-Validate, preview the diff, confirm, then publish to the control plane — founder only: --official + a `synap login` session that owns synap-official
+Validate, preview the diff, confirm, then publish to the control plane — owner only, for an emergency republish; CI normally publishes on every push to app-bases main (--official + a `synap login` session that owns synap-official)
 
 | Argument | Required | Description |
 |---|---|---|
@@ -3789,7 +3789,7 @@ Validate, preview the diff, confirm, then publish to the control plane — found
 
 | Option | Description | Default |
 |---|---|---|
-| `--kind <kind>` | Only this kind: workspace \| capability \| skill \| pack \| automation \| view |  |
+| `--kind <kind>` | Only this kind: workspace \| capability \| skill \| pack \| automation \| view \| agent |  |
 | `--catalog-dir <dir>` | Path to the catalog package (default: found by walking up from cwd) |  |
 | `--json` | Output as JSON |  |
 | `--official` | Publish as the synap-official vendor (required) |  |

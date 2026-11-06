@@ -2992,8 +2992,8 @@ market
 
 market
   .command("publish [targets...]")
-  .description("Validate then publish a template (or a standalone cell/view package) to the marketplace (private by default) — pass a file, --from-workspace <id>, or --from-project <id>. Non-official publish never uses the synap-official vendor. Founder: --official [slug...] publishes the official catalog from the monorepo checkout (alias of `synap catalog publish --official --kind workspace`)")
-  .option("--official", "Publish the OFFICIAL Synap catalog (all templates, or the named slugs) from the monorepo checkout — requires a `synap login` session that owns the synap-official vendor; previews and asks first")
+  .description("Validate then publish a template (or a standalone cell/view package) to the marketplace (private by default) — pass a file, --from-workspace <id>, or --from-project <id>. Non-official publish never uses the synap-official vendor. --official [slug...] republishes the official catalog from the monorepo checkout: owner only, for an emergency republish; CI normally publishes on every push to app-bases main (alias of `synap catalog publish --official --kind workspace`)")
+  .option("--official", "Emergency republish of the OFFICIAL Synap catalog (all templates, or the named slugs) from the monorepo checkout — owner only (a `synap login` session that owns the synap-official vendor); CI normally publishes on every push to app-bases main; previews and asks first")
   .option("--templates-dir <dir>", "With --official: path to the catalog package — synap-app/packages/catalog or workspace-templates (default: found by walking up from cwd)")
   .option("--dry-run", "With --official: preview what would change against the live catalog, publish nothing")
   .option("--yes", "With --official: skip the confirmation prompt")
@@ -3049,7 +3049,7 @@ market
 
 const catalog = program
   .command("catalog")
-  .description("Validate, diff and publish the OFFICIAL template catalog (workspaces, capabilities, skills, packs, automations) from the monorepo checkout");
+  .description("Validate, diff and publish the OFFICIAL template catalog (workspaces, capabilities, skills, packs, automations, views) from the monorepo checkout; CI publishes it on every push to app-bases main");
 
 for (const verb of ["validate", "diff", "publish"] as const) {
   const sub = catalog
@@ -3059,7 +3059,7 @@ for (const verb of ["validate", "diff", "publish"] as const) {
         ? "Validate the catalog (per-kind schema, cross-kind refs, goal grammar, duplicates) — offline"
         : verb === "diff"
           ? "Show what would change against the live control-plane catalog (new / changed / unchanged)"
-          : "Validate, preview the diff, confirm, then publish to the control plane — founder only: --official + a `synap login` session that owns synap-official",
+          : "Validate, preview the diff, confirm, then publish to the control plane — owner only, for an emergency republish; CI normally publishes on every push to app-bases main (--official + a `synap login` session that owns synap-official)",
     )
     .option("--kind <kind>", `Only this kind: ${CATALOG_KINDS.join(" | ")}`)
     .option("--catalog-dir <dir>", "Path to the catalog package (default: found by walking up from cwd)")
