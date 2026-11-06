@@ -1268,6 +1268,23 @@ box
     await boxReapCommand(opts);
   });
 
+// ─── host ─────────────────────────────────────────────────────────────────────
+// Run THIS computer as a host for installed capabilities: lease the host jobs
+// the person approved (install, update, remove, provider ops), run each exactly
+// as the approved manifest says, report health. See src/commands/host.ts.
+
+const host = program.command("host").description("Host installed capabilities on this computer (deterministic host runner)");
+
+host
+  .command("serve")
+  .description("Lease approved host jobs from the pod and run them: pinned containers, 127.0.0.1 ports, health, cleanup")
+  .option("--config <file>", "Host runner config (default /etc/synap-host/config.json when present)")
+  .option("--once", "Lease at most one job, work it, exit")
+  .action(async (opts: import("./commands/host.js").HostOptions) => {
+    const { hostServeCommand } = await import("./commands/host.js");
+    await hostServeCommand(opts);
+  });
+
 // ─── session ──────────────────────────────────────────────────────────────────
 // Focus sessions — goal-bound work rooms tracked on the pod.
 // AI agents: use start_session to begin, update_session to report progress,
