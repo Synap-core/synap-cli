@@ -7682,7 +7682,7 @@
             "path": "synap market publish",
             "name": "publish",
             "usage": "[options] [targets...]",
-            "description": "Validate then publish a template (or a standalone cell/view package) to the marketplace (private by default) — pass a file, --from-workspace <id>, or --from-project <id>. Non-official publish never uses the synap-official vendor. Founder: --official [slug...] publishes the official catalog from the monorepo checkout (alias of `synap catalog publish --official --kind workspace`)",
+            "description": "Validate then publish a template (or a standalone cell/view package) to the marketplace (private by default) — pass a file, --from-workspace <id>, or --from-project <id>. Non-official publish never uses the synap-official vendor. --official [slug...] republishes the official catalog from the monorepo checkout: owner only, for an emergency republish; CI normally publishes on every push to app-bases main (alias of `synap catalog publish --official --kind workspace`)",
             "hidden": false,
             "arguments": [
               {
@@ -7695,7 +7695,7 @@
               {
                 "flags": "--official",
                 "long": "--official",
-                "description": "Publish the OFFICIAL Synap catalog (all templates, or the named slugs) from the monorepo checkout — requires a `synap login` session that owns the synap-official vendor; previews and asks first",
+                "description": "Emergency republish of the OFFICIAL Synap catalog (all templates, or the named slugs) from the monorepo checkout — owner only (a `synap login` session that owns the synap-official vendor); CI normally publishes on every push to app-bases main; previews and asks first",
                 "takesValue": "none"
               },
               {
@@ -8007,7 +8007,7 @@
         "path": "synap catalog",
         "name": "catalog",
         "usage": "[options] [command]",
-        "description": "Validate, diff and publish the OFFICIAL template catalog (workspaces, capabilities, skills, packs, automations) from the monorepo checkout",
+        "description": "Validate, diff and publish the OFFICIAL template catalog (workspaces, capabilities, skills, packs, automations, views) from the monorepo checkout; CI publishes it on every push to app-bases main",
         "hidden": false,
         "arguments": [],
         "options": [],
@@ -8086,7 +8086,7 @@
             "path": "synap catalog publish",
             "name": "publish",
             "usage": "[options] [slugs...]",
-            "description": "Validate, preview the diff, confirm, then publish to the control plane — founder only: --official + a `synap login` session that owns synap-official",
+            "description": "Validate, preview the diff, confirm, then publish to the control plane — owner only, for an emergency republish; CI normally publishes on every push to app-bases main (--official + a `synap login` session that owns synap-official)",
             "hidden": false,
             "arguments": [
               {
