@@ -2,7 +2,9 @@
  * `synap catalog validate|diff|publish [--kind k] [slug...] [--official] [--dry-run]`
  * ==========================================================================
  *
- * The team's ONE door to the official catalog (every installable kind). This
+ * The team's by-hand door to the official catalog (every installable kind).
+ * CI on app-bases main is the normal publisher (every push publishes every
+ * kind, through the same lib); `publish` here is an emergency republish. This
  * file is a THIN caller: loading, validation, the diff against the live
  * catalog, the `synap-official` preflight and the POSTs are ONE lib in the
  * monorepo checkout — `scripts/catalog-lib.mjs` of the catalog package
@@ -17,7 +19,7 @@
  *
  * ONE READ PATH: every kind — capabilities included — is read from the catalog
  * package by `loadCatalog` (its default kind dirs). The CLI never reads the
- * control-plane repo; the CP's capability JSON is only a guarded mirror now.
+ * control-plane repo; no repo holds a copy of the catalog any more (CLI #91, CP 2c755f8e).
  *
  * ONE ERROR TABLE: every code the lib throws (and every refusal of this
  * command) maps to ONE next step in `CATALOG_ERROR_HINTS`.
@@ -276,7 +278,7 @@ export function catalogUsageError(verb: string, slugs: string[], opts: CatalogOp
     return null;
   }
   if (!opts.official) {
-    return "catalog publish writes the OFFICIAL catalog — pass --official (founder: a `synap login` session that owns the synap-official vendor).";
+    return "catalog publish writes the OFFICIAL catalog — pass --official (owner only, for an emergency republish: a `synap login` session that owns the synap-official vendor). CI normally publishes on every push to app-bases main.";
   }
   return null;
 }
