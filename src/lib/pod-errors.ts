@@ -20,6 +20,11 @@ export const POD_ERROR_CODES = {
   grantDoorUnsupported: "GRANT_DOOR_UNSUPPORTED",
   /** setup.ts: an AI's own key tried to connect another AI. */
   agentKeyCannotRegisterAgents: "AGENT_KEY_CANNOT_REGISTER_AGENTS",
+  /**
+   * services/presence/gate.ts: a sensitive act (a key, an app key, how an
+   * agent's changes land) needs the PERSON to confirm it is them; a key cannot.
+   */
+  presenceRequired: "PRESENCE_REQUIRED",
 } as const;
 
 /** The pod's words for GRANT_DOOR_UNSUPPORTED, for a pod that sent them without the code. */
@@ -139,6 +144,13 @@ export function explainPodError(r: PodRefusal): PodErrorText {
     return {
       line: "The CLI is using an AI's key, and an AI cannot connect another AI.",
       next: "Run this from your own terminal, not from inside an AI tool, so the CLI uses this computer's key.",
+    };
+  }
+
+  if (code === POD_ERROR_CODES.presenceRequired) {
+    return {
+      line: "This needs you: the pod asks the person to confirm it is them (Face ID, Touch ID or a passkey), and a key cannot.",
+      next: `Do it in ${podAdminHomeOf(r.podUrl)}.`,
     };
   }
 

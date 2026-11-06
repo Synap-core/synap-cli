@@ -28,7 +28,7 @@ import {
 import { preferClaudeCodeSurfaceKey } from "./key-source.js";
 import { samePodOrigin } from "./project-ref.js";
 import { PodMovedError, podFetch } from "./pod-moved.js";
-import { explainPodError } from "./pod-errors.js";
+import { explainPodError, POD_ERROR_CODES } from "./pod-errors.js";
 import { HubRestClient } from "@synap-core/hub-rest-client";
 import { log } from "../utils/logger.js";
 import chalk from "chalk";
@@ -527,6 +527,18 @@ function renderHubErrorBody(err: unknown, opts: { personDoor?: string }): void {
   }
   if (!(err instanceof HubError)) {
     log.error(err instanceof Error ? err.message : String(err));
+    return;
+  }
+  // A sensitive act the pod keeps for the person (proof of presence): say so
+  // and where, never the raw refusal.
+  if (err.code === POD_ERROR_CODES.presenceRequired) {
+    const { line, next } = explainPodError({
+      status: err.status,
+      code: err.code,
+      podUrl: err.podUrl,
+    });
+    log.error(line);
+    log.hint(next);
     return;
   }
   // Connection-class failure — the execute door returns 424 with a machine

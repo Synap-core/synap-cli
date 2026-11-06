@@ -19,6 +19,7 @@ import chalk from "chalk";
 import ora from "ora";
 import prompts from "prompts";
 import { log } from "../utils/logger.js";
+import { isPresenceRefusal, needsYouInPodAdmin } from "./presence-refusal.js";
 import {
   writeSecretFile,
   ensureSecretDir,
@@ -2578,6 +2579,14 @@ async function promptPodWriteMode(
     );
     log.success(`Agent changes: ${picked.label}. ${picked.line}`);
   } catch (err) {
+    if (isPresenceRefusal(err)) {
+      needsYouInPodAdmin({
+        podUrl: hubCfg.podUrl,
+        page: `/agents/${agentUserId}`,
+        what: "choose how this agent's changes land",
+      });
+      return;
+    }
     log.warn(`Could not apply agent governance: ${(err as Error).message}`);
   }
 }
@@ -2783,6 +2792,14 @@ export async function ensureAgentGovernance(
             : `Agent approval: "${legacyMode}".`
     );
   } catch (err) {
+    if (isPresenceRefusal(err)) {
+      needsYouInPodAdmin({
+        podUrl: hubCfg.podUrl,
+        page: `/agents/${agentUserId}`,
+        what: "choose how this agent's changes land",
+      });
+      return;
+    }
     log.warn(`Could not apply agent governance: ${(err as Error).message}`);
   }
 }
