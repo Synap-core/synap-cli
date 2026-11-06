@@ -52,7 +52,7 @@ import { log } from "../utils/logger.js";
 /** Package names the catalog checkout may carry (new name first). */
 export const CATALOG_PACKAGE_NAMES = ["@synap-core/catalog", "@synap-core/workspace-templates"] as const;
 export const CATALOG_LIB_PATH = "scripts/catalog-lib.mjs";
-export const CATALOG_KINDS = ["workspace", "capability", "skill", "pack", "automation", "view"] as const;
+export const CATALOG_KINDS = ["workspace", "capability", "skill", "pack", "automation", "view", "agent"] as const;
 export type CatalogKind = (typeof CATALOG_KINDS)[number];
 export const CATALOG_VERBS = ["validate", "diff", "publish"] as const;
 export type CatalogVerb = (typeof CATALOG_VERBS)[number];

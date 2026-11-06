@@ -3753,7 +3753,7 @@ Validate the catalog (per-kind schema, cross-kind refs, goal grammar, duplicates
 
 | Option | Description | Default |
 |---|---|---|
-| `--kind <kind>` | Only this kind: workspace \| capability \| skill \| pack \| automation \| view |  |
+| `--kind <kind>` | Only this kind: workspace \| capability \| skill \| pack \| automation \| view \| agent |  |
 | `--catalog-dir <dir>` | Path to the catalog package (default: found by walking up from cwd) |  |
 | `--json` | Output as JSON |  |
 
@@ -3771,7 +3771,7 @@ Show what would change against the live control-plane catalog (new / changed / u
 
 | Option | Description | Default |
 |---|---|---|
-| `--kind <kind>` | Only this kind: workspace \| capability \| skill \| pack \| automation \| view |  |
+| `--kind <kind>` | Only this kind: workspace \| capability \| skill \| pack \| automation \| view \| agent |  |
 | `--catalog-dir <dir>` | Path to the catalog package (default: found by walking up from cwd) |  |
 | `--json` | Output as JSON |  |
 
@@ -3789,7 +3789,7 @@ Validate, preview the diff, confirm, then publish to the control plane — owner
 
 | Option | Description | Default |
 |---|---|---|
-| `--kind <kind>` | Only this kind: workspace \| capability \| skill \| pack \| automation \| view |  |
+| `--kind <kind>` | Only this kind: workspace \| capability \| skill \| pack \| automation \| view \| agent |  |
 | `--catalog-dir <dir>` | Path to the catalog package (default: found by walking up from cwd) |  |
 | `--json` | Output as JSON |  |
 | `--official` | Publish as the synap-official vendor (required) |  |

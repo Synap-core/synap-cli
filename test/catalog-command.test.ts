@@ -112,7 +112,7 @@ describe("argument parsing", () => {
     expect(catalogUsageError("validate", [], { dryRun: true })).toMatch(/only apply to "synap catalog publish"/);
     expect(catalogUsageError("diff", [], { official: true })).toMatch(/only apply/);
     expect(catalogUsageError("publish", [], {})).toMatch(/pass --official/);
-    for (const kind of ["workspace", "capability", "skill", "pack", "automation", "view"]) {
+    for (const kind of ["workspace", "capability", "skill", "pack", "automation", "view", "agent"]) {
       expect(catalogUsageError("publish", ["a-slug"], { kind, official: true })).toBeNull();
     }
   });

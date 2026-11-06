@@ -9,6 +9,7 @@
  *   - how to render a one-shot install for the given pod + API key
  */
 
+import { agentTemplateFor } from "./agent-template.js";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -1199,6 +1200,7 @@ export async function provisionAgentKey(
   }
   const surface = surfaceName ?? agentType;
   const instance = instanceId ?? machineInstanceId(surface);
+  const template = agentTemplateFor(agentType);
   const podBase = podUrl.replace(/\/$/, "");
   const pod = await import("./pod.js");
 
@@ -1258,6 +1260,10 @@ export async function provisionAgentKey(
         instanceLabel: machineInstanceLabel(),
         ...(toolProfile ? { toolProfile } : {}),
         ...(job ? { role: job.role, ...(job.roleLabel ? { roleLabel: job.roleLabel } : {}) } : {}),
+        // The agent template this type is an instance of (D9), from the
+        // installed catalog: the pod applies it with the SAME approval that
+        // connects the agent. An older pod ignores it; none found = none sent.
+        ...(template ? { template } : {}),
       }),
       signal: AbortSignal.timeout(30000),
     });
