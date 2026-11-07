@@ -53,6 +53,15 @@ export function workerRunnerHeader(version: string = cliBuild().version): Record
 }
 
 /**
+ * A computer's waker's stamp, `synap-waker/<version>`: sent ONLY by `synap
+ * waker` on its poll, with the COMPUTER's key. The pod reads it as the
+ * computer's wake lease (plan v2 slice 4).
+ */
+export function wakerRunnerHeader(version: string = cliBuild().version): Record<string, string> {
+  return { [RUNNER_HEADER]: `synap-waker/${headerVersion(version)}` };
+}
+
+/**
  * Which OS process of a conversation calls (`<host>:<pid>:<startedAtMs>`), and
  * what that runner is doing (`busy` | `idle` | `needs_permission` |
  * `needs_answer` (a question or a plan dialog) | `ended`).

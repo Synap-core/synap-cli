@@ -1301,6 +1301,46 @@ worker
     await workerUninstallCommand({ agent: cmd.optsWithGlobals().agent });
   });
 
+// ─── waker ────────────────────────────────────────────────────────────────────
+// This computer's WAKER (plan v2 slice 4): starts its agents when work is handed
+// to them, so the pod can count on them. See src/commands/waker.ts.
+
+const waker = program
+  .command("waker")
+  .description("Start this computer's agents when work is handed to them (the pod's \"Wakes agents\")")
+  .option("--interval <dur>", "How often to ask the pod (e.g. 30s, 1m)", "30s")
+  .option("--once", "Ask once, start what is due, wait for those workers, exit")
+  .option("--protocols <list>", "Passed to every worker it starts: code, work-folder (comma-separated)")
+  .action(async (opts: { interval?: string; once?: boolean; protocols?: string }) => {
+    const { wakerCommand } = await import("./commands/waker.js");
+    await wakerCommand(opts);
+  });
+
+waker
+  .command("install")
+  .description("Run the waker as a login service on this Mac; opens pod admin when \"Wakes agents\" is off")
+  .action(async (_opts: unknown, cmd: Command) => {
+    const { wakerInstallCommand } = await import("./commands/waker.js");
+    await wakerInstallCommand({ protocols: cmd.optsWithGlobals().protocols });
+  });
+
+waker
+  .command("status")
+  .description("Show the waker service and what the pod says for this computer")
+  .option("--json", "Output as JSON")
+  .action(async (opts: { json?: boolean }) => {
+    const { wakerStatusCommand } = await import("./commands/waker.js");
+    await wakerStatusCommand(opts);
+  });
+
+waker
+  .command("uninstall")
+  .description("Remove the waker's login service from this Mac")
+  .action(async () => {
+    const { wakerUninstallCommand } = await import("./commands/waker.js");
+    await wakerUninstallCommand();
+  });
+
 // ─── box ──────────────────────────────────────────────────────────────────────
 // Run THIS computer as a run box provisioner: lease the box runs queued on the
 // pod, run each in a fresh isolated LXC, hand back the evidence. See src/commands/box.ts.
