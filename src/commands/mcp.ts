@@ -26,7 +26,7 @@ import {
 } from "../lib/targets.js";
 import { agentTypeOfSurface } from "../lib/machine-instance.js";
 import { SURFACE_NAMES, setSurfaceAgentKey, type SurfaceName } from "../lib/pod.js";
-import { suggestTargets, unknownClientMessage } from "../lib/target-suggest.js";
+import { suggestTargets } from "../lib/target-suggest.js";
 import { log } from "../utils/logger.js";
 import { MANAGED_MCP_URL, mcpConnectorUrl } from "../lib/auth.js";
 import { printMcpConnection, redactKey, writeMcpSnippetFiles, MCP_KEY_ENV, mcpRemoteArgs } from "../lib/mcp-snippets.js";
@@ -95,16 +95,18 @@ export async function mcpUrl(
     const { url, workspaceId, projectId } = resolveMcpTarget(cfg, opts);
 
     // A dedicated agent key — never paste the person's key into an external
-    // product. The client names are the CLI's known clients (`TARGETS`), not a
-    // hand list; with no --client, the `generic` client. An unknown name stops
-    // with the closest ones, as `synap connect` does.
-    const surface = opts.client?.trim() || "generic";
-    if (!isTargetName(surface)) {
-      const [first, ...rest] = unknownClientMessage(surface, suggestTargets(surface), { toolHint: false });
-      log.error(first);
-      for (const line of rest) log.hint(line);
-      log.hint("Any other client: synap mcp url --client generic");
-      process.exit(1);
+    // product. A known client (`TARGETS`) gets its own key; with no --client,
+    // the `generic` client. Any other name is a display label for a product
+    // the CLI does not know (the catalog's setups pass their own, e.g.
+    // `--client claude-managed-agents`): its key is the generic client's.
+    // `synap connect`, which writes a client's config, stops on an unknown
+    // name instead; here a near-miss of a known name only gets a hint.
+    const label = opts.client?.trim() || "generic";
+    const surface: TargetName = isTargetName(label) ? label : "generic";
+    if (surface !== label && !opts.json) {
+      const near = suggestTargets(label);
+      log.hint(`\`${label}\` is not one of the CLI's clients: it gets a generic client's key.`);
+      if (near.length) log.hint(`Did you mean: ${near.map((n) => `\`${n}\``).join(", ")}? (synap mcp url --client ${near[0]})`);
     }
     const { hubApiKey, agentUserId } = await mintReusableKey(cfg, surface);
 

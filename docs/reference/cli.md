@@ -178,8 +178,8 @@ Every command also accepts `-h, --help`.
   - [`synap view arrange`](#synap-view-arrange) — Replace the widget arrangement of a bento view
 - [`synap explain`](#synap-explain) — Full capability map — what Synap can do and how (no network required)
 - [`synap open`](#synap-open) — Open in the Synap desktop app. Use: open <kind> <id> or open <id> (auto-resolves type)
-- [`synap doc`](#synap-doc) — Create and update markdown documents on the pod
-  - [`synap doc create`](#synap-doc-create) — Create a new markdown document
+- [`synap doc`](#synap-doc) — Create and update documents on the pod (markdown, or an html page)
+  - [`synap doc create`](#synap-doc-create) — Create a new document: markdown, or an html page pod admin runs
   - [`synap doc update`](#synap-doc-update) — Update a document's content: the whole body, or one section (--section). Governed: an agent's edit is proposed.
   - [`synap doc reference`](#synap-doc-reference) — Create an external reference document (points at a URL — no bytes stored)
 - [`synap cell`](#synap-cell) — Define and bundle frame cells for the Synap runtime
@@ -207,16 +207,16 @@ Every command also accepts `-h, --help`.
   - [`synap market attach`](#synap-market-attach) — Reconcile a marketplace template onto an existing workspace + version-stamp it — how you relink a workspace installed before the marketplace
   - [`synap market scaffold`](#synap-market-scaffold) — Write a minimal valid <slug>.template.yaml to edit in place (refuses to overwrite)
   - [`synap market validate`](#synap-market-validate) — Validate a local template file against the shared template validator — fast author feedback
-  - [`synap market publish`](#synap-market-publish) — Validate then publish a template (or a standalone cell/view package) to the marketplace (private by default) — pass a file, --from-workspace <id>, or --from-project <id>. Non-official publish never uses the synap-official vendor. Founder: --official [slug...] publishes the official catalog from the monorepo checkout (alias of `synap catalog publish --official --kind workspace`)
+  - [`synap market publish`](#synap-market-publish) — Validate then publish a template (or a standalone cell/view package) to the marketplace (private by default) — pass a file, --from-workspace <id>, or --from-project <id>. Non-official publish never uses the synap-official vendor. --official [slug...] republishes the official catalog from the monorepo checkout: owner only, for an emergency republish; CI normally publishes on every push to app-bases main (alias of `synap catalog publish --official --kind workspace`)
   - [`synap market unpublish`](#synap-market-unpublish) — Flip a published package back to private (owner only)
 - [`synap templates`](#synap-templates) — See every workspace's template status (attached, drifted, or unattached) and connect them — the one home for template health
   - [`synap templates attach`](#synap-templates-attach) — Connect a workspace (by NAME or id) to a template — suggests the right one so you don't guess a slug
   - [`synap templates update`](#synap-templates-update) — Apply template updates — 'update all' (or --yes) for every drifted workspace, or name specific slugs. Bare 'update' previews what's available.
   - [`synap templates retire`](#synap-templates-retire) — Move a retired template's space into its replacement (by template slug, workspace name or id). Shows the plan, asks, then moves through the pod — never deletes.
-- [`synap catalog`](#synap-catalog) — Validate, diff and publish the OFFICIAL template catalog (workspaces, capabilities, skills, packs, automations) from the monorepo checkout
+- [`synap catalog`](#synap-catalog) — Validate, diff and publish the OFFICIAL template catalog (workspaces, capabilities, skills, packs, automations, views) from the monorepo checkout; CI publishes it on every push to app-bases main
   - [`synap catalog validate`](#synap-catalog-validate) — Validate the catalog (per-kind schema, cross-kind refs, goal grammar, duplicates) — offline
   - [`synap catalog diff`](#synap-catalog-diff) — Show what would change against the live control-plane catalog (new / changed / unchanged)
-  - [`synap catalog publish`](#synap-catalog-publish) — Validate, preview the diff, confirm, then publish to the control plane — founder only: --official + a `synap login` session that owns synap-official
+  - [`synap catalog publish`](#synap-catalog-publish) — Validate, preview the diff, confirm, then publish to the control plane — owner only, for an emergency republish; CI normally publishes on every push to app-bases main (--official + a `synap login` session that owns synap-official)
 - [`synap capability`](#synap-capability) — The one capability-first root: list, add, enable, connect, show, run a capability pack
   - [`synap capability list`](#synap-capability-list) — List capabilities — one row per pack, with status, connection, and verbs
   - [`synap capability add`](#synap-capability-add) — Install a capability from the catalog — omit the name to pick from a list
@@ -590,7 +590,7 @@ Print a ready-to-paste MCP connection (URL + key + snippets) for UI clients like
 
 | Option | Description | Default |
 |---|---|---|
-| `--client <name>` | The client this key is for, one of synap connect --list (default: generic) |  |
+| `--client <name>` | The client this key is for: one of synap connect --list gets its own key, any other name a generic one (default: generic) |  |
 | `--workspace <id>` | Scope to a specific workspace (omit for pod-wide) |  |
 | `--project <id>` | Focus the agent on a project (narrows every tool call; orthogonal to --workspace) |  |
 | `--json` | Output as JSON |  |
@@ -990,7 +990,7 @@ Import files, folders, or URLs into the pod (AI capture pipeline, or Superwhispe
 | `--limit <n>` | Max Superwhisper units to process |  |
 | `--concurrency <n>` | Parallel unit uploads (1–4) |  |
 | `--no-resume` | Ignore local import ledger (re-import all) |  |
-| `--job-status <jobId>` | Re-poll a background corpus import started by an earlier run (no waiting) |  |
+| `--job-status <jobId>` | Re-poll a background import started by an earlier run (no waiting); with --source superwhisper, a bulk store-first job |  |
 
 ## `synap upload`
 
@@ -1791,8 +1791,8 @@ Block until the human replies in the session room (or, with --events, until the 
 | Option | Description | Default |
 |---|---|---|
 | `--since <iso>` | Only events strictly after this ISO timestamp (default: now — skips anything that predates this wait; with --events: the unread ones) |  |
-| `--events <kinds>` | Wait on the session change feed: comma list of answer, proposal_decided, stage_moved, owner_message, session_message (a message from another session's agent), or all |  |
-| `--wake-only` | Stop only on what should wake an agent: answers, owner messages, and agent messages the pod marked wake (the rest is read and skipped) |  |
+| `--events <kinds>` | Wait on the session change feed: comma list of answer, proposal_decided, stage_moved, owner_message, session_message (a message from another session's agent), pr_merged, pr_closed, checks_finished, status_moved, hold_set, blocker_ended, signal_raised, or all |  |
+| `--wake-only` | Stop only on what the pod marks `wake` (answers, owner messages, agent messages sent to wake you, decided proposals, merged or closed PRs, finished checks, ended blockers, signals, a pause it resumed); the rest is read and skipped. The default when --events is not given |  |
 | `--once` | One read, no waiting loop |  |
 | `--peek` | Mark nothing picked up or read (a watcher that is not the agent doing the work) |  |
 | `--hook` | Run as a Claude Code asyncRewake Stop hook: wait for a wake-worthy event, print it on stderr, exit 2 (see: synap hooks install-wake) |  |
@@ -3066,7 +3066,7 @@ Open in the Synap desktop app. Use: open <kind> <id> or open <id> (auto-resolves
 synap doc [options] [command]
 ```
 
-Create and update markdown documents on the pod
+Create and update documents on the pod (markdown, or an html page)
 
 Subcommands: [`create`](#synap-doc-create), [`update`](#synap-doc-update), [`reference`](#synap-doc-reference)
 
@@ -3076,13 +3076,14 @@ Subcommands: [`create`](#synap-doc-create), [`update`](#synap-doc-update), [`ref
 synap doc create [options]
 ```
 
-Create a new markdown document
+Create a new document: markdown, or an html page pod admin runs
 
 | Option | Description | Default |
 |---|---|---|
 | `--title <title>` | Document title (required) |  |
-| `--content <text>` | Markdown content (inline) |  |
-| `--file <path>` | Read content from a file |  |
+| `--content <text>` | Content (inline) |  |
+| `--file <path>` | Read content from a file (.html / .htm means --type html) |  |
+| `--type <type>` | markdown (default) or html: a page pod admin runs at /open/<id> in an isolated frame (inline only, no CDN, at most 2 MB) |  |
 | `--workspace <id>` | Workspace to create the document in |  |
 | `--open` | Open in the Synap desktop app after creation |  |
 | `--json` | JSON output |  |
@@ -3094,6 +3095,7 @@ Examples:
   synap doc create --title "My Notes" --content "# Hello"
   synap doc create --title "My Notes" --file ./notes.md --open
   echo "# Draft" | synap doc create --title "Draft"
+  synap doc create --title "Weekly report" --file ./report.html
 ```
 
 ## `synap doc update`
@@ -3177,7 +3179,7 @@ Create or update a frame cell on the pod from ESM source
 | `--name <name>` | Cell display name (required) |  |
 | `--file <path>` | ESM source file (or pipe stdin) |  |
 | `--type-key <key>` | Explicit typeKey (default: generated:<slug>) |  |
-| `--deps <json>` | Dependency map JSON, e.g. '{"recharts":"2.12.0"}' |  |
+| `--deps <json>` | Dependency map JSON. Leave it out: the frame refuses runtime deps, so bundle libraries with `synap cell build` instead |  |
 | `--view-types <list>` | Comma-separated view types this cell can render as a VIEW RENDERER, e.g. "list,table,kanban". Omit to leave an existing affinity untouched; pass "" to clear it |  |
 | `--content-kind <kind>` | What this cell renders — entity-detail \| entity-card \| entity-profile \| collection \| widget (default: widget, which is placeable but never offered as a profile renderer) |  |
 | `--workspace <id>` | Workspace to scope the cell to (default: your active workspace lens — run `synap lens` to see it) |  |
@@ -3193,7 +3195,6 @@ PICKED as a view or profile renderer — it is only placeable on a bento.
 
 Examples:
   synap cell define --name "Revenue Chart" --file ./chart.js
-  synap cell define --name "Revenue Chart" --file ./chart.js --deps '{"recharts":"2.12.0"}'
   synap cell define --name "Deal Board" --file ./board.js --view-types kanban,table --content-kind collection
   synap cell define --name "Contact Page" --file ./contact.js --content-kind entity-detail
   cat chart.js | synap cell define --name "Revenue Chart"
@@ -3214,14 +3215,15 @@ Bundle a multi-file cell/app into a single ESM module the runtime expects
 | Option | Description | Default |
 |---|---|---|
 | `--out <file>` | Output file path (default: <entry>.bundle.js) |  |
-| `--bundle-deps` | Inline all third-party deps into the bundle (only react/react-dom stay external) — output has deps={} and the runtime CSP drops esm.sh entirely |  |
+| `--bundle-deps` | Inline every third-party library into the cell (the default; kept for older scripts). react, react-dom, the JSX runtimes, @synap/kit and @synap/view-sdk stay external: the host provides them |  |
+| `--no-bundle-deps` | Keep third-party imports external and emit them as a deps map. The web and desktop frames refuse such a cell |  |
 | `--self-contained` | Build ONE complete HTML document (React, CSS, brand fonts inlined; nothing external) — the code of a rendererType "mcp-app" cell |  |
 | `--fonts` | With --self-contained: require the inlined brand fonts (default: include when @synap-core/design-tokens resolves) |  |
 | `--no-fonts` | With --self-contained: skip the inlined brand fonts |  |
 | `--define` | Chain into cell define after bundling (requires --name) |  |
 | `--name <name>` | Cell name (required with --define) |  |
 | `--type-key <key>` | Explicit typeKey (used with --define) |  |
-| `--deps <json>` | Override dependency versions as JSON, e.g. '{"react":"18.3.0"}' |  |
+| `--deps <json>` | Override the emitted deps map (JSON). The frame refuses runtime deps; leave it out |  |
 | `--view-types <list>` | Comma-separated view-renderer affinity (used with --define), e.g. "list,table" |  |
 | `--content-kind <kind>` | entity-detail \| entity-card \| entity-profile \| collection \| widget (used with --define) |  |
 | `--workspace <id>` | Workspace (used with --define) |  |
@@ -3234,18 +3236,16 @@ Bundle a multi-file cell/app into a single ESM module the runtime expects
 ```text
 Output: a single ESM file.
 
-Default mode: bare imports (react, recharts, …) are externalized and emitted
-as a deps map. At runtime Synap resolves them via esm.sh importmap.
-
---bundle-deps mode: only react/react-dom are externalized (React is
-host-inlined at runtime, never via esm.sh); everything else is bundled into
-the output, so the deps map is empty. A cell built this way reaches no esm.sh
-origin at runtime — the runtime CSP collapses to drop it entirely.
+The frame loads no code from the network (no CDN, no esm.sh). It provides only
+react, react-dom, the JSX runtimes, @synap/kit and @synap/view-sdk, resolved by the host; those
+stay external. Every other library (recharts, d3, three, …) is bundled into the
+cell, so the deps map is empty. That is the default, and it is the only shape
+the web and desktop frames accept. Leave `deps` empty; --no-bundle-deps
+exists only for a host that resolves imports itself and the frame refuses it.
 
 Examples:
   synap cell build ./src/chart.tsx --out ./dist/chart.js
   synap cell build ./src/chart.tsx --out ./dist/chart.js --define --name "Revenue Chart"
-  synap cell build ./src/chart.tsx --out ./dist/chart.js --bundle-deps
 ```
 
 ## `synap artifact`
@@ -3608,7 +3608,7 @@ Validate a local template file against the shared template validator — fast au
 synap market publish [options] [targets...]
 ```
 
-Validate then publish a template (or a standalone cell/view package) to the marketplace (private by default) — pass a file, --from-workspace <id>, or --from-project <id>. Non-official publish never uses the synap-official vendor. Founder: --official [slug...] publishes the official catalog from the monorepo checkout (alias of `synap catalog publish --official --kind workspace`)
+Validate then publish a template (or a standalone cell/view package) to the marketplace (private by default) — pass a file, --from-workspace <id>, or --from-project <id>. Non-official publish never uses the synap-official vendor. --official [slug...] republishes the official catalog from the monorepo checkout: owner only, for an emergency republish; CI normally publishes on every push to app-bases main (alias of `synap catalog publish --official --kind workspace`)
 
 | Argument | Required | Description |
 |---|---|---|
@@ -3616,7 +3616,7 @@ Validate then publish a template (or a standalone cell/view package) to the mark
 
 | Option | Description | Default |
 |---|---|---|
-| `--official` | Publish the OFFICIAL Synap catalog (all templates, or the named slugs) from the monorepo checkout — requires a `synap login` session that owns the synap-official vendor; previews and asks first |  |
+| `--official` | Emergency republish of the OFFICIAL Synap catalog (all templates, or the named slugs) from the monorepo checkout — owner only (a `synap login` session that owns the synap-official vendor); CI normally publishes on every push to app-bases main; previews and asks first |  |
 | `--templates-dir <dir>` | With --official: path to the catalog package — synap-app/packages/catalog or workspace-templates (default: found by walking up from cwd) |  |
 | `--dry-run` | With --official: preview what would change against the live catalog, publish nothing |  |
 | `--yes` | With --official: skip the confirmation prompt |  |
@@ -3628,7 +3628,7 @@ Validate then publish a template (or a standalone cell/view package) to the mark
 | `--json` | Output as JSON |  |
 | `--pod-url <url>` | Pod URL override (for --from-workspace / --from-project) |  |
 | `--api-key <key>` | API key override (for --from-workspace / --from-project) |  |
-| `--no-bundle-deps` | Publish a cell's codeFile with external deps via esm.sh instead of bundling them in (default: bundled) |  |
+| `--no-bundle-deps` | Publish a cell's codeFile with external third-party imports instead of bundling them in (default: bundled). The web and desktop frames refuse an unbundled cell |  |
 
 ## `synap market unpublish`
 
@@ -3735,7 +3735,7 @@ Move a retired template's space into its replacement (by template slug, workspac
 synap catalog [options] [command]
 ```
 
-Validate, diff and publish the OFFICIAL template catalog (workspaces, capabilities, skills, packs, automations) from the monorepo checkout
+Validate, diff and publish the OFFICIAL template catalog (workspaces, capabilities, skills, packs, automations, views) from the monorepo checkout; CI publishes it on every push to app-bases main
 
 Subcommands: [`validate`](#synap-catalog-validate), [`diff`](#synap-catalog-diff), [`publish`](#synap-catalog-publish)
 
@@ -3753,7 +3753,7 @@ Validate the catalog (per-kind schema, cross-kind refs, goal grammar, duplicates
 
 | Option | Description | Default |
 |---|---|---|
-| `--kind <kind>` | Only this kind: workspace \| capability \| skill \| pack \| automation |  |
+| `--kind <kind>` | Only this kind: workspace \| capability \| skill \| pack \| automation \| view \| agent |  |
 | `--catalog-dir <dir>` | Path to the catalog package (default: found by walking up from cwd) |  |
 | `--json` | Output as JSON |  |
 
@@ -3771,7 +3771,7 @@ Show what would change against the live control-plane catalog (new / changed / u
 
 | Option | Description | Default |
 |---|---|---|
-| `--kind <kind>` | Only this kind: workspace \| capability \| skill \| pack \| automation |  |
+| `--kind <kind>` | Only this kind: workspace \| capability \| skill \| pack \| automation \| view \| agent |  |
 | `--catalog-dir <dir>` | Path to the catalog package (default: found by walking up from cwd) |  |
 | `--json` | Output as JSON |  |
 
@@ -3781,7 +3781,7 @@ Show what would change against the live control-plane catalog (new / changed / u
 synap catalog publish [options] [slugs...]
 ```
 
-Validate, preview the diff, confirm, then publish to the control plane — founder only: --official + a `synap login` session that owns synap-official
+Validate, preview the diff, confirm, then publish to the control plane — owner only, for an emergency republish; CI normally publishes on every push to app-bases main (--official + a `synap login` session that owns synap-official)
 
 | Argument | Required | Description |
 |---|---|---|
@@ -3789,7 +3789,7 @@ Validate, preview the diff, confirm, then publish to the control plane — found
 
 | Option | Description | Default |
 |---|---|---|
-| `--kind <kind>` | Only this kind: workspace \| capability \| skill \| pack \| automation |  |
+| `--kind <kind>` | Only this kind: workspace \| capability \| skill \| pack \| automation \| view \| agent |  |
 | `--catalog-dir <dir>` | Path to the catalog package (default: found by walking up from cwd) |  |
 | `--json` | Output as JSON |  |
 | `--official` | Publish as the synap-official vendor (required) |  |

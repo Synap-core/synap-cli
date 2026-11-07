@@ -1,11 +1,14 @@
 /**
  * synap doc create / synap doc update
  *
- * Manage markdown documents on the pod.
+ * Manage documents on the pod: markdown, or an html page that pod admin runs
+ * at /open/<id> in an isolated frame (inline only, no network, at most 2 MB).
  *
  * Usage:
  *   synap doc create --title "My Doc" --content "# Hello" [--workspace <id>] [--open]
  *   synap doc create --title "My Doc" --file ./notes.md [--open]
+ *   synap doc create --title "Report" --file ./report.html   (type html, from the extension)
+ *   synap doc create --title "Report" --type html --content "<!doctype html>..."
  *   echo "# Hello" | synap doc create --title "My Doc"
  *
  *   synap doc update <id> --content "new body"
@@ -34,6 +37,8 @@ export interface DocCreateOpts {
   title: string;
   content?: string;
   file?: string;
+  /** "markdown" (default) or "html"; a `.html` / `.htm` --file means html. */
+  type?: string;
   workspace?: string;
   open?: boolean;
   json?: boolean;
@@ -91,8 +96,25 @@ async function resolveContent(
   return undefined;
 }
 
+const DOC_TYPES = ["markdown", "html"] as const;
+type DocType = (typeof DOC_TYPES)[number];
+
+/** --type wins; otherwise a `.html` / `.htm` --file is a page; else markdown. */
+export function resolveDocType(
+  type: string | undefined,
+  file: string | undefined
+): DocType {
+  if (type !== undefined) {
+    if ((DOC_TYPES as readonly string[]).includes(type)) return type as DocType;
+    log.error(`--type must be "markdown" or "html", not "${type}".`);
+    process.exit(1);
+  }
+  return file && /\.html?$/i.test(file) ? "html" : "markdown";
+}
+
 export async function docCreate(opts: DocCreateOpts): Promise<void> {
   try {
+    const type = resolveDocType(opts.type, opts.file);
     const cfg = await resolveHubConfig(opts);
     const userId = await resolveUserId(cfg);
     const workspaceId = opts.workspace ?? cfg.workspaceId;
@@ -110,7 +132,7 @@ export async function docCreate(opts: DocCreateOpts): Promise<void> {
       userId,
       workspaceId,
       title: opts.title,
-      type: "markdown",
+      type,
     };
     if (content !== undefined) body.content = content;
 
@@ -128,6 +150,12 @@ export async function docCreate(opts: DocCreateOpts): Promise<void> {
       return;
     }
 
+    // What the pod says on the receipt (for a page: code or assets it loads
+    // from the network, which never load in its frame).
+    if (Array.isArray(res.warnings)) {
+      for (const w of res.warnings) log.warn(String(w));
+    }
+
     const isProposed = res.status === "proposed" || Boolean(res.proposalId);
     if (isProposed) {
       // A proposal is normal — the write is queued for review, not a failure.
@@ -140,6 +168,7 @@ export async function docCreate(opts: DocCreateOpts): Promise<void> {
 
     log.success(`Document created: ${opts.title}`);
     log.dim(`  id: ${id}`);
+    if (type === "html") log.dim(`  a page: pod admin runs it at /open/${id}`);
     log.dim(`  open in browser: synap open document ${id}`);
 
     if (opts.open && id) {

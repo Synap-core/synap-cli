@@ -89,7 +89,8 @@ export async function connect(thing: string | undefined, opts: ConnectOptions = 
 
   if (route.kind === "pick") {
     if (!process.stdin.isTTY) {
-      log.error("Say what to connect: synap connect <client|tool>  (synap connect --list)");
+      log.error("Say what to connect: synap connect <client>, or synap connect --tool <service>.");
+      log.hint("All clients: synap connect --list");
       process.exitCode = 1;
       return;
     }

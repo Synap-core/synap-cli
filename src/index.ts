@@ -18,6 +18,7 @@ import { bootstrapPodOverride } from "./lib/pod.js";
 import { INIT_EXIT_HELP } from "./lib/init-exit.js";
 import { WAIT_HELP } from "./lib/wait-help.js";
 import { cliBuild, formatCliBuild } from "./lib/cli-build.js";
+import { CATALOG_KINDS } from "./commands/catalog.js";
 
 // The version AND the commit this build came from — a stale build is visible.
 const version = formatCliBuild(cliBuild());
@@ -328,7 +329,7 @@ const mcp = program
 mcp
   .command("url")
   .description("Print a ready-to-paste MCP connection (URL + key + snippets) for UI clients like ChatGPT")
-  .option("--client <name>", "The client this key is for, one of synap connect --list (default: generic)")
+  .option("--client <name>", "The client this key is for: one of synap connect --list gets its own key, any other name a generic one (default: generic)")
   .option("--workspace <id>", "Scope to a specific workspace (omit for pod-wide)")
   .option("--project <id>", "Focus the agent on a project (narrows every tool call; orthogonal to --workspace)")
   .option("--json", "Output as JSON")
@@ -786,9 +787,14 @@ program
   .option("--no-resume", "Ignore local import ledger (re-import all)")
   .option(
     "--job-status <jobId>",
-    "Re-poll a background corpus import started by an earlier run (no waiting)"
+    "Re-poll a background import started by an earlier run (no waiting); with --source superwhisper, a bulk store-first job"
   )
   .action(async (inputs: string[], opts) => {
+    if (opts.jobStatus && opts.source === "superwhisper") {
+      const { importSuperwhisperJobStatus } = await import("./lib/superwhisper-import.js");
+      await importSuperwhisperJobStatus(opts.jobStatus, opts);
+      return;
+    }
     const mod = await import("./commands/import.js");
     if (opts.jobStatus) {
       await mod.importJobStatus(opts.jobStatus, opts);
@@ -1443,9 +1449,9 @@ session
   )
   .option(
     "--events <kinds>",
-    "Wait on the session change feed: comma list of answer, proposal_decided, stage_moved, owner_message, session_message (a message from another session's agent), or all"
+    "Wait on the session change feed: comma list of answer, proposal_decided, stage_moved, owner_message, session_message (a message from another session's agent), pr_merged, pr_closed, checks_finished, status_moved, hold_set, blocker_ended, signal_raised, or all"
   )
-  .option("--wake-only", "Stop only on what should wake an agent: answers, owner messages, and agent messages the pod marked wake (the rest is read and skipped)")
+  .option("--wake-only", "Stop only on what the pod marks `wake` (answers, owner messages, agent messages sent to wake you, decided proposals, merged or closed PRs, finished checks, ended blockers, signals, a pause it resumed); the rest is read and skipped. The default when --events is not given")
   .option("--once", "One read, no waiting loop")
   .option("--peek", "Mark nothing picked up or read (a watcher that is not the agent doing the work)")
   .option("--hook", "Run as a Claude Code asyncRewake Stop hook: wait for a wake-worthy event, print it on stderr, exit 2 (see: synap hooks install-wake)")
@@ -2447,14 +2453,18 @@ program
 
 const doc = program
   .command("doc")
-  .description("Create and update markdown documents on the pod");
+  .description("Create and update documents on the pod (markdown, or an html page)");
 
 doc
   .command("create")
-  .description("Create a new markdown document")
+  .description("Create a new document: markdown, or an html page pod admin runs")
   .requiredOption("--title <title>", "Document title")
-  .option("--content <text>", "Markdown content (inline)")
-  .option("--file <path>", "Read content from a file")
+  .option("--content <text>", "Content (inline)")
+  .option("--file <path>", "Read content from a file (.html / .htm means --type html)")
+  .option(
+    "--type <type>",
+    "markdown (default) or html: a page pod admin runs at /open/<id> in an isolated frame (inline only, no CDN, at most 2 MB)"
+  )
   .option("--workspace <id>", "Workspace to create the document in")
   .option("--open", "Open in the Synap desktop app after creation")
   .option("--json", "JSON output")
@@ -2465,6 +2475,7 @@ Examples:
   synap doc create --title "My Notes" --content "# Hello"
   synap doc create --title "My Notes" --file ./notes.md --open
   echo "# Draft" | synap doc create --title "Draft"
+  synap doc create --title "Weekly report" --file ./report.html
   `)
   .action(async (opts) => {
     const { docCreate } = await import("./commands/doc.js");
@@ -2527,7 +2538,7 @@ cell
   .option("--type-key <key>", "Explicit typeKey (default: generated:<slug>)")
   .option(
     "--deps <json>",
-    'Dependency map JSON, e.g. \'{"recharts":"2.12.0"}\''
+    'Dependency map JSON. Leave it out: the frame refuses runtime deps, so bundle libraries with `synap cell build` instead'
   )
   .option(
     "--view-types <list>",
@@ -2558,7 +2569,6 @@ PICKED as a view or profile renderer — it is only placeable on a bento.
 
 Examples:
   synap cell define --name "Revenue Chart" --file ./chart.js
-  synap cell define --name "Revenue Chart" --file ./chart.js --deps '{"recharts":"2.12.0"}'
   synap cell define --name "Deal Board" --file ./board.js --view-types kanban,table --content-kind collection
   synap cell define --name "Contact Page" --file ./contact.js --content-kind entity-detail
   cat chart.js | synap cell define --name "Revenue Chart"
@@ -2574,7 +2584,11 @@ cell
   .option("--out <file>", "Output file path (default: <entry>.bundle.js)")
   .option(
     "--bundle-deps",
-    "Inline all third-party deps into the bundle (only react/react-dom stay external) — output has deps={} and the runtime CSP drops esm.sh entirely"
+    "Inline every third-party library into the cell (the default; kept for older scripts). react, react-dom, the JSX runtimes, @synap/kit and @synap/view-sdk stay external: the host provides them"
+  )
+  .option(
+    "--no-bundle-deps",
+    "Keep third-party imports external and emit them as a deps map. The web and desktop frames refuse such a cell"
   )
   .option("--self-contained", 'Build ONE complete HTML document (React, CSS, brand fonts inlined; nothing external) — the code of a rendererType "mcp-app" cell')
   .option("--fonts", "With --self-contained: require the inlined brand fonts (default: include when @synap-core/design-tokens resolves)")
@@ -2584,7 +2598,7 @@ cell
   .option("--type-key <key>", "Explicit typeKey (used with --define)")
   .option(
     "--deps <json>",
-    "Override dependency versions as JSON, e.g. '{\"react\":\"18.3.0\"}'"
+    "Override the emitted deps map (JSON). The frame refuses runtime deps; leave it out"
   )
   .option("--view-types <list>", 'Comma-separated view-renderer affinity (used with --define), e.g. "list,table"')
   .option("--content-kind <kind>", "entity-detail | entity-card | entity-profile | collection | widget (used with --define)")
@@ -2597,18 +2611,16 @@ cell
   .addHelpText("after", `
 Output: a single ESM file.
 
-Default mode: bare imports (react, recharts, …) are externalized and emitted
-as a deps map. At runtime Synap resolves them via esm.sh importmap.
-
---bundle-deps mode: only react/react-dom are externalized (React is
-host-inlined at runtime, never via esm.sh); everything else is bundled into
-the output, so the deps map is empty. A cell built this way reaches no esm.sh
-origin at runtime — the runtime CSP collapses to drop it entirely.
+The frame loads no code from the network (no CDN, no esm.sh). It provides only
+react, react-dom, the JSX runtimes, @synap/kit and @synap/view-sdk, resolved by the host; those
+stay external. Every other library (recharts, d3, three, …) is bundled into the
+cell, so the deps map is empty. That is the default, and it is the only shape
+the web and desktop frames accept. Leave \`deps\` empty; --no-bundle-deps
+exists only for a host that resolves imports itself and the frame refuses it.
 
 Examples:
   synap cell build ./src/chart.tsx --out ./dist/chart.js
   synap cell build ./src/chart.tsx --out ./dist/chart.js --define --name "Revenue Chart"
-  synap cell build ./src/chart.tsx --out ./dist/chart.js --bundle-deps
   `)
   .action(async (entry: string, opts) => {
     const { cellBuild } = await import("./commands/cell.js");
@@ -2980,8 +2992,8 @@ market
 
 market
   .command("publish [targets...]")
-  .description("Validate then publish a template (or a standalone cell/view package) to the marketplace (private by default) — pass a file, --from-workspace <id>, or --from-project <id>. Non-official publish never uses the synap-official vendor. Founder: --official [slug...] publishes the official catalog from the monorepo checkout (alias of `synap catalog publish --official --kind workspace`)")
-  .option("--official", "Publish the OFFICIAL Synap catalog (all templates, or the named slugs) from the monorepo checkout — requires a `synap login` session that owns the synap-official vendor; previews and asks first")
+  .description("Validate then publish a template (or a standalone cell/view package) to the marketplace (private by default) — pass a file, --from-workspace <id>, or --from-project <id>. Non-official publish never uses the synap-official vendor. --official [slug...] republishes the official catalog from the monorepo checkout: owner only, for an emergency republish; CI normally publishes on every push to app-bases main (alias of `synap catalog publish --official --kind workspace`)")
+  .option("--official", "Emergency republish of the OFFICIAL Synap catalog (all templates, or the named slugs) from the monorepo checkout — owner only (a `synap login` session that owns the synap-official vendor); CI normally publishes on every push to app-bases main; previews and asks first")
   .option("--templates-dir <dir>", "With --official: path to the catalog package — synap-app/packages/catalog or workspace-templates (default: found by walking up from cwd)")
   .option("--dry-run", "With --official: preview what would change against the live catalog, publish nothing")
   .option("--yes", "With --official: skip the confirmation prompt")
@@ -2995,10 +3007,10 @@ market
   .option("--api-key <key>", "API key override (for --from-workspace / --from-project)")
   // Default ON for a cell package's `codeFile` resolution — see `cell build
   // --bundle-deps`'s doc comment for why: a published cell's `deps` map is
-  // otherwise resolved through esm.sh at RUNTIME, so the artifact reviewed at
-  // publish time isn't what actually executes. `synap cell build` invoked
-  // directly is unaffected — its own default stays external-deps-via-esm.sh.
-  .option("--no-bundle-deps", "Publish a cell's codeFile with external deps via esm.sh instead of bundling them in (default: bundled)")
+  // otherwise resolved over the network at RUNTIME, so the artifact reviewed at
+  // publish time isn't what actually executes. `synap cell build` bundles by
+  // default too (the frame accepts nothing else).
+  .option("--no-bundle-deps", "Publish a cell's codeFile with external third-party imports instead of bundling them in (default: bundled). The web and desktop frames refuse an unbundled cell")
   .action(async (targets: string[] | undefined, _opts, cmd) => {
     // Same parent/child `--json` collision as `market install` — see its comment.
     const opts = cmd.optsWithGlobals();
@@ -3037,7 +3049,7 @@ market
 
 const catalog = program
   .command("catalog")
-  .description("Validate, diff and publish the OFFICIAL template catalog (workspaces, capabilities, skills, packs, automations) from the monorepo checkout");
+  .description("Validate, diff and publish the OFFICIAL template catalog (workspaces, capabilities, skills, packs, automations, views) from the monorepo checkout; CI publishes it on every push to app-bases main");
 
 for (const verb of ["validate", "diff", "publish"] as const) {
   const sub = catalog
@@ -3047,9 +3059,9 @@ for (const verb of ["validate", "diff", "publish"] as const) {
         ? "Validate the catalog (per-kind schema, cross-kind refs, goal grammar, duplicates) — offline"
         : verb === "diff"
           ? "Show what would change against the live control-plane catalog (new / changed / unchanged)"
-          : "Validate, preview the diff, confirm, then publish to the control plane — founder only: --official + a `synap login` session that owns synap-official",
+          : "Validate, preview the diff, confirm, then publish to the control plane — owner only, for an emergency republish; CI normally publishes on every push to app-bases main (--official + a `synap login` session that owns synap-official)",
     )
-    .option("--kind <kind>", "Only this kind: workspace | capability | skill | pack | automation")
+    .option("--kind <kind>", `Only this kind: ${CATALOG_KINDS.join(" | ")}`)
     .option("--catalog-dir <dir>", "Path to the catalog package (default: found by walking up from cwd)")
     .option("--json", "Output as JSON");
   if (verb === "publish") {

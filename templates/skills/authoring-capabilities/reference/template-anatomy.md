@@ -56,7 +56,7 @@ The `playbooks[]` array holds full playbook definitions (see the `authoring-play
 
 ## automations (optional)
 
-The `automations[]` array can carry WHEN→THEN flows in the same `{ name, triggerType, status, triggerConfig, flowDefinition, metadata }` shape used by `synap-backend/templates/automations/*.automation.json` (see `authoring-automations`).
+The `automations[]` array can carry WHEN→THEN flows in the same `{ name, triggerType, status, triggerConfig, flowDefinition, metadata }` shape used by the catalog's `synap-app/packages/workspace-templates/automations/*.automation.json` (see `authoring-automations`).
 
 ## Reference templates (in the same directory)
 

@@ -80,7 +80,10 @@ function sentBody(): Record<string, unknown> & { _meta?: { version?: string }; l
   return (call as unknown as [string, Record<string, unknown>])[1];
 }
 
-const FRESH_SURFACE = { kind: "cell", cellKey: "content-home" };
+// A sentinel only the catalog row carries: the bundle's own content-os has a
+// primarySurface too (from @synap-core/workspace-templates 0.23), so "which
+// definition was sent" is read from this, not from null vs set.
+const FRESH_SURFACE = { kind: "cell", cellKey: "catalog-row-sentinel" };
 function catalogRow(sourceVersion?: string): Record<string, unknown> {
   return {
     workspaceName: "Content OS",
@@ -98,7 +101,7 @@ describe("market install — the version label matches the definition sent", () 
     remoteDefinition.value = catalogRow(undefined);
     await marketInstall("content-os", { onto: "8f894661-db21-4f6d-ba30-5334f7b67bef" });
     const body = sentBody();
-    expect(body.layoutConfig?.primarySurface ?? null).toBeNull();
+    expect(body.layoutConfig?.primarySurface ?? null).not.toEqual(FRESH_SURFACE);
     expect(body._meta?.version).toBe(`bundle@${bundledTemplatesVersion()}`);
     expect(body._meta?.version).not.toBe(CATALOG_VERSION);
     expect((body._meta as { slug?: string } | undefined)?.slug).toBe("content-os");

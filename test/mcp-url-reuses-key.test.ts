@@ -61,10 +61,30 @@ describe("synap mcp url", () => {
     expect(provisionAgentKey.mock.calls[0][2]).toBe("windsurf");
   });
 
-  it("an unknown client stops with the closest names and mints nothing", async () => {
-    await expect(mcpUrl({ client: "curser" })).rejects.toThrow("exit 1");
-    expect(provisionAgentKey).not.toHaveBeenCalled();
+  // The catalog's claude-managed-agents setup runs exactly this command
+  // (review bf96d410, lane D): a name the CLI does not know is a display
+  // label, minted as the generic client, as before #84.
+  it("a name the CLI does not know is a label: it mints the generic client's key, no exit", async () => {
+    await mcpUrl({ client: "claude-managed-agents" });
+    expect(process.exit).not.toHaveBeenCalled();
+    expect(provisionAgentKey).toHaveBeenCalledTimes(1);
+    const [, , agentType, opts] = provisionAgentKey.mock.calls[0] as unknown as [string, string, string, Record<string, unknown>];
+    expect(agentType).toBe("generic");
+    expect(opts.surfaceName).toBe("generic");
+    expect(stderr.join("\n")).toContain("`claude-managed-agents` is not one of the CLI's clients: it gets a generic client's key.");
+  });
+
+  it("a near-miss of a known name still mints (generic), and hints at the closest names", async () => {
+    await mcpUrl({ client: "curser" });
+    expect(process.exit).not.toHaveBeenCalled();
+    expect(provisionAgentKey.mock.calls[0][2]).toBe("generic");
     expect(stderr.join("\n")).toContain("Did you mean: `cursor`?");
+  });
+
+  it("--json keeps stdout and stderr free of the label hint", async () => {
+    await mcpUrl({ client: "claude-managed-agents", json: true });
+    expect(provisionAgentKey.mock.calls[0][2]).toBe("generic");
+    expect(stderr.join("\n")).not.toContain("not one of the CLI's clients");
   });
 });
 

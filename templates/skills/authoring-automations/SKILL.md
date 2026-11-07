@@ -11,7 +11,7 @@ Read `reference/node-matrix.md` for the exhaustive per-node field reference. Kee
 
 ## The template format
 
-Automation templates live at `synap-backend/templates/automations/*.automation.json`:
+Automation templates live in the catalog, `synap-app/packages/workspace-templates/automations/*.automation.json` (npm `@synap-core/workspace-templates`):
 
 ```jsonc
 {

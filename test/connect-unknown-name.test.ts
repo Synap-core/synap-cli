@@ -73,6 +73,20 @@ describe("synap connect <unknown>", () => {
     expect(process.exitCode).toBeUndefined();
   });
 
+  it("with no name and no terminal, names both ways: a client, or --tool for a service (no `<client|tool>`)", async () => {
+    const tty = process.stdin.isTTY;
+    Object.defineProperty(process.stdin, "isTTY", { value: false, configurable: true });
+    try {
+      await connect(undefined, {});
+    } finally {
+      Object.defineProperty(process.stdin, "isTTY", { value: tty, configurable: true });
+    }
+    const out = stderr.join("\n");
+    expect(process.exitCode).toBe(1);
+    expect(out).toContain("Say what to connect: synap connect <client>, or synap connect --tool <service>.");
+    expect(out).not.toContain("<client|tool>");
+  });
+
   it("a known client still connects", async () => {
     await connect("cursor", {});
     expect(connectKnownAgent).toHaveBeenCalledTimes(1);

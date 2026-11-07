@@ -112,7 +112,7 @@ describe("argument parsing", () => {
     expect(catalogUsageError("validate", [], { dryRun: true })).toMatch(/only apply to "synap catalog publish"/);
     expect(catalogUsageError("diff", [], { official: true })).toMatch(/only apply/);
     expect(catalogUsageError("publish", [], {})).toMatch(/pass --official/);
-    for (const kind of ["workspace", "capability", "skill", "pack", "automation"]) {
+    for (const kind of ["workspace", "capability", "skill", "pack", "automation", "view", "agent"]) {
       expect(catalogUsageError("publish", ["a-slug"], { kind, official: true })).toBeNull();
     }
   });
@@ -510,7 +510,7 @@ describe("the preview names what changes", () => {
     expect(text).toContain("capability/proton  h-a → h-b\n      ~ definition: new content version");
   });
 
-  it("a same-version CHANGED row names the sourcePackage stamp move; an unmoved stamp prints nothing", () => {
+  it("a same-version CHANGED row names its stamp move in people's words; an unmoved stamp prints nothing", () => {
     const text = formatDiff([
       {
         kind: "workspace",
@@ -531,8 +531,13 @@ describe("the preview names what changes", () => {
         columns: [],
       },
     ]);
-    expect(text).toContain("workspace/agency-os  h-a → h-a\n      ~ sourcePackage: 0.17.2 → 0.17.4");
-    expect(text).not.toMatch(/crm[^\n]*\n[^\n]*sourcePackage/);
+    expect(text).toContain("workspace/agency-os  h-a → h-a\n      ~ stamp only: 0.17.2 → 0.17.4 (content unchanged)");
+    // The crm row's own detail lines: everything indented under its header.
+    const crmBlock = text.match(/workspace\/crm [^\n]*\n((?: {6}[^\n]*\n?)*)/)?.[1];
+    expect(crmBlock).toBeDefined();
+    expect(crmBlock).toContain("~ definition: new content version");
+    expect(crmBlock).not.toMatch(/stamp only|published as/);
+    expect(text).not.toMatch(/sourcePackage/);
   });
 
   it("a warning several rows share prints once under the summary with its count; a row's own warning stays on the row", () => {

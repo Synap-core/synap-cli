@@ -43,9 +43,8 @@ import { unwrapList } from "../lib/unwrapList.js";
 import { fetchProjects } from "../lib/project.js";
 import { parseSkillDir, importSkill } from "../lib/skill-import.js";
 import {
-  CLI_TEMPLATES_DIR,
   resolveAgencySkillDirs,
-  resolveAutomationTemplatesDir,
+  resolveBridgeAutomationFiles,
   resolveInstalledCatalogRoot,
 } from "../lib/catalog-templates.js";
 import {
@@ -489,8 +488,8 @@ export async function bridgeSetup(opts: BridgeSetupOpts): Promise<void> {
 
   // ── 4e. Seed the GENERIC automation templates (idempotent, event-driven) ────
   // Only the domain-agnostic automations are seeded here (mail-feed,
-  // url/bookmark capture), read from the installed catalog package when it
-  // ships them, else from templates/automations/. The grant operation itself
+  // url/bookmark capture), read from the installed catalog package (the one
+  // source; the CLI keeps no copy). The grant operation itself
   // ships with the `grants` workspace template (its "Grant Process" method +
   // automations). Thread the operator's
   // chosen proactive channel through — output nodes pin their post target with it
@@ -697,8 +696,9 @@ async function applyAgencyCapabilities(
 // ── Agency skill seeding (instruction skills) ──────────────────────────────
 
 /**
- * Resolve the bundled skills templates directory (standard SKILL.md dirs).
- * Shared with `synap skill add --bundled` via resolveBundledSkillsDir.
+ * Resolve the CLI's runtime skills directory (standard SKILL.md dirs:
+ * `authoring-*`, `coordinating-*`). The agency skills are not here: they are
+ * read from the installed catalog package (resolveAgencySkillDirs).
  */
 export function resolveBundledSkillsDir(): string | null {
   const thisFile = fileURLToPath(import.meta.url);
@@ -709,8 +709,8 @@ export function resolveBundledSkillsDir(): string | null {
 
 /**
  * Seed the Synap-native skills (standard SKILL.md directories): the agency
- * skills from the installed catalog package when it ships them, else from
- * templates/skills/; the CLI runtime skills from templates/skills/. Each becomes
+ * skills from the installed catalog package, the CLI runtime skills from
+ * templates/skills/. Each becomes
  * a pod-wide instruction skill via /agent-skills/import; references/ files
  * become linked documents. Idempotent (slug-unique guard).
  */
@@ -718,7 +718,12 @@ async function applyAgencySkills(
   cfg: Awaited<ReturnType<typeof resolveHubConfig>>
 ): Promise<void> {
   const catalogRoot = resolveInstalledCatalogRoot();
-  const { dirs, fromCatalog } = resolveAgencySkillDirs({ cliSkillsDir: resolveBundledSkillsDir(), catalogRoot });
+  const { dirs, fromCatalog, missing } = resolveAgencySkillDirs({ cliSkillsDir: resolveBundledSkillsDir(), catalogRoot });
+  if (missing.length)
+    log.warn(
+      `The installed catalog package ${catalogRoot ? `(${catalogRoot}) ` : ""}does not ship: ${missing.join(", ")} — ` +
+        "update @synap-core/workspace-templates. Those skills are not seeded."
+    );
   if (dirs.length === 0) { log.warn("Bundled skill templates not found — skipping."); return; }
 
   const userId = await resolveUserId(cfg);
@@ -921,9 +926,8 @@ async function resolveGoogleConnectionId(
 }
 
 /**
- * Apply the *.automation.json templates: AUTOMATION_TEMPLATES_DIR when set, else
- * the installed catalog package's automations/ when it ships them, else the
- * CLI's templates/automations/.
+ * Apply the *.automation.json templates: every one in AUTOMATION_TEMPLATES_DIR when
+ * set, else the BRIDGE_AUTOMATIONS from the installed catalog package (the one source).
  *
  * For each file:
  *  - Fill placeholders + validate references in the flowDefinition:
@@ -945,20 +949,15 @@ async function applyAutomationTemplates(
   workspaceId: string | undefined,
   feedChannelId?: string
 ): Promise<void> {
-  const templatesDir = resolveAutomationTemplatesDir({
+  const { dir: templatesDir, files, missing } = resolveBridgeAutomationFiles({
     override: process.env.AUTOMATION_TEMPLATES_DIR,
     catalogRoot: resolveInstalledCatalogRoot(),
-    cliDir: path.join(CLI_TEMPLATES_DIR, "automations"),
   });
-  if (!templatesDir) {
+  if (missing.length)
     log.warn(
-      "Automation templates dir not found — skipping. " +
-      "Set AUTOMATION_TEMPLATES_DIR=<path> to seed from a custom location."
+      `The installed catalog package does not ship: ${missing.join(", ")} — ` +
+        "update @synap-core/workspace-templates (or set AUTOMATION_TEMPLATES_DIR=<path>). Those automations are not seeded."
     );
-    return;
-  }
-
-  const files = fs.readdirSync(templatesDir).filter((f) => f.endsWith(".automation.json"));
   if (files.length === 0) {
     log.dim("No *.automation.json templates found — skipping automation seeding.");
     return;
@@ -1031,8 +1030,8 @@ async function applyAutomationTemplates(
   // the default connection at runtime).
   const googleConnectionId = await resolveGoogleConnectionId(cfg, workspaceId);
 
-  for (const file of files) {
-    const filePath = path.join(templatesDir, file);
+  for (const filePath of files) {
+    const file = path.basename(filePath);
     let tpl: AutomationTemplate;
     try {
       tpl = JSON.parse(fs.readFileSync(filePath, "utf-8")) as AutomationTemplate;
