@@ -277,6 +277,12 @@ describe("which engine, and why not", () => {
   it("reads the real installed catalog's templates (non-vacuity)", () => {
     const root = resolveInstalledCatalogRoot();
     expect(root).not.toBeNull();
+    // The lockfile may pin a catalog from before agent templates (0.23.0 has no agents/): then it names
+    // none, and the worker's reader falls back to the pod or refuses. A catalog with agents/ must read.
+    if (!fs.existsSync(path.join(root!, "agents"))) {
+      expect(readAgentTemplateWake("claude-code", root)).toBeNull();
+      return;
+    }
     expect(readAgentTemplateWake("claude-code", root)).toMatchObject({ harness: "claude-code", wake: { program: "claude" } });
     expect(readAgentTemplateWake("hermes", root)?.wake?.args).toContain("{prompt}");
   });

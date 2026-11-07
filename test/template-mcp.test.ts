@@ -117,7 +117,9 @@ describe("agents add <slug> of a catalog agent template", () => {
     expect(catalogTypeForSlug("nous-hermes", templates)).toBe("hermes");
     expect(catalogTypeForSlug("claude-code", templates)).toBeUndefined();
     expect(catalogTypeForSlug("researcher", templates)).toBeUndefined();
-    // The real installed catalog names hermes (non-vacuity).
-    expect(catalogTypeForSlug("hermes")).toBe("hermes");
+    // The real installed catalog names hermes when it ships agent templates (the lockfile may pin one from before).
+    const { resolveInstalledCatalogRoot } = await import("../src/lib/catalog-templates.js");
+    const root = resolveInstalledCatalogRoot();
+    expect(catalogTypeForSlug("hermes")).toBe(root && fs.existsSync(path.join(root, "agents")) ? "hermes" : undefined);
   });
 });
