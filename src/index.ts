@@ -2763,17 +2763,51 @@ program
 
 const tools = program
   .command("tools")
-  .description("Add and manage external service tools and their credentials");
+  .description("Install, check and remove a capability's tool on this computer (connect/sync/disconnect/schema: deprecated, use `synap cap`)");
 
+// Computer tools (plan b647769e, decision 168f34db): run ON the computer, the
+// steps the capability declares for this OS, recorded on the pod. See
+// src/commands/computer-tools.ts.
 tools
   .command("list")
-  .description("List available tools and their connection status")
+  .description("List the tools the pod records on this computer, with their state and last check")
   .option("--json", "Output as JSON")
-  .option("--workspace <id>", "Workspace context")
-  .action(async (opts) => {
-    const { toolsList } = await import("./commands/tools.js");
-    await toolsList(opts);
+  .action(async (opts: { json?: boolean }) => {
+    const { toolsListCommand } = await import("./commands/computer-tools.js");
+    await toolsListCommand(opts);
   });
+
+const toolStepOptions = (c: Command) =>
+  c
+    .option("--dry-run", "Print the steps and the check for this computer; run and record nothing")
+    .option("--manifest <file>", "Read the capability from this manifest file instead of the catalog")
+    .option("--computer <name>", "This computer's name (or `this`); another computer is refused: run it there")
+    .option("--session <id>", "The pod session this install belongs to (recorded with the result)")
+    .option("--json", "Output as JSON");
+
+toolStepOptions(
+  tools
+    .command("install <capability>")
+    .description("Install a capability's tool on this computer with its declared steps, check it works, record it on the pod")
+    .option("--skip-models", "Skip model downloads (the tool fetches its model on first use)")
+).action(async (slug: string, opts: import("./commands/computer-tools.js").ToolsCommandOpts) => {
+  const { toolsInstallCommand } = await import("./commands/computer-tools.js");
+  await toolsInstallCommand(slug, opts);
+});
+
+toolStepOptions(
+  tools.command("verify <capability>").description("Check a capability's tool works on this computer and record the version it reports")
+).action(async (slug: string, opts: import("./commands/computer-tools.js").ToolsCommandOpts) => {
+  const { toolsVerifyCommand } = await import("./commands/computer-tools.js");
+  await toolsVerifyCommand(slug, opts);
+});
+
+toolStepOptions(
+  tools.command("remove <capability>").description("Remove a capability's tool from this computer (downloaded models are kept) and record it")
+).action(async (slug: string, opts: import("./commands/computer-tools.js").ToolsCommandOpts) => {
+  const { toolsRemoveCommand } = await import("./commands/computer-tools.js");
+  await toolsRemoveCommand(slug, opts);
+});
 
 tools
   .command("connect <service>")

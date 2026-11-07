@@ -2033,9 +2033,16 @@ export async function workerCommand(opts: WorkerOptions): Promise<void> {
   process.on("SIGINT", stop);
   say(`every ${intervalMs / 1000}s`);
 
+  // The computer's tools (plan b647769e, decision 168f34db): install what the
+  // person approved on the pod, check again when due, repair without asking.
+  // It runs as THIS computer (its own key), under one lock per computer.
+  const { createToolsReconciler, doorFor } = await import("./computer-tools.js");
+  const tools = createToolsReconciler({ door: await doorFor(cfg.podUrl, enrol.computerKey), say });
+
   let failures = 0;
   let paused = false;
   while (!stopping) {
+    await tools.tick();
     try {
       const r = await worker.tick();
       failures = 0;

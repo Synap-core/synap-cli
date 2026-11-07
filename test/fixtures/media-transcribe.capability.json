@@ -1,0 +1,121 @@
+{
+  "apiVersion": "synap/v1",
+  "kind": "capability",
+  "meta": {
+    "slug": "media-transcribe",
+    "name": "Transcribe on your computer",
+    "version": "0.1.0"
+  },
+  "spec": {
+    "key": "media-transcribe",
+    "licence": "MIT",
+    "placement": {
+      "runsOn": [
+        "computer"
+      ],
+      "platforms": [
+        {
+          "os": "darwin",
+          "arch": [
+            "arm64"
+          ]
+        },
+        {
+          "os": "linux",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        },
+        {
+          "os": "win32",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "install": {
+      "darwin": {
+        "steps": [
+          {
+            "kind": "uv",
+            "action": "tool-install",
+            "package": "mlx-whisper"
+          },
+          {
+            "kind": "download",
+            "what": "model",
+            "id": "mlx-community/whisper-large-v3-turbo",
+            "sizeMb": 1600
+          }
+        ]
+      },
+      "linux": {
+        "steps": [
+          {
+            "kind": "uv",
+            "action": "tool-install",
+            "package": "whisper-ctranslate2"
+          }
+        ]
+      },
+      "win32": {
+        "steps": [
+          {
+            "kind": "uv",
+            "action": "tool-install",
+            "package": "whisper-ctranslate2"
+          }
+        ]
+      },
+      "elevation": "never",
+      "diskFreeMb": 4000
+    },
+    "verify": {
+      "darwin": {
+        "command": [
+          "mlx_whisper",
+          "--help"
+        ],
+        "expect": {
+          "exitCode": 0,
+          "stdoutMatches": "usage: mlx_whisper"
+        }
+      },
+      "linux": {
+        "command": [
+          "whisper-ctranslate2",
+          "--version"
+        ],
+        "expect": {
+          "stdoutMatches": "(\\d+\\.\\d+\\.\\d+)"
+        },
+        "captureVersion": 1
+      },
+      "win32": {
+        "command": [
+          "whisper-ctranslate2",
+          "--version"
+        ],
+        "expect": {
+          "stdoutMatches": "(\\d+\\.\\d+\\.\\d+)"
+        },
+        "captureVersion": 1
+      },
+      "reverifyEvery": "P7D"
+    },
+    "uninstall": {
+      "darwin": {
+        "steps": [
+          {
+            "kind": "uv",
+            "action": "tool-uninstall",
+            "package": "mlx-whisper"
+          }
+        ]
+      },
+      "keepUserData": true
+    }
+  }
+}

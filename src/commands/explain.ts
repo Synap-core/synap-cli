@@ -121,7 +121,7 @@ function sectionTools(): void {
   console.log(chalk.bold("\n## Tools & External Services"));
   console.log(chalk.dim("  External services connect through the pod's connection broker (Google, GitHub, Notion, …)."));
   console.log("");
-  console.log(`  ${chalk.cyan("synap tools list")}            ${chalk.dim("→ available tools + connection status")}`);
+  console.log(`  ${chalk.cyan("synap tools list")}            ${chalk.dim("→ tools installed on this computer (synap tools install|verify|remove)")}`);
   console.log(`  ${chalk.cyan("synap cap list")}               ${chalk.dim("→ capabilities, one row per pack, with status + connection")}`);
   console.log(`  ${chalk.cyan("synap cap connect [name]")}     ${chalk.dim("→ connect a credential to a capability")}`);
   console.log(`  ${chalk.cyan("synap cap enable [name]")}      ${chalk.dim("→ turn on a capability (ensures connection, picks verbs)")}`);
