@@ -147,9 +147,9 @@ Every command also accepts `-h, --help`.
   - [`synap create relation`](#synap-create-relation) — Create a typed relation between two entities
 - [`synap set`](#synap-set) — Update pod resources
   - [`synap set entity`](#synap-set-entity) — Update entity properties
-- [`synap agents`](#synap-agents) — Manage agent principals on your pod (one per type for you; local keys are a cache)
-  - [`synap agents list`](#synap-agents-list) — List your agents on this pod (one per type). Use --local for ~/.synap cache only.
-  - [`synap agents add`](#synap-agents-add) — Bring an agent into the pod: a client (claude-code, cursor, codex, …), your own (--name → URL + key), or pick from this machine (no kind)
+- [`synap agents`](#synap-agents) — Manage agent principals on your pod (one per program per computer; local keys are a cache)
+  - [`synap agents list`](#synap-agents-list) — List your agents on this pod (one per program per computer). Use --local for ~/.synap cache only.
+  - [`synap agents add`](#synap-agents-add) — Bring an agent into the pod: a program on this computer (claude-code, codex, hermes, … : one agent per computer), your own (--name → URL + key), or pick from this machine (no kind)
   - [`synap agents adopt`](#synap-agents-adopt) — Save the key this OS user already holds for an engine as the agent <job> (mints and revokes nothing)
   - [`synap agents create`](#synap-agents-create) — Deprecated — use `synap agents add` (same flags)
   - [`synap agents rotate-key`](#synap-agents-rotate-key) — Rotate the Hub Protocol API key for an agent (local cache only)
@@ -2542,7 +2542,7 @@ Update entity properties
 synap agents [options] [command]
 ```
 
-Manage agent principals on your pod (one per type for you; local keys are a cache)
+Manage agent principals on your pod (one per program per computer; local keys are a cache)
 
 Subcommands: [`list`](#synap-agents-list), [`add`](#synap-agents-add), [`adopt`](#synap-agents-adopt), [`create`](#synap-agents-create), [`rotate-key`](#synap-agents-rotate-key), [`remove`](#synap-agents-remove), [`info`](#synap-agents-info)
 
@@ -2552,7 +2552,7 @@ Subcommands: [`list`](#synap-agents-list), [`add`](#synap-agents-add), [`adopt`]
 synap agents list [options]
 ```
 
-List your agents on this pod (one per type). Use --local for ~/.synap cache only.
+List your agents on this pod (one per program per computer). Use --local for ~/.synap cache only.
 
 | Option | Description | Default |
 |---|---|---|
@@ -2565,7 +2565,7 @@ List your agents on this pod (one per type). Use --local for ~/.synap cache only
 synap agents add [options] [kind]
 ```
 
-Bring an agent into the pod: a client (claude-code, cursor, codex, …), your own (--name → URL + key), or pick from this machine (no kind)
+Bring an agent into the pod: a program on this computer (claude-code, codex, hermes, … : one agent per computer), your own (--name → URL + key), or pick from this machine (no kind)
 
 | Argument | Required | Description |
 |---|---|---|
@@ -2573,9 +2573,9 @@ Bring an agent into the pod: a client (claude-code, cursor, codex, …), your ow
 
 | Option | Description | Default |
 |---|---|---|
-| `--name <name>` | Name your own agent (e.g. researcher) — prints a URL + key to paste |  |
+| `--name <name>` | Name your own agent (e.g. researcher) — prints a URL + key to paste; with an agent template's --type it only labels that program on this computer |  |
 | `--template <tmpl>` | Your own agent's template: twin \| assistant \| custom (default: custom) |  |
-| `--type <type>` | Explicit agent type for your own agent (default: a slug of --name) |  |
+| `--type <type>` | Explicit agent type (default: a slug of --name); an agent template's type (hermes, …) is that program on this computer, never a custom agent |  |
 | `--role <role>` | Workspace role: admin \| editor \| viewer (default: editor) |  |
 | `--workspace <id>` | Focus on one workspace (default: pod-wide) |  |
 | `--project <id>` | Focus on one project (composable with --workspace) |  |

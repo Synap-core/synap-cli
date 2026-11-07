@@ -1,5 +1,8 @@
 /**
- * One agent, several computers — how the CLI prints an agent's connections.
+ * An agent's connections — how the CLI prints them. One agent per computer
+ * per template (decision 59c75aab): an agent's connection is its computer's
+ * key. An agent made before that rule may still hold keys from several
+ * computers; each is listed by its computer.
  *
  * The pod lists each agent's LIVE connections (`GET /agent-users?mine=1` →
  * `connections`), one per computer. The agent's name is already the row it

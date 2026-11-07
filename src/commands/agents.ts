@@ -2,8 +2,9 @@
  * synap agents — manage agent principals on your pod
  *
  *   synap agents list              list your agents on this pod (default) or --local cache
- *   synap agents add [kind]        THE door: a client (claude-code, cursor…), a custom
- *                                  agent (--name), or what's on this machine (no kind).
+ *   synap agents add [kind]        THE door: a program on this computer (claude-code,
+ *                                  hermes…: one agent per computer), a custom agent
+ *                                  (--name), or what's on this machine (no kind).
  *                                  --api-key registers a key you already hold.
  *   synap agents create            deprecated alias of `add`
  *   synap agents remove <name>     remove from local cache only

@@ -133,10 +133,10 @@ function sectionTools(): void {
 
 function sectionAgents(): void {
   console.log(chalk.bold("\n## Agents"));
-  console.log(chalk.dim("  Pod agent principals (one per type for you) + autonomous runner + schedules."));
+  console.log(chalk.dim("  Pod agent principals (one per program per computer, or your own) + autonomous runner + schedules."));
   console.log("");
   console.log(`  ${chalk.cyan("synap agents list")}          ${chalk.dim("→ your agents on this pod")}`);
-  console.log(`  ${chalk.cyan("synap agents add [client]")}  ${chalk.dim("→ connect a client, --name X for your own, none = pick from this machine")}`);
+  console.log(`  ${chalk.cyan("synap agents add [client]")}  ${chalk.dim("→ a program on this computer (claude-code, hermes…), --name X for your own, none = pick from this machine")}`);
   console.log(`  ${chalk.cyan("synap agents add --api-key")} ${chalk.dim("→ register a key you already hold (local cache)")}`);
   console.log(`  ${chalk.cyan("synap agent run")}            ${chalk.dim("→ --goal 'text' --persona researcher")}`);
   console.log(`  ${chalk.cyan("synap agent schedule")}       ${chalk.dim("→ --goal X --name Y --every daily")}`);

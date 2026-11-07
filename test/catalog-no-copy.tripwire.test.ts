@@ -3,14 +3,14 @@
  *
  * The catalog (synap-app `packages/workspace-templates`, npm
  * `@synap-core/workspace-templates`, later `@synap-core/catalog`) is the one
- * home of skills, automations, capabilities, packs and workspace templates. The
+ * home of skills, automations, capabilities, agent templates and workspace templates. The
  * CLI reads them from the installed package (`src/lib/catalog-templates.ts`). A
  * copy in this repo forks silently: the bookmark-enrichment copy here had missed
  * the catalog's `web.read` fix for three weeks.
  *
  * Both sides are DERIVED, never listed:
  * - the catalog's content is every non-code file of the INSTALLED package outside
- *   `dist/` (its `skills/`, `automations/`, `capabilities/`, `packs/`, and the
+ *   `dist/` (its `skills/`, `automations/`, `capabilities/`, `agents/`, and the
  *   workspace templates `src/*.yaml`);
  * - the CLI's files are every file git tracks or would track in this repo.
  * A CLI file is a copy when a path segment is named like a catalog entry (a skill
@@ -79,7 +79,8 @@ describe("the CLI holds no copy of catalog content", () => {
     expect(CATALOG_TEMPLATE_PACKAGES).toContain(pkg.name);
     const { files, names } = catalogContent(root!);
     const folders = new Set(files.map((f) => f.split(path.sep)[0]));
-    for (const f of ["skills", "automations", "capabilities", "packs", "src"]) expect(folders).toContain(f);
+    // `packs/` left the catalog in 0.24.0 (the CP pack fragments); `agents/` (0.25+) holds the agent templates.
+    for (const f of ["skills", "automations", "capabilities", "agents", "src"]) expect(folders).toContain(f);
     expect(names).toContain("mail-feed.automation.json");
     expect(names).toContain("stellar-scf-grants-advisor");
     expect(cliFiles()).toContain("src/lib/catalog-templates.ts");
