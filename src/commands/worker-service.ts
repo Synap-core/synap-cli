@@ -325,7 +325,7 @@ export function parseDisabled(text: string): Set<string> {
 const domain = (deps: ServiceDeps) => `gui/${deps.uid}`;
 const target = (deps: ServiceDeps, label: string) => `gui/${deps.uid}/${label}`;
 
-async function printService(deps: ServiceDeps, label: string): Promise<LaunchdState | null> {
+export async function printService(deps: ServiceDeps, label: string): Promise<LaunchdState | null> {
   const r = await deps.launchctl(["print", target(deps, label)]);
   return r.code === 0 ? parseLaunchctlPrint(r.stdout) : null;
 }
@@ -513,6 +513,16 @@ export async function stopServices(deps: ServiceDeps, agent?: string): Promise<S
   return out;
 }
 
+/** Boot out and remove one service by its label (the computer's waker, `live.synap.waker`). */
+export async function uninstallByLabel(deps: ServiceDeps, label: string): Promise<boolean> {
+  requireMac(deps, "uninstall");
+  const plistPath = plistPathFor(deps.home, label);
+  const existed = fs.existsSync(plistPath);
+  if (await printService(deps, label)) await bootoutAndWait(deps, label);
+  fs.rmSync(plistPath, { force: true });
+  return existed;
+}
+
 export async function uninstallService(deps: ServiceDeps, agent: string): Promise<ServiceOutcome & { logPath?: string }> {
   requireMac(deps, "uninstall");
   const [svc] = pickServices(deps.home, agent);
@@ -599,7 +609,7 @@ export function notMacMessage(platform: string, spec: Pick<ServiceSpec, "program
 
 // ─── the commands ─────────────────────────────────────────────────────────────
 
-function liveDeps(): ServiceDeps {
+export function liveDeps(): ServiceDeps {
   return { home: os.homedir(), uid: process.getuid?.() ?? 0, platform: process.platform, launchctl: defaultLaunchctl };
 }
 

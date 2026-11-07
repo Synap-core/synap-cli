@@ -4,7 +4,7 @@
 
 Synap CLI — connect AI agents to your data pod
 
-239 commands. Hidden commands and hidden options are omitted here (5 hidden commands); `cli.json` lists them with `"hidden": true`.
+243 commands. Hidden commands and hidden options are omitted here (5 hidden commands); `cli.json` lists them with `"hidden": true`.
 
 Every command also accepts `-h, --help`.
 
@@ -93,6 +93,10 @@ Every command also accepts `-h, --help`.
   - [`synap worker stop`](#synap-worker-stop) — Stop the agent's login service; it stays stopped after a restart until `synap worker start`
   - [`synap worker status`](#synap-worker-status) — Show each agent login service on this Mac: running, pid, last exit, log
   - [`synap worker uninstall`](#synap-worker-uninstall) — Remove the agent's login service from this Mac (needs --agent)
+- [`synap waker`](#synap-waker) — Start this computer's agents when work is handed to them (the pod's "Wakes agents")
+  - [`synap waker install`](#synap-waker-install) — Run the waker as a login service on this Mac; opens pod admin when "Wakes agents" is off
+  - [`synap waker status`](#synap-waker-status) — Show the waker service and what the pod says for this computer
+  - [`synap waker uninstall`](#synap-waker-uninstall) — Remove the waker's login service from this Mac
 - [`synap box`](#synap-box) — Run scripts in fresh isolated boxes on this computer (run box provisioner)
   - [`synap box serve`](#synap-box-serve) — Lease queued box runs from the pod and run each in a fresh box
   - [`synap box reap`](#synap-box-reap) — Destroy every box no run holds (after a crash)
@@ -1600,6 +1604,50 @@ synap worker uninstall [options]
 ```
 
 Remove the agent's login service from this Mac (needs --agent)
+
+## `synap waker`
+
+```
+synap waker [options] [command]
+```
+
+Start this computer's agents when work is handed to them (the pod's "Wakes agents")
+
+| Option | Description | Default |
+|---|---|---|
+| `--interval <dur>` | How often to ask the pod (e.g. 30s, 1m) | `"30s"` |
+| `--once` | Ask once, start what is due, wait for those workers, exit |  |
+| `--protocols <list>` | Passed to every worker it starts: code, work-folder (comma-separated) |  |
+
+Subcommands: [`install`](#synap-waker-install), [`status`](#synap-waker-status), [`uninstall`](#synap-waker-uninstall)
+
+## `synap waker install`
+
+```
+synap waker install [options]
+```
+
+Run the waker as a login service on this Mac; opens pod admin when "Wakes agents" is off
+
+## `synap waker status`
+
+```
+synap waker status [options]
+```
+
+Show the waker service and what the pod says for this computer
+
+| Option | Description | Default |
+|---|---|---|
+| `--json` | Output as JSON |  |
+
+## `synap waker uninstall`
+
+```
+synap waker uninstall [options]
+```
+
+Remove the waker's login service from this Mac
 
 ## `synap box`
 
