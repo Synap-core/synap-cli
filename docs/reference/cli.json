@@ -3031,6 +3031,12 @@
             "takesValue": "none"
           },
           {
+            "flags": "--run-timeout <dur>",
+            "long": "--run-timeout",
+            "description": "How long a run may take when the agent's template wakes another program than Claude Code (e.g. 30m, 2h; default 60m)",
+            "takesValue": "required"
+          },
+          {
             "flags": "--protocols <list>",
             "long": "--protocols",
             "description": "Which runs this computer takes: code, work-folder (comma-separated; default both). A computer that runs no code, like the person's Mac, takes work-folder only; a design run counts as code",

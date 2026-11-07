@@ -33,6 +33,7 @@ import {
   resolveAgentPod,
 } from "../lib/agent-door.js";
 import { provisionAgentKey } from "../lib/targets.js";
+import { catalogTypeForSlug } from "../lib/agent-template.js";
 import { isPresenceRefusal, needsYouInPodAdmin } from "../lib/presence-refusal.js";
 import { connectionLines, type PodConnection } from "../lib/agent-connections.js";
 import { thisComputerInstanceIds } from "../lib/machine-instance.js";
@@ -448,7 +449,14 @@ export async function agentsAdd(kind: string | undefined, opts: AgentsAddOpts = 
   } else if (plan.mode === "custom") {
     ok = await createCustomAgent(
       pod,
-      { name: plan.name, template: opts.template, type: opts.type, role: opts.role, label: opts.label },
+      {
+        name: plan.name,
+        template: opts.template,
+        // `agents add <slug>` of a catalog agent template (hermes, …): its agents' type, so the pod links it.
+        type: opts.type ?? (kind && !opts.name ? catalogTypeForSlug(kind) : undefined),
+        role: opts.role,
+        label: opts.label,
+      },
       scope
     );
   } else {

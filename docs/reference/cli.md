@@ -1547,6 +1547,7 @@ Run Claude Code unattended here for the sessions handed to an agent
 | `--allowed-tools <list>` | Comma-separated Claude tools allowed without asking (the pod MCP server is always added) |  |
 | `--skip-permissions` | Launch with --dangerously-skip-permissions instead of an allow-list |  |
 | `--dry-run` | Claim and log what would launch, without launching Claude |  |
+| `--run-timeout <dur>` | How long a run may take when the agent's template wakes another program than Claude Code (e.g. 30m, 2h; default 60m) |  |
 | `--protocols <list>` | Which runs this computer takes: code, work-folder (comma-separated; default both). A computer that runs no code, like the person's Mac, takes work-folder only; a design run counts as code |  |
 
 Subcommands: [`install`](#synap-worker-install), [`start`](#synap-worker-start), [`stop`](#synap-worker-stop), [`status`](#synap-worker-status), [`uninstall`](#synap-worker-uninstall)

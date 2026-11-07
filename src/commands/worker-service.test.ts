@@ -183,6 +183,28 @@ describe("service label and plist", () => {
     expect(() => buildServiceSpec({ agent: "a" }, { ...ctx, synapPath: "/u/.npm/_npx/abc/node_modules/.bin/synap" })).toThrow(/npx/);
   });
 
+  it("an agent whose template wakes another program: its folder is on the service's PATH, no --claude-bin, --run-timeout carried", () => {
+    const hermes = path.join(home, "tools", "bin", "hermes");
+    const spec = buildServiceSpec(
+      { agent: "hermes-mac", runTimeout: "30m" },
+      {
+        ...ctx,
+        engine: {
+          kind: "program",
+          template: "hermes",
+          program: "hermes",
+          programPath: hermes,
+          wake: { program: "hermes", args: ["chat", "-q", "{prompt}"], params: {}, envStrip: [] },
+        },
+      }
+    );
+    expect(spec.programArguments).not.toContain("--claude-bin");
+    expect(spec.programArguments.slice(-2)).toEqual(["--run-timeout", "30m"]);
+    expect(spec.environment.PATH.split(":")).toContain(path.join(home, "tools", "bin"));
+    // A Claude Code agent is as before: claude pinned.
+    expect(buildServiceSpec({ agent: "a" }, { ...ctx, engine: { kind: "claude", template: "claude-code" } }).programArguments).toContain("--claude-bin");
+  });
+
   it("carries --protocols, so the Mac's service takes work-folder runs only; a typo is refused at install", () => {
     const spec = buildServiceSpec({ agent: "a", protocols: " work-folder " }, ctx);
     expect(spec.programArguments.slice(-2)).toEqual(["--protocols", "work-folder"]);
