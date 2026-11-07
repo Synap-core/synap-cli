@@ -19,6 +19,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { parse as parseYaml } from "yaml";
 import { resolveInstalledCatalogRoot } from "./catalog-templates.js";
+import { parseMcpSpec, type AgentMcpSpec } from "./template-mcp.js";
 
 interface AgentManifest {
   kind?: unknown;
@@ -78,6 +79,8 @@ export interface AgentTemplateWake {
   harness: string;
   /** `null`: the template carries no `wake` block (nothing can start it headless). */
   wake: AgentWakeSpec | null;
+  /** Where its program reads MCP servers (`spec.mcp`); absent/`null` = it declares none. */
+  mcp?: AgentMcpSpec | null;
 }
 
 /**
@@ -94,7 +97,7 @@ export function readAgentTemplateWake(
   if (!dir || !fs.existsSync(dir)) return null;
   for (const file of fs.readdirSync(dir).sort()) {
     if (!/\.agent\.ya?ml$/.test(file)) continue;
-    let doc: AgentManifest & { spec?: { wake?: unknown } };
+    let doc: AgentManifest & { spec?: { wake?: unknown; mcp?: unknown } };
     try {
       doc = parseYaml(fs.readFileSync(path.join(dir, file), "utf8")) as typeof doc;
     } catch {
@@ -106,7 +109,8 @@ export function readAgentTemplateWake(
       | { program?: unknown; args?: unknown; params?: unknown; env?: { strip?: unknown } }
       | undefined
       | null;
-    if (raw == null) return { slug, harness, wake: null };
+    const mcp = parseMcpSpec(slug, doc.spec?.mcp);
+    if (raw == null) return { slug, harness, wake: null, mcp };
     const args = raw.args ?? [];
     if (typeof raw.program !== "string" || !raw.program || !Array.isArray(args) || !args.every((a) => typeof a === "string")) {
       throw new Error(`The agent template "${slug}" (${file}) has a wake block the worker cannot read: it needs a program and a list of string args.`);
@@ -114,7 +118,7 @@ export function readAgentTemplateWake(
     const params =
       raw.params && typeof raw.params === "object" ? (raw.params as AgentWakeSpec["params"]) : {};
     const strip = Array.isArray(raw.env?.strip) ? raw.env!.strip.filter((s): s is string => typeof s === "string") : [];
-    return { slug, harness, wake: { program: raw.program, args: args as string[], params, envStrip: strip } };
+    return { slug, harness, wake: { program: raw.program, args: args as string[], params, envStrip: strip }, mcp };
   }
   return null;
 }
