@@ -72,12 +72,28 @@ describe("a failed agent-key mint", () => {
     expect(msg).not.toContain("hub-protocol.write");
   });
 
-  it("the same code for a custom agent name points at pod admin's Agents page", async () => {
+  it("the same code for a custom agent name, asked without asPerson: the command that asks for your approval", async () => {
     podAnswers(400, SURFACE_REFUSAL);
     const msg = await mintFails("researcher");
     expect(msg).toContain('custom agent "researcher"');
+    expect(msg).toContain("synap agents add --name researcher --type researcher");
     expect(msg).toContain("/agents)");
+    expect(msg).not.toMatch(/cannot sign in as you/i);
     expect(msg).not.toMatch(/reconnect/i);
+  });
+
+  it("asked as the person and still refused: an older pod, said plainly, with pod admin as the way", () => {
+    const { line, next } = explainPodError({
+      status: 400,
+      body: JSON.stringify(SURFACE_REFUSAL),
+      client: "hermes",
+      knownClient: false,
+      asPerson: true,
+      podUrl: POD,
+    });
+    expect(line).toBe('Your pod does not accept a request for the custom agent "hermes" from this computer yet: it needs a newer pod.');
+    expect(next).toContain("/agents)");
+    expect(`${line} ${next}`).not.toMatch(/cannot sign in as you|reconnect/i);
   });
 
   it("403 GRANT_DOOR_UNSUPPORTED says it needs you signed in as yourself; no reconnect", async () => {

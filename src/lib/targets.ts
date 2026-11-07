@@ -1102,11 +1102,25 @@ export function bridgeInvocationNote(invocation: BridgeInvocation): string | nul
  * for a 400 or a 403 a reconnect only mints another computer key, which
  * cannot help. The pod's raw JSON is never shown.
  */
-export function credentialError(agentType: string, status: number, body: string, podUrl?: string): string {
+export function credentialError(
+  agentType: string,
+  status: number,
+  body: string,
+  podUrl?: string,
+  opts: { asPerson?: boolean } = {}
+): string {
   const known = isTargetName(agentType);
   // "Grok (Grok Build TUI)" → "Grok": the name is said up to three times.
   const label = known ? TARGETS[agentType].label.replace(/\s*\(.*\)$/, "") : agentType;
-  const { line, next } = explainPodError({ status, body, client: agentType, clientLabel: label, knownClient: known, podUrl });
+  const { line, next } = explainPodError({
+    status,
+    body,
+    client: agentType,
+    clientLabel: label,
+    knownClient: known,
+    podUrl,
+    asPerson: opts.asPerson,
+  });
   return `Could not connect ${label}. ${line}\n${next}`;
 }
 
@@ -1151,6 +1165,7 @@ export async function provisionAgentKey(
     fallbackCandidate,
     toolProfile,
     job,
+    asPerson = false,
   }: {
     requireApproval?: boolean;
     idempotent?: boolean;
@@ -1182,6 +1197,14 @@ export async function provisionAgentKey(
      * would mint for the engine's PLAIN agent.
      */
     job?: { role: string; roleLabel?: string };
+    /**
+     * Ask for the agent AS THE PERSON (W3, the pod's `asPerson`): a custom
+     * agent type a computer's key cannot create by itself. The pod files the
+     * same pending key + `agent/connect` request, which the person approves
+     * with a proof of presence; the agent then acts for them (never pod-wide).
+     * An older pod ignores the flag and refuses the custom type.
+     */
+    asPerson?: boolean;
   } = {}
 ): Promise<{
   hubApiKey: string;
@@ -1231,6 +1254,7 @@ export async function provisionAgentKey(
         hubApiKey: recorded.hubApiKey,
         pendingToken: recorded.keyId,
         approvalUrl: now.state.approvalUrl ?? recorded.approvalUrl,
+        asPerson,
       });
       return { hubApiKey: recorded.hubApiKey, agentUserId: recorded.agentUserId, reused: true, keyId: recorded.keyId };
     }
@@ -1264,6 +1288,7 @@ export async function provisionAgentKey(
         // installed catalog: the pod applies it with the SAME approval that
         // connects the agent. An older pod ignores it; none found = none sent.
         ...(template ? { template } : {}),
+        ...(asPerson ? { asPerson: true } : {}),
       }),
       signal: AbortSignal.timeout(30000),
     });
@@ -1275,7 +1300,7 @@ export async function provisionAgentKey(
   }
   if (!res.ok) {
     const text = await res.text().catch(() => res.statusText);
-    throw new Error(credentialError(agentType, res.status, text, podUrl));
+    throw new Error(credentialError(agentType, res.status, text, podUrl, { asPerson }));
   }
   const body = await res.json() as {
     hubApiKey?: string;
@@ -1343,6 +1368,7 @@ export async function provisionAgentKey(
       instanceId: instance,
       toolProfile,
       job,
+      asPerson,
     });
   }
   if (!body.hubApiKey) {
@@ -1384,6 +1410,7 @@ export async function provisionAgentKey(
       hubApiKey: body.hubApiKey,
       pendingToken: body.pendingToken,
       approvalUrl: body.reviewUrl,
+      asPerson,
     });
     log.success(`  Approved! Writing ${agentType} agent key.`);
     return { hubApiKey: body.hubApiKey, agentUserId: body.agentUserId, reused: false, keyId: body.pendingToken };
@@ -1411,9 +1438,18 @@ async function awaitApprovalOrThrow(args: {
   hubApiKey: string;
   pendingToken: string;
   approvalUrl: string;
+  asPerson?: boolean;
 }): Promise<void> {
   const { waitForKeyLive, openAndWait, AgentKeyAwaitingApprovalError } = await import("./key-approval.js");
   const pod = await import("./pod.js");
+  if (args.asPerson) {
+    // The pod asks the person to prove it is them for this one (W3): say so
+    // before the wait, so the tap on the phone is not a surprise.
+    log.info(
+      `\n  ${args.agentType} will act for you, so approving it asks you to confirm it is you ` +
+        `(Face ID, Touch ID or a passkey). Approve it on Relay, on your phone, or at the link below.`
+    );
+  }
   const outcome = await openAndWait(
     args.agentType,
     args.approvalUrl,

@@ -223,10 +223,16 @@ async function podIsHealthy(podUrl: string): Promise<boolean> {
   return true;
 }
 
-function describeScope(scope: AgentScope): string {
+/**
+ * Where the agent looks. An agent that acts for the person is never
+ * "pod-wide" (the pod's word for an agent that is its own principal, which it
+ * refuses for one asked as the person): it acts for you, in every space.
+ */
+function describeScope(scope: AgentScope, actsForYou = false): string {
   const parts: string[] = [];
   if (scope.workspaceId) parts.push(`workspace ${scope.workspaceId}`);
   if (scope.projectId) parts.push(`project ${scope.projectId}`);
+  if (actsForYou) return `acts for you · ${parts.length ? parts.join(" · ") : "every space"}`;
   return parts.length ? parts.join(" · ") : "pod-wide";
 }
 
@@ -326,7 +332,12 @@ export async function createCustomAgent(
     return false;
   }
 
-  log.heading(`Adding ${chalk.bold(agentName)} → ${pod.podUrl}  ${chalk.dim(`(${describeScope(scope)})`)}`);
+  // A type that is not a client's is one this computer's key cannot create by
+  // itself: it is asked for AS THE PERSON (W3), who approves it with a proof
+  // of presence. A client's type (an explicit --type) keeps the plain request.
+  const asPerson = !RESERVED_AGENT_TYPES.has(agentType);
+
+  log.heading(`Adding ${chalk.bold(agentName)} → ${pod.podUrl}  ${chalk.dim(`(${describeScope(scope, asPerson)})`)}`);
 
   let hubApiKey: string;
   let agentUserId: string;
@@ -336,8 +347,19 @@ export async function createCustomAgent(
     // the agent rather than minting a parallel one.
     ({ hubApiKey, agentUserId } = await provisionAgentKey(pod.podUrl, pod.apiKey, agentType, {
       idempotent: true,
+      asPerson,
     }));
   } catch (err) {
+    const { AgentKeyAwaitingApprovalError } = await import("./key-approval.js");
+    if (err instanceof AgentKeyAwaitingApprovalError) {
+      // The request stays filed on this computer: running the same command
+      // again picks it up (one request, one approval) and then saves the agent
+      // here, which `synap doctor --fix` does not do for a custom agent.
+      log.warn(`${agentName} is waiting for your approval. Nothing was changed on this computer.`);
+      log.hint(`Approve it: ${err.approvalUrl}`);
+      log.hint(`Then run this again: ${customAgentCommand(agentName, template, req, scope)}`);
+      return false;
+    }
     log.error(err instanceof Error ? err.message : String(err));
     return false;
   }
@@ -373,9 +395,22 @@ export async function createCustomAgent(
     url: buildMcpUrl(pod.podUrl, scope.workspaceId, scope.projectId),
     hubApiKey,
     scope,
+    actsForYou: asPerson,
     verified: v.ok ? { toolCount: v.toolCount ?? 0 } : { error: v.error ?? "unknown error" },
   });
   return v.ok;
+}
+
+/** The command that asked for this custom agent, to run again once it is approved. */
+function customAgentCommand(name: string, template: AgentTemplate, req: CustomAgentRequest, scope: AgentScope): string {
+  const q = (v: string) => (/^[A-Za-z0-9._:/-]+$/.test(v) ? v : `"${v.replace(/"/g, '\\"')}"`);
+  const parts = ["synap agents add", `--name ${q(name)}`];
+  if (req.type) parts.push(`--type ${q(req.type)}`);
+  if (template !== "custom") parts.push(`--template ${template}`);
+  if (req.role) parts.push(`--role ${req.role}`);
+  if (scope.workspaceId) parts.push(`--workspace ${q(scope.workspaceId)}`);
+  if (scope.projectId) parts.push(`--project ${q(scope.projectId)}`);
+  return parts.join(" ");
 }
 
 /**
@@ -390,14 +425,16 @@ export function printAgentCard(c: {
   url: string;
   hubApiKey: string;
   scope: AgentScope;
+  /** The agent acts for the person (asked as the person): never called pod-wide. */
+  actsForYou?: boolean;
   verified?: { toolCount: number } | { error: string };
 }): void {
   log.blank();
   if (!c.verified) {
-    console.log(`  ${chalk.bold(c.name)}  ${chalk.dim(`(${describeScope(c.scope)})`)}`);
+    console.log(`  ${chalk.bold(c.name)}  ${chalk.dim(`(${describeScope(c.scope, c.actsForYou)})`)}`);
   } else if ("toolCount" in c.verified) {
     console.log(
-      `  ${chalk.green("✔")} ${chalk.bold(c.name)} is ready  ${chalk.dim(`(${describeScope(c.scope)} · ${c.verified.toolCount} tools reachable)`)}`
+      `  ${chalk.green("✔")} ${chalk.bold(c.name)} is ready  ${chalk.dim(`(${describeScope(c.scope, c.actsForYou)} · ${c.verified.toolCount} tools reachable)`)}`
     );
   } else {
     console.log(`  ${chalk.yellow("⚠")} ${chalk.bold(c.name)} was created, but its key could not reach Synap: ${c.verified.error}`);

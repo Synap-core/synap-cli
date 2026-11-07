@@ -18,7 +18,9 @@ import { describe, it, expect } from "vitest";
 import { readFileSync, existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
+import { stripComments } from "./helpers/strip-comments.mjs";
 import {
+  installedLine,
   marketInstallKind,
   marketInstallNeedsWorkspace,
   MARKET_INSTALL_KINDS,
@@ -47,6 +49,10 @@ describe("marketInstallKind", () => {
     expect(marketInstallKind("skill")).toBe("skill");
   });
 
+  it("installs an agent template (backend#890: the verb's `agent` kind, the catalog's `agent` category)", () => {
+    expect(marketInstallKind("agent")).toBe("agent");
+  });
+
   it("returns null for a workspace (installed via /packages/apply, never routed here)", () => {
     expect(marketInstallKind("workspace")).toBeNull();
   });
@@ -66,17 +72,28 @@ describe("market.install workspace requirement", () => {
     expect(marketInstallNeedsWorkspace("cell")).toBe(false);
     expect(marketInstallNeedsWorkspace("skill")).toBe(false);
     expect(marketInstallNeedsWorkspace("template")).toBe(false);
+    expect(marketInstallNeedsWorkspace("agent")).toBe(false);
+  });
+});
+
+describe("the success line", () => {
+  it("an agent template the pod already had (`exists`) is never called installed", () => {
+    expect(installedLine("Hermes", "exists")).toBe("Hermes is already installed. Nothing was changed.");
+    expect(installedLine("Hermes", "installed")).toBe("Installed Hermes.");
   });
 });
 
 /**
  * Path to the backend file that owns the `market.install` zod enum. Resolved
- * relative to this test so it works from the monorepo checkout; the parity
- * assertion is skipped (not failed) when the CLI is checked out standalone.
+ * relative to this test so it works from the monorepo checkout (and in CI);
+ * the parity assertion is skipped (not failed) when the CLI is checked out
+ * standalone. `SYNAP_BACKEND_DIR` points it at another backend checkout: a
+ * lane worktree's sibling can be a stale checkout that passes a parity main
+ * no longer has (how backend#890's red went unseen on 2026-11-07).
  */
 const BUILTIN_VERBS = resolve(
-  dirname(fileURLToPath(import.meta.url)),
-  "../../synap-backend/packages/api/src/services/capabilities/builtin-verbs.ts"
+  process.env.SYNAP_BACKEND_DIR ?? resolve(dirname(fileURLToPath(import.meta.url)), "../../synap-backend"),
+  "packages/api/src/services/capabilities/builtin-verbs.ts"
 );
 
 describe("door parity: CLI kinds vs the pod verb's zod enum", () => {
@@ -90,7 +107,9 @@ describe("door parity: CLI kinds vs the pod verb's zod enum", () => {
       const enumBlock = /kind:\s*z\.enum\(\[([\s\S]*?)\]\)/.exec(block![0]);
       expect(enumBlock, "kind: z.enum([...]) not found in marketInstallParams").toBeTruthy();
 
-      const podKinds = [...enumBlock![1].matchAll(/"([a-z_]+)"/g)].map((m) => m[1]);
+      // Comments out first: the enum's own comment quotes a kind (`case "agent"`,
+      // backend#890), which would otherwise be counted as a second kind.
+      const podKinds = [...stripComments(enumBlock![1], "ts").matchAll(/"([a-z_]+)"/g)].map((m) => m[1]);
       expect(podKinds.length).toBeGreaterThan(0);
 
       // Same set, order-insensitive.

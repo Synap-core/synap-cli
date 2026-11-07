@@ -42,6 +42,8 @@ export interface PodRefusal {
   clientLabel?: string;
   /** True when `client` is one of the CLI's known clients (not a custom agent name). */
   knownClient?: boolean;
+  /** True when the request asked for the agent as the person (`asPerson`, W3). */
+  asPerson?: boolean;
   /** The pod the call went to, to name pod admin's pages. */
   podUrl?: string;
 }
@@ -120,9 +122,18 @@ export function explainPodError(r: PodRefusal): PodErrorText {
 
   if (code === POD_ERROR_CODES.surfaceAgentTypeRequired) {
     if (r.knownClient === false) {
+      const name = r.client ?? "this agent";
+      // Asked as the person and still refused: this pod predates that request
+      // (an older pod ignores `asPerson`). Plainly that, and where else to do it.
+      if (r.asPerson) {
+        return {
+          line: `Your pod does not accept a request for the custom agent "${name}" from this computer yet: it needs a newer pod.`,
+          next: `Update the pod from ${podAdminHomeOf(r.podUrl)}, then run this again. Or create the agent in ${agentsPageOf(r.podUrl)}.`,
+        };
+      }
       return {
-        line: `This computer's key cannot create the custom agent "${r.client ?? "this agent"}": only you, signed in as yourself, can.`,
-        next: `Create it in ${agentsPageOf(r.podUrl)}. The CLI cannot sign in as you yet.`,
+        line: `This computer's key cannot create the custom agent "${name}" by itself: you approve it.`,
+        next: `Run \`synap agents add --name ${name} --type ${name}\`: it asks for your approval on Relay or in ${agentsPageOf(r.podUrl)}.`,
       };
     }
     // No release promise, and no Synap-account route: a client that connects
