@@ -65,6 +65,7 @@ function ctxFor(over: Partial<RunContext>): RunContext & { lines: string[] } {
     values: { brewPrefix: "/opt/homebrew", home: "/h", models: "/h/models", workdir: "/h/work" },
     interactive: false,
     say: (l) => lines.push(l),
+    freeMb: () => 100_000,
     lines,
     ...over,
   };
@@ -126,12 +127,24 @@ describe("synap tools install", () => {
     expect("planned" in preflight(transcribe, ctxFor({}), "install", 5000)).toBe(true);
   });
 
+  it("--skip-models needs the space without the skipped model (4.0 GB less 1.6 GB)", async () => {
+    expect("planned" in preflight(transcribe, ctxFor({ skipModels: true }), "install", 2500)).toBe(true);
+    expect(preflight(transcribe, ctxFor({ skipModels: true }), "install", 2300)).toEqual({
+      error: "Transcribe on your computer needs 2.4 GB free; this computer has 2.3 GB",
+    });
+    const { run, calls } = fakeRun({});
+    const r = await installTool(transcribe, ctxFor({ run, freeMb: () => 1000 }));
+    expect(calls).toEqual([]);
+    expect(r.message).toBe("Transcribe on your computer needs 4.0 GB free; this computer has 1.0 GB");
+  });
+
   it("--dry-run prints the steps and the check; nothing runs, nothing is recorded", async () => {
     const { run, calls } = fakeRun({});
     const { door, reports } = fakeDoor();
     const ctx = ctxFor({ run, door, dryRun: true });
-    const r = await installTool(transcribe, ctx);
+    const r = await installTool(transcribe, { ...ctx, freeMb: () => 1000 });
     expect(r.status).toBe("dry-run");
+    expect(ctx.lines.join("\n")).toContain("needs 4.0 GB free; this computer has 1.0 GB: the install would stop here");
     expect(calls).toEqual([]);
     expect(reports).toEqual([]);
     expect(ctx.lines.join("\n")).toContain("uv tool install mlx-whisper");
@@ -175,6 +188,21 @@ describe("admin rights", () => {
       ["ffmpeg", "-version"],
     ]);
     expect(r).toMatchObject({ status: "installed", toolVersion: "6.1.1" });
+  });
+  it("apt succeeding means dnf (its fallback) does not run", async () => {
+    const { run, calls } = fakeRun({ ffmpeg: { exitCode: 0, stdout: "ffmpeg version 6.1.1", stderr: "" } });
+    await installTool(ffmpegLinux, ctxFor({ run, os: "linux", arch: "x64", interactive: true, confirm: async () => true }));
+    expect(calls).toEqual([["sudo", "apt-get", "install", "-y", "ffmpeg"], ["ffmpeg", "-version"]]);
+  });
+
+  it("a manifest that says `elevation: never` is never asked for admin rights: refused before any step", async () => {
+    const never = { ...ffmpegLinux, spec: { ...ffmpegLinux.spec, install: { ...ffmpegLinux.spec.install, elevation: "never" } } };
+    const { run, calls } = fakeRun({});
+    const asked: string[] = [];
+    const r = await installTool(never, ctxFor({ run, os: "linux", arch: "x64", interactive: true, confirm: async (q) => (asked.push(q), true) }));
+    expect(calls).toEqual([]);
+    expect(asked).toEqual([]);
+    expect(r.message).toMatch(/needs admin rights, and the manifest says it never asks for them/);
   });
 });
 
@@ -281,7 +309,8 @@ describe("the command", () => {
       await toolsInstallCommand("media-transcribe", { dryRun: true, manifest: file });
       const text = out.mock.calls.map((c) => String(c[0])).join("\n");
       expect(text).toContain(`manifest: ${file}`);
-      expect(text).toMatch(/dry run: nothing was installed or recorded|needs a /);
+      expect(text).toContain("dry run: nothing was installed or recorded");
+      expect(text).toContain("then check:");
       expect(fetchSpy).not.toHaveBeenCalled();
     } finally {
       out.mockRestore();

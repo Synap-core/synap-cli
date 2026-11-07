@@ -286,6 +286,8 @@ export interface RunContext {
   visited?: Set<string>;
   run?: typeof runProcess;
   load?: typeof loadComputerManifest;
+  /** Free disk in MB where tools land (default: measured). */
+  freeMb?: () => number | undefined;
 }
 
 export function defaultContext(over: Partial<RunContext> = {}): RunContext {
@@ -384,10 +386,13 @@ export function preflight(
   if ("error" in plan) return plan;
   const elevation = elevationRefusal(m.spec, plan.planned);
   if (elevation) return { error: elevation };
-  const planned = ctx.skipModels ? plan.planned.filter((p) => !(p.step.kind === "download" && p.step.what === "model")) : plan.planned;
+  const isModel = (p: PlannedStep) => p.step.kind === "download" && p.step.what === "model";
+  const planned = ctx.skipModels ? plan.planned.filter((p) => !isModel(p)) : plan.planned;
   if (action === "install") {
-    const needMb =
-      m.spec.install?.diskFreeMb ?? planned.reduce((n, p) => n + (p.step.kind === "download" ? (p.step.sizeMb ?? 0) : 0), 0);
+    const downloads = (list: PlannedStep[]) => list.reduce((n, p) => n + (p.step.kind === "download" ? (p.step.sizeMb ?? 0) : 0), 0);
+    // A skipped model is space the install no longer needs.
+    const skippedMb = downloads(plan.planned) - downloads(planned);
+    const needMb = m.spec.install?.diskFreeMb !== undefined ? m.spec.install.diskFreeMb - skippedMb : downloads(planned);
     if (needMb && freeMb !== undefined && freeMb < needMb) {
       return { error: `${m.name} needs ${(needMb / 1000).toFixed(1)} GB free; this computer has ${(freeMb / 1000).toFixed(1)} GB` };
     }
@@ -474,10 +479,14 @@ function newLogFile(slug: string, action: string): string {
 /** Install the capability's tool on this computer, check it, record it. */
 export async function installTool(m: ComputerManifest, ctx: RunContext): Promise<ToolResult> {
   if (ctx.os === "win32") ctx.say(chalk.yellow("Windows: these steps are written but not tested on Windows yet."));
-  const pre = preflight(m, ctx, "install", freeDiskMb());
+  const freeMb = (ctx.freeMb ?? freeDiskMb)();
+  // A dry run shows the steps even when the disk is short, and says so.
+  const pre = preflight(m, ctx, "install", ctx.dryRun ? undefined : freeMb);
   if ("error" in pre) return { status: "refused", toolVersion: null, message: pre.error };
 
   if (ctx.dryRun) {
+    const disk = preflight(m, ctx, "install", freeMb);
+    if ("error" in disk) ctx.say(chalk.yellow(`  ${disk.error}: the install would stop here`));
     ctx.say(`${m.name} (${m.slug} ${m.version}) on ${OS_LABEL[ctx.os] ?? ctx.os} ${ctx.arch}, licence ${m.spec.licence ?? "not stated"}:`);
     for (const p of pre.planned) ctx.say(`  ${p.admin ? "[admin] " : ""}${p.describe}${p.argv ? `\n      ${p.argv.join(" ")}` : ""}`);
     const check = verifyFor(m.spec, ctx.os);
