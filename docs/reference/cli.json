@@ -3221,7 +3221,7 @@
               {
                 "flags": "--no-template",
                 "long": "--no-template",
-                "description": "Opt out of auto-matching a playbook — start ad-hoc",
+                "description": "Skip the ranked playbook suggestions (facts may still bind)",
                 "takesValue": "none",
                 "negate": true
               },

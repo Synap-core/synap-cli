@@ -1661,7 +1661,7 @@ Start a new focus session and return its ID
 | `--task-id <id>` | Link session to an existing task entity |  |
 | `--track <id>` | Born inside a track (a project's goal) — implies its project |  |
 | `--template <id>` | Start from a playbook (seeds currentStage from its stages) |  |
-| `--no-template` | Opt out of auto-matching a playbook — start ad-hoc |  |
+| `--no-template` | Skip the ranked playbook suggestions (facts may still bind) |  |
 | `--parent <id>` | Push from another session — records session --spawned_from--> session (the parent stays open) |  |
 | `--suspended-intent <text>` | With --parent: this session BLOCKS the parent. One line naming what the parent was about to do; the parent waits until this session closes |  |
 | `--criteria <file.json>` | Path to a JSON file of binary acceptance criteria (SessionCriterion[]) |  |
