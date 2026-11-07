@@ -19,6 +19,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { parse as parseYaml } from "yaml";
 import { resolveInstalledCatalogRoot } from "./catalog-templates.js";
+import { RESERVED_AGENT_TYPES } from "./pod.js";
 import { parseMcpSpec, type AgentMcpSpec } from "./template-mcp.js";
 
 interface AgentManifest {
@@ -51,6 +52,21 @@ export function installedAgentTemplates(
     out.push({ slug, types: [harness, ...aliases] });
   }
   return out;
+}
+
+/**
+ * `synap agents add <slug>` for a catalog agent template: the agent type its
+ * agents carry (the template's harness), so the pod links the new agent to
+ * that template whatever the slug spells. `undefined` when no template has
+ * that slug (the word is a name, as before).
+ */
+export function catalogTypeForSlug(
+  slug: string,
+  templates: Array<{ slug: string; types: string[] }> = installedAgentTemplates(),
+): string | undefined {
+  const type = templates.find((t) => t.slug === slug)?.types[0];
+  // A client's own type (claude-code, cursor, …) is never taken this way: it would reuse that client's agent.
+  return type && !RESERVED_AGENT_TYPES.has(type) ? type : undefined;
 }
 
 /** The template slug for an agent type, or null when the catalog names none (or two). */

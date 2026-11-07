@@ -104,3 +104,20 @@ spec:
     expect(writeTemplateMcpFor("acme-bot", "https://pod.me.synap.live", {}, "k", home)).toBeNull();
   });
 });
+
+describe("agents add <slug> of a catalog agent template", () => {
+  it("takes the template's agent type (its harness), never a client's own type", async () => {
+    const { catalogTypeForSlug } = await import("../src/lib/agent-template.js");
+    const templates = [
+      { slug: "hermes", types: ["hermes"] },
+      { slug: "nous-hermes", types: ["hermes", "nous"] },
+      { slug: "claude-code", types: ["claude-code"] },
+    ];
+    expect(catalogTypeForSlug("hermes", templates)).toBe("hermes");
+    expect(catalogTypeForSlug("nous-hermes", templates)).toBe("hermes");
+    expect(catalogTypeForSlug("claude-code", templates)).toBeUndefined();
+    expect(catalogTypeForSlug("researcher", templates)).toBeUndefined();
+    // The real installed catalog names hermes (non-vacuity).
+    expect(catalogTypeForSlug("hermes")).toBe("hermes");
+  });
+});
