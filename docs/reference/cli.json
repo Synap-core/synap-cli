@@ -5382,7 +5382,7 @@
             "path": "synap agents add",
             "name": "add",
             "usage": "[options] [kind]",
-            "description": "Bring an agent into the pod: a client (claude-code, cursor, codex, …), your own (--name → URL + key), or pick from this machine (no kind)",
+            "description": "Bring an agent into the pod: a program on this computer (claude-code, codex, hermes, … : one agent per computer), your own (--name → URL + key), or pick from this machine (no kind)",
             "hidden": false,
             "arguments": [
               {
@@ -5395,7 +5395,7 @@
               {
                 "flags": "--name <name>",
                 "long": "--name",
-                "description": "Name your own agent (e.g. researcher) — prints a URL + key to paste",
+                "description": "Name your own agent (e.g. researcher) — prints a URL + key to paste; with an agent template's --type it only labels that program on this computer",
                 "takesValue": "required"
               },
               {
@@ -5407,7 +5407,7 @@
               {
                 "flags": "--type <type>",
                 "long": "--type",
-                "description": "Explicit agent type for your own agent (default: a slug of --name)",
+                "description": "Explicit agent type (default: a slug of --name); an agent template's type (hermes, …) is that program on this computer, never a custom agent",
                 "takesValue": "required"
               },
               {

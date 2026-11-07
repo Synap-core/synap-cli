@@ -114,6 +114,16 @@ export function customAgentType(
   return { agentType, localName };
 }
 
+/**
+ * An AI program on a computer (an ENGINE), not a custom agent: a client's
+ * type, or the type an installed agent template names (`agentTemplateFor`,
+ * the catalog package this CLI ships). The pod reads the same rule from its
+ * own installed templates.
+ */
+export function isEngineAgentType(agentType: string): boolean {
+  return RESERVED_AGENT_TYPES.has(agentType) || agentTemplateFor(agentType) !== null;
+}
+
 // ─── Pod ──────────────────────────────────────────────────────────────────────
 
 export interface AgentPod {
@@ -336,10 +346,15 @@ export async function createCustomAgent(
     return false;
   }
 
-  // A type that is not a client's is one this computer's key cannot create by
-  // itself: it is asked for AS THE PERSON (W3), who approves it with a proof
-  // of presence. A client's type (an explicit --type) keeps the plain request.
-  const asPerson = !RESERVED_AGENT_TYPES.has(agentType);
+  // An ENGINE type — a client's (an explicit --type) or one an installed agent
+  // template names (hermes, …) — is an AI program on THIS computer: one agent
+  // per computer, like Claude Code (decision 59c75aab), on the plain connect
+  // request; `--name` only labels it. Only a type no template names is one
+  // this computer's key cannot create by itself: it is asked for AS THE
+  // PERSON (W3), who approves it with a proof of presence (founder,
+  // 2026-11-07: "this is not a personal custom agent, this is just hermes, on
+  // my server").
+  const asPerson = !isEngineAgentType(agentType);
 
   log.heading(`Adding ${chalk.bold(agentName)} → ${pod.podUrl}  ${chalk.dim(`(${describeScope(scope, asPerson)})`)}`);
 

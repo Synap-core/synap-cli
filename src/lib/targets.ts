@@ -1110,6 +1110,10 @@ export function credentialError(
   opts: { asPerson?: boolean } = {}
 ): string {
   const known = isTargetName(agentType);
+  // A type an installed agent template names (hermes, …) is an AI program on
+  // a computer, never a custom agent: the pod refuses it only when it does
+  // not know that template yet.
+  const engineTemplate = !known && agentTemplateFor(agentType) !== null;
   // "Grok (Grok Build TUI)" → "Grok": the name is said up to three times.
   const label = known ? TARGETS[agentType].label.replace(/\s*\(.*\)$/, "") : agentType;
   const { line, next } = explainPodError({
@@ -1120,6 +1124,7 @@ export function credentialError(
     knownClient: known,
     podUrl,
     asPerson: opts.asPerson,
+    engineTemplate,
   });
   return `Could not connect ${label}. ${line}\n${next}`;
 }

@@ -2075,11 +2075,11 @@ agents
 agents
   .command("add [kind]")
   .description(
-    "Bring an agent into the pod: a client (claude-code, cursor, codex, …), your own (--name → URL + key), or pick from this machine (no kind)"
+    "Bring an agent into the pod: a program on this computer (claude-code, codex, hermes, … : one agent per computer), your own (--name → URL + key), or pick from this machine (no kind)"
   )
-  .option("--name <name>", "Name your own agent (e.g. researcher) — prints a URL + key to paste")
+  .option("--name <name>", "Name your own agent (e.g. researcher) — prints a URL + key to paste; with an agent template's --type it only labels that program on this computer")
   .option("--template <tmpl>", "Your own agent's template: twin | assistant | custom (default: custom)")
-  .option("--type <type>", "Explicit agent type for your own agent (default: a slug of --name)")
+  .option("--type <type>", "Explicit agent type (default: a slug of --name); an agent template's type (hermes, …) is that program on this computer, never a custom agent")
   .option("--role <role>", "Workspace role: admin | editor | viewer (default: editor)")
   .option("--workspace <id>", "Focus on one workspace (default: pod-wide)")
   .option("--project <id>", "Focus on one project (composable with --workspace)")
