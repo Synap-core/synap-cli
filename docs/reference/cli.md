@@ -4,7 +4,7 @@
 
 Synap CLI — connect AI agents to your data pod
 
-234 commands. Hidden commands and hidden options are omitted here (5 hidden commands); `cli.json` lists them with `"hidden": true`.
+239 commands. Hidden commands and hidden options are omitted here (5 hidden commands); `cli.json` lists them with `"hidden": true`.
 
 Every command also accepts `-h, --help`.
 
@@ -88,6 +88,11 @@ Every command also accepts `-h, --help`.
   - [`synap proposals reject`](#synap-proposals-reject) — Reject a pending proposal
   - [`synap proposals await`](#synap-proposals-await) — Block until a proposal is decided. Exit 0 approved · 1 rejected/expired/withdrawn · 2 timeout
 - [`synap worker`](#synap-worker) — Run Claude Code unattended here for the sessions handed to an agent
+  - [`synap worker install`](#synap-worker-install) — Run this agent as a login service on this Mac: starts at login, restarts if it stops (takes the worker flags)
+  - [`synap worker start`](#synap-worker-start) — Start the agent's login service (every agent's when no --agent)
+  - [`synap worker stop`](#synap-worker-stop) — Stop the agent's login service; it stays stopped after a restart until `synap worker start`
+  - [`synap worker status`](#synap-worker-status) — Show each agent login service on this Mac: running, pid, last exit, log
+  - [`synap worker uninstall`](#synap-worker-uninstall) — Remove the agent's login service from this Mac (needs --agent)
 - [`synap box`](#synap-box) — Run scripts in fresh isolated boxes on this computer (run box provisioner)
   - [`synap box serve`](#synap-box-serve) — Lease queued box runs from the pod and run each in a fresh box
   - [`synap box reap`](#synap-box-reap) — Destroy every box no run holds (after a crash)
@@ -1520,14 +1525,14 @@ Block until a proposal is decided. Exit 0 approved · 1 rejected/expired/withdra
 ## `synap worker`
 
 ```
-synap worker [options]
+synap worker [options] [command]
 ```
 
 Run Claude Code unattended here for the sessions handed to an agent
 
 | Option | Description | Default |
 |---|---|---|
-| `--agent <name>` | The named agent this machine works as (its key comes from ~/.synap) (required) |  |
+| `--agent <name>` | The named agent this machine works as (its key comes from ~/.synap); required |  |
 | `--runtime <engine>` | First run of an agent with a job: the engine that runs it (e.g. claude-code); asks for the agent on this computer when no key is saved |  |
 | `--no-create` | Never ask for the agent on first run, even with --runtime |  |
 | `--interval <dur>` | How often to check for handed sessions (e.g. 30s, 2m) | `"30s"` |
@@ -1543,6 +1548,57 @@ Run Claude Code unattended here for the sessions handed to an agent
 | `--skip-permissions` | Launch with --dangerously-skip-permissions instead of an allow-list |  |
 | `--dry-run` | Claim and log what would launch, without launching Claude |  |
 | `--protocols <list>` | Which runs this computer takes: code, work-folder (comma-separated; default both). A computer that runs no code, like the person's Mac, takes work-folder only; a design run counts as code |  |
+
+Subcommands: [`install`](#synap-worker-install), [`start`](#synap-worker-start), [`stop`](#synap-worker-stop), [`status`](#synap-worker-status), [`uninstall`](#synap-worker-uninstall)
+
+## `synap worker install`
+
+```
+synap worker install [options]
+```
+
+Run this agent as a login service on this Mac: starts at login, restarts if it stops (takes the worker flags)
+
+| Option | Description | Default |
+|---|---|---|
+| `--replace` | Take out a service made another way for the same agent (its file is kept) |  |
+| `--env <NAME=value...>` | Extra environment for the service (never a secret: the service file is readable) |  |
+
+## `synap worker start`
+
+```
+synap worker start [options]
+```
+
+Start the agent's login service (every agent's when no --agent)
+
+## `synap worker stop`
+
+```
+synap worker stop [options]
+```
+
+Stop the agent's login service; it stays stopped after a restart until `synap worker start`
+
+## `synap worker status`
+
+```
+synap worker status [options]
+```
+
+Show each agent login service on this Mac: running, pid, last exit, log
+
+| Option | Description | Default |
+|---|---|---|
+| `--json` | Output as JSON |  |
+
+## `synap worker uninstall`
+
+```
+synap worker uninstall [options]
+```
+
+Remove the agent's login service from this Mac (needs --agent)
 
 ## `synap box`
 

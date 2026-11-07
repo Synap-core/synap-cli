@@ -1210,10 +1210,12 @@ proposals
 // Run Claude Code unattended on THIS machine for the sessions handed to an agent
 // (the session roster → orient handedToYou). See src/commands/worker.ts.
 
-program
+const worker = program
   .command("worker")
   .description("Run Claude Code unattended here for the sessions handed to an agent")
-  .requiredOption("--agent <name>", "The named agent this machine works as (its key comes from ~/.synap)")
+  // Not requiredOption: commander checks a parent's required options for its
+  // subcommands too, and `worker status|start|stop` act on every agent without it.
+  .option("--agent <name>", "The named agent this machine works as (its key comes from ~/.synap); required")
   .option("--runtime <engine>", "First run of an agent with a job: the engine that runs it (e.g. claude-code); asks for the agent on this computer when no key is saved")
   .option("--no-create", "Never ask for the agent on first run, even with --runtime")
   .option("--interval <dur>", "How often to check for handed sessions (e.g. 30s, 2m)", "30s")
@@ -1238,9 +1240,64 @@ program
     "--protocols <list>",
     "Which runs this computer takes: code, work-folder (comma-separated; default both). A computer that runs no code, like the person's Mac, takes work-folder only; a design run counts as code"
   )
-  .action(async (opts: import("./commands/worker.js").WorkerOptions) => {
+  .action(async (opts: import("./commands/worker.js").WorkerOptions, cmd: Command) => {
+    if (!opts.agent) cmd.error("error: required option '--agent <name>' not specified");
     const { workerCommand } = await import("./commands/worker.js");
     await workerCommand(opts);
+  });
+
+// The agent as a macOS login service (launchd), so it runs without a terminal.
+// The worker flags above (given before or after the subcommand) are what the
+// service runs with. See src/commands/worker-service.ts.
+
+worker
+  .command("install")
+  .description("Run this agent as a login service on this Mac: starts at login, restarts if it stops (takes the worker flags)")
+  .option("--replace", "Take out a service made another way for the same agent (its file is kept)")
+  .option("--env <NAME=value...>", "Extra environment for the service (never a secret: the service file is readable)")
+  .action(async (opts: { replace?: boolean; env?: string[] }, cmd: Command) => {
+    const all = cmd.optsWithGlobals() as import("./commands/worker-service.js").ServiceOptions & { replace?: boolean };
+    if (!all.agent) cmd.error("error: required option '--agent <name>' not specified");
+    // A default the person did not type stays out of the service file, so it follows the worker's own default.
+    const parent = cmd.parent!;
+    for (const key of ["interval", "maxParallel", "claudeBin"] as const) {
+      if (parent.getOptionValueSource(key) === "default") delete all[key];
+    }
+    const { workerInstallCommand } = await import("./commands/worker-service.js");
+    await workerInstallCommand(all);
+  });
+
+worker
+  .command("start")
+  .description("Start the agent's login service (every agent's when no --agent)")
+  .action(async (_opts: unknown, cmd: Command) => {
+    const { workerStartCommand } = await import("./commands/worker-service.js");
+    await workerStartCommand({ agent: cmd.optsWithGlobals().agent });
+  });
+
+worker
+  .command("stop")
+  .description("Stop the agent's login service; it stays stopped after a restart until `synap worker start`")
+  .action(async (_opts: unknown, cmd: Command) => {
+    const { workerStopCommand } = await import("./commands/worker-service.js");
+    await workerStopCommand({ agent: cmd.optsWithGlobals().agent });
+  });
+
+worker
+  .command("status")
+  .description("Show each agent login service on this Mac: running, pid, last exit, log")
+  .option("--json", "Output as JSON")
+  .action(async (opts: { json?: boolean }, cmd: Command) => {
+    const { workerStatusCommand } = await import("./commands/worker-service.js");
+    await workerStatusCommand({ agent: cmd.optsWithGlobals().agent, json: opts.json });
+  });
+
+worker
+  .command("uninstall")
+  .description("Remove the agent's login service from this Mac (needs --agent)")
+  .action(async (_opts: unknown, cmd: Command) => {
+    const { workerUninstallCommand } = await import("./commands/worker-service.js");
+    await workerUninstallCommand({ agent: cmd.optsWithGlobals().agent });
   });
 
 // ─── box ──────────────────────────────────────────────────────────────────────
