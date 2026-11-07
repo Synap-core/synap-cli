@@ -32,7 +32,8 @@ import path from "node:path";
 import { writeFileAtomic } from "../lib/atomic-file.js";
 import { unknownAgentMessage } from "../lib/agents-config.js";
 import { findOnPath } from "./worker-github-broker.js";
-import { parseProtocols } from "./worker.js";
+import { parseProtocols, engineForSavedAgent } from "./worker.js";
+import { engineLine, type WorkerEngine } from "./worker-engine.js";
 
 export const LABEL_PREFIX = "live.synap.worker-";
 /** Every worker service file this command recognises, its own and a hand-made one. */
@@ -84,6 +85,8 @@ export interface ServiceOptions {
   skipPermissions?: boolean;
   /** Which runs this computer takes (`code`, `work-folder`); absent = the worker's default, every protocol. */
   protocols?: string;
+  /** How long a program engine's run may take (`--run-timeout`). */
+  runTimeout?: string;
   /** Extra environment for the service, KEY=VALUE each. Never a secret. */
   env?: string[];
 }
@@ -98,6 +101,12 @@ export interface ServiceContext {
   synapPath: string;
   /** The PATH to look `claude` up on when --claude-bin is a bare name. */
   searchPath?: string;
+  /**
+   * What the agent's template starts (`resolveWorkerEngine`). A program engine
+   * is pinned by its absolute path's folder on the service's PATH and carries
+   * no --claude-bin; absent = Claude Code.
+   */
+  engine?: WorkerEngine;
 }
 
 export interface ServiceSpec {
@@ -129,16 +138,22 @@ export function buildServiceSpec(opts: ServiceOptions, ctx: ServiceContext): Ser
   if (entryProblem) throw new Error(entryProblem);
   const abs = (p: string) => absolutePath(p, ctx.home, ctx.cwd);
 
-  // launchd starts with a bare PATH, so `claude` is pinned to an absolute path.
+  // launchd starts with a bare PATH: `claude` is pinned to an absolute path, another
+  // engine's program by its folder on the service's PATH (the worker finds it there).
+  const program = ctx.engine?.kind === "program" ? ctx.engine.programPath : undefined;
   const claudeName = opts.claudeBin ?? "claude";
-  const claudeBin = claudeName.includes("/") ? abs(claudeName) : findOnPath(claudeName, ctx.searchPath, "/nonexistent") ?? claudeName;
+  const claudeBin = program
+    ? undefined
+    : claudeName.includes("/")
+      ? abs(claudeName)
+      : (findOnPath(claudeName, ctx.searchPath, "/nonexistent") ?? claudeName);
 
   const args = [ctx.nodePath, ctx.synapPath, "worker", "--agent", opts.agent];
   if (opts.interval) args.push("--interval", opts.interval);
   if (opts.cwd) args.push("--cwd", abs(opts.cwd));
   if (opts.workRoot) args.push("--work-root", abs(opts.workRoot));
   if (opts.maxParallel) args.push("--max-parallel", opts.maxParallel);
-  args.push("--claude-bin", claudeBin);
+  if (claudeBin) args.push("--claude-bin", claudeBin);
   if (opts.claudeConfigDir) args.push("--claude-config-dir", abs(opts.claudeConfigDir));
   if (opts.accounts) args.push("--accounts", abs(opts.accounts));
   if (opts.githubApp) args.push("--github-app", abs(opts.githubApp));
@@ -146,10 +161,12 @@ export function buildServiceSpec(opts: ServiceOptions, ctx: ServiceContext): Ser
   if (opts.skipPermissions) args.push("--skip-permissions");
   // Checked here, not at the first restart: a typo must never become a service that dies every 30 s.
   if (opts.protocols !== undefined) args.push("--protocols", [...parseProtocols(opts.protocols)].join(","));
+  if (opts.runTimeout) args.push("--run-timeout", opts.runTimeout);
 
   const pathDirs = [
     path.dirname(ctx.nodePath),
-    ...(claudeBin.includes("/") ? [path.dirname(claudeBin)] : []),
+    ...(program ? [path.dirname(program)] : []),
+    ...(claudeBin?.includes("/") ? [path.dirname(claudeBin)] : []),
     path.join(ctx.home, ".local", "bin"),
     ...SYSTEM_PATH,
   ];
@@ -599,16 +616,21 @@ export async function workerInstallCommand(
   }
   if (unknown) throw new Error(unknown);
   const deps = liveDeps();
+  // The program the agent's template starts, read as the worker reads it: a missing one is refused here,
+  // not by a service that would die every 30 s.
+  const engine = await engineForSavedAgent(opts.agent, process.env.PATH);
   const spec = buildServiceSpec(opts, {
     home: deps.home,
     cwd: process.cwd(),
     nodePath: process.execPath,
     synapPath: path.resolve(process.argv[1] ?? ""),
     searchPath: process.env.PATH,
+    engine,
   });
   if (deps.platform !== "darwin") throw new Error(notMacMessage(deps.platform, spec));
   const r = await installService(spec, deps, { replace: opts.replace });
   console.log(installMessage(r, opts.agent, deps.home));
+  console.log(`  Starts: ${engineLine(engine)}`);
 }
 
 export async function workerStartCommand(opts: { agent?: string }): Promise<void> {

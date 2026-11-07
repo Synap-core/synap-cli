@@ -86,6 +86,14 @@ import {
 } from "./worker-github-app.js";
 import { findOnPath, startTokenBroker, writeGithubHelpers, type TokenBroker } from "./worker-github-broker.js";
 import { ensureTreeFolder, sweepTreeFolder, treeFolderFor, type GitFn } from "./worker-worktrees.js";
+import {
+  CLAUDE_HARNESS,
+  engineLine,
+  renderWakeArgs,
+  resolveWorkerEngine,
+  stripWakeEnv,
+  type WorkerEngine,
+} from "./worker-engine.js";
 
 export interface WorkerOptions {
   agent: string;
@@ -119,6 +127,14 @@ export interface WorkerOptions {
   runtime?: string;
   /** `--no-create`: never ask for the agent, even with `--runtime`. */
   create?: boolean;
+  /**
+   * What starts this agent's runs (`worker-engine.ts`): resolved from the
+   * agent's template by `workerCommand`. Absent = Claude Code (the worker's
+   * own path), as before engines existed.
+   */
+  engine?: WorkerEngine;
+  /** How long a run of a program engine may take before it is stopped (default 60m). Claude runs are not timed. */
+  runTimeout?: string;
 }
 
 export interface HandedItem {
@@ -204,6 +220,13 @@ export interface WorkerState {
 }
 
 // ─── pure helpers (tested) ────────────────────────────────────────────────────
+
+/** A program engine's run is stopped after this long unless `--run-timeout` says otherwise. */
+export const DEFAULT_RUN_TIMEOUT_MS = 60 * 60_000;
+/** After the timeout's SIGTERM, a run that has not exited gets SIGKILL this much later. */
+export const RUN_KILL_GRACE_MS = 10_000;
+/** How much of a program run's output is kept to read its verdict from. */
+const PROGRAM_OUTPUT_KEEP = 64 * 1024;
 
 /** "30s" | "2m" | "1h" | "45" (seconds) → milliseconds. */
 export function parseInterval(raw: string | undefined, fallbackMs = 30_000): number {
@@ -1143,6 +1166,8 @@ export function createWorker(opts: WorkerOptions, deps: WorkerDeps): Worker {
   const workRoot = path.resolve(opts.workRoot ?? path.join(os.homedir(), "synap-work"));
   const takes = parseProtocols(opts.protocols);
   const takesAll = WORKER_PROTOCOLS.every((p) => takes.has(p));
+  const engine: WorkerEngine = opts.engine ?? { kind: "claude", template: CLAUDE_HARNESS };
+  const runTimeoutMs = parseInterval(opts.runTimeout, DEFAULT_RUN_TIMEOUT_MS);
 
   const mcpServer = RUN_MCP_SERVER;
 
@@ -1212,7 +1237,9 @@ export function createWorker(opts: WorkerOptions, deps: WorkerDeps): Worker {
   const bgRunning = () => Object.values(state.runs).filter((r) => r.status === "running" && r.mode === "bg");
   const active = () => children.size + bgRunning().length;
 
-  const who = accountsFile
+  const who = engine.kind === "program"
+    ? `${engineLine(engine)}, runs stopped after ${opts.runTimeout ?? "60m"}`
+    : accountsFile
     ? `accounts ${accountsFile.accounts.map((a) => `${a.id}${a.design ? " (design)" : ""}`).join(", ")} · reserve ${accountsFile.reserve}`
     : "the environment's Claude login";
   log(`agent ${agent} → ${deps.podUrl} · MCP server "${mcpServer}" · cwd ${cwd} · work folders ${workRoot} · max ${maxParallel} parallel${takesAll ? "" : ` · takes ${[...takes].join(", ")} runs only`} · ${who} · GitHub as ${githubToken ? "the Synap Agent App" : "THE ENVIRONMENT'S LOGIN"}`);
@@ -1227,7 +1254,8 @@ export function createWorker(opts: WorkerOptions, deps: WorkerDeps): Worker {
   let measuredThisTick = false;
   /** `undefined`: no accounts file (the environment's login). `null`: no account with room — do not launch. */
   const pick = async (design: boolean): Promise<AccountSpec | null | undefined> => {
-    if (!pool) return undefined;
+    // Accounts are Claude subscriptions: a program engine runs on its own login.
+    if (!pool || engine.kind === "program") return undefined;
     if (!measuredThisTick) {
       await pool.measure();
       measuredThisTick = true;
@@ -1322,6 +1350,123 @@ export function createWorker(opts: WorkerOptions, deps: WorkerDeps): Worker {
   };
 
   // ── launching ──
+  /**
+   * A run of a PROGRAM engine (`worker-engine.ts`): the template's argv with
+   * `{prompt}` filled, spawned in the run's folder, stopped after the run
+   * timeout. Its stdout and stderr go to the run log; its verdict is its
+   * `WORKER-RESULT:` line, else the tail of what it printed, and it ends
+   * through the same `settle` as a Claude run. No conversation is kept, so a
+   * finished program run is not resumed by follow-ups.
+   */
+  const launchProgram = (
+    item: HandedItem,
+    record: RunRecord,
+    prompt: string,
+    protocol: WorkerProtocol,
+    runCwd: string,
+    workDir: string | undefined,
+    treeDir: string | undefined,
+    baseEnv: NodeJS.ProcessEnv,
+    what: string
+  ): boolean => {
+    if (engine.kind !== "program") throw new Error("launchProgram runs a program engine only");
+    let args: string[];
+    try {
+      args = renderWakeArgs(engine.wake, { prompt });
+    } catch (err) {
+      record.status = "failed";
+      record.finishedAt = iso();
+      record.result = `the ${engine.template} template's wake could not be run: ${(err as Error).message}`;
+      log(`session ${item.id}: ${record.result}`);
+      void settle(record, undefined, false);
+      return false;
+    }
+    if (opts.dryRun) {
+      record.status = "done";
+      record.result = `dry run: would launch ${engine.programPath} (${protocol}) in ${runCwd}`;
+      save();
+      log(`dry run — ${protocol} session ${item.id} in ${runCwd}: ${engine.programPath} ${args.map((a) => (a === prompt ? "<prompt>" : a)).join(" ")}`);
+      return true;
+    }
+    if (workDir) fs.mkdirSync(workDir, { recursive: true, mode: 0o700 });
+    if (treeDir) {
+      ensureTreeFolder(treeDir);
+      fs.writeFileSync(path.join(treesRoot, ".gitignore"), "*\n");
+    }
+    fs.mkdirSync(runsDir, { recursive: true, mode: 0o700 });
+    const out = fs.createWriteStream(path.join(runsDir, `${item.id}.jsonl`), { flags: "a", mode: 0o600 });
+    const child = spawn(engine.programPath, args, {
+      cwd: runCwd,
+      env: stripWakeEnv(baseEnv, engine.wake.envStrip),
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    children.set(item.id, child);
+    record.pid = child.pid;
+    save();
+    log(`${what} ${protocol} session ${item.id} with ${engine.program} (pid ${child.pid})${workDir ? ` in ${workDir}` : ""}${treeDir ? ` in ${treeDir}` : ""}`);
+
+    let printed = "";
+    const keep = (chunk: Buffer) => {
+      out.write(chunk);
+      printed = (printed + chunk.toString("utf8")).slice(-PROGRAM_OUTPUT_KEEP);
+    };
+    child.stdout?.on("data", keep);
+    child.stderr?.on("data", (chunk: Buffer) => out.write(chunk));
+    let startError: string | undefined;
+    child.on("error", (err) => {
+      startError = err.message;
+      out.write(`synap-worker: could not start ${engine.programPath}: ${err.message}\n`);
+    });
+    let timedOut = false;
+    let kill: NodeJS.Timeout | undefined;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      out.write(`synap-worker: stopped after ${opts.runTimeout ?? "60m"} (--run-timeout)\n`);
+      child.kill("SIGTERM");
+      kill = setTimeout(() => child.kill("SIGKILL"), RUN_KILL_GRACE_MS);
+      kill.unref();
+    }, runTimeoutMs);
+    timer.unref();
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      if (kill) clearTimeout(kill);
+      out.end();
+      const finish = async () => {
+        if (treeDir) {
+          const swept = await sweepTreeFolder(treeDir, deps.git);
+          record.keptTrees = swept.kept.map((k) => `${k.dir} (${k.why})`);
+          if (swept.removed.length) log(`session ${item.id}: removed ${swept.removed.length} clean worktree(s)`);
+          if (!record.keptTrees.length) delete record.keptTrees;
+        }
+        children.delete(item.id);
+        record.exitCode = code;
+        record.finishedAt = iso();
+        const verdict = timedOut ? undefined : workerVerdict(printed);
+        record.result = timedOut
+          ? `stopped after ${opts.runTimeout ?? "60m"} (--run-timeout): ${engine.program} did not finish`
+          : startError
+            ? `${engine.program} did not start: ${startError}`
+            : (verdict ?? (printed.trim() ? printed.trim().slice(-300) : undefined));
+        record.status = code === 0 && !timedOut ? "done" : "failed";
+        if (record.keptTrees) record.result = `${record.result ?? ""} · KEPT (unpushed work): ${record.keptTrees.join("; ")}`.trim();
+        save();
+        log(`session ${item.id} finished — exit ${code}${record.result ? ` · ${record.result}` : ""}`);
+        // A program that ended cleanly without a verdict line still owes the room what it said:
+        // a person judges it (blocked), never a `done` that would claim a deliverable on prose.
+        const tail = printed.replace(/\s+/g, " ").trim().slice(-200);
+        const said =
+          verdict ??
+          (code === 0 && !timedOut && tail ? `blocked — ${engine.program} ended without a WORKER-RESULT line; it printed: ${tail}` : undefined);
+        await settle(record, said, code === 0 && !timedOut);
+      };
+      const p = finish()
+        .catch((err) => log(`session ${item.id}: finishing failed: ${(err as Error).message}`))
+        .finally(() => sweeps.delete(p));
+      sweeps.add(p);
+    });
+    return true;
+  };
+
   const launch = async (
     item: HandedItem,
     how: How,
@@ -1376,7 +1521,8 @@ export function createWorker(opts: WorkerOptions, deps: WorkerDeps): Worker {
       status: "running" as const,
       exitCode: undefined,
       accountId: account?.id,
-      mode: design ? ("bg" as const) : ("print" as const),
+      // A program engine has no background mode: every run of it is a print run.
+      mode: design && engine.kind === "claude" ? ("bg" as const) : ("print" as const),
       launchedAt: iso(),
       blockedSince: undefined,
       protocol,
@@ -1414,6 +1560,8 @@ export function createWorker(opts: WorkerOptions, deps: WorkerDeps): Worker {
       account?.token,
       ghToken && githubRun ? { ...githubRun, token: ghToken } : undefined
     );
+
+    if (engine.kind === "program") return launchProgram(item, record, prompt, protocol, runCwd, workDir, treeDir, env, what);
 
     if (design) {
       // `claude --bg` is the mode that has the Artifact tool. --strict-mcp-config: a
@@ -1867,7 +2015,9 @@ export async function workerCommand(opts: WorkerOptions): Promise<void> {
   // Its own posts must never resume it: compare with the key's AGENT id (who
   // the key is), never the acting user /users/me answers (its linked human).
   const selfAgentId = await resolveAgentUserId(cfg);
-  const worker = createWorker(opts, { mcp, podUrl: cfg.podUrl, apiKey: cfg.apiKey, selfAgentId });
+  // What starts its runs: the agent's template, as the pod names it (never a guess, never Claude by default).
+  const engine = await resolveWorkerEngine(agent, mcp, selfAgentId, process.env.PATH);
+  const worker = createWorker({ ...opts, engine }, { mcp, podUrl: cfg.podUrl, apiKey: cfg.apiKey, selfAgentId });
 
   let stopping = false;
   const stop = () => {
@@ -1916,4 +2066,16 @@ export async function workerCommand(opts: WorkerOptions): Promise<void> {
       await worker.watch();
     }
   }
+}
+
+/**
+ * The engine of a SAVED agent, read the way the worker reads it at start (its
+ * own key, the pod's roster, the installed catalog). `synap worker install`
+ * uses it to pin the program a service starts.
+ */
+export async function engineForSavedAgent(agent: string, searchPath: string | undefined): Promise<WorkerEngine> {
+  process.env.SYNAP_AGENT = agent;
+  const cfg = await resolveHubConfig();
+  const mcp = createMcpClient({ url: `${cfg.podUrl.replace(/\/+$/, "")}/mcp`, apiKey: cfg.apiKey, clientName: `synap-worker/${agent}` });
+  return resolveWorkerEngine(agent, mcp, await resolveAgentUserId(cfg), searchPath);
 }
