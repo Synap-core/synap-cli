@@ -33,7 +33,7 @@ import { writeFileAtomic } from "../lib/atomic-file.js";
 import { unknownAgentMessage } from "../lib/agents-config.js";
 import { findOnPath } from "./worker-github-broker.js";
 import { parseProtocols, engineForSavedAgent } from "./worker.js";
-import { engineLine, type WorkerEngine } from "./worker-engine.js";
+import { engineLine, writeEnginePin, type WorkerEngine } from "./worker-engine.js";
 
 export const LABEL_PREFIX = "live.synap.worker-";
 /** Every worker service file this command recognises, its own and a hand-made one. */
@@ -629,6 +629,8 @@ export async function workerInstallCommand(
   });
   if (deps.platform !== "darwin") throw new Error(notMacMessage(deps.platform, spec));
   const r = await installService(spec, deps, { replace: opts.replace });
+  // Installing is the person accepting what runs: the pin is (re)written here, and only here or on a first run.
+  writeEnginePin(deps.home, opts.agent, engine);
   console.log(installMessage(r, opts.agent, deps.home));
   console.log(`  Starts: ${engineLine(engine)}`);
 }

@@ -88,6 +88,7 @@ import { findOnPath, startTokenBroker, writeGithubHelpers, type TokenBroker } fr
 import { ensureTreeFolder, sweepTreeFolder, treeFolderFor, type GitFn } from "./worker-worktrees.js";
 import {
   CLAUDE_HARNESS,
+  checkEnginePin,
   engineLine,
   renderWakeArgs,
   resolveWorkerEngine,
@@ -2017,6 +2018,10 @@ export async function workerCommand(opts: WorkerOptions): Promise<void> {
   const selfAgentId = await resolveAgentUserId(cfg);
   // What starts its runs: the agent's template, as the pod names it (never a guess, never Claude by default).
   const engine = await resolveWorkerEngine(agent, mcp, selfAgentId, process.env.PATH);
+  // What the pod serves becomes a program run HERE: only the command this computer agreed to (the pin).
+  const pin = checkEnginePin(os.homedir(), agent, engine);
+  if (pin.status === "pinned") say(`recorded what runs for ${agent}: ${engineLine(engine)} (~/.synap/worker/${agent}/engine.json)`);
+  if (pin.status === "version") say(`${agent}'s template moved from ${pin.from ?? "built in"} to ${pin.to ?? "built in"}; the same command runs`);
   const worker = createWorker({ ...opts, engine }, { mcp, podUrl: cfg.podUrl, apiKey: cfg.apiKey, selfAgentId });
 
   let stopping = false;

@@ -13,10 +13,13 @@ import os from "node:os";
 import path from "node:path";
 import { createWorker } from "../src/commands/worker.js";
 import {
+  checkEnginePin,
+  enginePinPath,
   engineFor,
   renderWakeArgs,
   resolveWorkerEngine,
   rosterTemplateSlug,
+  writeEnginePin,
   type WorkerEngine,
 } from "../src/commands/worker-engine.js";
 import { readAgentTemplateWake, type AgentTemplateWake } from "../src/lib/agent-template.js";
@@ -212,6 +215,39 @@ describe("which engine, and why not", () => {
     await expect(resolveWorkerEngine("hermes-mac", refused, SELF, path.join(tmp, "bin"), tpl)).rejects.toThrow(/roster could not be read: forbidden/);
   });
 
+  it("the pod's served wake block is the source; the catalog answers only an older pod or a built-in template", async () => {
+    const bin = path.join(tmp, "bin");
+    // A catalog whose hermes block differs from the pod's: which one ran tells the source.
+    const catalog = (slug: string) =>
+      slug === "hermes"
+        ? readAgentTemplateWake("hermes", writeCatalog(HERMES_YAML.replace('["chat", "-q", "{prompt}"]', '["old", "{prompt}"]')))
+        : null;
+    const roster = (template: Record<string, unknown>): McpCallClient => ({
+      call: async () => ({ isError: false, text: JSON.stringify({ agents: [{ agentUserId: SELF, template }] }) }),
+    });
+    const podWake = { program: "hermes", args: ["chat", "-q", "{prompt}"], params: { prompt: { type: "text", required: true } } };
+
+    const fromPod = await resolveWorkerEngine("h", roster({ slug: "hermes", version: "h-1", wake: podWake }), SELF, bin, catalog);
+    expect(fromPod).toMatchObject({ kind: "program", source: "pod", version: "h-1", wake: { args: ["chat", "-q", "{prompt}"] } });
+
+    // A pod older than the field (no `wake` key): this synap's catalog.
+    const older = await resolveWorkerEngine("h", roster({ slug: "hermes", version: "h-1" }), SELF, bin, catalog);
+    expect(older).toMatchObject({ source: "catalog", wake: { args: ["old", "{prompt}"] } });
+
+    // An installed template the pod says has no wake: refused (never the catalog's block instead).
+    await expect(resolveWorkerEngine("h", roster({ slug: "hermes", version: "h-1", wake: null }), SELF, bin, catalog)).rejects.toThrow(/has no wake/);
+
+    // A served block that is not one, or names a path instead of a program: refused.
+    await expect(resolveWorkerEngine("h", roster({ slug: "hermes", version: "h-1", wake: { program: 7 } }), SELF, bin, catalog)).rejects.toThrow(/not one/);
+    await expect(
+      resolveWorkerEngine("h", roster({ slug: "hermes", version: "h-1", wake: { ...podWake, program: "/tmp/evil" } }), SELF, bin, catalog)
+    ).rejects.toThrow(/not a bare program name/);
+
+    // The built-in Claude Code template (version null, wake null): the Claude path.
+    const claude = await resolveWorkerEngine("c", roster({ slug: "claude-code", version: null, wake: null }), SELF, bin, () => null);
+    expect(claude).toMatchObject({ kind: "claude", source: "catalog" });
+  });
+
   it("a missing program is refused by name", () => {
     const tpl = readAgentTemplateWake("hermes", writeCatalog())!;
     expect(() => engineFor("hermes-mac", "hermes", tpl, "/nowhere")).toThrow(/^hermes is not installed here/);
@@ -243,5 +279,59 @@ describe("which engine, and why not", () => {
     expect(root).not.toBeNull();
     expect(readAgentTemplateWake("claude-code", root)).toMatchObject({ harness: "claude-code", wake: { program: "claude" } });
     expect(readAgentTemplateWake("hermes", root)?.wake?.args).toContain("{prompt}");
+  });
+});
+
+describe("the pin: this computer runs only the command it agreed to", () => {
+  const hermes = (over: Partial<{ args: string[]; programPath: string; version: string | null; template: string }> = {}): WorkerEngine => ({
+    kind: "program",
+    template: over.template ?? "hermes",
+    program: "hermes",
+    programPath: over.programPath ?? hermesBin(),
+    wake: { program: "hermes", args: over.args ?? ["chat", "-q", "{prompt}"], params: {}, envStrip: [] },
+    version: over.version === undefined ? "h-1" : over.version,
+    source: "pod",
+  });
+
+  it("the first run records it; the same command runs; a version bump alone runs and moves the pin", () => {
+    const home = os.homedir();
+    expect(checkEnginePin(home, "hermes-mac", hermes())).toEqual({ status: "pinned" });
+    const file = enginePinPath(home, "hermes-mac");
+    expect(fs.statSync(file).mode & 0o777).toBe(0o600);
+    expect(JSON.parse(fs.readFileSync(file, "utf8"))).toMatchObject({
+      template: "hermes",
+      program: "hermes",
+      programPath: hermesBin(),
+      args: ["chat", "-q", "{prompt}"],
+      version: "h-1",
+    });
+    expect(checkEnginePin(home, "hermes-mac", hermes())).toEqual({ status: "same" });
+    expect(checkEnginePin(home, "hermes-mac", hermes({ version: "h-2" }))).toEqual({ status: "version", from: "h-1", to: "h-2" });
+    expect(JSON.parse(fs.readFileSync(file, "utf8")).version).toBe("h-2");
+  });
+
+  it("a changed wake on the pod is REFUSED with both commands and how to accept it; install accepts", () => {
+    const home = os.homedir();
+    checkEnginePin(home, "hermes-mac", hermes());
+    const changed = hermes({ args: ["chat", "--yolo", "-q", "{prompt}"] });
+    expect(() => checkEnginePin(home, "hermes-mac", changed)).toThrow(
+      /^hermes-mac's wake changed on your pod \(hermes: .*hermes chat -q \{prompt\} → hermes: .*hermes chat --yolo -q \{prompt\}\)\. .*run `synap worker install --agent hermes-mac` again to accept it\.$/
+    );
+    // Another program path, another template, or a switch from Claude Code: refused too.
+    expect(() => checkEnginePin(home, "hermes-mac", hermes({ programPath: "/opt/other/hermes" }))).toThrow(/wake changed/);
+    expect(() => checkEnginePin(home, "hermes-mac", hermes({ template: "evil" }))).toThrow(/wake changed/);
+    writeEnginePin(home, "claude-mac", { kind: "claude", template: "claude-code" });
+    expect(() => checkEnginePin(home, "claude-mac", hermes())).toThrow(/claude-mac's wake changed on your pod \(claude-code: Claude Code → hermes:/);
+    // Install is the person accepting it: the new command then runs.
+    writeEnginePin(home, "hermes-mac", changed);
+    expect(checkEnginePin(home, "hermes-mac", changed)).toEqual({ status: "same" });
+  });
+
+  it("an unreadable pin is refused, never silently re-pinned", () => {
+    const home = os.homedir();
+    const file = enginePinPath(home, "hermes-mac");
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, "{not json");
+    expect(() => checkEnginePin(home, "hermes-mac", hermes())).toThrow(/cannot be read/);
   });
 });
