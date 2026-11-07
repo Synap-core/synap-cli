@@ -5350,7 +5350,7 @@
         "path": "synap agents",
         "name": "agents",
         "usage": "[options] [command]",
-        "description": "Manage agent principals on your pod (one per type for you; local keys are a cache)",
+        "description": "Manage agent principals on your pod (one per program per computer; local keys are a cache)",
         "hidden": false,
         "arguments": [],
         "options": [],
@@ -5359,7 +5359,7 @@
             "path": "synap agents list",
             "name": "list",
             "usage": "[options]",
-            "description": "List your agents on this pod (one per type). Use --local for ~/.synap cache only.",
+            "description": "List your agents on this pod (one per program per computer). Use --local for ~/.synap cache only.",
             "hidden": false,
             "arguments": [],
             "options": [

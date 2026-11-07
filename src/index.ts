@@ -2058,12 +2058,12 @@ set
 
 const agents = program
   .command("agents")
-  .description("Manage agent principals on your pod (one per type for you; local keys are a cache)");
+  .description("Manage agent principals on your pod (one per program per computer; local keys are a cache)");
 
 agents
   .command("list", { isDefault: true })
   .description(
-    "List your agents on this pod (one per type). Use --local for ~/.synap cache only."
+    "List your agents on this pod (one per program per computer). Use --local for ~/.synap cache only."
   )
   .option("--json", "Output as JSON")
   .option("--local", "List only the local ~/.synap agent cache")
