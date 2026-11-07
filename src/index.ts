@@ -1345,7 +1345,7 @@ session
   .option("--task-id <id>", "Link session to an existing task entity")
   .option("--track <id>", "Born inside a track (a project's goal) — implies its project")
   .option("--template <id>", "Start from a playbook (seeds currentStage from its stages)")
-  .option("--no-template", "Opt out of auto-matching a playbook — start ad-hoc")
+  .option("--no-template", "Skip the ranked playbook suggestions (facts may still bind)")
   .option("--parent <id>", "Push from another session — records session --spawned_from--> session (the parent stays open)")
   .option("--suspended-intent <text>", "With --parent: this session BLOCKS the parent. One line naming what the parent was about to do; the parent waits until this session closes")
   .option("--criteria <file.json>", "Path to a JSON file of binary acceptance criteria (SessionCriterion[])")

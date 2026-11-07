@@ -321,6 +321,9 @@ export const MARKET_INSTALL_KINDS = [
   "cell",
   "skill",
   "view",
+  // An agent template (backend#890: `market.install` case "agent", one write,
+  // `installAgentTemplate`). The catalog publishes it under category `agent`.
+  "agent",
 ] as const;
 
 export type MarketInstallKind = (typeof MARKET_INSTALL_KINDS)[number];
@@ -352,6 +355,8 @@ export function marketInstallKind(type: string): MarketInstallKind | null {
       return "skill";
     case "view":
       return "view";
+    case "agent":
+      return "agent";
     default:
       return null;
   }
@@ -366,6 +371,15 @@ export function marketInstallKind(type: string): MarketInstallKind | null {
  */
 export function marketInstallNeedsWorkspace(kind: MarketInstallKind): boolean {
   return kind === "automation" || kind === "view";
+}
+
+/**
+ * The success line for a one-write install. `exists` is the pod saying it was
+ * already there and nothing was written (an agent template never overwrites an
+ * installed slug, `installAgentTemplate`): never "Installed".
+ */
+export function installedLine(name: string, status: string): string {
+  return status === "exists" ? `${name} is already installed. Nothing was changed.` : `Installed ${name}.`;
 }
 
 /** One per-item result of a kind:automation market.install (marketplace-install.ts). */
@@ -1397,7 +1411,7 @@ export async function marketInstall(
       return;
     }
 
-    log.success(`Installed ${entry.name}.`);
+    log.success(installedLine(entry.name, status));
     return;
   }
 
