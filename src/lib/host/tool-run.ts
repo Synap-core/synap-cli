@@ -472,7 +472,9 @@ export async function installTool(m: ComputerManifest, ctx: RunContext): Promise
   const steps: FinishStep[] = [];
   const ran = await runSteps(pre.planned, m, ctx, logFile, steps);
   if ("error" in ran) {
-    return { status: "failed", toolVersion: null, message: `${m.name} was not installed: ${ran.error}`, steps, check: buildToolCheck({ toolVersion: null, os: ctx.os, arch: ctx.arch, ok: false }) };
+    // Check anyway: the pod keeps the last check it was sent, so a failed install reports what is there now.
+    const now = await verifyTool(m, ctx);
+    return { status: "failed", toolVersion: now.toolVersion, message: `${m.name} was not installed: ${ran.error}`, steps: [...steps, ...now.steps], check: now.check };
   }
   const checked = await verifyTool(m, ctx);
   const all = [...steps, ...checked.steps];

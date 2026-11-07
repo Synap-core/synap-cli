@@ -85,12 +85,14 @@ describe("synap tools install", () => {
     expect(r.steps.at(-1)).toMatchObject({ ok: false, detail: "mlx_whisper is not installed on this computer" });
   });
 
-  it("a missing package manager stops before anything runs and says where to get it", async () => {
+  it("a missing package manager stops before any step runs and says where to get it; only the check runs, so the job reports what is there", async () => {
     fs.rmSync(path.join(bin, "uv"));
-    const { run, calls } = fakeRun({});
+    const { run, calls } = fakeRun({ mlx_whisper: MISSING });
     const r = await installTool(transcribe, ctxFor({ run }));
-    expect(calls).toEqual([]);
+    expect(calls).toEqual([["mlx_whisper", "--help"]]);
+    expect(r.status).toBe("failed");
     expect(r.message).toContain("uv is not installed on this computer (https://docs.astral.sh/uv/)");
+    expect(r.check?.verify).toMatchObject({ ok: false, exitCode: null });
   });
 
   it("on a computer the capability does not support, nothing runs and the reason is plain", async () => {
@@ -245,7 +247,8 @@ describe("downloads, prerequisites and smoke runs", () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response(Buffer.from("tampered"))));
     const { run, calls } = fakeRun({});
     const r = await installTool(ffmpeg(), ctxFor({ run, os: "linux", arch: "x64", values: { tools: tools(), home } }));
-    expect(calls).toEqual([]);
+    // Nothing unpacked: the only process is the check (the pinned bin, absent).
+    expect(calls).toEqual([[path.join(tools(), "ffmpeg", "bin", "ffmpeg"), "-version"]]);
     expect(r.message).toMatch(/refused: https:\/\/x\.test\/f-x64\.tar\.xz does not match its sha256/);
   });
 
