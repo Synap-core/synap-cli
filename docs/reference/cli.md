@@ -4,7 +4,7 @@
 
 Synap CLI — connect AI agents to your data pod
 
-243 commands. Hidden commands and hidden options are omitted here (5 hidden commands); `cli.json` lists them with `"hidden": true`.
+246 commands. Hidden commands and hidden options are omitted here (5 hidden commands); `cli.json` lists them with `"hidden": true`.
 
 Every command also accepts `-h, --help`.
 
@@ -87,7 +87,7 @@ Every command also accepts `-h, --help`.
   - [`synap proposals approve`](#synap-proposals-approve) — Approve a pending proposal (interactive only — requires a TTY and a typed confirmation)
   - [`synap proposals reject`](#synap-proposals-reject) — Reject a pending proposal
   - [`synap proposals await`](#synap-proposals-await) — Block until a proposal is decided. Exit 0 approved · 1 rejected/expired/withdrawn · 2 timeout
-- [`synap worker`](#synap-worker) — Run Claude Code unattended here for the sessions handed to an agent
+- [`synap worker`](#synap-worker) — Run this computer's work: the sessions handed to an agent, and the installs the person approved on the pod (host jobs)
   - [`synap worker install`](#synap-worker-install) — Run this agent as a login service on this Mac: starts at login, restarts if it stops (takes the worker flags)
   - [`synap worker start`](#synap-worker-start) — Start the agent's login service (every agent's when no --agent)
   - [`synap worker stop`](#synap-worker-stop) — Stop the agent's login service; it stays stopped after a restart until `synap worker start`
@@ -197,8 +197,11 @@ Every command also accepts `-h, --help`.
 - [`synap artifact`](#synap-artifact) — Create HTML artifacts as Synap cells: an HTML/JS page that opens in the desktop app and can read pod data
   - [`synap artifact create`](#synap-artifact-create) — Define a cell from a local HTML file (governed: an agent key files a proposal)
 - [`synap connect-service`](#synap-connect-service) — Connect an external service (Google, GitHub, Notion, Linear, Slack, …)
-- [`synap tools`](#synap-tools) — Add and manage external service tools and their credentials
-  - [`synap tools list`](#synap-tools-list) — List available tools and their connection status
+- [`synap tools`](#synap-tools) — Install, check and remove a capability's tool on this computer (connect/sync/disconnect/schema: deprecated, use `synap cap`)
+  - [`synap tools list`](#synap-tools-list) — List the tools the pod records on this computer, with their state and last check
+  - [`synap tools install`](#synap-tools-install) — Install a capability's tool on this computer with its declared steps, check it works, record it on the pod
+  - [`synap tools verify`](#synap-tools-verify) — Check a capability's tool works on this computer and record the version it reports
+  - [`synap tools remove`](#synap-tools-remove) — Remove a capability's tool from this computer (downloaded models are kept) and record it
   - [`synap tools connect`](#synap-tools-connect) — Connect a credential to a tool (OAuth via the connection broker, or vault)
   - [`synap tools sync`](#synap-tools-sync) — Trigger a manual sync for a connected tool
   - [`synap tools disconnect`](#synap-tools-disconnect) — Revoke a tool's connection
@@ -1532,7 +1535,7 @@ Block until a proposal is decided. Exit 0 approved · 1 rejected/expired/withdra
 synap worker [options] [command]
 ```
 
-Run Claude Code unattended here for the sessions handed to an agent
+Run this computer's work: the sessions handed to an agent, and the installs the person approved on the pod (host jobs)
 
 | Option | Description | Default |
 |---|---|---|
@@ -1553,6 +1556,8 @@ Run Claude Code unattended here for the sessions handed to an agent
 | `--dry-run` | Claim and log what would launch, without launching Claude |  |
 | `--run-timeout <dur>` | How long a run may take when the agent's template wakes another program than Claude Code (e.g. 30m, 2h; default 60m) |  |
 | `--protocols <list>` | Which runs this computer takes: code, work-folder (comma-separated; default both). A computer that runs no code, like the person's Mac, takes work-folder only; a design run counts as code |  |
+| `--host-only` | Run only this computer's host jobs (installs, updates, removals, checks), no agent: a server's synap-host user |  |
+| `--host-config <file>` | Host runner config (default /etc/synap-host/config.json when present) |  |
 
 Subcommands: [`install`](#synap-worker-install), [`start`](#synap-worker-start), [`stop`](#synap-worker-stop), [`status`](#synap-worker-status), [`uninstall`](#synap-worker-uninstall)
 
@@ -3405,9 +3410,9 @@ Connect an external service (Google, GitHub, Notion, Linear, Slack, …)
 synap tools [options] [command]
 ```
 
-Add and manage external service tools and their credentials
+Install, check and remove a capability's tool on this computer (connect/sync/disconnect/schema: deprecated, use `synap cap`)
 
-Subcommands: [`list`](#synap-tools-list), [`connect`](#synap-tools-connect), [`sync`](#synap-tools-sync), [`disconnect`](#synap-tools-disconnect), [`schema`](#synap-tools-schema)
+Subcommands: [`list`](#synap-tools-list), [`install`](#synap-tools-install), [`verify`](#synap-tools-verify), [`remove`](#synap-tools-remove), [`connect`](#synap-tools-connect), [`sync`](#synap-tools-sync), [`disconnect`](#synap-tools-disconnect), [`schema`](#synap-tools-schema)
 
 ## `synap tools list`
 
@@ -3415,12 +3420,72 @@ Subcommands: [`list`](#synap-tools-list), [`connect`](#synap-tools-connect), [`s
 synap tools list [options]
 ```
 
-List available tools and their connection status
+List the tools the pod records on this computer, with their state and last check
 
 | Option | Description | Default |
 |---|---|---|
 | `--json` | Output as JSON |  |
-| `--workspace <id>` | Workspace context |  |
+
+## `synap tools install`
+
+```
+synap tools install [options] <capability>
+```
+
+Install a capability's tool on this computer with its declared steps, check it works, record it on the pod
+
+| Argument | Required | Description |
+|---|---|---|
+| `capability` | yes |  |
+
+| Option | Description | Default |
+|---|---|---|
+| `--skip-models` | Skip model downloads (the tool fetches its model on first use) |  |
+| `--dry-run` | Print the steps and the check for this computer; run and record nothing |  |
+| `--manifest <file>` | Read the capability from this manifest file instead of the catalog |  |
+| `--computer <name>` | This computer's name (or `this`); another computer is refused: run it there |  |
+| `--session <id>` | The pod session this install belongs to (recorded with the result) |  |
+| `--json` | Output as JSON |  |
+
+## `synap tools verify`
+
+```
+synap tools verify [options] <capability>
+```
+
+Check a capability's tool works on this computer and record the version it reports
+
+| Argument | Required | Description |
+|---|---|---|
+| `capability` | yes |  |
+
+| Option | Description | Default |
+|---|---|---|
+| `--dry-run` | Print the steps and the check for this computer; run and record nothing |  |
+| `--manifest <file>` | Read the capability from this manifest file instead of the catalog |  |
+| `--computer <name>` | This computer's name (or `this`); another computer is refused: run it there |  |
+| `--session <id>` | The pod session this install belongs to (recorded with the result) |  |
+| `--json` | Output as JSON |  |
+
+## `synap tools remove`
+
+```
+synap tools remove [options] <capability>
+```
+
+Remove a capability's tool from this computer (downloaded models are kept) and record it
+
+| Argument | Required | Description |
+|---|---|---|
+| `capability` | yes |  |
+
+| Option | Description | Default |
+|---|---|---|
+| `--dry-run` | Print the steps and the check for this computer; run and record nothing |  |
+| `--manifest <file>` | Read the capability from this manifest file instead of the catalog |  |
+| `--computer <name>` | This computer's name (or `this`); another computer is refused: run it there |  |
+| `--session <id>` | The pod session this install belongs to (recorded with the result) |  |
+| `--json` | Output as JSON |  |
 
 ## `synap tools connect`
 
