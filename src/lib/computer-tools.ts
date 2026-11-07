@@ -50,6 +50,10 @@ export interface InstallStep {
   elevation?: string;
   /** apt/dnf: runs only when the step before it failed (apt, else dnf). */
   fallback?: boolean;
+  /** Runs only on these CPU types (one download per arch). */
+  arch?: string[];
+  /** download of an archive: leading path parts dropped when unpacking (`tar --strip-components`). */
+  stripComponents?: number;
 }
 
 export interface StepsBlock {
@@ -290,7 +294,8 @@ export function planStep(
         if (!step.dest) return need("a dest");
         const dest = fillPlaceholders(step.dest, values);
         if ("error" in dest) return dest;
-        return { step, admin: false, dest: dest.value, describe: `download ${step.url} to ${dest.value} (checked against its sha256)${size}` };
+        const unpack = step.what === "archive" ? `unpack ${step.url} into` : `download ${step.url} to`;
+        return { step, admin: false, dest: dest.value, describe: `${unpack} ${dest.value} (checked against its sha256)${size}` };
       }
       if (step.what === "model" && step.id) {
         const argv = ["uvx", "--from", "huggingface_hub", "hf", "download", step.id];
@@ -317,10 +322,13 @@ export function planSteps(
   steps: InstallStep[],
   action: StepAction,
   os: string,
-  values: PlaceholderValues = {}
+  values: PlaceholderValues = {},
+  arch?: string
 ): { planned: PlannedStep[] } | { error: string } {
   const planned: PlannedStep[] = [];
   for (const s of steps) {
+    // A step for another CPU type is not this computer's (one archive per arch).
+    if (arch && s.arch?.length && !s.arch.includes(arch)) continue;
     const p = planStep(s, action, os, values);
     if ("error" in p) return p;
     planned.push(p);
@@ -442,6 +450,9 @@ export interface ToolReport {
   observedArch: string;
   verifiedAt: string | null;
   verifyResult: { exitCode: number | null; excerpt: string; outputSha256: string } | null;
+  /** The smoke run, kept apart from the version check: null when none ran. */
+  smokeAt: string | null;
+  smokeResult: { ok: boolean; exitCode: number | null; excerpt: string } | null;
   sessionId?: string;
 }
 
@@ -456,11 +467,14 @@ export function buildToolReport(p: {
   os: string;
   arch: string;
   run?: ProcessResult;
+  smoke?: { run: ProcessResult; ok: boolean };
   at?: Date;
   sessionId?: string;
 }): ToolReport {
-  const out = p.run ? `${p.run.stdout}${p.run.stderr ? `\n${p.run.stderr}` : ""}${p.run.error ? `\n${p.run.error}` : ""}` : "";
+  const text = (r: ProcessResult) => `${r.stdout}${r.stderr ? `\n${r.stderr}` : ""}${r.error ? `\n${r.error}` : ""}`;
+  const out = p.run ? text(p.run) : "";
   const excerpt = redactSecrets(out.trim()).slice(0, EXCERPT_MAX);
+  const at = (p.at ?? new Date()).toISOString();
   return {
     capabilitySlug: p.slug,
     status: p.status,
@@ -468,9 +482,13 @@ export function buildToolReport(p: {
     toolVersion: p.toolVersion,
     observedOs: p.os,
     observedArch: p.arch,
-    verifiedAt: p.run ? (p.at ?? new Date()).toISOString() : null,
+    verifiedAt: p.run ? at : null,
     verifyResult: p.run
       ? { exitCode: p.run.exitCode, excerpt, outputSha256: createHash("sha256").update(out).digest("hex") }
+      : null,
+    smokeAt: p.smoke ? at : null,
+    smokeResult: p.smoke
+      ? { ok: p.smoke.ok, exitCode: p.smoke.run.exitCode, excerpt: redactSecrets(text(p.smoke.run).trim()).slice(0, EXCERPT_MAX) }
       : null,
     ...(p.sessionId ? { sessionId: p.sessionId } : {}),
   };

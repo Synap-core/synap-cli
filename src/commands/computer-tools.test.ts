@@ -3,6 +3,7 @@
  * to end with a fake process runner and a fake pod door: which argv run, in
  * which order, what is refused before anything runs, and what the pod records.
  */
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -203,6 +204,134 @@ describe("admin rights", () => {
     expect(calls).toEqual([]);
     expect(asked).toEqual([]);
     expect(r.message).toMatch(/needs admin rights, and the manifest says it never asks for them/);
+  });
+});
+
+describe("downloads, prerequisites and smoke runs", () => {
+  const archiveBytes = Buffer.from("fake archive");
+  const archiveSha = createHash("sha256").update(archiveBytes).digest("hex");
+  const ffmpeg = (over: object = {}) =>
+    readComputerManifest({
+      meta: { slug: "media-ffmpeg", name: "ffmpeg", version: "1.0.0" },
+      spec: {
+        licence: "GPL-2.0-or-later",
+        placement: { runsOn: ["computer"] },
+        install: {
+          linux: {
+            steps: [
+              { kind: "download", what: "archive", url: "https://x.test/f-x64.tar.xz", sha256: archiveSha, dest: "{tools}/ffmpeg", stripComponents: 1, arch: ["x64"] },
+              { kind: "download", what: "archive", url: "https://x.test/f-arm64.tar.xz", sha256: "0".repeat(64), dest: "{tools}/ffmpeg", stripComponents: 1, arch: ["arm64"] },
+            ],
+            bins: { ffmpeg: "{tools}/ffmpeg/bin/ffmpeg" },
+          },
+        },
+        verify: {
+          linux: {
+            command: ["ffmpeg", "-version"],
+            expect: { stdoutMatches: "^ffmpeg version n?(\\d+\\.\\d+)" },
+            captureVersion: 1,
+            smoke: { command: ["ffmpeg", "-h", "filter=subtitles"], expect: { stdoutContains: "libass" } },
+          },
+        },
+        ...over,
+      },
+    }) as ComputerManifest;
+  let home: string;
+  beforeEach(() => {
+    home = fs.mkdtempSync(path.join(os.tmpdir(), "ct-home-"));
+    vi.stubEnv("HOME", home);
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.unstubAllGlobals();
+    fs.rmSync(home, { recursive: true, force: true });
+  });
+  const tools = () => path.join(home, ".synap", "tools", "opt");
+
+  it("an archive for this CPU is fetched, checked against its sha256 and unpacked with tar; the pinned bin is checked", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(archiveBytes)));
+    const pinned = path.join(tools(), "ffmpeg", "bin", "ffmpeg");
+    const { run, calls } = fakeRun({ [pinned]: { exitCode: 0, stdout: "ffmpeg version n9.0 Copyright\nconfiguration: --enable-libass", stderr: "" }, tar: { exitCode: 0, stdout: "", stderr: "" } });
+    const { door, reports } = fakeDoor();
+    const r = await installTool(ffmpeg(), ctxFor({ run, door, os: "linux", arch: "x64", values: { tools: tools(), home } }));
+    expect(calls[0]!.slice(0, 2)).toEqual(["tar", "-xf"]);
+    expect(calls[0]!.slice(3)).toEqual(["-C", path.join(tools(), "ffmpeg"), "--strip-components=1"]);
+    expect(fs.readFileSync(calls[0]![2]!, "utf8")).toBe("fake archive");
+    expect(calls.slice(1)).toEqual([[pinned, "-version"], [pinned, "-h", "filter=subtitles"]]);
+    expect(r).toMatchObject({ status: "installed", toolVersion: "9.0" });
+    expect(r.message).toMatch(/, checked, smoke test passed$/);
+    expect(reports.at(-1)).toMatchObject({ status: "installed", smokeResult: { ok: true, exitCode: 0 } });
+    expect(reports.at(-1)!.smokeAt).toEqual(reports.at(-1)!.verifiedAt);
+  });
+
+  it("an archive that does not match its sha256 is refused before anything is unpacked", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(Buffer.from("tampered"))));
+    const { run, calls } = fakeRun({});
+    const r = await installTool(ffmpeg(), ctxFor({ run, os: "linux", arch: "x64", values: { tools: tools(), home } }));
+    expect(calls).toEqual([]);
+    expect(r.message).toMatch(/refused: https:\/\/x\.test\/f-x64\.tar\.xz does not match its sha256/);
+  });
+
+  it("a smoke that fails is recorded apart: the tool is still installed, and the message says the smoke failed", async () => {
+    const pinned = path.join(tools(), "ffmpeg", "bin", "ffmpeg");
+    const { run } = fakeRun({ [pinned]: [{ exitCode: 0, stdout: "ffmpeg version 9.0", stderr: "" }, { exitCode: 0, stdout: "no such filter", stderr: "" }] });
+    const { door, reports } = fakeDoor();
+    const r = await verifyTool(ffmpeg(), ctxFor({ run, door, os: "linux", arch: "x64", values: { tools: tools(), home } }));
+    expect(r.status).toBe("installed");
+    expect(r.message).toMatch(/but its smoke test failed$/);
+    expect(reports[0]).toMatchObject({ status: "installed", smokeResult: { ok: false } });
+  });
+
+  it("a smoke that needs a {fixture} is not run, and says so", async () => {
+    const { run, calls } = fakeRun({ mlx_whisper: HELP_OK });
+    const withSmoke = JSON.parse(JSON.stringify(TRANSCRIBE));
+    withSmoke.spec.verify.darwin.smoke = { command: ["mlx_whisper", "{fixture}"], expect: { stdoutContains: "ask not" }, fixture: "jfk.wav" };
+    const { door, reports } = fakeDoor();
+    const r = await verifyTool(readComputerManifest(withSmoke) as ComputerManifest, ctxFor({ run, door }));
+    expect(calls).toEqual([["mlx_whisper", "--help"]]);
+    expect(r.message).toMatch(/\(smoke test not run: the manifest uses \{fixture\}, which this computer does not know\)$/);
+    expect(reports[0]).toMatchObject({ smokeAt: null, smokeResult: null });
+  });
+
+  describe("a prerequisite (requires.capabilities) is its own yes", () => {
+    const needsFfmpeg = () => {
+      const t = JSON.parse(JSON.stringify(TRANSCRIBE));
+      t.spec.placement.requires = { capabilities: [{ slug: "media-ffmpeg" }] };
+      return readComputerManifest(t) as ComputerManifest;
+    };
+    const macFfmpeg = readComputerManifest({
+      meta: { slug: "media-ffmpeg", name: "ffmpeg", version: "1.0.0" },
+      spec: {
+        placement: { runsOn: ["computer"] },
+        install: { darwin: { steps: [{ kind: "brew", package: "ffmpeg-full" }] } },
+        verify: { darwin: { command: ["ffmpeg", "-version"], expect: { exitCode: 0 } } },
+      },
+    }) as ComputerManifest;
+    const load = async () => ({ manifest: macFfmpeg, source: "test" });
+    const FF_MISSING: ProcessResult = { exitCode: null, stdout: "", stderr: "", error: "ffmpeg is not installed on this computer" };
+
+    it("the worker never installs a prerequisite nobody approved", async () => {
+      const { run, calls } = fakeRun({ ffmpeg: FF_MISSING });
+      const r = await installTool(needsFfmpeg(), ctxFor({ run, load, interactive: false, approvedOnPod: true }));
+      expect(calls).toEqual([["ffmpeg", "-version"]]);
+      expect(r.message).toBe("Transcribe on your computer needs ffmpeg first: install media-ffmpeg on this computer (approve it on the pod), then this one");
+    });
+
+    it("a person says yes: the prerequisite installs first, then the tool", async () => {
+      const asked: string[] = [];
+      const { run, calls } = fakeRun({ ffmpeg: [FF_MISSING, { exitCode: 0, stdout: "", stderr: "" }], mlx_whisper: HELP_OK });
+      const r = await installTool(needsFfmpeg(), ctxFor({ run, load, interactive: true, skipModels: true, confirm: async (q) => (asked.push(q), true) }));
+      expect(asked).toEqual(["Transcribe on your computer needs ffmpeg first. Install it?"]);
+      expect(calls).toEqual([["ffmpeg", "-version"], ["brew", "install", "ffmpeg-full"], ["ffmpeg", "-version"], ["uv", "tool", "install", "mlx-whisper"], ["mlx_whisper", "--help"]]);
+      expect(r.status).toBe("installed");
+    });
+
+    it("no means nothing is installed", async () => {
+      const { run, calls } = fakeRun({ ffmpeg: FF_MISSING });
+      const r = await installTool(needsFfmpeg(), ctxFor({ run, load, interactive: true, confirm: async () => false }));
+      expect(calls).toEqual([["ffmpeg", "-version"]]);
+      expect(r.message).toBe("you said no: Transcribe on your computer needs ffmpeg first, nothing was installed");
+    });
   });
 });
 

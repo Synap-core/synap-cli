@@ -58,6 +58,7 @@ export function localPlaceholders(platform: string = process.platform, arch: str
     brewPrefix,
     home: os.homedir(),
     models: path.join(toolsHome(), "models"),
+    tools: path.join(toolsHome(), "opt"),
     workdir: path.join(toolsHome(), "work"),
   };
 }
@@ -315,6 +316,8 @@ export interface ToolResult {
   message: string;
   /** What the pod recorded: "recorded", or why it did not. */
   recorded?: string;
+  /** How the smoke run went, as words appended to a message ("" when none was declared). */
+  smokeWords?: string;
 }
 
 /** The tool's own name for a sentence: the first package the steps install, else the capability's name. */
@@ -349,6 +352,21 @@ export async function runVerify(
   return { outcome: matchVerify(run, check), run, argv: filled.argv };
 }
 
+/**
+ * The smoke run (does the tool WORK, not only answer --version), when the
+ * manifest declares one this computer can fill. A smoke that needs a
+ * `{fixture}` waits for the catalog to ship fixtures: not run, said so.
+ */
+export async function runSmoke(m: ComputerManifest, ctx: RunContext): Promise<{ run: ProcessResult; ok: boolean } | { skipped: string } | undefined> {
+  const smoke = verifyFor(m.spec, ctx.os)?.smoke;
+  if (!smoke) return undefined;
+  const filled = verifyArgv(m.spec, ctx.os, smoke.command, ctx.values);
+  if ("error" in filled) return { skipped: filled.error };
+  const timeoutMs = (m.spec.verify?.timeoutSec ?? 60) * 1000;
+  const run = await (ctx.run ?? runProcess)(filled.argv, { env: ctx.env, timeoutMs });
+  return { run, ok: matchVerify(run, { command: filled.argv, expect: smoke.expect }).ok };
+}
+
 /** Check the tool and record what was found. */
 export async function verifyTool(m: ComputerManifest, ctx: RunContext): Promise<ToolResult> {
   const { outcome, run, argv } = await runVerify(m, ctx);
@@ -356,19 +374,22 @@ export async function verifyTool(m: ComputerManifest, ctx: RunContext): Promise<
     return { status: "dry-run", toolVersion: null, message: `would check: ${argv?.join(" ") ?? outcome.reason}` };
   }
   const status = statusAfterVerify(m.spec, outcome);
+  const smoke = outcome.ok ? await runSmoke(m, ctx) : undefined;
+  const smokeRan = smoke && "run" in smoke ? smoke : undefined;
   const recorded = await sendReport(
     ctx,
-    buildToolReport({ slug: m.slug, status, manifestVersion: m.version, toolVersion: outcome.toolVersion, os: ctx.os, arch: ctx.arch, run, sessionId: ctx.sessionId })
+    buildToolReport({ slug: m.slug, status, manifestVersion: m.version, toolVersion: outcome.toolVersion, os: ctx.os, arch: ctx.arch, run, smoke: smokeRan, sessionId: ctx.sessionId })
   );
+  const smokeWords = !smoke ? "" : "skipped" in smoke ? " (smoke test not run: " + smoke.skipped + ")" : smoke.ok ? ", smoke test passed" : ", but its smoke test failed";
   const name = toolName(m, ctx.os);
   const v = outcome.toolVersion ? ` ${outcome.toolVersion}` : "";
   const message =
     status === "installed"
-      ? `${name}${v} works on ${computerName()}, checked`
+      ? `${name}${v} works on ${computerName()}, checked${smokeWords}`
       : status === "drifted"
         ? `${name}${v} on ${computerName()} is outside the version ${m.slug} needs (${m.spec.placement?.requires?.tool?.version})`
         : `${name} does not work on ${computerName()}: ${outcome.reason}`;
-  return { status, toolVersion: outcome.toolVersion, message, recorded };
+  return { status, toolVersion: outcome.toolVersion, message, recorded, smokeWords };
 }
 
 /** Everything that must hold before a step runs: platform, steps, refusals, disk. */
@@ -382,7 +403,7 @@ export function preflight(
   if (!allowed.ok) return { error: `${m.name} ${allowed.reason}` };
   const steps = stepsFor(action === "install" ? m.spec.install : m.spec.uninstall, ctx.os);
   if ("error" in steps) return { error: `${m.name} has ${steps.error}` };
-  const plan = planSteps(steps.steps, action, ctx.os, ctx.values);
+  const plan = planSteps(steps.steps, action, ctx.os, ctx.values, ctx.arch);
   if ("error" in plan) return plan;
   const elevation = elevationRefusal(m.spec, plan.planned);
   if (elevation) return { error: elevation };
@@ -435,20 +456,28 @@ async function runSteps(planned: PlannedStep[], m: ComputerManifest, ctx: RunCon
     if (p.step.kind === "script" || (p.step.kind === "download" && p.step.url)) {
       const buf = await fetchChecked(p.step.url!, p.step.sha256!);
       if (!Buffer.isBuffer(buf)) return buf;
-      if (p.step.kind === "download") {
+      if (p.step.kind === "download" && p.step.what === "archive") {
+        // Unpack with tar (macOS, Linux and Windows 10+ ship it), as an argv like any step.
+        const file = path.join(toolsHome(), "downloads", `${m.slug}-${p.step.sha256!.slice(0, 12)}${path.extname(new URL(p.step.url!).pathname)}`);
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        fs.mkdirSync(p.dest!, { recursive: true });
+        fs.writeFileSync(file, buf);
+        argv = ["tar", "-xf", file, "-C", p.dest!, ...(p.step.stripComponents ? [`--strip-components=${p.step.stripComponents}`] : [])];
+      } else if (p.step.kind === "download") {
         fs.mkdirSync(path.dirname(p.dest!), { recursive: true });
-        fs.writeFileSync(p.dest!, buf);
+        fs.writeFileSync(p.dest!, buf, { mode: p.step.what === "binary" ? 0o755 : 0o644 });
         previousFailed = false;
         continue;
+      } else {
+        const script = path.join(toolsHome(), "scripts", `${m.slug}-${p.step.sha256!.slice(0, 12)}`);
+        fs.mkdirSync(path.dirname(script), { recursive: true });
+        fs.writeFileSync(script, buf, { mode: 0o700 });
+        if (ctx.interactive && !ctx.approvedOnPod) {
+          ctx.say(chalk.dim(buf.toString("utf8").split("\n").slice(0, 40).join("\n")));
+          if (!(await ctx.confirm?.(`Run this script from ${p.step.url}?`))) return { error: "you did not run the script: nothing else was changed" };
+        }
+        argv = argv!.map((a) => a.split("{script}").join(script));
       }
-      const script = path.join(toolsHome(), "scripts", `${m.slug}-${p.step.sha256!.slice(0, 12)}`);
-      fs.mkdirSync(path.dirname(script), { recursive: true });
-      fs.writeFileSync(script, buf, { mode: 0o700 });
-      if (ctx.interactive && !ctx.approvedOnPod) {
-        ctx.say(chalk.dim(buf.toString("utf8").split("\n").slice(0, 40).join("\n")));
-        if (!(await ctx.confirm?.(`Run this script from ${p.step.url}?`))) return { error: "you did not run the script: nothing else was changed" };
-      }
-      argv = argv!.map((a) => a.split("{script}").join(script));
     }
     const res = await (ctx.run ?? runProcess)(argv!, {
       env: ctx.env,
@@ -505,7 +534,13 @@ export async function installTool(m: ComputerManifest, ctx: RunContext): Promise
     if ("error" in loaded) return { status: "refused", toolVersion: null, message: `${m.name} needs ${dep.slug} first: ${loaded.error}` };
     const { outcome } = await runVerify(loaded.manifest, ctx);
     if (outcome.ok) continue;
-    ctx.say(`${m.name} needs ${loaded.manifest.name} first.`);
+    // Each tool is asked for once per computer (decision 2): a prerequisite is its own yes.
+    if (!ctx.interactive) {
+      return { status: "refused", toolVersion: null, message: `${m.name} needs ${loaded.manifest.name} first: install ${dep.slug} on this computer (approve it on the pod), then this one` };
+    }
+    if (!(await ctx.confirm?.(`${m.name} needs ${loaded.manifest.name} first. Install it?`))) {
+      return { status: "refused", toolVersion: null, message: `you said no: ${m.name} needs ${loaded.manifest.name} first, nothing was installed` };
+    }
     const r = await installTool(loaded.manifest, { ...ctx, visited });
     if (r.status !== "installed") return { status: "refused", toolVersion: null, message: `${m.name} needs ${loaded.manifest.name} first: ${r.message}` };
   }
@@ -534,7 +569,7 @@ export async function installTool(m: ComputerManifest, ctx: RunContext): Promise
   const checked = await verifyTool(m, ctx);
   if (checked.status === "installed") {
     const v = checked.toolVersion ? ` ${checked.toolVersion}` : "";
-    return { ...checked, message: `Installed ${toolName(m, ctx.os)}${v} on ${computerName()}, checked` };
+    return { ...checked, message: `Installed ${toolName(m, ctx.os)}${v} on ${computerName()}, checked${checked.smokeWords ?? ""}` };
   }
   return { ...checked, message: `${checked.message}. Log: ${logFile}` };
 }

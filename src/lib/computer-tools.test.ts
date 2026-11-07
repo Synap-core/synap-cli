@@ -138,6 +138,16 @@ describe("planStep: exact argv, never a shell line", () => {
     });
   });
 
+  it("a step for another CPU type is not this computer's", () => {
+    const steps = [
+      { kind: "download", what: "archive", url: "https://x.test/x64.tar.xz", sha256: "a".repeat(64), dest: "{tools}/ffmpeg", arch: ["x64"] },
+      { kind: "download", what: "archive", url: "https://x.test/arm64.tar.xz", sha256: "b".repeat(64), dest: "{tools}/ffmpeg", arch: ["arm64"] },
+    ];
+    const arm = planSteps(steps, "install", "linux", { tools: "/t" }, "arm64");
+    expect("planned" in arm && arm.planned.map((p) => p.step.url)).toEqual(["https://x.test/arm64.tar.xz"]);
+    expect("planned" in arm && arm.planned[0]!.describe).toBe("unpack https://x.test/arm64.tar.xz into /t/ffmpeg (checked against its sha256)");
+  });
+
   it("one refused step refuses the whole plan: nothing runs", () => {
     const r = planSteps([{ kind: "brew", package: "a" }, { kind: "telnet" }], "install", "darwin");
     expect(r).toEqual({ error: 'refused: "telnet" is not a step this computer runs' });
@@ -230,7 +240,7 @@ describe("the report the pod records", () => {
       sessionId: "s-1",
     });
     expect(Object.keys(r).sort()).toEqual(
-      ["capabilitySlug", "manifestVersion", "observedArch", "observedOs", "sessionId", "status", "toolVersion", "verifiedAt", "verifyResult"].sort()
+      ["capabilitySlug", "manifestVersion", "observedArch", "observedOs", "sessionId", "smokeAt", "smokeResult", "status", "toolVersion", "verifiedAt", "verifyResult"].sort()
     );
     expect(r).toMatchObject({ capabilitySlug: "media-ffmpeg", status: "installed", toolVersion: "7.1.1", observedOs: "darwin", observedArch: "arm64", verifiedAt: "2026-11-07T10:00:00.000Z" });
     expect(r.verifyResult).toEqual({
