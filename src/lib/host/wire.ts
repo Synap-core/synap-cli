@@ -59,9 +59,11 @@ export interface LeasedHostJob {
   queuedAt: string;
   installation: {
     id: string;
-    /** Absent from a pod that predates kinds: derived from the manifest (`installationKind`). */
+    /** Always sent by the pod; derived from the manifest when absent (`installationKind`). */
     kind?: InstallationKind;
     capabilityKey: string;
+    /** The version the person approved (an upgrade is a new approval). */
+    desiredVersion?: string | null;
     capabilityVersion: string | null;
     upstreamVersion: string | null;
     /** The manifest AS APPROVED: the runner writes compose from it only. */
@@ -98,7 +100,7 @@ export interface HealthReport {
 
 /**
  * A tool's check, as a report and a finish carry it (`ComputerToolReportSchema`
- * merged into the host-job wire, reconciliation f75fbb48 §4 #779). The pod
+ * merged into the host-job wire, @synap-core/types/host-jobs, backend#779). The pod
  * derives health from it: drift from `observedVersion` against the manifest's
  * range, stale from the check's age.
  */

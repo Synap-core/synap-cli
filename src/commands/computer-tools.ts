@@ -98,12 +98,14 @@ export interface InstallationRow {
   observedVersion?: string | null;
   desiredVersion?: string | null;
   verifiedAt?: string | null;
-  health?: string | { verdict?: string } | null;
+  /** The pod's derived verdict: ok | degraded | drifted | stale | unknown | failed. */
+  health?: string | null;
 }
 
 export interface InstallationsDoor {
   /** With the person's key: their ask is approved; an agent's waits for them. */
-  request(body: { capabilityKey: string; kind: "tool"; action: ToolAction; computer: "me"; sessionId?: string }): Promise<RequestAnswer>;
+  /** The pod derives the kind from the capability's manifest. */
+  request(body: { capabilityKey: string; action: ToolAction; computer: "me"; sessionId?: string }): Promise<RequestAnswer>;
   /** With the computer's key: what the pod records on this computer. */
   list(): Promise<InstallationRow[]>;
 }
@@ -230,7 +232,7 @@ export async function toolViaPod(
 ): Promise<{ ok: boolean; lines: Array<{ level: "success" | "error" | "warn" | "info"; text: string }> }> {
   let answer: RequestAnswer;
   try {
-    answer = await env.door.request({ capabilityKey: slug, kind: "tool", action, computer: "me", ...(opts.session ? { sessionId: opts.session } : {}) });
+    answer = await env.door.request({ capabilityKey: slug, action, computer: "me", ...(opts.session ? { sessionId: opts.session } : {}) });
   } catch (err) {
     if (!isMissingDoor(err)) return { ok: false, lines: [{ level: "error", text: `${env.pod} did not take the request: ${(err as Error).message}` }] };
     if (action !== "verify") {
@@ -321,7 +323,7 @@ async function toolsAction(action: ToolAction, slug: string, opts: ToolsCommandO
       ? {
           prerequisite: async (dep: ComputerManifest) => {
             if (!(await ctx.confirm?.(`This needs ${dep.name} first. Install it?`))) return { ok: false as const, message: "you said no: nothing was installed" };
-            const asked = await door.request({ capabilityKey: dep.slug, kind: "tool", action: "install", computer: "me" });
+            const asked = await door.request({ capabilityKey: dep.slug, action: "install", computer: "me" });
             if (asked.status === "proposed") return { ok: false as const, message: `approve ${dep.slug} first${asked.reviewUrl ? `: ${asked.reviewUrl}` : " on the pod"}` };
             // The outer job holds this computer's runner: the prerequisite's job runs inside it.
             const inner = await env.pass.leaseAndRun((j) => (asked.jobId ? j.id === asked.jobId : j.installation.capabilityKey === dep.slug));
@@ -376,7 +378,7 @@ export async function toolsListCommand(opts: { json?: boolean }): Promise<void> 
     return;
   }
   for (const r of rows) {
-    const health = typeof r.health === "string" ? r.health : r.health?.verdict;
+    const health = r.health;
     const version = r.observedVersion ? `  ${r.observedVersion}` : "";
     const checked = r.verifiedAt ? `, checked ${r.verifiedAt.slice(0, 10)}` : "";
     log.info(`${r.capabilityKey}  ${resolveStatusLabel(r.status)}${health ? ` (${resolveStatusLabel(health)})` : ""}${version}${checked}`);

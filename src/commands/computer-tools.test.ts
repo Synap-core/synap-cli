@@ -52,7 +52,7 @@ describe("synap tools goes through the pod", () => {
   it("files the request as this computer's, then runs the job the pod queued, and says it is recorded", async () => {
     const { env, asked, matched } = fakeEnv({ status: "approved", installationId: "i1", jobId: "j1" }, { ran: true, finish: done(), message: "Installed mlx-whisper on mac, checked" });
     const r = await toolViaPod("install", "media-transcribe", env, { session: "s1" });
-    expect(asked).toEqual([{ capabilityKey: "media-transcribe", kind: "tool", action: "install", computer: "me", sessionId: "s1" }]);
+    expect(asked).toEqual([{ capabilityKey: "media-transcribe", action: "install", computer: "me", sessionId: "s1" }]);
     expect(matched[0]!({ id: "j1", installation: { capabilityKey: "x" } })).toBe(true);
     expect(matched[0]!({ id: "j2", installation: { capabilityKey: "media-transcribe" } })).toBe(false);
     expect(r).toEqual({ ok: true, lines: [{ level: "success", text: "Installed mlx-whisper on mac, checked (recorded on pod.example)" }] });
