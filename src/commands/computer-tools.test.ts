@@ -130,6 +130,24 @@ describe("synap tools goes through the pod", () => {
       });
     });
 
+    it.each(["install", "remove"] as const)("%s: the door's own 404 is said as the pod said it, never \"update the pod\"", async (action) => {
+      const notInstallable = new HubError({
+        message: "Hub POST /installations/request failed (HTTP 404): media-ffmpeg is not a capability this pod can install on a computer.",
+        status: 404,
+        code: "NOT_INSTALLABLE",
+        rawBody: "{}",
+        path: "/installations/request",
+        method: "POST",
+      });
+      const { env, matched } = fakeEnv(notInstallable);
+      const r = await toolViaPod(action, "media-ffmpeg", env, {});
+      expect(matched).toEqual([]);
+      expect(r).toEqual({
+        ok: false,
+        lines: [{ level: "error", text: "pod.example did not take the request: Hub POST /installations/request failed (HTTP 404): media-ffmpeg is not a capability this pod can install on a computer." }],
+      });
+    });
+
     it("a refused read says the pod's refusal; only the router's 404 is a missing door", () => {
       const refused = new HubError({
         message: "Hub GET /installations failed (HTTP 403): This door does not support scoped keys yet: its reads are not bounded by a grant.",
