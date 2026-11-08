@@ -10,7 +10,8 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { RunContext } from "../lib/host/tool-run.js";
 import { HostDoorClosedError, type FinishBody } from "../lib/host/wire.js";
-import { toolsInstallCommand, toolViaPod, type InstallationsDoor, type PassDeps, type RanHere, type ToolsEnv } from "./computer-tools.js";
+import { HubError } from "../lib/hub-client.js";
+import { listFailureLine, toolsInstallCommand, toolViaPod, type InstallationsDoor, type PassDeps, type RanHere, type ToolsEnv } from "./computer-tools.js";
 
 const FIXTURE = new URL("../../test/fixtures/media-transcribe.capability.json", import.meta.url).pathname;
 
@@ -106,6 +107,43 @@ describe("synap tools goes through the pod", () => {
       expect(r.ok).toBe(false);
       expect(r.lines.map((l) => l.level)).toEqual(["success", "warn"]);
       expect(r.lines[1]!.text).toBe(`not recorded: pod.example has no installations door yet (manifest: ${FIXTURE})`);
+    });
+
+    it("the door's own 404 is not a missing door: the pod's reason is said (founder's Mac, 2026-11-08)", async () => {
+      const notInstallable = new HubError({
+        message: "Hub POST /installations/request failed (HTTP 404): media-ffmpeg is not a capability this pod can install on a computer.",
+        status: 404,
+        code: "NOT_INSTALLABLE",
+        detail: "media-ffmpeg is not a capability this pod can install on a computer.",
+        rawBody: '{"code":"NOT_INSTALLABLE","error":"media-ffmpeg is not a capability this pod can install on a computer."}',
+        path: "/installations/request",
+        method: "POST",
+      });
+      const { env } = fakeEnv(notInstallable);
+      let ranHere = false;
+      env.ctx = quietCtx({ run: async () => ((ranHere = true), { exitCode: 1, stdout: "", stderr: "" }) });
+      const r = await toolViaPod("verify", "media-ffmpeg", env, { manifest: FIXTURE });
+      expect(ranHere).toBe(false);
+      expect(r).toEqual({
+        ok: false,
+        lines: [{ level: "error", text: "pod.example did not take the request: Hub POST /installations/request failed (HTTP 404): media-ffmpeg is not a capability this pod can install on a computer." }],
+      });
+    });
+
+    it("a refused read says the pod's refusal; only the router's 404 is a missing door", () => {
+      const refused = new HubError({
+        message: "Hub GET /installations failed (HTTP 403): This door does not support scoped keys yet: its reads are not bounded by a grant.",
+        status: 403,
+        code: "GRANT_DOOR_UNSUPPORTED",
+        rawBody: "{}",
+        path: "/installations",
+        method: "GET",
+      });
+      expect(listFailureLine("pod.example", "mac", refused)).toBe(
+        "could not read what is installed on mac from pod.example: Hub GET /installations failed (HTTP 403): This door does not support scoped keys yet: its reads are not bounded by a grant."
+      );
+      const routerMissing = new HubError({ message: "Hub GET /installations failed (HTTP 404): Not found", status: 404, rawBody: '{"error":"Not found"}', path: "/installations", method: "GET" });
+      expect(listFailureLine("pod.example", "mac", routerMissing)).toBe("pod.example cannot list what is installed on its computers yet (no installations door): update the pod");
     });
 
     it("any other refusal is said as it is", async () => {
