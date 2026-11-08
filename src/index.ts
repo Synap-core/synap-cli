@@ -1212,7 +1212,7 @@ proposals
 
 const worker = program
   .command("worker")
-  .description("Run Claude Code unattended here for the sessions handed to an agent")
+  .description("Run this computer's work: the sessions handed to an agent, and the installs the person approved on the pod (host jobs)")
   // Not requiredOption: commander checks a parent's required options for its
   // subcommands too, and `worker status|start|stop` act on every agent without it.
   .option("--agent <name>", "The named agent this machine works as (its key comes from ~/.synap); required")
@@ -1241,7 +1241,15 @@ const worker = program
     "--protocols <list>",
     "Which runs this computer takes: code, work-folder (comma-separated; default both). A computer that runs no code, like the person's Mac, takes work-folder only; a design run counts as code"
   )
+  .option("--host-only", "Run only this computer's host jobs (installs, updates, removals, checks), no agent: a server's synap-host user")
+  .option("--host-config <file>", "Host runner config (default /etc/synap-host/config.json when present)")
   .action(async (opts: import("./commands/worker.js").WorkerOptions, cmd: Command) => {
+    if (opts.hostOnly) {
+      if (opts.agent) cmd.error("error: --host-only runs no agent: drop --agent, or drop --host-only");
+      const { hostOnlyCommand } = await import("./commands/worker.js");
+      await hostOnlyCommand(opts);
+      return;
+    }
     if (!opts.agent) cmd.error("error: required option '--agent <name>' not specified");
     const { workerCommand } = await import("./commands/worker.js");
     await workerCommand(opts);
@@ -2763,17 +2771,51 @@ program
 
 const tools = program
   .command("tools")
-  .description("Add and manage external service tools and their credentials");
+  .description("Install, check and remove a capability's tool on this computer (connect/sync/disconnect/schema: deprecated, use `synap cap`)");
 
+// Computer tools (plan b647769e, decision 168f34db): run ON the computer, the
+// steps the capability declares for this OS, recorded on the pod. See
+// src/commands/computer-tools.ts.
 tools
   .command("list")
-  .description("List available tools and their connection status")
+  .description("List the tools the pod records on this computer, with their state and last check")
   .option("--json", "Output as JSON")
-  .option("--workspace <id>", "Workspace context")
-  .action(async (opts) => {
-    const { toolsList } = await import("./commands/tools.js");
-    await toolsList(opts);
+  .action(async (opts: { json?: boolean }) => {
+    const { toolsListCommand } = await import("./commands/computer-tools.js");
+    await toolsListCommand(opts);
   });
+
+const toolStepOptions = (c: Command) =>
+  c
+    .option("--dry-run", "Print the steps and the check for this computer; run and record nothing")
+    .option("--manifest <file>", "Read the capability from this manifest file instead of the catalog")
+    .option("--computer <name>", "This computer's name (or `this`); another computer is refused: run it there")
+    .option("--session <id>", "The pod session this install belongs to (recorded with the result)")
+    .option("--json", "Output as JSON");
+
+toolStepOptions(
+  tools
+    .command("install <capability>")
+    .description("Install a capability's tool on this computer with its declared steps, check it works, record it on the pod")
+    .option("--skip-models", "Skip model downloads (the tool fetches its model on first use)")
+).action(async (slug: string, opts: import("./commands/computer-tools.js").ToolsCommandOpts) => {
+  const { toolsInstallCommand } = await import("./commands/computer-tools.js");
+  await toolsInstallCommand(slug, opts);
+});
+
+toolStepOptions(
+  tools.command("verify <capability>").description("Check a capability's tool works on this computer and record the version it reports")
+).action(async (slug: string, opts: import("./commands/computer-tools.js").ToolsCommandOpts) => {
+  const { toolsVerifyCommand } = await import("./commands/computer-tools.js");
+  await toolsVerifyCommand(slug, opts);
+});
+
+toolStepOptions(
+  tools.command("remove <capability>").description("Remove a capability's tool from this computer (downloaded models are kept) and record it")
+).action(async (slug: string, opts: import("./commands/computer-tools.js").ToolsCommandOpts) => {
+  const { toolsRemoveCommand } = await import("./commands/computer-tools.js");
+  await toolsRemoveCommand(slug, opts);
+});
 
 tools
   .command("connect <service>")

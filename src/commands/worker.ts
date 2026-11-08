@@ -136,6 +136,13 @@ export interface WorkerOptions {
   engine?: WorkerEngine;
   /** How long a run of a program engine may take before it is stopped (default 60m). Claude runs are not timed. */
   runTimeout?: string;
+  /**
+   * Run only this computer's host jobs (installs, updates, removals and checks
+   * the person approved on the pod), no agent: a server's `synap-host` user.
+   */
+  hostOnly?: boolean;
+  /** The host runner's config file (default /etc/synap-host/config.json when present). */
+  hostConfig?: string;
 }
 
 export interface HandedItem {
@@ -2033,6 +2040,21 @@ export async function workerCommand(opts: WorkerOptions): Promise<void> {
   process.on("SIGINT", stop);
   say(`every ${intervalMs / 1000}s`);
 
+  // This computer's host jobs (one installer, reconciliation f75fbb48 §3.3):
+  // what the person approved on the pod gets installed, updated, removed and
+  // checked here, as THIS computer (its own key), one runner per computer.
+  const host = await startHostRunner(cfg.podUrl, enrol.computerKey, opts);
+  const stopAll = () => {
+    stop();
+    host?.stop.abort();
+  };
+  process.removeListener("SIGTERM", stop);
+  process.removeListener("SIGINT", stop);
+  process.on("SIGTERM", stopAll);
+  process.on("SIGINT", stopAll);
+  if (host && opts.once) await host.once();
+  const hostLoop = host && !opts.once ? host.loop() : undefined;
+
   let failures = 0;
   let paused = false;
   while (!stopping) {
@@ -2071,6 +2093,49 @@ export async function workerCommand(opts: WorkerOptions): Promise<void> {
       await worker.watch();
     }
   }
+  host?.stop.abort();
+  await hostLoop;
+}
+
+/**
+ * The host runner beside the agent's work. Its failures are said, never the
+ * worker's: a computer that does not install from the pod, or a broken host
+ * config, leaves the agent working. Undefined when it cannot start.
+ */
+async function startHostRunner(
+  podUrl: string,
+  computerKey: string,
+  opts: Pick<WorkerOptions, "hostConfig" | "dryRun">
+): Promise<{ stop: AbortController; loop: () => Promise<void>; once: () => Promise<void> } | undefined> {
+  if (opts.dryRun) {
+    say("host: --dry-run: this computer's host jobs are not leased");
+    return undefined;
+  }
+  const { createHostRunner, runHostLoop } = await import("../lib/host/runner.js");
+  let deps;
+  try {
+    deps = createHostRunner({ podUrl, computerKey, hostConfig: opts.hostConfig, log: (l) => say(`host: ${l}`) });
+  } catch (err) {
+    say(`host: this computer's host jobs do not run: ${(err as Error).message}`);
+    return undefined;
+  }
+  const stop = new AbortController();
+  const run = (once: boolean) =>
+    runHostLoop(deps, { idleMs: 30_000, errorWaitMs: 60_000, once, signal: stop.signal }).catch((err: Error) => say(`host: ${err.message}`));
+  return { stop, loop: () => run(false), once: () => run(true) };
+}
+
+/** `synap worker --host-only`: this computer's host jobs, no agent (a server's `synap-host` user). */
+export async function hostOnlyCommand(opts: Pick<WorkerOptions, "once" | "hostConfig">): Promise<void> {
+  const cfg = await resolveHubConfig();
+  const enrol = await ensureComputerEnrolled(cfg.podUrl, "run `synap worker --host-only` again", { interactive: false });
+  if (!enrol.enrolled) throw new Error(enrol.message);
+  const { createHostRunner, hostRunnerLine, runHostLoop } = await import("../lib/host/runner.js");
+  const deps = createHostRunner({ podUrl: cfg.podUrl, computerKey: enrol.computerKey, hostConfig: opts.hostConfig, log: say });
+  say(hostRunnerLine(deps, cfg.podUrl));
+  const stop = new AbortController();
+  for (const sig of ["SIGINT", "SIGTERM"] as const) process.once(sig, () => stop.abort());
+  await runHostLoop(deps, { idleMs: 10_000, errorWaitMs: 30_000, once: opts.once, signal: stop.signal });
 }
 
 /**

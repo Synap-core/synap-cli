@@ -116,7 +116,7 @@ export function writeSecretFile(file: string, data: string, opts: { mode?: numbe
  * follow a symlink at `file` (O_NOFOLLOW, ELOOP), so a link planted there
  * cannot redirect the write. The caller creates the 0700 directory.
  */
-export function writeSecretFileNoFollow(file: string, data: string, opts: { mode?: number } = {}): void {
+export function writeSecretFileNoFollow(file: string, data: string | Buffer, opts: { mode?: number } = {}): void {
   const mode = opts.mode ?? 0o600;
   // O_NOFOLLOW is undefined on Windows, where a symlink needs privilege to plant.
   // Node accepts a numeric flag at runtime; its typings only list the string form.
