@@ -94,9 +94,9 @@ Every command also accepts `-h, --help`.
   - [`synap worker status`](#synap-worker-status) — Show each agent login service on this Mac: running, pid, last exit, log
   - [`synap worker uninstall`](#synap-worker-uninstall) — Remove the agent's login service from this Mac (needs --agent)
 - [`synap waker`](#synap-waker) — Start this computer's agents when work is handed to them (the pod's "Wakes agents")
-  - [`synap waker install`](#synap-waker-install) — Run the waker as a login service on this Mac; opens pod admin when "Wakes agents" is off
+  - [`synap waker install`](#synap-waker-install) — Run the waker as a service (launchd on a Mac, systemd on Linux); opens pod admin when "Wakes agents" is off
   - [`synap waker status`](#synap-waker-status) — Show the waker service and what the pod says for this computer
-  - [`synap waker uninstall`](#synap-waker-uninstall) — Remove the waker's login service from this Mac
+  - [`synap waker uninstall`](#synap-waker-uninstall) — Remove the waker's service from this computer
 - [`synap box`](#synap-box) — Run scripts in fresh isolated boxes on this computer (run box provisioner)
   - [`synap box serve`](#synap-box-serve) — Lease queued box runs from the pod and run each in a fresh box
   - [`synap box reap`](#synap-box-reap) — Destroy every box no run holds (after a crash)
@@ -1615,7 +1615,7 @@ Start this computer's agents when work is handed to them (the pod's "Wakes agent
 
 | Option | Description | Default |
 |---|---|---|
-| `--interval <dur>` | How often to ask the pod (e.g. 30s, 1m) | `"30s"` |
+| `--interval <dur>` | How often to ask the pod, 5s to 60s (e.g. 30s, 1m) | `"30s"` |
 | `--once` | Ask once, start what is due, wait for those workers, exit |  |
 | `--protocols <list>` | Passed to every worker it starts: code, work-folder (comma-separated) |  |
 
@@ -1627,7 +1627,7 @@ Subcommands: [`install`](#synap-waker-install), [`status`](#synap-waker-status),
 synap waker install [options]
 ```
 
-Run the waker as a login service on this Mac; opens pod admin when "Wakes agents" is off
+Run the waker as a service (launchd on a Mac, systemd on Linux); opens pod admin when "Wakes agents" is off
 
 ## `synap waker status`
 
@@ -1647,7 +1647,7 @@ Show the waker service and what the pod says for this computer
 synap waker uninstall [options]
 ```
 
-Remove the waker's login service from this Mac
+Remove the waker's service from this computer
 
 ## `synap box`
 
