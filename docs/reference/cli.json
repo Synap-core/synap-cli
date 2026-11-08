@@ -3128,7 +3128,7 @@
           {
             "flags": "--interval <dur>",
             "long": "--interval",
-            "description": "How often to ask the pod (e.g. 30s, 1m)",
+            "description": "How often to ask the pod, 5s to 60s (e.g. 30s, 1m)",
             "takesValue": "required",
             "default": "30s"
           },
@@ -3150,7 +3150,7 @@
             "path": "synap waker install",
             "name": "install",
             "usage": "[options]",
-            "description": "Run the waker as a login service on this Mac; opens pod admin when \"Wakes agents\" is off",
+            "description": "Run the waker as a service (launchd on a Mac, systemd on Linux); opens pod admin when \"Wakes agents\" is off",
             "hidden": false,
             "arguments": [],
             "options": [],
@@ -3177,7 +3177,7 @@
             "path": "synap waker uninstall",
             "name": "uninstall",
             "usage": "[options]",
-            "description": "Remove the waker's login service from this Mac",
+            "description": "Remove the waker's service from this computer",
             "hidden": false,
             "arguments": [],
             "options": [],

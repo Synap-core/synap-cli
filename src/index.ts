@@ -1308,7 +1308,7 @@ worker
 const waker = program
   .command("waker")
   .description("Start this computer's agents when work is handed to them (the pod's \"Wakes agents\")")
-  .option("--interval <dur>", "How often to ask the pod (e.g. 30s, 1m)", "30s")
+  .option("--interval <dur>", "How often to ask the pod, 5s to 60s (e.g. 30s, 1m)", "30s")
   .option("--once", "Ask once, start what is due, wait for those workers, exit")
   .option("--protocols <list>", "Passed to every worker it starts: code, work-folder (comma-separated)")
   .action(async (opts: { interval?: string; once?: boolean; protocols?: string }) => {
@@ -1318,7 +1318,7 @@ const waker = program
 
 waker
   .command("install")
-  .description("Run the waker as a login service on this Mac; opens pod admin when \"Wakes agents\" is off")
+  .description("Run the waker as a service (launchd on a Mac, systemd on Linux); opens pod admin when \"Wakes agents\" is off")
   .action(async (_opts: unknown, cmd: Command) => {
     const { wakerInstallCommand } = await import("./commands/waker.js");
     await wakerInstallCommand({ protocols: cmd.optsWithGlobals().protocols });
@@ -1335,7 +1335,7 @@ waker
 
 waker
   .command("uninstall")
-  .description("Remove the waker's login service from this Mac")
+  .description("Remove the waker's service from this computer")
   .action(async () => {
     const { wakerUninstallCommand } = await import("./commands/waker.js");
     await wakerUninstallCommand();
