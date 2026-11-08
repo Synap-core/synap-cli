@@ -44,6 +44,8 @@ export interface PodRefusal {
   knownClient?: boolean;
   /** True when the request asked for the agent as the person (`asPerson`, W3). */
   asPerson?: boolean;
+  /** True when an installed agent template names the type (an engine, never a custom agent). */
+  engineTemplate?: boolean;
   /** The pod the call went to, to name pod admin's pages. */
   podUrl?: string;
 }
@@ -123,6 +125,16 @@ export function explainPodError(r: PodRefusal): PodErrorText {
   if (code === POD_ERROR_CODES.surfaceAgentTypeRequired) {
     if (r.knownClient === false) {
       const name = r.client ?? "this agent";
+      // An agent template's program (hermes, …) refused: this pod does not
+      // know that template as an AI program on a computer yet. Never the
+      // custom path: it would make a personal agent instead of this
+      // computer's.
+      if (r.engineTemplate) {
+        return {
+          line: `Your pod does not know ${r.clientLabel ?? name} as an AI program on a computer yet: it needs a newer pod.`,
+          next: `Update the pod from ${podAdminHomeOf(r.podUrl)}, then run this again.`,
+        };
+      }
       // Asked as the person and still refused: this pod predates that request
       // (an older pod ignores `asPerson`). Plainly that, and where else to do it.
       if (r.asPerson) {

@@ -281,7 +281,7 @@ function isCatalogMissing(err: unknown): boolean {
 function catalogNeedsDeploy(): void {
   log.warn("This pod doesn't expose the capability catalog yet.");
   log.dim("`synap cap` needs the latest pod deploy (GET /capabilities/catalog).");
-  log.dim("Update the pod, then retry — or use `synap tools list` in the meantime.");
+  log.dim("Update the pod, then retry.");
 }
 
 /** Resolve a name/key (case-insensitive) to its catalog card. */

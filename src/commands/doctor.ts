@@ -1050,7 +1050,7 @@ async function finish(
     }
   }
 
-  // ── One agent, several computers ─────────────────────────────────────────
+  // ── Connected agents, each by its computer ───────────────────────────────
   if (hubCfg) {
     log.blank();
     console.log(chalk.bold("Connected agents"));

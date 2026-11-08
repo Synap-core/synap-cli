@@ -1212,7 +1212,7 @@ proposals
 
 const worker = program
   .command("worker")
-  .description("Run Claude Code unattended here for the sessions handed to an agent")
+  .description("Run this computer's work: the sessions handed to an agent, and the installs the person approved on the pod (host jobs)")
   // Not requiredOption: commander checks a parent's required options for its
   // subcommands too, and `worker status|start|stop` act on every agent without it.
   .option("--agent <name>", "The named agent this machine works as (its key comes from ~/.synap); required")
@@ -1236,11 +1236,20 @@ const worker = program
   .option("--allowed-tools <list>", "Comma-separated Claude tools allowed without asking (the pod MCP server is always added)")
   .option("--skip-permissions", "Launch with --dangerously-skip-permissions instead of an allow-list")
   .option("--dry-run", "Claim and log what would launch, without launching Claude")
+  .option("--run-timeout <dur>", "How long a run may take when the agent's template wakes another program than Claude Code (e.g. 30m, 2h; default 60m)")
   .option(
     "--protocols <list>",
     "Which runs this computer takes: code, work-folder (comma-separated; default both). A computer that runs no code, like the person's Mac, takes work-folder only; a design run counts as code"
   )
+  .option("--host-only", "Run only this computer's host jobs (installs, updates, removals, checks), no agent: a server's synap-host user")
+  .option("--host-config <file>", "Host runner config (default /etc/synap-host/config.json when present)")
   .action(async (opts: import("./commands/worker.js").WorkerOptions, cmd: Command) => {
+    if (opts.hostOnly) {
+      if (opts.agent) cmd.error("error: --host-only runs no agent: drop --agent, or drop --host-only");
+      const { hostOnlyCommand } = await import("./commands/worker.js");
+      await hostOnlyCommand(opts);
+      return;
+    }
     if (!opts.agent) cmd.error("error: required option '--agent <name>' not specified");
     const { workerCommand } = await import("./commands/worker.js");
     await workerCommand(opts);
@@ -1298,6 +1307,46 @@ worker
   .action(async (_opts: unknown, cmd: Command) => {
     const { workerUninstallCommand } = await import("./commands/worker-service.js");
     await workerUninstallCommand({ agent: cmd.optsWithGlobals().agent });
+  });
+
+// ─── waker ────────────────────────────────────────────────────────────────────
+// This computer's WAKER (plan v2 slice 4): starts its agents when work is handed
+// to them, so the pod can count on them. See src/commands/waker.ts.
+
+const waker = program
+  .command("waker")
+  .description("Start this computer's agents when work is handed to them (the pod's \"Wakes agents\")")
+  .option("--interval <dur>", "How often to ask the pod, 5s to 60s (e.g. 30s, 1m)", "30s")
+  .option("--once", "Ask once, start what is due, wait for those workers, exit")
+  .option("--protocols <list>", "Passed to every worker it starts: code, work-folder (comma-separated)")
+  .action(async (opts: { interval?: string; once?: boolean; protocols?: string }) => {
+    const { wakerCommand } = await import("./commands/waker.js");
+    await wakerCommand(opts);
+  });
+
+waker
+  .command("install")
+  .description("Run the waker as a service (launchd on a Mac, systemd on Linux); opens pod admin when \"Wakes agents\" is off")
+  .action(async (_opts: unknown, cmd: Command) => {
+    const { wakerInstallCommand } = await import("./commands/waker.js");
+    await wakerInstallCommand({ protocols: cmd.optsWithGlobals().protocols });
+  });
+
+waker
+  .command("status")
+  .description("Show the waker service and what the pod says for this computer")
+  .option("--json", "Output as JSON")
+  .action(async (opts: { json?: boolean }) => {
+    const { wakerStatusCommand } = await import("./commands/waker.js");
+    await wakerStatusCommand(opts);
+  });
+
+waker
+  .command("uninstall")
+  .description("Remove the waker's service from this computer")
+  .action(async () => {
+    const { wakerUninstallCommand } = await import("./commands/waker.js");
+    await wakerUninstallCommand();
   });
 
 // ─── box ──────────────────────────────────────────────────────────────────────
@@ -2057,12 +2106,12 @@ set
 
 const agents = program
   .command("agents")
-  .description("Manage agent principals on your pod (one per type for you; local keys are a cache)");
+  .description("Manage agent principals on your pod (one per program per computer; local keys are a cache)");
 
 agents
   .command("list", { isDefault: true })
   .description(
-    "List your agents on this pod (one per type). Use --local for ~/.synap cache only."
+    "List your agents on this pod (one per program per computer). Use --local for ~/.synap cache only."
   )
   .option("--json", "Output as JSON")
   .option("--local", "List only the local ~/.synap agent cache")
@@ -2074,11 +2123,11 @@ agents
 agents
   .command("add [kind]")
   .description(
-    "Bring an agent into the pod: a client (claude-code, cursor, codex, …), your own (--name → URL + key), or pick from this machine (no kind)"
+    "Bring an agent into the pod: a program on this computer (claude-code, codex, hermes, … : one agent per computer), your own (--name → URL + key), or pick from this machine (no kind)"
   )
-  .option("--name <name>", "Name your own agent (e.g. researcher) — prints a URL + key to paste")
+  .option("--name <name>", "Name your own agent (e.g. researcher) — prints a URL + key to paste; with an agent template's --type it only labels that program on this computer")
   .option("--template <tmpl>", "Your own agent's template: twin | assistant | custom (default: custom)")
-  .option("--type <type>", "Explicit agent type for your own agent (default: a slug of --name)")
+  .option("--type <type>", "Explicit agent type (default: a slug of --name); an agent template's type (hermes, …) is that program on this computer, never a custom agent")
   .option("--role <role>", "Workspace role: admin | editor | viewer (default: editor)")
   .option("--workspace <id>", "Focus on one workspace (default: pod-wide)")
   .option("--project <id>", "Focus on one project (composable with --workspace)")
@@ -2722,17 +2771,51 @@ program
 
 const tools = program
   .command("tools")
-  .description("Add and manage external service tools and their credentials");
+  .description("Install, check and remove a capability's tool on this computer (connect/sync/disconnect/schema: deprecated, use `synap cap`)");
 
+// Computer tools (plan b647769e, decision 168f34db): run ON the computer, the
+// steps the capability declares for this OS, recorded on the pod. See
+// src/commands/computer-tools.ts.
 tools
   .command("list")
-  .description("List available tools and their connection status")
+  .description("List the tools the pod records on this computer, with their state and last check")
   .option("--json", "Output as JSON")
-  .option("--workspace <id>", "Workspace context")
-  .action(async (opts) => {
-    const { toolsList } = await import("./commands/tools.js");
-    await toolsList(opts);
+  .action(async (opts: { json?: boolean }) => {
+    const { toolsListCommand } = await import("./commands/computer-tools.js");
+    await toolsListCommand(opts);
   });
+
+const toolStepOptions = (c: Command) =>
+  c
+    .option("--dry-run", "Print the steps and the check for this computer; run and record nothing")
+    .option("--manifest <file>", "Read the capability from this manifest file instead of the catalog")
+    .option("--computer <name>", "This computer's name (or `this`); another computer is refused: run it there")
+    .option("--session <id>", "The pod session this install belongs to (recorded with the result)")
+    .option("--json", "Output as JSON");
+
+toolStepOptions(
+  tools
+    .command("install <capability>")
+    .description("Install a capability's tool on this computer with its declared steps, check it works, record it on the pod")
+    .option("--skip-models", "Skip model downloads (the tool fetches its model on first use)")
+).action(async (slug: string, opts: import("./commands/computer-tools.js").ToolsCommandOpts) => {
+  const { toolsInstallCommand } = await import("./commands/computer-tools.js");
+  await toolsInstallCommand(slug, opts);
+});
+
+toolStepOptions(
+  tools.command("verify <capability>").description("Check a capability's tool works on this computer and record the version it reports")
+).action(async (slug: string, opts: import("./commands/computer-tools.js").ToolsCommandOpts) => {
+  const { toolsVerifyCommand } = await import("./commands/computer-tools.js");
+  await toolsVerifyCommand(slug, opts);
+});
+
+toolStepOptions(
+  tools.command("remove <capability>").description("Remove a capability's tool from this computer (downloaded models are kept) and record it")
+).action(async (slug: string, opts: import("./commands/computer-tools.js").ToolsCommandOpts) => {
+  const { toolsRemoveCommand } = await import("./commands/computer-tools.js");
+  await toolsRemoveCommand(slug, opts);
+});
 
 tools
   .command("connect <service>")

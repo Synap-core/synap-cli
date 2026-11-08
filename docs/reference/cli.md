@@ -4,7 +4,7 @@
 
 Synap CLI — connect AI agents to your data pod
 
-239 commands. Hidden commands and hidden options are omitted here (5 hidden commands); `cli.json` lists them with `"hidden": true`.
+246 commands. Hidden commands and hidden options are omitted here (5 hidden commands); `cli.json` lists them with `"hidden": true`.
 
 Every command also accepts `-h, --help`.
 
@@ -87,12 +87,16 @@ Every command also accepts `-h, --help`.
   - [`synap proposals approve`](#synap-proposals-approve) — Approve a pending proposal (interactive only — requires a TTY and a typed confirmation)
   - [`synap proposals reject`](#synap-proposals-reject) — Reject a pending proposal
   - [`synap proposals await`](#synap-proposals-await) — Block until a proposal is decided. Exit 0 approved · 1 rejected/expired/withdrawn · 2 timeout
-- [`synap worker`](#synap-worker) — Run Claude Code unattended here for the sessions handed to an agent
+- [`synap worker`](#synap-worker) — Run this computer's work: the sessions handed to an agent, and the installs the person approved on the pod (host jobs)
   - [`synap worker install`](#synap-worker-install) — Run this agent as a login service on this Mac: starts at login, restarts if it stops (takes the worker flags)
   - [`synap worker start`](#synap-worker-start) — Start the agent's login service (every agent's when no --agent)
   - [`synap worker stop`](#synap-worker-stop) — Stop the agent's login service; it stays stopped after a restart until `synap worker start`
   - [`synap worker status`](#synap-worker-status) — Show each agent login service on this Mac: running, pid, last exit, log
   - [`synap worker uninstall`](#synap-worker-uninstall) — Remove the agent's login service from this Mac (needs --agent)
+- [`synap waker`](#synap-waker) — Start this computer's agents when work is handed to them (the pod's "Wakes agents")
+  - [`synap waker install`](#synap-waker-install) — Run the waker as a service (launchd on a Mac, systemd on Linux); opens pod admin when "Wakes agents" is off
+  - [`synap waker status`](#synap-waker-status) — Show the waker service and what the pod says for this computer
+  - [`synap waker uninstall`](#synap-waker-uninstall) — Remove the waker's service from this computer
 - [`synap box`](#synap-box) — Run scripts in fresh isolated boxes on this computer (run box provisioner)
   - [`synap box serve`](#synap-box-serve) — Lease queued box runs from the pod and run each in a fresh box
   - [`synap box reap`](#synap-box-reap) — Destroy every box no run holds (after a crash)
@@ -147,9 +151,9 @@ Every command also accepts `-h, --help`.
   - [`synap create relation`](#synap-create-relation) — Create a typed relation between two entities
 - [`synap set`](#synap-set) — Update pod resources
   - [`synap set entity`](#synap-set-entity) — Update entity properties
-- [`synap agents`](#synap-agents) — Manage agent principals on your pod (one per type for you; local keys are a cache)
-  - [`synap agents list`](#synap-agents-list) — List your agents on this pod (one per type). Use --local for ~/.synap cache only.
-  - [`synap agents add`](#synap-agents-add) — Bring an agent into the pod: a client (claude-code, cursor, codex, …), your own (--name → URL + key), or pick from this machine (no kind)
+- [`synap agents`](#synap-agents) — Manage agent principals on your pod (one per program per computer; local keys are a cache)
+  - [`synap agents list`](#synap-agents-list) — List your agents on this pod (one per program per computer). Use --local for ~/.synap cache only.
+  - [`synap agents add`](#synap-agents-add) — Bring an agent into the pod: a program on this computer (claude-code, codex, hermes, … : one agent per computer), your own (--name → URL + key), or pick from this machine (no kind)
   - [`synap agents adopt`](#synap-agents-adopt) — Save the key this OS user already holds for an engine as the agent <job> (mints and revokes nothing)
   - [`synap agents create`](#synap-agents-create) — Deprecated — use `synap agents add` (same flags)
   - [`synap agents rotate-key`](#synap-agents-rotate-key) — Rotate the Hub Protocol API key for an agent (local cache only)
@@ -193,8 +197,11 @@ Every command also accepts `-h, --help`.
 - [`synap artifact`](#synap-artifact) — Create HTML artifacts as Synap cells: an HTML/JS page that opens in the desktop app and can read pod data
   - [`synap artifact create`](#synap-artifact-create) — Define a cell from a local HTML file (governed: an agent key files a proposal)
 - [`synap connect-service`](#synap-connect-service) — Connect an external service (Google, GitHub, Notion, Linear, Slack, …)
-- [`synap tools`](#synap-tools) — Add and manage external service tools and their credentials
-  - [`synap tools list`](#synap-tools-list) — List available tools and their connection status
+- [`synap tools`](#synap-tools) — Install, check and remove a capability's tool on this computer (connect/sync/disconnect/schema: deprecated, use `synap cap`)
+  - [`synap tools list`](#synap-tools-list) — List the tools the pod records on this computer, with their state and last check
+  - [`synap tools install`](#synap-tools-install) — Install a capability's tool on this computer with its declared steps, check it works, record it on the pod
+  - [`synap tools verify`](#synap-tools-verify) — Check a capability's tool works on this computer and record the version it reports
+  - [`synap tools remove`](#synap-tools-remove) — Remove a capability's tool from this computer (downloaded models are kept) and record it
   - [`synap tools connect`](#synap-tools-connect) — Connect a credential to a tool (OAuth via the connection broker, or vault)
   - [`synap tools sync`](#synap-tools-sync) — Trigger a manual sync for a connected tool
   - [`synap tools disconnect`](#synap-tools-disconnect) — Revoke a tool's connection
@@ -1528,7 +1535,7 @@ Block until a proposal is decided. Exit 0 approved · 1 rejected/expired/withdra
 synap worker [options] [command]
 ```
 
-Run Claude Code unattended here for the sessions handed to an agent
+Run this computer's work: the sessions handed to an agent, and the installs the person approved on the pod (host jobs)
 
 | Option | Description | Default |
 |---|---|---|
@@ -1547,7 +1554,10 @@ Run Claude Code unattended here for the sessions handed to an agent
 | `--allowed-tools <list>` | Comma-separated Claude tools allowed without asking (the pod MCP server is always added) |  |
 | `--skip-permissions` | Launch with --dangerously-skip-permissions instead of an allow-list |  |
 | `--dry-run` | Claim and log what would launch, without launching Claude |  |
+| `--run-timeout <dur>` | How long a run may take when the agent's template wakes another program than Claude Code (e.g. 30m, 2h; default 60m) |  |
 | `--protocols <list>` | Which runs this computer takes: code, work-folder (comma-separated; default both). A computer that runs no code, like the person's Mac, takes work-folder only; a design run counts as code |  |
+| `--host-only` | Run only this computer's host jobs (installs, updates, removals, checks), no agent: a server's synap-host user |  |
+| `--host-config <file>` | Host runner config (default /etc/synap-host/config.json when present) |  |
 
 Subcommands: [`install`](#synap-worker-install), [`start`](#synap-worker-start), [`stop`](#synap-worker-stop), [`status`](#synap-worker-status), [`uninstall`](#synap-worker-uninstall)
 
@@ -1599,6 +1609,50 @@ synap worker uninstall [options]
 ```
 
 Remove the agent's login service from this Mac (needs --agent)
+
+## `synap waker`
+
+```
+synap waker [options] [command]
+```
+
+Start this computer's agents when work is handed to them (the pod's "Wakes agents")
+
+| Option | Description | Default |
+|---|---|---|
+| `--interval <dur>` | How often to ask the pod, 5s to 60s (e.g. 30s, 1m) | `"30s"` |
+| `--once` | Ask once, start what is due, wait for those workers, exit |  |
+| `--protocols <list>` | Passed to every worker it starts: code, work-folder (comma-separated) |  |
+
+Subcommands: [`install`](#synap-waker-install), [`status`](#synap-waker-status), [`uninstall`](#synap-waker-uninstall)
+
+## `synap waker install`
+
+```
+synap waker install [options]
+```
+
+Run the waker as a service (launchd on a Mac, systemd on Linux); opens pod admin when "Wakes agents" is off
+
+## `synap waker status`
+
+```
+synap waker status [options]
+```
+
+Show the waker service and what the pod says for this computer
+
+| Option | Description | Default |
+|---|---|---|
+| `--json` | Output as JSON |  |
+
+## `synap waker uninstall`
+
+```
+synap waker uninstall [options]
+```
+
+Remove the waker's service from this computer
 
 ## `synap box`
 
@@ -2541,7 +2595,7 @@ Update entity properties
 synap agents [options] [command]
 ```
 
-Manage agent principals on your pod (one per type for you; local keys are a cache)
+Manage agent principals on your pod (one per program per computer; local keys are a cache)
 
 Subcommands: [`list`](#synap-agents-list), [`add`](#synap-agents-add), [`adopt`](#synap-agents-adopt), [`create`](#synap-agents-create), [`rotate-key`](#synap-agents-rotate-key), [`remove`](#synap-agents-remove), [`info`](#synap-agents-info)
 
@@ -2551,7 +2605,7 @@ Subcommands: [`list`](#synap-agents-list), [`add`](#synap-agents-add), [`adopt`]
 synap agents list [options]
 ```
 
-List your agents on this pod (one per type). Use --local for ~/.synap cache only.
+List your agents on this pod (one per program per computer). Use --local for ~/.synap cache only.
 
 | Option | Description | Default |
 |---|---|---|
@@ -2564,7 +2618,7 @@ List your agents on this pod (one per type). Use --local for ~/.synap cache only
 synap agents add [options] [kind]
 ```
 
-Bring an agent into the pod: a client (claude-code, cursor, codex, …), your own (--name → URL + key), or pick from this machine (no kind)
+Bring an agent into the pod: a program on this computer (claude-code, codex, hermes, … : one agent per computer), your own (--name → URL + key), or pick from this machine (no kind)
 
 | Argument | Required | Description |
 |---|---|---|
@@ -2572,9 +2626,9 @@ Bring an agent into the pod: a client (claude-code, cursor, codex, …), your ow
 
 | Option | Description | Default |
 |---|---|---|
-| `--name <name>` | Name your own agent (e.g. researcher) — prints a URL + key to paste |  |
+| `--name <name>` | Name your own agent (e.g. researcher) — prints a URL + key to paste; with an agent template's --type it only labels that program on this computer |  |
 | `--template <tmpl>` | Your own agent's template: twin \| assistant \| custom (default: custom) |  |
-| `--type <type>` | Explicit agent type for your own agent (default: a slug of --name) |  |
+| `--type <type>` | Explicit agent type (default: a slug of --name); an agent template's type (hermes, …) is that program on this computer, never a custom agent |  |
 | `--role <role>` | Workspace role: admin \| editor \| viewer (default: editor) |  |
 | `--workspace <id>` | Focus on one workspace (default: pod-wide) |  |
 | `--project <id>` | Focus on one project (composable with --workspace) |  |
@@ -3356,9 +3410,9 @@ Connect an external service (Google, GitHub, Notion, Linear, Slack, …)
 synap tools [options] [command]
 ```
 
-Add and manage external service tools and their credentials
+Install, check and remove a capability's tool on this computer (connect/sync/disconnect/schema: deprecated, use `synap cap`)
 
-Subcommands: [`list`](#synap-tools-list), [`connect`](#synap-tools-connect), [`sync`](#synap-tools-sync), [`disconnect`](#synap-tools-disconnect), [`schema`](#synap-tools-schema)
+Subcommands: [`list`](#synap-tools-list), [`install`](#synap-tools-install), [`verify`](#synap-tools-verify), [`remove`](#synap-tools-remove), [`connect`](#synap-tools-connect), [`sync`](#synap-tools-sync), [`disconnect`](#synap-tools-disconnect), [`schema`](#synap-tools-schema)
 
 ## `synap tools list`
 
@@ -3366,12 +3420,72 @@ Subcommands: [`list`](#synap-tools-list), [`connect`](#synap-tools-connect), [`s
 synap tools list [options]
 ```
 
-List available tools and their connection status
+List the tools the pod records on this computer, with their state and last check
 
 | Option | Description | Default |
 |---|---|---|
 | `--json` | Output as JSON |  |
-| `--workspace <id>` | Workspace context |  |
+
+## `synap tools install`
+
+```
+synap tools install [options] <capability>
+```
+
+Install a capability's tool on this computer with its declared steps, check it works, record it on the pod
+
+| Argument | Required | Description |
+|---|---|---|
+| `capability` | yes |  |
+
+| Option | Description | Default |
+|---|---|---|
+| `--skip-models` | Skip model downloads (the tool fetches its model on first use) |  |
+| `--dry-run` | Print the steps and the check for this computer; run and record nothing |  |
+| `--manifest <file>` | Read the capability from this manifest file instead of the catalog |  |
+| `--computer <name>` | This computer's name (or `this`); another computer is refused: run it there |  |
+| `--session <id>` | The pod session this install belongs to (recorded with the result) |  |
+| `--json` | Output as JSON |  |
+
+## `synap tools verify`
+
+```
+synap tools verify [options] <capability>
+```
+
+Check a capability's tool works on this computer and record the version it reports
+
+| Argument | Required | Description |
+|---|---|---|
+| `capability` | yes |  |
+
+| Option | Description | Default |
+|---|---|---|
+| `--dry-run` | Print the steps and the check for this computer; run and record nothing |  |
+| `--manifest <file>` | Read the capability from this manifest file instead of the catalog |  |
+| `--computer <name>` | This computer's name (or `this`); another computer is refused: run it there |  |
+| `--session <id>` | The pod session this install belongs to (recorded with the result) |  |
+| `--json` | Output as JSON |  |
+
+## `synap tools remove`
+
+```
+synap tools remove [options] <capability>
+```
+
+Remove a capability's tool from this computer (downloaded models are kept) and record it
+
+| Argument | Required | Description |
+|---|---|---|
+| `capability` | yes |  |
+
+| Option | Description | Default |
+|---|---|---|
+| `--dry-run` | Print the steps and the check for this computer; run and record nothing |  |
+| `--manifest <file>` | Read the capability from this manifest file instead of the catalog |  |
+| `--computer <name>` | This computer's name (or `this`); another computer is refused: run it there |  |
+| `--session <id>` | The pod session this install belongs to (recorded with the result) |  |
+| `--json` | Output as JSON |  |
 
 ## `synap tools connect`
 

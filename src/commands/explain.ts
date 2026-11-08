@@ -121,7 +121,7 @@ function sectionTools(): void {
   console.log(chalk.bold("\n## Tools & External Services"));
   console.log(chalk.dim("  External services connect through the pod's connection broker (Google, GitHub, Notion, …)."));
   console.log("");
-  console.log(`  ${chalk.cyan("synap tools list")}            ${chalk.dim("→ available tools + connection status")}`);
+  console.log(`  ${chalk.cyan("synap tools list")}            ${chalk.dim("→ tools installed on this computer (synap tools install|verify|remove)")}`);
   console.log(`  ${chalk.cyan("synap cap list")}               ${chalk.dim("→ capabilities, one row per pack, with status + connection")}`);
   console.log(`  ${chalk.cyan("synap cap connect [name]")}     ${chalk.dim("→ connect a credential to a capability")}`);
   console.log(`  ${chalk.cyan("synap cap enable [name]")}      ${chalk.dim("→ turn on a capability (ensures connection, picks verbs)")}`);
@@ -133,10 +133,10 @@ function sectionTools(): void {
 
 function sectionAgents(): void {
   console.log(chalk.bold("\n## Agents"));
-  console.log(chalk.dim("  Pod agent principals (one per type for you) + autonomous runner + schedules."));
+  console.log(chalk.dim("  Pod agent principals (one per program per computer, or your own) + autonomous runner + schedules."));
   console.log("");
   console.log(`  ${chalk.cyan("synap agents list")}          ${chalk.dim("→ your agents on this pod")}`);
-  console.log(`  ${chalk.cyan("synap agents add [client]")}  ${chalk.dim("→ connect a client, --name X for your own, none = pick from this machine")}`);
+  console.log(`  ${chalk.cyan("synap agents add [client]")}  ${chalk.dim("→ a program on this computer (claude-code, hermes…), --name X for your own, none = pick from this machine")}`);
   console.log(`  ${chalk.cyan("synap agents add --api-key")} ${chalk.dim("→ register a key you already hold (local cache)")}`);
   console.log(`  ${chalk.cyan("synap agent run")}            ${chalk.dim("→ --goal 'text' --persona researcher")}`);
   console.log(`  ${chalk.cyan("synap agent schedule")}       ${chalk.dim("→ --goal X --name Y --every daily")}`);

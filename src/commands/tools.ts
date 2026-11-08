@@ -9,7 +9,7 @@ import ora from "ora";
 import { openExternalUrl } from "../lib/safe-open.js";
 import { mkdirSync, writeFileSync, existsSync } from "fs";
 import { resolveHubConfig, hubGet, hubPost, renderHubError } from "../lib/hub-client.js";
-import { capabilityList, capabilityConnect, capabilityDisconnect } from "./capability.js";
+import { capabilityConnect, capabilityDisconnect } from "./capability.js";
 import { log } from "../utils/logger.js";
 
 /**
@@ -149,7 +149,7 @@ export async function toolsConnect(service: string | undefined, opts: ConnectOpt
   if (status === "connected") {
     log.heading(`${res.displayName ?? res.provider} is already connected`);
     printUnlocked(res.unlocked as UnlockedCapability[] | undefined);
-    log.dim(`Run \`synap tools list\` to see all tools and their credentials.`);
+    log.dim(`Run \`synap cap list\` to see all tools and their credentials.`);
     return;
   }
 
@@ -213,24 +213,11 @@ export async function toolsConnect(service: string | undefined, opts: ConnectOpt
       return;
     }
     waitSpinner.stop();
-    log.dim(`Didn't detect a connection yet — finish the browser flow, then run \`synap tools list\` to check status.`);
+    log.dim(`Didn't detect a connection yet — finish the browser flow, then run \`synap cap list\` to check status.`);
     return;
   }
 
-  log.dim(`Once connected, records will import automatically. Run \`synap tools list\` to check status.`);
-}
-
-// ── Public: toolsList ──────────────────────────────────────────────────────────
-
-export interface ListOpts {
-  json?: boolean;
-  workspace?: string;
-}
-
-export async function toolsList(opts: ListOpts): Promise<void> {
-  // `cap list` is the one capability-first view.
-  log.dim(TOOLS_DEPRECATED);
-  await capabilityList({ json: opts.json, workspace: opts.workspace });
+  log.dim(`Once connected, records will import automatically. Run \`synap cap list\` to check status.`);
 }
 
 // ── Public: toolsSync ────────────────────────────────────────────────────
@@ -400,8 +387,6 @@ function buildToolSchemaMarkdown(schema: Record<string, unknown>, podUrl: string
     `synap cap connect "Nango — Google Workspace"`,
     ``,
     `# List all capabilities and connection status`,
-    `synap tools list`,
-    `synap tools list --json`,
     `synap cap list`,
     ``,
     `# Show one capability's detail (status, connection, verbs, next action)`,

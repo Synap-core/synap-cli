@@ -43,6 +43,21 @@ function writeConfig(cfg: ConfigWithAgents): void {
   writeFileAtomic(CONFIG_FILE, JSON.stringify(cfg, null, 2), { mode: 0o600 });
 }
 
+/**
+ * The agents saved on this computer, by their pod id: what `synap worker
+ * --agent <name>` can run here. Both stores (named agents and the keys a
+ * client connect saved). An agent saved without its id is not listed.
+ */
+export function savedAgentsById(): Map<string, string> {
+  const cfg = readConfig();
+  const out = new Map<string, string>();
+  for (const [name, p] of Object.entries(cfg.agents ?? {})) if (p.agentUserId) out.set(p.agentUserId, name);
+  for (const [name, k] of Object.entries(cfg.agentKeys ?? {})) {
+    if (k.agentUserId && !out.has(k.agentUserId)) out.set(k.agentUserId, name);
+  }
+  return out;
+}
+
 export function listAgents(): Array<{ name: string; profile: AgentProfile }> {
   const cfg = readConfig();
   return Object.entries(cfg.agents ?? {}).map(([name, profile]) => ({ name, profile }));
