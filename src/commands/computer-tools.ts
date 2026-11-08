@@ -110,8 +110,23 @@ export interface InstallationsDoor {
   list(): Promise<InstallationRow[]>;
 }
 
-/** The pod has no installations door yet (an older pod). */
-export const isMissingDoor = (err: unknown): boolean => (err as { status?: number })?.status === 404;
+/**
+ * The pod has no installations door yet (an older pod): its router's 404,
+ * which carries no code. A 404 the door itself answers names its code
+ * (`NOT_INSTALLABLE`: the pod has no such capability to install), and a 403
+ * is a refusal (`GRANT_DOOR_UNSUPPORTED`): both are said as the pod said them.
+ */
+export const isMissingDoor = (err: unknown): boolean => {
+  const e = err as { status?: number; code?: string } | undefined;
+  return e?.status === 404 && !e.code;
+};
+
+/** The line `synap tools list` says when the pod's read failed. */
+export function listFailureLine(pod: string, computer: string, err: unknown): string {
+  return isMissingDoor(err)
+    ? `${pod} cannot list what is installed on its computers yet (no installations door): update the pod`
+    : `could not read what is installed on ${computer} from ${pod}: ${(err as Error).message}`;
+}
 
 export async function installationsDoor(podUrl: string, personKey: string, computerKey: string): Promise<InstallationsDoor> {
   const { hubGet, hubPost } = await import("../lib/hub-client.js");
@@ -360,11 +375,7 @@ export async function toolsListCommand(opts: { json?: boolean }): Promise<void> 
   try {
     rows = await (await installationsDoor(cfg.podUrl, cfg.apiKey, enrol.computerKey)).list();
   } catch (err) {
-    log.error(
-      isMissingDoor(err)
-        ? `${pod} cannot list what is installed on its computers yet (no installations door): update the pod`
-        : `could not read what is installed on ${computerName()} from ${pod}: ${(err as Error).message}`
-    );
+    log.error(listFailureLine(pod, computerName(), err));
     process.exitCode = 1;
     return;
   }
