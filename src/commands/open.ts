@@ -17,7 +17,7 @@ import { existsSync } from "fs";
 import { homedir } from "os";
 import { join } from "path";
 import { openAppUrl } from "@synap-core/hub-rest-client";
-import { resolveHubConfig } from "../lib/hub-client.js";
+import { HubError, HubNetworkError, hubGet, renderHubError, resolveHubConfig } from "../lib/hub-client.js";
 import { log } from "../utils/logger.js";
 
 /**
@@ -122,16 +122,9 @@ export function openUrl(url: string): void {
  */
 async function resolveId(id: string): Promise<ResolveResult> {
   const config = await resolveHubConfig();
-  const url = `${config.podUrl}/api/hub/resolve/${encodeURIComponent(id)}`;
-  const res = await fetch(url, {
-    headers: {
-      Authorization: `Bearer ${config.apiKey}`,
-    },
-  });
-  if (!res.ok) {
-    throw new Error(`Resolve failed: ${res.status} ${res.statusText}`);
-  }
-  return res.json();
+  // hubGet throws the typed HubError / HubNetworkError the shared printer reads,
+  // so a refused key carries its HTTP status to the catch below.
+  return (await hubGet(`/resolve/${encodeURIComponent(id)}`, {}, config)) as ResolveResult;
 }
 
 export async function openInBrowser(opts: OpenOpts): Promise<void> {
@@ -187,6 +180,16 @@ export async function resolveAndOpen(id: string): Promise<void> {
       ...(resolved.params ? { params: resolved.params } : {}),
     });
   } catch (e) {
+    if (e instanceof HubError || e instanceof HubNetworkError) {
+      // The pod answered (or did not): say which, with the status. A refused
+      // key points at `synap doctor` (renderHubError), never at the desktop app.
+      log.error("Could not resolve the ID on your pod.");
+      renderHubError(e);
+      if (e instanceof HubError && (e.status === 401 || e.status === 403)) {
+        log.hint("Check which key this computer uses with: synap whoami");
+      }
+      process.exit(1);
+    }
     log.error(
       `Could not resolve/open: ${(e as Error).message}\n` +
         `  Make sure the Synap desktop app is installed and your pod is reachable.`,
