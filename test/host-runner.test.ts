@@ -6,6 +6,7 @@
  * dogfooded on the devbox (U14).
  */
 
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -29,9 +30,12 @@ import { maskSecrets, toHostLog } from "../src/lib/host/logs.js";
 import { isTailnetIPv4, listenPortFor, parseProviderOp, planProviderOp, ProviderOpRefusal } from "../src/lib/host/provider-ops.js";
 import {
   createHostHub,
+  fitStepName,
   HOST_LOG_CAP,
+  HOST_STEP_NAME_MAX,
   HostDoorClosedError,
   HostLeaseLostError,
+  HostRequestRefusedError,
   installationKind,
   RUNNER_ID,
   type FinishBody,
@@ -827,6 +831,81 @@ describe("runJob: a tool installation", () => {
     const out = await runJob(toolJob(), deps(calls, fakeRuntime(calls), hub, { toolContext: () => tctx }));
     expect(out).toBeNull();
     expect(calls.finishes).toEqual([]);
+  });
+
+  describe("the finish stays inside the pod's limits (job 7b8b69a3, 2026-11-09)", () => {
+    // media-matte's swift helper, as the catalog serves it, padded to 300 characters.
+    const LONG_URL = `https://cdn.jsdelivr.net/npm/@synap-core/workspace-templates@0.33.0/skills/facecam-edit/${"a".repeat(300 - 106)}/synap-matte.swift`;
+    const SWIFT = "print(1)\n";
+    const matteJob = () => {
+      const j = toolJob();
+      j.installation.capabilityKey = "media-matte";
+      j.installation.manifest = {
+        ...ffmpegSpec(),
+        key: "media-matte",
+        install: {
+          darwin: {
+            steps: [
+              { kind: "download", url: LONG_URL, sha256: createHash("sha256").update(SWIFT).digest("hex"), dest: "{home}/.synap/bin/synap-matte.swift" },
+              { kind: "brew", package: "ffmpeg" },
+            ],
+          },
+        },
+      };
+      return j;
+    };
+    /** The pod's schema: a step name past its limit refuses the whole finish (HTTP 400). */
+    const strictHub = (calls: Calls) => {
+      const hub = fakeHub(calls);
+      const finish = hub.finish;
+      hub.finish = async (j, body) => {
+        const long = body.steps?.find((st) => st.name.length > HOST_STEP_NAME_MAX);
+        if (long) throw new HostRequestRefusedError(`POST host-jobs/x/finish failed (HTTP 400): steps.name: Too big`, 400);
+        return finish(j, body);
+      };
+      return hub;
+    };
+    afterEach(() => vi.unstubAllGlobals());
+
+    it("a manifest step with a 300-character URL installs and the pod records the outcome, every step named in a short label", async () => {
+      expect(LONG_URL).toHaveLength(300);
+      vi.stubGlobal("fetch", vi.fn(async () => new Response(SWIFT)));
+      const calls = newCalls();
+      const { ctx: tctx } = toolCtx({ ffmpeg: FF_OK });
+      const out = await runJob(matteJob(), deps(calls, fakeRuntime(calls), strictHub(calls), { toolContext: () => tctx }));
+      expect(out?.status).toBe("done");
+      expect(calls.finishes).toHaveLength(1);
+      const names = calls.finishes[0]!.steps!.map((st) => st.name);
+      for (const n of names) expect(n.length).toBeLessThanOrEqual(HOST_STEP_NAME_MAX);
+      expect(names[1]).toMatch(/^download synap-matte\.swift to synap-matte\.swift/);
+    });
+
+    it("a finish the pod still refuses as malformed is sent again with the outcome alone, once", async () => {
+      const calls = newCalls();
+      const { ctx: tctx } = toolCtx({ ffmpeg: FF_OK });
+      const hub = fakeHub(calls);
+      const finish = hub.finish;
+      let tries = 0;
+      hub.finish = async (j, body) => {
+        tries += 1;
+        if (body.steps) throw new HostRequestRefusedError("POST host-jobs/x/finish failed (HTTP 400): something new", 400);
+        return finish(j, body);
+      };
+      const out = await runJob(toolJob(), deps(calls, fakeRuntime(calls), hub, { toolContext: () => tctx }));
+      expect(tries).toBe(2);
+      expect(out).toMatchObject({ status: "done", observedVersion: "7.1.1", verify: { ok: true } });
+      expect(calls.finishes[0]).not.toHaveProperty("steps");
+    });
+
+    it("a label: a URL becomes its file name, then a path; past that it is cut", () => {
+      expect(fitStepName("Homebrew: install ffmpeg")).toBe("Homebrew: install ffmpeg");
+      expect(fitStepName(`download ${LONG_URL} to /Users/x/.synap/bin/synap-matte.swift (checked against its sha256)`)).toBe(
+        "download synap-matte.swift to /Users/x/.synap/bin/synap-matte.swift (checked against its sha256)"
+      );
+      const cut = fitStepName("x".repeat(500));
+      expect(cut).toHaveLength(HOST_STEP_NAME_MAX);
+      expect(cut.endsWith("…")).toBe(true);
+    });
   });
 });
 
