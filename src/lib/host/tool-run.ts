@@ -42,6 +42,7 @@ import {
   type ProcessResult,
   type VerifyOutcome,
 } from "./tool.js";
+import { loadComputerManifest } from "./tool-manifest.js";
 import type { FinishStep, ToolCheck } from "./wire.js";
 
 // ── Where things live on this computer ────────────────────────────────────────
@@ -119,7 +120,7 @@ export function runProcess(
     const timer = opts.timeoutMs
       ? setTimeout(() => {
           child.kill("SIGTERM");
-          done({ exitCode: null, stdout, stderr, error: `${argv[0]} took longer than ${Math.round(opts.timeoutMs! / 1000)} s and was stopped` });
+          done({ exitCode: null, stdout, stderr, error: `${argv[0]} took longer than ${Math.round(opts.timeoutMs! / 1000)} s and was stopped`, timedOut: true });
         }, opts.timeoutMs)
       : undefined;
     child.stdout?.on("data", (b: Buffer) => {
@@ -183,6 +184,11 @@ export interface RunContext {
   freeMb?: () => number | undefined;
 }
 
+/**
+ * The context a job runs with: at the keyboard (`synap tools`) and in the
+ * worker alike. Both read a prerequisite's manifest through the same loader;
+ * only the keyboard can install one (`prerequisite`).
+ */
 export function defaultContext(over: Partial<RunContext> = {}): RunContext {
   const interactive = !!process.stdin.isTTY && !!process.stdout.isTTY;
   return {
@@ -192,6 +198,7 @@ export function defaultContext(over: Partial<RunContext> = {}): RunContext {
     values: localPlaceholders(),
     interactive,
     say: () => {},
+    load: (slug) => loadComputerManifest(slug),
     confirm: async (q) => {
       const prompts = (await import("prompts")).default;
       const { ok } = await prompts({ type: "confirm", name: "ok", message: q, initial: false });
@@ -227,7 +234,13 @@ function toolName(m: ComputerManifest, os: string): string {
 
 const refused = (message: string): ToolResult => ({ status: "refused", toolVersion: null, message, steps: [] });
 
-/** Run the OS's verify check. */
+/**
+ * Run the OS's verify check. A check that runs past its time is run ONCE more:
+ * the first launch of a program just installed (or after a restart) can be
+ * slow while macOS scans its libraries (ffmpeg-full links 84 of them: over
+ * 30 s cold, 4 s next, 0.05 s warm), so no manifest has to guess a cold
+ * launch's time. Two timeouts are said as a timeout, never as "does not work".
+ */
 export async function runVerify(
   m: ComputerManifest,
   ctx: RunContext
@@ -236,9 +249,16 @@ export async function runVerify(
   if (!check) return { outcome: { ok: false, toolVersion: null, reason: `no check for ${OS_LABEL[ctx.os] ?? ctx.os}` } };
   const filled = verifyArgv(m.spec, ctx.os, check.command, ctx.values);
   if ("error" in filled) return { outcome: { ok: false, toolVersion: null, reason: filled.error } };
-  const timeoutMs = (m.spec.verify?.timeoutSec ?? 60) * 1000;
-  const run = await (ctx.run ?? runProcess)(filled.argv, { env: ctx.env, timeoutMs });
-  return { outcome: matchVerify(run, check), run, argv: filled.argv };
+  const timeoutSec = m.spec.verify?.timeoutSec ?? 60;
+  const runOnce = () => (ctx.run ?? runProcess)(filled.argv, { env: ctx.env, timeoutMs: timeoutSec * 1000 });
+  let run = await runOnce();
+  if (run.timedOut) {
+    ctx.say(`${filled.argv[0]} took longer than ${timeoutSec} s to answer (a first launch can be slow): checking once more`);
+    run = await runOnce();
+  }
+  const outcome = matchVerify(run, check);
+  if (outcome.timedOut) outcome.reason = `its check (${filled.argv.join(" ")}) took longer than ${timeoutSec} s twice and was stopped`;
+  return { outcome, run, argv: filled.argv };
 }
 
 /**
@@ -279,7 +299,9 @@ export async function verifyTool(m: ComputerManifest, ctx: RunContext): Promise<
       ? `${name}${v} works on ${computerName()}, checked${smokeWords}`
       : status === "drifted"
         ? `${name}${v} on ${computerName()} is outside the version ${m.slug} needs (${m.spec.placement?.requires?.tool?.version})`
-        : `${name} does not work on ${computerName()}: ${outcome.reason}`;
+        : outcome.timedOut
+          ? `${name} on ${computerName()} could not be checked: ${outcome.reason}. It may be installed; check it again with \`synap tools verify ${m.slug}\``
+          : `${name} does not work on ${computerName()}: ${outcome.reason}`;
   return { status, toolVersion: outcome.toolVersion, message, check, steps, smokeWords };
 }
 
@@ -450,6 +472,7 @@ export async function installTool(m: ComputerManifest, ctx: RunContext): Promise
     if ("error" in loaded) return refused(`${m.name} needs ${dep.slug} first: ${loaded.error}`);
     const { outcome } = await runVerify(loaded.manifest, ctx);
     if (outcome.ok) continue;
+    if (outcome.timedOut) return refused(`${m.name} needs ${loaded.manifest.name} first, and ${outcome.reason}: check it again, then this one`);
     if (!ctx.prerequisite) {
       return refused(`${m.name} needs ${loaded.manifest.name} first: approve ${dep.slug} for this computer on the pod, then this one`);
     }
@@ -507,9 +530,12 @@ export async function removeTool(m: ComputerManifest, ctx: RunContext): Promise<
   if ("error" in ran) return { status: "failed", toolVersion: null, message: `${m.name} was not removed: ${ran.error}`, steps };
   const t0 = Date.now();
   const { outcome, run, argv } = await runVerify(m, ctx);
-  // Removed means the check no longer passes.
-  steps.push({ name: `check it is gone: ${argv?.join(" ") ?? "no check"}`, ok: !outcome.ok, durationMs: Date.now() - t0 });
+  // Removed means the check no longer passes; a check that timed out answered nothing.
+  steps.push({ name: `check it is gone: ${argv?.join(" ") ?? "no check"}`, ok: !outcome.ok && !outcome.timedOut, durationMs: Date.now() - t0 });
   const check = buildToolCheck({ toolVersion: outcome.toolVersion, os: ctx.os, arch: ctx.arch, ok: outcome.ok, run });
+  if (outcome.timedOut) {
+    return { status: "failed", toolVersion: null, message: `${toolName(m, ctx.os)} on ${computerName()} could not be checked after removing it: ${outcome.reason}. Log: ${logFile}`, steps, check };
+  }
   if (outcome.ok) {
     return {
       status: "failed",
