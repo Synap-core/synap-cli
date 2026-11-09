@@ -33,6 +33,7 @@ import {
   HostDoorClosedError,
   HostLeaseLostError,
   installationKind,
+  RUNNER_ID,
   type FinishBody,
   type HeartbeatAnswer,
   type HostHub,
@@ -625,7 +626,9 @@ describe("wire", () => {
       "https://pod.example/api/hub/host-jobs/lease",
       `https://pod.example/api/hub/host-jobs/${job().id}/heartbeat`,
     ]);
-    expect(seen[0]!.body).toEqual({ os: process.platform, arch: process.arch });
+    // Every lease names this runner process, so the pod sees a restart and checks the tools again.
+    expect(seen[0]!.body).toEqual({ os: process.platform, arch: process.arch, runner: RUNNER_ID });
+    expect(RUNNER_ID).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
     expect(seen[1]).toMatchObject({ auth: "Bearer k1", body: { leaseId: job().leaseId, phase: "running" } });
     status = 409;
     await expect(hub.finish(job(), { status: "done" })).rejects.toBeInstanceOf(HostLeaseLostError);
