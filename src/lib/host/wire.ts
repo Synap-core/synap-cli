@@ -231,7 +231,10 @@ export function createHostHub(cfg: Pick<HubConfig, "podUrl" | "apiKey">, fetchIm
 
   return {
     async lease(capacity) {
-      const body = (await post("/lease", capacity ? { capacity } : {})) as { job?: LeasedHostJob | null };
+      // Every lease says what this computer is, so the pod knows its processor before an
+      // install: a tool built for one processor is refused on another, before anyone approves.
+      const seen = { os: process.platform, arch: process.arch };
+      const body = (await post("/lease", capacity ? { ...seen, capacity } : seen)) as { job?: LeasedHostJob | null };
       return body.job ?? null;
     },
     async heartbeat(job, phase) {

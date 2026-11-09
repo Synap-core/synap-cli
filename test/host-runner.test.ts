@@ -602,6 +602,7 @@ describe("wire", () => {
       "https://pod.example/api/hub/host-jobs/lease",
       `https://pod.example/api/hub/host-jobs/${job().id}/heartbeat`,
     ]);
+    expect(seen[0]!.body).toEqual({ os: process.platform, arch: process.arch });
     expect(seen[1]).toMatchObject({ auth: "Bearer k1", body: { leaseId: job().leaseId, phase: "running" } });
     status = 409;
     await expect(hub.finish(job(), { status: "done" })).rejects.toBeInstanceOf(HostLeaseLostError);
