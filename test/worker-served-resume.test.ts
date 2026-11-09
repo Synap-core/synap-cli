@@ -98,7 +98,11 @@ function stubPod(
           isError: false,
           text: JSON.stringify({
             session: { id, goal: "g", playbookId: null, channelId: `room-${id.slice(0, 8)}` },
-            outcomes: { status: outcomesStatus, ...(outcomesStatus === "ok" ? { outcomes } : {}) },
+            // The lean read (backend#932) says whose each outcome is and whether it was withdrawn.
+            outcomes: {
+              status: outcomesStatus,
+              ...(outcomesStatus === "ok" ? { outcomes: outcomes.map((o) => ({ retired: false, ...o })) } : {}),
+            },
           }),
         };
       }
