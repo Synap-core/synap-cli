@@ -14,6 +14,7 @@
  * config at start, like `synap worker` and `synap box serve`.
  */
 
+import { randomUUID } from "node:crypto";
 import type { HubConfig } from "../hub-client.js";
 
 /**
@@ -47,6 +48,13 @@ export interface HostLog {
   totalBytes?: number | null;
   truncated?: boolean;
 }
+
+/**
+ * This runner process's id, sent on every lease. Minted once per process: the
+ * pod reads a new one (or a long silence) as the runner coming back, and checks
+ * every tool on the computer again (backend services/host-jobs `noteHostRunner`).
+ */
+export const RUNNER_ID = randomUUID();
 
 /** A leased job, as the lease route answers it (`LeasedHostJob`). */
 export interface LeasedHostJob {
@@ -233,7 +241,9 @@ export function createHostHub(cfg: Pick<HubConfig, "podUrl" | "apiKey">, fetchIm
     async lease(capacity) {
       // Every lease says what this computer is, so the pod knows its processor before an
       // install: a tool built for one processor is refused on another, before anyone approves.
-      const seen = { os: process.platform, arch: process.arch };
+      // `runner` is this process: a new one (the worker restarted, the CLI was updated, the
+      // computer rebooted) is how the pod knows to check every tool here again (self-heal).
+      const seen = { os: process.platform, arch: process.arch, runner: RUNNER_ID };
       const body = (await post("/lease", capacity ? { ...seen, capacity } : seen)) as { job?: LeasedHostJob | null };
       return body.job ?? null;
     },
