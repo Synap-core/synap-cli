@@ -97,7 +97,44 @@ export interface LeasedHostJob {
   /** The job as queued (the op, its input). */
   spec: Record<string, unknown>;
   parameters: Record<string, unknown>;
+  /**
+   * A hosted verb's input files (kind `verb`): each `file` / `files` param of
+   * its recipe, as a link signed at this lease for the job's owner
+   * (`HostJobInputFile`). `parameters` keeps the pod file ids.
+   */
+  inputs?: Record<string, HostJobInputFile[]>;
 }
+
+/** One input file of a hosted verb. Mirrors `HostJobInputFile`. */
+export interface HostJobInputFile {
+  fileEntityId: string;
+  url: string;
+  expiresAt: string;
+  /** A safe file name to write it under, never a path. */
+  name: string;
+  mimeType: string | null;
+  size: number | null;
+}
+
+/** One output a hosted verb wrote, as the finish carries it. Mirrors `HostJobFileSchema`. */
+export interface HostJobFile {
+  param: string;
+  name: string;
+  size?: number;
+  uploadToken?: string;
+  error?: string;
+}
+
+/** The upload ticket `POST /host-jobs/:id/uploads` answers (the requester's presigned PUT). */
+export interface HostUploadTicket {
+  uploadUrl: string;
+  method: "PUT";
+  headers: Record<string, string>;
+  uploadToken: string;
+}
+
+/** Files one hosted verb run may return. Mirrors `HOST_VERB_MAX_FILES`. */
+export const HOST_VERB_MAX_FILES = 20;
 
 export interface HeartbeatAnswer {
   leaseExpiresAt: string;
@@ -169,6 +206,8 @@ export interface FinishBody extends Partial<ToolCheck> {
   output?: Record<string, unknown>;
   /** What the runner removed on a failure path. */
   cleanedUp?: string[];
+  /** A hosted verb's outputs, each uploaded first (`HostHub.upload`). */
+  files?: HostJobFile[];
 }
 
 /** 404 / 409: the pod no longer holds this lease for us. Stop, clean up, never report or finish. */
@@ -211,6 +250,8 @@ export interface HostHub {
   heartbeat(job: LeasedHostJob, phase: "setup" | "running"): Promise<HeartbeatAnswer>;
   report(job: LeasedHostJob, body: Omit<ReportBody, "leaseId">): Promise<unknown>;
   finish(job: LeasedHostJob, body: Omit<FinishBody, "leaseId">): Promise<unknown>;
+  /** A hosted verb's output: a presigned PUT minted for the run's requester. */
+  upload(job: LeasedHostJob, file: { filename: string; mimeType: string; size: number }): Promise<HostUploadTicket>;
 }
 
 export type FetchLike = (url: string, init: RequestInit) => Promise<Response>;
@@ -316,6 +357,9 @@ export function createHostHub(cfg: Pick<HubConfig, "podUrl" | "apiKey">, fetchIm
     },
     async finish(job, body) {
       return post(jobPath(job, "finish"), { leaseId: job.leaseId, ...body }, job.id);
+    },
+    async upload(job, file) {
+      return (await post(jobPath(job, "uploads"), { leaseId: job.leaseId, ...file }, job.id)) as HostUploadTicket;
     },
   };
 }

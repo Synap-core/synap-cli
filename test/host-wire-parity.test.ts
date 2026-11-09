@@ -23,6 +23,8 @@ import {
   HOST_STEP_DETAIL_MAX,
   HOST_STEP_NAME_MAX,
   HOST_STEPS_MAX,
+  HOST_VERB_MAX_FILES,
+  type HostJobFile,
 } from "../src/lib/host/wire.js";
 
 const source =
@@ -83,5 +85,15 @@ describe.skipIf(!present)("host-job wire mirror = @synap-core/types/host-jobs", 
     expect(finish).toMatch(new RegExp(`detail: z\\.string\\(\\)\\.max\\(${HOST_STEP_DETAIL_MAX}\\)`));
     expect(finish).toMatch(new RegExp(`\\)\\s*\\.max\\(${HOST_STEPS_MAX}\\)\\s*\\.optional\\(\\),\\s*log:`));
     expect(finish).toMatch(new RegExp(`cleanedUp: z\\.array\\(z\\.string\\(\\)\\.max\\(${HOST_CLEANED_UP_ITEM_MAX}\\)\\)\\.max\\(${HOST_CLEANED_UP_MAX}\\)`));
+  });
+
+  it("a hosted verb's files: every field the runner sends is one the pod's schema reads, and the cap is the pod's", () => {
+    const schema = /HostJobFileSchema = z\.object\(\{([\s\S]*?)\n\}\);/.exec(text)?.[1] ?? "";
+    expect(schema, "HostJobFileSchema not found").not.toBe("");
+    const sent: Required<HostJobFile> = { param: "out", name: "a.mp4", size: 1, uploadToken: "t", error: "e" };
+    for (const k of Object.keys(sent)) expect(schema, `HostJobFileSchema has no "${k}"`).toMatch(new RegExp(`\\b${k}:`));
+    expect(text).toMatch(new RegExp(`HOST_VERB_MAX_FILES = ${HOST_VERB_MAX_FILES};`));
+    const upload = /HostJobUploadBodySchema = z\.object\(\{([\s\S]*?)\n\}\);/.exec(text)?.[1] ?? "";
+    for (const k of ["leaseId", "filename", "mimeType", "size"]) expect(upload, `upload body has no "${k}"`).toMatch(new RegExp(`\\b${k}:`));
   });
 });

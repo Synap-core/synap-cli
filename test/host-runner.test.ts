@@ -231,6 +231,9 @@ function fakeHub(calls: Calls, opts: { heartbeat?: (n: number, phase: string) =>
       calls.finishes.push(body);
       return {};
     },
+    async upload() {
+      throw new Error("no upload in these jobs");
+    },
   };
 }
 
@@ -517,11 +520,12 @@ describe("runJob: update, remove, verb", () => {
     expect(fs.existsSync(instDir())).toBe(false);
   });
 
-  it("a hosted verb is answered failed with the reason (U8 runs them)", async () => {
+  it("a hosted verb whose recipe the approved manifest does not declare is answered failed with the reason (recipes: host-recipe-run.test.ts)", async () => {
     const calls = newCalls();
     const out = await runJob(job({ kind: "verb" }), deps(calls, fakeRuntime(calls), fakeHub(calls)));
     expect(out?.status).toBe("failed");
-    expect(out?.steps?.[0].detail).toMatch(/does not run hosted verbs yet/);
+    expect(out?.steps?.[0].detail).toMatch(/declares no recipe/);
+    expect(calls.order).not.toContain("heartbeat:running");
   });
 
   it("serve --once leases at most one job", async () => {
