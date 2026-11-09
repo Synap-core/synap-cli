@@ -14,64 +14,12 @@
  * computer's steps; it asks nothing and records nothing.
  */
 
-import fs from "node:fs";
-import path from "node:path";
 import { resolveStatusLabel } from "@synap-core/types/vocabulary";
-import { readComputerManifest, type ComputerManifest } from "../lib/host/tool.js";
+import type { ComputerManifest } from "../lib/host/tool.js";
+import { loadComputerManifest, type ManifestSourceOpts } from "../lib/host/tool-manifest.js";
 import { computerName, defaultContext, installTool, removeTool, verifyTool, type RunContext, type ToolResult } from "../lib/host/tool-run.js";
 import { HostDoorClosedError, type FinishBody } from "../lib/host/wire.js";
 import { log } from "../utils/logger.js";
-
-// ── The manifest ──────────────────────────────────────────────────────────────
-
-export interface ManifestSourceOpts {
-  /** A manifest file on disk (a catalog `*.capability.json`), read before anything else. */
-  manifest?: string;
-}
-
-/**
- * Read the capability's manifest for a dry run or a prerequisite's check: a
- * file given with `--manifest`, else the catalog (the control plane's package
- * registry, the one catalog), else the catalog package this CLI ships with.
- * Each answer says where it came from. A job never uses this: it runs the
- * manifest as the person approved it.
- */
-export async function loadComputerManifest(
-  slug: string,
-  opts: ManifestSourceOpts = {}
-): Promise<{ manifest: ComputerManifest; source: string } | { error: string }> {
-  if (opts.manifest) {
-    let raw: unknown;
-    try {
-      raw = JSON.parse(fs.readFileSync(opts.manifest, "utf8"));
-    } catch (err) {
-      return { error: `could not read ${opts.manifest}: ${(err as Error).message}` };
-    }
-    const m = readComputerManifest(raw, slug);
-    return "error" in m ? m : { manifest: m, source: opts.manifest };
-  }
-  const tried: string[] = [];
-  try {
-    const { fetchPackageDefinition } = await import("../lib/cp-packages.js");
-    const def = await fetchPackageDefinition(slug);
-    if (def) {
-      const m = readComputerManifest(def, slug);
-      if (!("error" in m)) return { manifest: m, source: "the catalog" };
-      tried.push(`the catalog: ${m.error}`);
-    } else tried.push("the catalog has no such capability, or could not be reached");
-  } catch (err) {
-    tried.push(`the catalog: ${(err as Error).message}`);
-  }
-  const { resolveInstalledCatalogRoot } = await import("../lib/catalog-templates.js");
-  const root = resolveInstalledCatalogRoot();
-  const file = root ? path.join(root, "capabilities", `${slug}.capability.json`) : undefined;
-  if (file && fs.existsSync(file)) {
-    const m = readComputerManifest(JSON.parse(fs.readFileSync(file, "utf8")), slug);
-    if (!("error" in m)) return { manifest: m, source: "the catalog shipped with this CLI" };
-    tried.push(`the shipped catalog: ${m.error}`);
-  } else tried.push("the catalog shipped with this CLI does not have it");
-  return { error: `no manifest for ${slug} (${tried.join("; ")})` };
-}
 
 // ── The pod's installations door ──────────────────────────────────────────────
 
@@ -333,7 +281,6 @@ async function toolsAction(action: ToolAction, slug: string, opts: ToolsCommandO
   // A prerequisite (requires.capabilities) is its own yes and its own installation on the pod.
   const jobCtx = (): RunContext => ({
     ...ctx,
-    load: (s) => loadComputerManifest(s),
     ...(ctx.interactive
       ? {
           prerequisite: async (dep: ComputerManifest) => {

@@ -24,7 +24,7 @@ import {
 } from "../src/lib/host/compose.js";
 import { runJob, serveHost, takeHostLock, type RunnerDeps } from "../src/lib/host/lease.js";
 import type { ProcessResult } from "../src/lib/host/tool.js";
-import type { RunContext } from "../src/lib/host/tool-run.js";
+import { defaultContext, type RunContext } from "../src/lib/host/tool-run.js";
 import { maskSecrets, toHostLog } from "../src/lib/host/logs.js";
 import { isTailnetIPv4, listenPortFor, parseProviderOp, planProviderOp, ProviderOpRefusal } from "../src/lib/host/provider-ops.js";
 import {
@@ -39,6 +39,29 @@ import {
   type LeasedHostJob,
   type ReportBody,
 } from "../src/lib/host/wire.js";
+
+/** The catalog, as the loader reads it: media-ffmpeg only (no network in a test). */
+const catalogReads = vi.hoisted(() => [] as string[]);
+vi.mock("../src/lib/host/tool-manifest.js", async () => {
+  const { readComputerManifest } = await import("../src/lib/host/tool.js");
+  return {
+    loadComputerManifest: async (slug: string) => {
+      catalogReads.push(slug);
+      if (slug !== "media-ffmpeg") return { error: `no manifest for ${slug}` };
+      const m = readComputerManifest(
+        {
+          key: "media-ffmpeg",
+          name: "ffmpeg",
+          placement: { runsOn: ["computer"] },
+          install: { darwin: { steps: [{ kind: "brew", package: "ffmpeg-full" }] } },
+          verify: { timeoutSec: 30, darwin: { command: ["ffmpeg", "-version"], expect: { exitCode: 0 } } },
+        },
+        "media-ffmpeg"
+      );
+      return "error" in m ? m : { manifest: m, source: "the catalog" };
+    },
+  };
+});
 
 const D1 = `sha256:${"a".repeat(64)}`;
 const D2 = `sha256:${"b".repeat(64)}`;
@@ -739,6 +762,59 @@ describe("runJob: a tool installation", () => {
     expect(ran).toEqual([]);
     expect(out?.status).toBe("failed");
     expect(out?.steps?.find((s) => !s.ok)?.detail).toMatch(/needs admin rights .*run `synap tools install media-ffmpeg` on this computer yourself/);
+  });
+
+  it("the worker reads a prerequisite's manifest: media-ffmpeg already works, so media-download installs", async () => {
+    // Worker log 2026-11-09: "media-download needs media-ffmpeg first, and this runner cannot read its manifest".
+    // The worker passes no toolContext: its jobs run with defaultContext, the same loader as the keyboard.
+    const calls = newCalls();
+    const bin = fs.mkdtempSync(path.join(root, "bin-"));
+    fs.writeFileSync(path.join(bin, "brew"), "#!/bin/sh\n", { mode: 0o755 });
+    const ran: string[][] = [];
+    const worker = (): RunContext =>
+      defaultContext({
+        os: "darwin",
+        arch: "arm64",
+        env: { PATH: bin },
+        values: { brewPrefix: "/opt/homebrew", home: root, models: root, workdir: root, tools: root },
+        interactive: false,
+        freeMb: () => 100_000,
+        run: async (argv) => (ran.push(argv), argv[0] === "yt-dlp" ? { exitCode: 0, stdout: "2025.10.22\n", stderr: "" } : FF_OK),
+      });
+    const download = toolJob();
+    download.installation.capabilityKey = "media-download";
+    download.installation.manifest = {
+      key: "media-download",
+      name: "Download media",
+      placement: { runsOn: ["computer"], requires: { capabilities: [{ slug: "media-ffmpeg" }] } },
+      install: { darwin: { steps: [{ kind: "brew", package: "yt-dlp" }] } },
+      verify: { darwin: { command: ["yt-dlp", "--version"], expect: { stdoutMatches: "^(\\S+)" }, captureVersion: 1 } },
+    };
+    catalogReads.length = 0;
+    const out = await runJob(download, deps(calls, fakeRuntime(calls), fakeHub(calls), { toolContext: worker }));
+    expect(catalogReads).toEqual(["media-ffmpeg"]);
+    expect(ran).toEqual([["ffmpeg", "-version"], ["brew", "install", "yt-dlp"], ["yt-dlp", "--version"]]);
+    expect(out).toMatchObject({ status: "done", observedVersion: "2025.10.22" });
+  });
+
+  it("the worker never installs a prerequisite: one that does not work yet is approved on the pod first", async () => {
+    const calls = newCalls();
+    const ran: string[][] = [];
+    const worker = (): RunContext =>
+      defaultContext({ os: "darwin", arch: "arm64", env: { PATH: root }, interactive: false, freeMb: () => 100_000, run: async (argv) => (ran.push(argv), FF_GONE) });
+    const download = toolJob();
+    download.installation.capabilityKey = "media-download";
+    download.installation.manifest = {
+      key: "media-download",
+      name: "Download media",
+      placement: { runsOn: ["computer"], requires: { capabilities: [{ slug: "media-ffmpeg" }] } },
+      install: { darwin: { steps: [{ kind: "brew", package: "yt-dlp" }] } },
+      verify: { darwin: { command: ["yt-dlp", "--version"] } },
+    };
+    const out = await runJob(download, deps(calls, fakeRuntime(calls), fakeHub(calls), { toolContext: worker }));
+    expect(ran).toEqual([["ffmpeg", "-version"]]);
+    expect(out?.status).toBe("failed");
+    expect(out?.steps?.find((s) => !s.ok)?.detail).toBe("Download media needs ffmpeg first: approve media-ffmpeg for this computer on the pod, then this one");
   });
 
   it("a lease lost during the steps: nothing is reported or finished", async () => {
