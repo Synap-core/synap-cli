@@ -1011,8 +1011,13 @@ export function verdictClaim(getSessionText: string): VerdictClaim {
   return { kind: "one", key: open[0].key as string };
 }
 
-/** Newest room messages a follow-up read asks for: the pod's reply cap (16,000 characters) cuts a whole busy room. */
-export const ROOM_READ_LIMIT = 20;
+/**
+ * Newest room messages a follow-up read asks for first. The pod's reply cap
+ * (16,000 characters) cut 20 messages of one room (22,886 characters,
+ * 2026-11-09) and every poll failed with it; 5 is the newest turn or two, and
+ * `readRoomTail` halves it while the pod still cuts the reply.
+ */
+export const ROOM_READ_LIMIT = 5;
 
 export interface RoomMessage {
   id?: string;
@@ -1020,6 +1025,24 @@ export interface RoomMessage {
   timestamp?: string;
   authorType?: string;
   routedTeammateId?: string | null;
+}
+
+/**
+ * A room's newest messages, read in a size the pod's reply cap cannot cut:
+ * `limit` first, halved while the pod cuts the reply (5, 2, 1). A room whose
+ * single newest message is still over the cap throws the cap's named error;
+ * the caller skips that room, never the poll.
+ */
+export async function readRoomTail(mcp: McpCallClient, channelId: string, limit = ROOM_READ_LIMIT): Promise<RoomMessage[]> {
+  for (let n = Math.max(1, Math.floor(limit)); ; n = Math.max(1, Math.floor(n / 2))) {
+    try {
+      const t = await mcp.call("synap_get_thread_context", { threadId: channelId, limit: n });
+      if (t.isError) throw new Error(`thread ${channelId} refused: ${t.text.slice(0, 160)}`);
+      return (JSON.parse(t.text) as { messages?: RoomMessage[] }).messages ?? [];
+    } catch (err) {
+      if (!(err instanceof McpReplyCappedError) || n === 1) throw err;
+    }
+  }
 }
 
 /** At most this many follow-up resumes per session (a runaway-loop guard). */
@@ -1814,10 +1837,7 @@ export function createWorker(opts: WorkerOptions, deps: WorkerDeps): Worker {
     if (s.isError) throw new Error(`get_session ${sessionId} refused: ${s.text.slice(0, 160)}`);
     const channelId = (findKey(JSON.parse(s.text), "channelId") as string | undefined) ?? null;
     if (!channelId) return [];
-    const t = await deps.mcp.call("synap_get_thread_context", { threadId: channelId, limit: ROOM_READ_LIMIT });
-    if (t.isError) throw new Error(`thread ${channelId} refused: ${t.text.slice(0, 160)}`);
-    const messages = (JSON.parse(t.text) as { messages?: RoomMessage[] }).messages ?? [];
-    return followUpsSince(messages, since, deps.selfAgentId);
+    return followUpsSince(await readRoomTail(deps.mcp, channelId), since, deps.selfAgentId);
   };
 
   /**
@@ -1962,7 +1982,16 @@ export function createWorker(opts: WorkerOptions, deps: WorkerDeps): Worker {
         continue;
       }
       if ((rec.resumes ?? 0) >= MAX_RESUMES) continue;
-      const follow = await roomFollowUps(item.id, rec.finishedAt);
+      // One room that cannot be read (cut by the reply cap, refused) skips that
+      // session's follow-ups this tick, said once per cause; it never fails the
+      // poll, so every other session is still launched and resumed.
+      let follow: RoomMessage[] = [];
+      try {
+        follow = await roomFollowUps(item.id, rec.finishedAt);
+      } catch (err) {
+        const msg = (err as Error).message;
+        sayOnce(`room:${item.id}:${msg}`, `session ${item.id}: its room could not be read (${msg}); its follow-ups are skipped, the other sessions go on; retried every tick`);
+      }
       const quiet = item.resume === true && rec.resumedQuietSince !== (item.quietSince ?? "") && !quietIsOwnRun(item, rec);
       if (!follow.length && !quiet) continue;
       const design = rec.mode === "bg";
