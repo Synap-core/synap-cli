@@ -310,6 +310,52 @@ describe("downloads, prerequisites and smoke runs", () => {
       expect(calls).toEqual([["ffmpeg", "-version"]]);
       expect(r.message).toBe("Transcribe on your computer needs ffmpeg first: you said no: nothing was installed");
     });
+
+    it("the tool's check runs with the approved prerequisite's programs FIRST on PATH, never another ffmpeg PATH finds first", async () => {
+      // The founder's Mac, 2026-11-09: a brew `ffmpeg` an x265 upgrade broke sits
+      // in /opt/homebrew/bin; mlx_whisper calls a bare `ffmpeg`.
+      const prefix = fs.mkdtempSync(path.join(os.tmpdir(), "ct-brew-"));
+      const full = path.join(prefix, "opt", "ffmpeg-full", "bin");
+      fs.mkdirSync(full, { recursive: true });
+      fs.writeFileSync(path.join(full, "ffmpeg"), "#!/bin/sh\n", { mode: 0o755 });
+      const pinned = readComputerManifest({
+        meta: { slug: "media-ffmpeg", name: "ffmpeg", version: "1.0.0" },
+        spec: {
+          placement: { runsOn: ["computer"] },
+          install: {
+            darwin: {
+              steps: [{ kind: "brew", package: "ffmpeg-full" }],
+              bins: { ffmpeg: "{brewPrefix}/opt/ffmpeg-full/bin/ffmpeg", ffprobe: "{brewPrefix}/opt/ffmpeg-full/bin/ffprobe" },
+            },
+          },
+          verify: { darwin: { command: ["ffmpeg", "-version"], expect: { exitCode: 0 } } },
+        },
+      }) as ComputerManifest;
+      const envs: Array<string | undefined> = [];
+      const run = async (argv: string[], o?: { env?: NodeJS.ProcessEnv }): Promise<ProcessResult> => {
+        envs.push(o?.env?.PATH);
+        return argv[0] === "mlx_whisper" ? HELP_OK : { exitCode: 0, stdout: "", stderr: "" };
+      };
+      try {
+        const ctx = ctxFor({ run, load: async () => ({ manifest: pinned }), values: { brewPrefix: prefix, home: "/h", models: "/h/models", workdir: "/h/work" }, env: { PATH: `${bin}:/usr/bin` } });
+        const r = await verifyTool(needsFfmpeg(), ctx);
+        expect(r.status).not.toBe("failed");
+        // ffprobe is pinned but absent on disk: only the folder of a program that exists goes first.
+        expect(envs[0]).toBe(`${full}:${bin}:/usr/bin`);
+        // An install checks the tool the same way, reading the prerequisite once.
+        envs.length = 0;
+        let loads = 0;
+        await installTool(needsFfmpeg(), { ...ctx, skipModels: true, load: async () => (loads++, { manifest: pinned }) });
+        expect(loads).toBe(1);
+        expect(envs.at(-1)).toBe(`${full}:${bin}:/usr/bin`);
+        // A tool with no prerequisite keeps the PATH it was given.
+        envs.length = 0;
+        await verifyTool(transcribe, ctx);
+        expect(envs[0]).toBe(`${bin}:/usr/bin`);
+      } finally {
+        fs.rmSync(prefix, { recursive: true, force: true });
+      }
+    });
   });
 });
 
