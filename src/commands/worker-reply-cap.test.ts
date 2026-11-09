@@ -87,6 +87,19 @@ describe("a capped reply is a named error, never data", () => {
     expect((err as Error).message).toMatch(/synap_list_agents's reply was cut by the pod's reply cap \(\d+ characters, the limit is 16000\)/);
   });
 
+  it("an envelope another block was added to is still a cut reply (orient's yourTools on a pod before backend#932)", async () => {
+    // What the founder's pod answered: the cap's envelope with `yourTools` put in front of it.
+    const wrapped = JSON.stringify({
+      yourTools: { profile: "entry" },
+      truncated: { reason: "The reply was 37416 characters; the limit is 16000.", totalChars: 37_416, how: "Narrow the call." },
+      head: '{"startHere":{"pendingReview":',
+    });
+    const { mcp } = fakePod(() => wrapped);
+    const err = await mcp.call("synap_orient", {}).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(McpReplyCappedError);
+    expect((err as Error).message).toMatch(/37416 characters, the limit is 16000/);
+  });
+
   it("a reply within the cap, and a tool error, come back as they are", async () => {
     const { mcp } = fakePod((tool) => (tool === "small" ? '{"truncated":false}' : "x"));
     expect(await mcp.call("small", {})).toEqual({ isError: false, text: '{"truncated":false}' });

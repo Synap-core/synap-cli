@@ -35,7 +35,8 @@ export class McpReplyCappedError extends Error {
 
 /** The pod's reply-cap envelope (`{truncated:{reason,totalChars,...}, head}`), or null for any other reply. */
 export function readCapEnvelope(text: string): { totalChars: number | null; limit: number | null; how: string | null } | null {
-  if (!text.startsWith('{"truncated":')) return null;
+  // Wherever the key sits: a pod may wrap the envelope (orient's `yourTools`, before backend#932).
+  if (!text.includes('"truncated":{')) return null;
   let d: { truncated?: { reason?: unknown; totalChars?: unknown; how?: unknown }; head?: unknown };
   try {
     d = JSON.parse(text);
