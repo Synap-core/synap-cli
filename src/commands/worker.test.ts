@@ -663,27 +663,44 @@ describe("the verdict, read for the session", () => {
     expect(parseVerdict(undefined)).toBeUndefined();
   });
   const read = (outcomes: unknown, status = "ok") => JSON.stringify({ outcomes: { status, outcomes } });
+  /** One outcome as the lean session read serves it (backend#932: owner and retired on every outcome). */
+  const o = (key: string, kind: string, owner: "agent" | "human" = "agent", extra: Record<string, unknown> = {}) => ({
+    key,
+    kind,
+    owner,
+    met: false,
+    retired: false,
+    ...extra,
+  });
   it("claims only the ONE open deliverable the agent owns; none and several are told apart", () => {
-    expect(verdictClaim(read([{ key: "v", kind: "file", owner: "agent", met: false }]))).toEqual({ kind: "one", key: "v" });
-    expect(verdictClaim(read([{ key: "v", kind: "file", owner: "agent", met: false }, { key: "w", kind: "file", met: false }]))).toEqual({
+    expect(verdictClaim(read([o("v", "file")]))).toEqual({ kind: "one", key: "v" });
+    expect(verdictClaim(read([o("v", "file"), o("w", "file")]))).toEqual({
       kind: "several",
       keys: ["v", "w"],
     });
-    expect(verdictClaim(read([{ key: "q", kind: "decision", owner: "human", met: false }]))).toEqual({ kind: "none" });
-    expect(verdictClaim(read([{ key: "f", kind: "fact", owner: "agent", met: false }]))).toEqual({ kind: "none" });
+    expect(verdictClaim(read([o("q", "decision", "human")]))).toEqual({ kind: "none" });
+    expect(verdictClaim(read([o("f", "fact")]))).toEqual({ kind: "none" });
     expect(verdictClaim(read([]))).toEqual({ kind: "none" });
   });
+  it("never claims a withdrawn deliverable, nor one the read does not say whose it is", () => {
+    // retired + agent-owned is the input that tells "owner checked" from "retired checked" apart.
+    expect(verdictClaim(read([o("gone", "file", "agent", { retired: true }), o("v", "file")]))).toEqual({ kind: "one", key: "v" });
+    // A pod older than backend#932: its lean read carries neither field — nothing is claimed, and that is said.
+    const old = verdictClaim(read([{ key: "v", kind: "file", met: false }]));
+    expect(old.kind).toBe("unreadable");
+    expect(old.kind === "unreadable" && old.why).toMatch(/whose each outcome is/);
+  });
   it("never claims a pull request, a branch or a commit: a PR is delivered only when it merges", () => {
-    const pr = { key: "pr-backend-12", kind: "pull_request", owner: "agent", met: false, ref: { url: "https://github.com/o/r/pull/12" } };
+    const pr = o("pr-backend-12", "pull_request", "agent", { ref: { url: "https://github.com/o/r/pull/12" } });
     expect(verdictClaim(read([pr]))).toEqual({ kind: "none" });
-    expect(verdictClaim(read([{ key: "branch-x", kind: "branch", met: false }, { key: "commit-r-abc", kind: "commit", met: false }]))).toEqual({
+    expect(verdictClaim(read([o("branch-x", "branch"), o("commit-r-abc", "commit")]))).toEqual({
       kind: "none",
     });
     // The one claimable deliverable beside an open PR is still the one.
-    expect(verdictClaim(read([pr, { key: "gate", kind: "file", owner: "agent", met: false }]))).toEqual({ kind: "one", key: "gate" });
+    expect(verdictClaim(read([pr, o("gate", "file")]))).toEqual({ kind: "one", key: "gate" });
   });
   it("an outcomes list that could not be read is unreadable, never \"nothing open\"", () => {
-    expect(verdictClaim(read([{ key: "v", kind: "file", owner: "agent", met: false }], "unavailable")).kind).toBe("unreadable");
+    expect(verdictClaim(read([o("v", "file")], "unavailable")).kind).toBe("unreadable");
     expect(verdictClaim("not json").kind).toBe("unreadable");
     expect(verdictClaim(JSON.stringify({ session: {} })).kind).toBe("unreadable");
     expect(verdictClaim(JSON.stringify({ outcomes: { status: "ok" } })).kind).toBe("unreadable");
