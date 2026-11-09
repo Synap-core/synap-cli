@@ -49,7 +49,7 @@ import {
   type ProviderPlan,
 } from "./provider-ops.js";
 import { readComputerManifest } from "./tool.js";
-import { defaultContext, installTool, removeTool, verifyTool, type RunContext } from "./tool-run.js";
+import { defaultContext, envWithPrerequisites, installTool, removeTool, verifyTool, type RunContext } from "./tool-run.js";
 import { runRecipe, type RecipeRunDeps } from "./recipe-run.js";
 import {
   fitFinishBody,
@@ -519,12 +519,16 @@ export async function runJob(job: LeasedHostJob, deps: RunnerDeps): Promise<Fini
           // A recipe of a tool installed here (recipe-run.ts): the RUNNING
           // heartbeat comes once the inputs are down and before the first step.
           const tctx: RunContext = deps.toolContext?.() ?? defaultContext({ interactive: false });
+          // The tool's prerequisites' pinned programs come first on PATH (a
+          // recipe step that calls a bare `ffmpeg` gets the approved one).
+          const approved = readComputerManifest(job.installation.manifest ?? {}, job.installation.capabilityKey);
+          const env = "error" in approved ? tctx.env : await envWithPrerequisites(approved, tctx);
           try {
             const r = await runRecipe(job, {
               hub: deps.hub,
               os: tctx.os,
               values: tctx.values,
-              env: tctx.env,
+              env,
               ...(deps.fetchImpl ? { fetchImpl: deps.fetchImpl as RecipeRunDeps["fetchImpl"] } : {}),
               ...(tctx.run ? { run: tctx.run } : {}),
               signal: stop.signal,

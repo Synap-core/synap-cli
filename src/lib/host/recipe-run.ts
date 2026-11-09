@@ -22,6 +22,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
+import { writeSecretFileNoFollow } from "../atomic-file.js";
 import { renderRecipe, findRecipe, type Recipe } from "./recipe.js";
 import { fillPlaceholders, redactSecrets, type PlaceholderValues } from "./tool.js";
 import { onPath, runProcess, toolsHome } from "./tool-run.js";
@@ -174,7 +175,7 @@ export async function runRecipe(job: LeasedHostJob, deps: RecipeRunDeps): Promis
       if (!/^[a-z0-9][a-z0-9_-]*\.(py|sh)$/.test(s.name)) fail("scripts", `${s.name} is not a script file name`);
       if (sha256(s.source) !== s.sha256) fail("scripts", `${s.name} does not match its pinned sha256: refused`);
       const at = path.join(dir, "scripts", s.name);
-      fs.writeFileSync(at, s.source, { mode: 0o600 });
+      writeSecretFileNoFollow(at, s.source, { mode: 0o600 });
       scripts[s.name] = at;
     }
 

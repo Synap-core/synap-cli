@@ -224,4 +224,48 @@ describe("a hosted verb on this computer", () => {
     expect(Date.now() - t0).toBeLessThan(10_000);
     expect(p.uploads).toHaveLength(0);
   }, 20_000);
+
+  it("a recipe of a tool that needs media-ffmpeg runs with the approved ffmpeg's folder FIRST on PATH", async () => {
+    // mlx_whisper calls a bare `ffmpeg`; a brew `ffmpeg` that no longer loads
+    // must never be the one it finds (founder's Mac, 2026-11-09).
+    const brew = path.join(root, "brew");
+    const full = path.join(brew, "opt", "ffmpeg-full", "bin");
+    fs.mkdirSync(full, { recursive: true });
+    fs.writeFileSync(path.join(full, "ffmpeg"), "#!/bin/sh\n", { mode: 0o755 });
+    const { pod: p, deps } = pod();
+    const paths: Array<string | undefined> = [];
+    deps.toolContext = () =>
+      defaultContext({
+        interactive: false,
+        values: { ...defaultContext().values, brewPrefix: brew },
+        load: async (slug) =>
+          slug === "media-ffmpeg"
+            ? {
+                manifest: {
+                  slug,
+                  name: "ffmpeg",
+                  version: "1",
+                  spec: { install: { [process.platform]: { steps: [], bins: { ffmpeg: "{brewPrefix}/opt/ffmpeg-full/bin/ffmpeg" } } } },
+                },
+              }
+            : { error: "unknown" },
+        run: async (argv, o) => {
+          paths.push(o?.env?.PATH);
+          p.runs.push(argv);
+          return runProcess(argv, o);
+        },
+      });
+    const j = job({
+      manifest: {
+        placement: { runsOn: ["computer"], requires: { capabilities: [{ slug: "media-ffmpeg" }] } },
+        install: { [process.platform]: { steps: [{ kind: "uv", package: "mlx-whisper" }] } },
+        verify: { [process.platform]: { command: ["mlx_whisper", "--help"], expect: { exitCode: 0 } } },
+        recipes: [recipe()],
+      },
+    });
+    j.installation.capabilityKey = "media-transcribe";
+    const out = await runJob(j, deps);
+    expect(out?.status).toBe("done");
+    expect(paths[0]?.split(path.delimiter)[0]).toBe(full);
+  });
 });
