@@ -50,8 +50,10 @@ import {
 import { readComputerManifest } from "./tool.js";
 import { defaultContext, installTool, removeTool, verifyTool, type RunContext } from "./tool-run.js";
 import {
+  fitFinishBody,
   HostDoorClosedError,
   HostLeaseLostError,
+  HostRequestRefusedError,
   installationKind,
   type FinishBody,
   type FinishStep,
@@ -540,7 +542,9 @@ export async function runJob(job: LeasedHostJob, deps: RunnerDeps): Promise<Fini
     return null;
   }
   const log = await collectLog();
-  const body: Omit<FinishBody, "leaseId"> = {
+  // Inside the pod's limits: a finish it refuses is an outcome it never learns
+  // (a tool installed and checked, then installed again by the self-heal).
+  let body: Omit<FinishBody, "leaseId"> = fitFinishBody({
     status: verdict,
     durationMs: now() - startedAt,
     ...(infraReason ? { infraReason } : {}),
@@ -549,9 +553,18 @@ export async function runJob(job: LeasedHostJob, deps: RunnerDeps): Promise<Fini
     ...(contractOutput ? { output: contractOutput } : {}),
     ...(cleanedUp.length ? { cleanedUp } : {}),
     ...(toolCheck ?? {}),
-  };
+  });
   try {
-    await deps.hub.finish(job, body);
+    try {
+      await deps.hub.finish(job, body);
+    } catch (err) {
+      if (!(err instanceof HostRequestRefusedError)) throw err;
+      // Refused as malformed: send the outcome alone (verdict, check), once.
+      deps.log(`job ${job.id}: ${err.message}; finishing again with the outcome only (steps and log are in this computer's log)`);
+      const { steps: _s, log: _l, output: _o, cleanedUp: _c, ...outcome } = body;
+      body = outcome;
+      await deps.hub.finish(job, body);
+    }
     deps.log(`job ${job.id}: finished ${verdict}`);
   } catch (err) {
     if (err instanceof HostLeaseLostError) {

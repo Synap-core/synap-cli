@@ -36,11 +36,14 @@ import {
   verifyArgv,
   verifyFor,
   type ComputerManifest,
+  type ComputerOs,
   type ComputerToolStatus,
   type PlaceholderValues,
   type PlannedStep,
   type ProcessResult,
+  type StepsBlock,
   type VerifyOutcome,
+  fillPlaceholders,
 } from "./tool.js";
 import { loadComputerManifest } from "./tool-manifest.js";
 import type { FinishStep, ToolCheck } from "./wire.js";
@@ -74,6 +77,46 @@ export function toolEnv(base: NodeJS.ProcessEnv = process.env, platform: string 
   const extra = [`${v.brewPrefix}/bin`, `${v.brewPrefix}/sbin`, "/usr/local/bin", path.join(os.homedir(), ".local", "bin")];
   const have = (base.PATH ?? "").split(path.delimiter).filter(Boolean);
   return { ...base, PATH: [...have, ...extra.filter((d) => !have.includes(d))].join(path.delimiter) };
+}
+
+/**
+ * The env a tool's own programs run with: the folders of its prerequisites'
+ * pinned programs (`requires.capabilities` → their `install.<os>.bins`) FIRST
+ * on PATH. mlx_whisper (media-transcribe) calls a bare `ffmpeg`: it must get
+ * the approved media-ffmpeg build, never another `ffmpeg` that PATH order
+ * finds first (a brew `ffmpeg` whose x265 an upgrade replaced no longer loads,
+ * 2026-11-09). A prerequisite whose manifest cannot be read is said, and the
+ * PATH is left as it was for it.
+ */
+export async function envWithPrerequisites(
+  m: ComputerManifest,
+  ctx: Pick<RunContext, "env" | "os" | "values" | "load" | "say">
+): Promise<NodeJS.ProcessEnv> {
+  const loaded: ComputerManifest[] = [];
+  for (const dep of m.spec.placement?.requires?.capabilities ?? []) {
+    if ((dep.os && dep.os !== ctx.os) || dep.slug === m.slug || !ctx.load) continue;
+    const got = await ctx.load(dep.slug);
+    if ("error" in got) ctx.say(`${dep.slug}'s programs could not be put first on PATH: ${got.error}`);
+    else loaded.push(got.manifest);
+  }
+  return prerequisitesFirst(loaded, ctx);
+}
+
+/** The PATH with these prerequisites' pinned programs' folders first (only programs that exist on disk). */
+export function prerequisitesFirst(prerequisites: readonly ComputerManifest[], ctx: Pick<RunContext, "env" | "os" | "values">): NodeJS.ProcessEnv {
+  const first: string[] = [];
+  for (const dep of prerequisites) {
+    const bins = (dep.spec.install?.[ctx.os as ComputerOs] as StepsBlock | undefined)?.bins ?? {};
+    for (const raw of Object.values(bins)) {
+      const f = fillPlaceholders(raw, ctx.values);
+      if ("error" in f || !path.isAbsolute(f.value) || !fs.existsSync(f.value)) continue;
+      const dir = path.dirname(f.value);
+      if (!first.includes(dir)) first.push(dir);
+    }
+  }
+  if (first.length === 0) return ctx.env;
+  const rest = (ctx.env.PATH ?? "").split(path.delimiter).filter((d) => d && !first.includes(d));
+  return { ...ctx.env, PATH: [...first, ...rest].join(path.delimiter) };
 }
 
 /** Is `program` on this PATH? */
@@ -276,8 +319,16 @@ export async function runSmoke(m: ComputerManifest, ctx: RunContext): Promise<{ 
   return { run, ok: matchVerify(run, { command: filled.argv, expect: smoke.expect }).ok };
 }
 
-/** Check the tool: the version it prints, and its smoke run when one is declared. */
+/**
+ * Check the tool: the version it prints, and its smoke run when one is
+ * declared, with its prerequisites' programs first on PATH.
+ */
 export async function verifyTool(m: ComputerManifest, ctx: RunContext): Promise<ToolResult> {
+  return checkTool(m, { ...ctx, env: await envWithPrerequisites(m, ctx) });
+}
+
+/** {@link verifyTool} with the env already built. */
+async function checkTool(m: ComputerManifest, ctx: RunContext): Promise<ToolResult> {
   if (ctx.os === "win32") ctx.say(chalk.yellow(WINDOWS_UNTESTED));
   const t0 = Date.now();
   const { outcome, run, argv } = await runVerify(m, ctx);
@@ -465,11 +516,13 @@ export async function installTool(m: ComputerManifest, ctx: RunContext): Promise
   }
 
   // What it needs first (requires.capabilities): each is its own installation, its own yes (decision 2).
+  const prerequisites: ComputerManifest[] = [];
   for (const dep of m.spec.placement?.requires?.capabilities ?? []) {
     if ((dep.os && dep.os !== ctx.os) || dep.slug === m.slug) continue;
     if (!ctx.load) return refused(`${m.name} needs ${dep.slug} first, and this runner cannot read its manifest`);
     const loaded = await ctx.load(dep.slug);
     if ("error" in loaded) return refused(`${m.name} needs ${dep.slug} first: ${loaded.error}`);
+    prerequisites.push(loaded.manifest);
     const { outcome } = await runVerify(loaded.manifest, ctx);
     if (outcome.ok) continue;
     if (outcome.timedOut) return refused(`${m.name} needs ${loaded.manifest.name} first, and ${outcome.reason}: check it again, then this one`);
@@ -494,12 +547,14 @@ export async function installTool(m: ComputerManifest, ctx: RunContext): Promise
   const logFile = newLogFile(m.slug, "install");
   const steps: FinishStep[] = [];
   const ran = await runSteps(pre.planned, m, ctx, logFile, steps);
+  // The tool is checked with its prerequisites' programs first on PATH (read once, above).
+  const checkCtx = { ...ctx, env: prerequisitesFirst(prerequisites, ctx) };
   if ("error" in ran) {
     // Check anyway: the pod keeps the last check it was sent, so a failed install reports what is there now.
-    const now = await verifyTool(m, ctx);
+    const now = await checkTool(m, checkCtx);
     return { status: "failed", toolVersion: now.toolVersion, message: `${m.name} was not installed: ${ran.error}`, steps: [...steps, ...now.steps], check: now.check };
   }
-  const checked = await verifyTool(m, ctx);
+  const checked = await checkTool(m, checkCtx);
   const all = [...steps, ...checked.steps];
   if (checked.status === "installed") {
     const v = checked.toolVersion ? ` ${checked.toolVersion}` : "";

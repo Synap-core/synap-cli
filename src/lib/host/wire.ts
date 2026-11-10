@@ -31,6 +31,19 @@ export const HOST_LOG_CAP = 64 * 1024;
 export const HOST_BODY_MAX_BYTES = 2 * 1024 * 1024;
 
 /**
+ * The finish body's string and list limits, as `HostJobFinishBodySchema`
+ * declares them (a parity test reads the schema). A finish past one is
+ * refused whole (HTTP 400), so the pod never learns the job's outcome:
+ * {@link fitFinishBody} keeps every finish inside them.
+ */
+export const HOST_STEP_NAME_MAX = 100;
+export const HOST_STEP_DETAIL_MAX = 1000;
+export const HOST_STEPS_MAX = 100;
+export const HOST_INFRA_REASON_MAX = 1000;
+export const HOST_CLEANED_UP_ITEM_MAX = 300;
+export const HOST_CLEANED_UP_MAX = 100;
+
+/**
  * What an installation is (reconciliation f75fbb48 §3.1): `service` runs as
  * compose services from the approved manifest; `tool` is a program installed
  * by the per-OS steps the manifest declares.
@@ -202,6 +215,52 @@ export interface HostHub {
 
 export type FetchLike = (url: string, init: RequestInit) => Promise<Response>;
 
+/** Cut text to `max` characters, ending with "…" when it was cut. */
+function clip(text: string, max: number): string {
+  return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
+}
+
+/**
+ * A step's name as a short label within the pod's limit: past it, a URL
+ * becomes its file name, then an absolute path its file name, then the
+ * label is cut. The full text stays in the job's log.
+ */
+export function fitStepName(name: string, max = HOST_STEP_NAME_MAX): string {
+  if (name.length <= max) return name;
+  let short = name.replace(/\bhttps?:\/\/\S+/g, (u) => {
+    const last = u.replace(/[?#].*$/, "").replace(/\/+$/, "").split("/").pop();
+    return last || u;
+  });
+  if (short.length > max) short = short.replace(/(^|\s)(\/[^\s]+)/g, (_m, pre: string, p: string) => `${pre}${p.split("/").pop() || p}`);
+  return clip(short, max);
+}
+
+/** The finish body inside every limit of the pod's schema (names, details, lists). */
+export function fitFinishBody<T extends Omit<FinishBody, "leaseId">>(body: T): T {
+  const out: T = { ...body };
+  if (body.steps) {
+    out.steps = body.steps.slice(0, HOST_STEPS_MAX).map((s) => ({
+      ...s,
+      name: fitStepName(s.name) || "step",
+      ...(s.detail !== undefined ? { detail: clip(s.detail, HOST_STEP_DETAIL_MAX) } : {}),
+    }));
+  }
+  if (body.infraReason !== undefined) out.infraReason = clip(body.infraReason, HOST_INFRA_REASON_MAX);
+  if (body.cleanedUp) out.cleanedUp = body.cleanedUp.slice(0, HOST_CLEANED_UP_MAX).map((c) => clip(c, HOST_CLEANED_UP_ITEM_MAX));
+  return out;
+}
+
+/** The pod refused a request as malformed (HTTP 400): resending the same body cannot help. */
+export class HostRequestRefusedError extends Error {
+  constructor(
+    message: string,
+    readonly status: number
+  ) {
+    super(message);
+    this.name = "HostRequestRefusedError";
+  }
+}
+
 /** Cut a log end to the wire's cap (UTF-8 bytes), keeping its start (head) or its end (tail). */
 export function capLogEnd(text: string, end: "head" | "tail", cap = HOST_LOG_CAP): string {
   const buf = Buffer.from(text, "utf8");
@@ -230,7 +289,9 @@ export function createHostHub(cfg: Pick<HubConfig, "podUrl" | "apiKey">, fetchIm
     if (!res.ok) {
       // empty-ok: only the error's detail; the HTTP status is thrown either way.
       const text = await res.text().catch(() => "");
-      throw new Error(`POST host-jobs${path} failed (HTTP ${res.status})${text ? `: ${text.slice(0, 300)}` : ""}`);
+      const message = `POST host-jobs${path} failed (HTTP ${res.status})${text ? `: ${text.slice(0, 300)}` : ""}`;
+      if (res.status === 400) throw new HostRequestRefusedError(message, res.status);
+      throw new Error(message);
     }
     return res.json();
   }

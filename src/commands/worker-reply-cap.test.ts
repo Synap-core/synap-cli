@@ -12,7 +12,7 @@
 import { describe, expect, it } from "vitest";
 import { createMcpClient, McpReplyCappedError } from "../lib/mcp-call.js";
 import { readRosterPageWithSelf, resolveWorkerEngine } from "./worker-engine.js";
-import { createWorker } from "./worker.js";
+import { createWorker, readRoomTail, ROOM_READ_LIMIT } from "./worker.js";
 
 const CAP = 16_000;
 
@@ -207,5 +207,96 @@ describe("a handed session is read lean: the full read is over the cap", () => {
     expect(lines.join("\n")).toMatch(/a work-folder session — this worker takes code runs only/);
     expect(lines.join("\n")).not.toMatch(/could not read how to run it/);
     expect(calls.filter((c) => c.tool === "synap_get_session").every((c) => c.args.detail === "lean")).toBe(true);
+  });
+});
+
+describe("a room is read in pages the cap cannot cut, and one fat room never stalls the poll", () => {
+  /**
+   * `synap_get_thread_context` as backend main answers it: the newest `limit`
+   * messages (default 50), each wrapped in the untrusted fence an agent's post
+   * gets, plus the thread's linked objects. `size` is each message's length.
+   */
+  const room = (count: number, size: number, since = "2026-11-09T22:00:00.000Z") =>
+    Array.from({ length: count }, (_, i) => ({
+      id: `m-${i}`,
+      content: `[untrusted content] ${"y".repeat(size)}`,
+      timestamp: new Date(Date.parse(since) + (i + 1) * 60_000).toISOString(),
+      authorType: "agent",
+      routedTeammateId: "someone-else",
+    }));
+  const threadContext =
+    (rooms: Record<string, ReturnType<typeof room>>): Handler =>
+    (tool, args) => {
+      if (tool !== "synap_get_thread_context") return "{}";
+      const all = rooms[args.threadId as string] ?? [];
+      const limit = typeof args.limit === "number" ? args.limit : 50;
+      return JSON.stringify({ thread: { id: args.threadId }, messages: all.slice(-limit), linkedEntities: [], linkedDocuments: [] });
+    };
+
+  it("asks for the newest few first: the founder's room (20 messages, 22,886 characters) is read in one call", async () => {
+    // 20 messages of ~1,100 characters: what the founder's Mac worker failed on every 30 s.
+    const { mcp, calls } = fakePod(threadContext({ r1: room(20, 1_050) }));
+    const messages = await readRoomTail(mcp, "r1");
+    expect(ROOM_READ_LIMIT).toBeLessThanOrEqual(5);
+    expect(messages.map((m) => m.id)).toEqual(["m-15", "m-16", "m-17", "m-18", "m-19"]);
+    expect(calls.map((c) => c.args.limit)).toEqual([ROOM_READ_LIMIT]);
+  });
+
+  it("halves the page while the pod cuts it, and keeps the newest messages", async () => {
+    // 5 messages of 5,000 characters are cut; 2 are not.
+    const { mcp, calls } = fakePod(threadContext({ r1: room(8, 5_000) }));
+    const messages = await readRoomTail(mcp, "r1");
+    expect(calls.map((c) => c.args.limit)).toEqual([5, 2]);
+    expect(messages.map((m) => m.id)).toEqual(["m-6", "m-7"]);
+  });
+
+  it("a single message over the cap is the cap's named error, never a parsed head", async () => {
+    const { mcp, calls } = fakePod(threadContext({ r1: room(3, 17_000) }));
+    const err = await readRoomTail(mcp, "r1").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(McpReplyCappedError);
+    expect(calls.map((c) => c.args.limit)).toEqual([5, 2, 1]);
+  });
+
+  it("the poll skips a room it cannot read, names it, and goes on with the other sessions", async () => {
+    const A = "aaaaaaaa-0000-4000-8000-0000000000a1";
+    const B = "bbbbbbbb-0000-4000-8000-0000000000b2";
+    const rooms = { "room-a": room(3, 17_000), "room-b": [] as ReturnType<typeof room> };
+    const thread = threadContext(rooms);
+    const { mcp, calls } = fakePod((tool, args) => {
+      if (tool === "synap_orient")
+        return JSON.stringify({ handedToYou: { count: 2, items: [{ id: A, goal: "g" }, { id: B, goal: "g" }] } });
+      if (tool === "synap_get_session") {
+        const id = args.sessionId as string;
+        return JSON.stringify({ session: { id, channelId: id === A ? "room-a" : "room-b" }, outcomes: { status: "ok", outcomes: [] } });
+      }
+      return thread(tool, args);
+    });
+    const lines: string[] = [];
+    const w = createWorker(
+      { agent: "cap-room", cwd: "/nonexistent-cap-test", protocols: "work-folder" },
+      { mcp, podUrl: "https://pod", apiKey: "k", selfAgentId: "self", say: (l) => lines.push(l) }
+    );
+    // Both ran and finished before the room grew: each is due a follow-up read.
+    const finished = (sessionId: string) => ({
+      sessionId,
+      status: "done" as const,
+      startedAt: "2026-11-09T21:00:00.000Z",
+      finishedAt: "2026-11-09T21:30:00.000Z",
+      claudeSessionId: `c-${sessionId.slice(0, 8)}`,
+      protocol: "work-folder" as const,
+    });
+    w.state.runs[A] = finished(A);
+    w.state.runs[B] = finished(B);
+
+    expect(await w.tick()).toEqual({ handed: 2, launched: 0 });
+    const reads = calls.filter((c) => c.tool === "synap_get_thread_context").map((c) => c.args.threadId);
+    expect(reads).toContain("room-b");
+    const said = lines.join("\n");
+    expect(said).toMatch(new RegExp(`session ${A}: its room could not be read \\(synap_get_thread_context's reply was cut by the pod's reply cap`));
+    expect(said).toMatch(/the other sessions go on/);
+
+    // Said once per cause, not on every tick.
+    await w.tick();
+    expect(lines.filter((l) => l.includes("its room could not be read"))).toHaveLength(1);
   });
 });
