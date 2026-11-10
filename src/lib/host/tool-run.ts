@@ -141,7 +141,7 @@ const OUTPUT_CAP = 256 * 1024;
 /** Run one argv (never a shell line), capture its output, optionally echo it. */
 export function runProcess(
   argv: string[],
-  opts: { env?: NodeJS.ProcessEnv; timeoutMs?: number; echo?: (chunk: string) => void } = {}
+  opts: { env?: NodeJS.ProcessEnv; timeoutMs?: number; echo?: (chunk: string) => void; cwd?: string; signal?: AbortSignal } = {}
 ): Promise<ProcessResult> {
   return new Promise((resolve) => {
     let stdout = "";
@@ -155,7 +155,7 @@ export function runProcess(
     };
     let child;
     try {
-      child = spawn(argv[0]!, argv.slice(1), { env: opts.env ?? toolEnv(), shell: false, windowsHide: true });
+      child = spawn(argv[0]!, argv.slice(1), { env: opts.env ?? toolEnv(), shell: false, windowsHide: true, ...(opts.cwd ? { cwd: opts.cwd } : {}) });
     } catch (err) {
       done({ exitCode: null, stdout, stderr, error: `${argv[0]} could not start: ${(err as Error).message}` });
       return;
@@ -166,6 +166,13 @@ export function runProcess(
           done({ exitCode: null, stdout, stderr, error: `${argv[0]} took longer than ${Math.round(opts.timeoutMs! / 1000)} s and was stopped`, timedOut: true });
         }, opts.timeoutMs)
       : undefined;
+    // A stop (a person's Stop, the runner shutting down) ends the program, as a timeout does.
+    const onAbort = () => {
+      child.kill("SIGTERM");
+      done({ exitCode: null, stdout, stderr, error: `${argv[0]} was stopped` });
+    };
+    if (opts.signal?.aborted) onAbort();
+    else opts.signal?.addEventListener("abort", onAbort, { once: true });
     child.stdout?.on("data", (b: Buffer) => {
       const s = b.toString();
       if (stdout.length < OUTPUT_CAP) stdout += s;
@@ -183,6 +190,7 @@ export function runProcess(
     });
     child.on("close", (code) => {
       if (timer) clearTimeout(timer);
+      opts.signal?.removeEventListener("abort", onAbort);
       done({ exitCode: code, stdout, stderr });
     });
   });
