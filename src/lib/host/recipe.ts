@@ -84,10 +84,20 @@ function valueProblem(param: RecipeParam, value: unknown): string | null {
  * spliced into. A placeholder that is a whole argument takes any value: an
  * argv is never parsed by a shell.
  */
+/**
+ * A value in the form `renderRecipe` checks and fills (the backend's
+ * `canonicalValue`, ported): a `time` is seconds or [hh:]mm:ss, so a JSON
+ * number of seconds (12, 12.5) is that time and becomes its string, which the
+ * time rule then checks. Every other value is left as it came.
+ */
+function canonicalValue(param: RecipeParam, value: unknown): unknown {
+  return param.type === "time" && typeof value === "number" && Number.isFinite(value) ? String(value) : value;
+}
+
 export function renderRecipe(recipe: Recipe, values: Record<string, unknown>, run: RecipeRunContext): RenderedStep[] {
   const filled: Record<string, string | string[]> = {};
   for (const [name, param] of Object.entries(recipe.params)) {
-    const value = values[name] ?? param.default;
+    const value = canonicalValue(param, values[name] ?? param.default);
     if (value === undefined) throw new Error(`recipe ${recipe.name}: ${name} is required`);
     const bad = valueProblem(param, value);
     if (bad) throw new Error(`recipe ${recipe.name}: ${name} must be ${bad}`);
