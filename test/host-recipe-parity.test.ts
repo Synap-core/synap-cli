@@ -56,6 +56,8 @@ const CASES: Array<[string, Record<string, unknown>, typeof RUN]> = [
   ["enum outside its options", { ...OK, mode: "turbo" }, RUN],
   ["bad colour", { ...OK, color: "red" }, RUN],
   ["bad time", { ...OK, at: "1 min" }, RUN],
+  ["a time given as a number of seconds", { ...OK, at: 12.5 }, RUN],
+  ["a time given as a negative number", { ...OK, at: -2 }, RUN],
   ["a valid time that cannot be spliced (its colon)", { ...OK, at: "00:01.5" }, RUN],
   ["empty list", { ...OK, clips: [] }, RUN],
   ["embedded value breaking the graph", { ...OK, x: "0,drawtext" }, RUN],
@@ -84,5 +86,15 @@ describe.skipIf(!present)("renderRecipe port = @synap-core/types/capability-mani
     // Non-vacuity: the table exercises both sides of the rule.
     expect(refusals).toBeGreaterThanOrEqual(8);
     expect(CASES.length - refusals).toBeGreaterThanOrEqual(3);
+  });
+});
+
+// The port's own rule, checked here too: the parity table above is skipped
+// where the backend source is absent, and agreement is not correctness.
+describe("renderRecipe port: a time given as a number of seconds", () => {
+  it("fills it as its string; a negative number is still refused", () => {
+    const args = ported(R, { ...OK, at: 12.5 }, RUN)[0]!.args;
+    expect(args).toContain("crop=iw*0.5:ih,fade=c=1A2B3C:st=12.5");
+    expect(() => ported(R, { ...OK, at: -2 }, RUN)).toThrow(/at must be a time/);
   });
 });
