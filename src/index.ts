@@ -1692,6 +1692,13 @@ track
   )
   .option("--uncertainty <level>", "How well the way is known: clear|complicated|complex|chaotic|unknown")
   .option("--loop <on|off|n>", "Let the goal propose its next session: on, off, or n sessions a week")
+  .option("--parent <goalId>", "The goal this one serves (its primary parent when it has none yet)")
+  .option(
+    "--pillar <spaceId>",
+    "A space of the project this goal advances (repeatable; the first is the primary pillar)",
+    collect,
+    []
+  )
   .option("--reason <text>", "Why — shown to the reviewer")
   .option("--json", "Output as JSON")
   .option("--pod-url <url>", "Pod URL override")
@@ -1721,6 +1728,13 @@ track
   )
   .option("--uncertainty <level>", "How well the way is known: clear|complicated|complex|chaotic|unknown")
   .option("--loop <on|off|n>", "Let the goal propose its next session: on, off, or n sessions a week")
+  .option("--parent <goalId>", "The goal this one serves (its primary parent when it has none yet)")
+  .option(
+    "--pillar <spaceId>",
+    "A space of the project this goal advances (repeatable; the first is the primary pillar)",
+    collect,
+    []
+  )
   .option("--reason <text>", "Why — shown to the reviewer")
   .option("--json", "Output as JSON")
   .option("--pod-url <url>", "Pod URL override")

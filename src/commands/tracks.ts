@@ -6,7 +6,8 @@
  *
  *   list        a project's tracks (the active project lens, else every goal on the pod)
  *   show        one track, its steps and where it stands
- *   start       start a track on a project (--name; --end-state, --criterion, … say what done is)
+ *   start       start a track on a project (--name; --end-state, --criterion, … say what done is;
+ *               --parent, --pillar say where it goes)
  *   update      set a goal's direction, KPI and content
  *   accept      the goal's judge accepts / sends back / rejects a claimed criterion
  *   advance     move a track to a step — returns the step's session OFFER
@@ -166,6 +167,8 @@ interface GoalContentOpts {
   kind?: string;
   uncertainty?: string;
   loop?: string;
+  parent?: string;
+  pillar?: string[];
 }
 
 /** Goal-content flags → the body fields the pod reads (only what was typed). */
@@ -179,6 +182,14 @@ export function goalContentBody(opts: GoalContentOpts): Json {
   if (opts.dropCondition?.length) body.dropConditions = opts.dropCondition;
   if (opts.kind) body.workKind = opts.kind;
   if (opts.uncertainty) body.uncertainty = opts.uncertainty;
+  if (opts.parent) body.parentGoalId = opts.parent;
+  // The first --pillar is the primary one (the goal rolls up to it); the rest only list it.
+  if (opts.pillar?.length) {
+    body.pillars = opts.pillar.map((workspaceId, i) => ({
+      workspaceId,
+      ...(i === 0 ? { primary: true } : {}),
+    }));
+  }
   if (opts.loop !== undefined) {
     if (opts.loop === "off") body.loop = null;
     else if (opts.loop === "on" || opts.loop === "") body.loop = { on: true };
