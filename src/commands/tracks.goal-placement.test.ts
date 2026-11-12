@@ -20,6 +20,15 @@ describe("goalContentBody: where a goal goes", () => {
     });
   });
 
+  it("always sends the whole set with exactly one primary, so an update cannot trip a second primary", () => {
+    const { pillars } = goalContentBody({ pillar: ["ws-2", "ws-1", "ws-3"] }) as {
+      pillars: Array<{ workspaceId: string; primary?: boolean }>;
+    };
+    expect(pillars.map((p) => p.workspaceId)).toEqual(["ws-2", "ws-1", "ws-3"]);
+    expect(pillars.filter((p) => p.primary)).toHaveLength(1);
+    expect(pillars[0].primary).toBe(true);
+  });
+
   it("sends neither field when neither flag was typed (an empty --pillar default is not a clear)", () => {
     expect(goalContentBody({ pillar: [] })).toEqual({});
   });

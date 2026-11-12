@@ -183,7 +183,8 @@ export function goalContentBody(opts: GoalContentOpts): Json {
   if (opts.kind) body.workKind = opts.kind;
   if (opts.uncertainty) body.uncertainty = opts.uncertainty;
   if (opts.parent) body.parentGoalId = opts.parent;
-  // The first --pillar is the primary one (the goal rolls up to it); the rest only list it.
+  // --pillar is the goal's WHOLE pillar set (the pod replaces the old set on update):
+  // the first is the main pillar, so the body always carries exactly one `primary`.
   if (opts.pillar?.length) {
     body.pillars = opts.pillar.map((workspaceId, i) => ({
       workspaceId,

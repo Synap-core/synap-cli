@@ -1692,10 +1692,10 @@ track
   )
   .option("--uncertainty <level>", "How well the way is known: clear|complicated|complex|chaotic|unknown")
   .option("--loop <on|off|n>", "Let the goal propose its next session: on, off, or n sessions a week")
-  .option("--parent <goalId>", "The goal this one serves (its primary parent when it has none yet)")
+  .option("--parent <goalId>", "The goal this one serves (a goal of the same project; its main parent when it has none yet)")
   .option(
     "--pillar <spaceId>",
-    "A space of the project this goal advances (repeatable; the first is the primary pillar)",
+    "A space of the project this goal advances. Repeat it to give the WHOLE set: the first is the main pillar, and on update the list REPLACES the goal's current pillars",
     collect,
     []
   )
@@ -1728,10 +1728,10 @@ track
   )
   .option("--uncertainty <level>", "How well the way is known: clear|complicated|complex|chaotic|unknown")
   .option("--loop <on|off|n>", "Let the goal propose its next session: on, off, or n sessions a week")
-  .option("--parent <goalId>", "The goal this one serves (its primary parent when it has none yet)")
+  .option("--parent <goalId>", "The goal this one serves (a goal of the same project; its main parent when it has none yet)")
   .option(
     "--pillar <spaceId>",
-    "A space of the project this goal advances (repeatable; the first is the primary pillar)",
+    "A space of the project this goal advances. Repeat it to give the WHOLE set: the first is the main pillar, and on update the list REPLACES the goal's current pillars",
     collect,
     []
   )
