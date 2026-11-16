@@ -18,9 +18,13 @@ import ora from "ora";
 import prompts from "prompts";
 import { openExternalUrl } from "../lib/safe-open.js";
 import { readFileSync } from "node:fs";
-import { resolveHubConfig, hubGet, hubPost, hubPatch, hubDelete, HubError, renderHubError } from "../lib/hub-client.js";
+import { resolveHubConfig, hubGet, hubPost, hubPatch, hubDelete, HubError, renderHubError, grantDenialOf } from "../lib/hub-client.js";
+import { fetchAuthStatus } from "../lib/credential-class.js";
+import { askPodToInstall, directInstallAllowed } from "../lib/install-request.js";
 import { unwrapList } from "../lib/unwrapList.js";
 import { log } from "../utils/logger.js";
+import { matchByName, type NameFields, type NameMatch } from "../lib/name-match.js";
+import { isInteractiveTerminal, pickByName, type PickOptions } from "../lib/name-pick.js";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -291,6 +295,30 @@ function findCard(cards: CapabilityCard[], name: string): CapabilityCard | undef
     cards.find((c) => c.name.toLowerCase() === q) ??
     cards.find((c) => c.key.toLowerCase() === q)
   );
+}
+
+/** What a person may type to name a capability, and the text a word may be found in. */
+function cardNameFields(c: CapabilityCard): NameFields {
+  return {
+    names: [c.name, c.key],
+    words: [c.description ?? "", ...c.verbs.flatMap((v) => [v.verbId, v.label])],
+  };
+}
+
+function matchCard(cards: CapabilityCard[], name: string): NameMatch<CapabilityCard> {
+  return matchByName(cards, name, cardNameFields);
+}
+
+/** How `cap <sub>` names a capability back: its suggestions run the same subcommand. */
+function capPick(sub: string, query: string, json?: boolean): PickOptions<CapabilityCard> {
+  return {
+    query,
+    noun: "capability",
+    labelOf: (c) => c.name,
+    commandFor: (c) => `synap cap ${sub} "${c.name}"`,
+    listCommand: "synap cap list",
+    interactive: isInteractiveTerminal(json),
+  };
 }
 
 /**
@@ -867,7 +895,9 @@ async function applyTemplateWithParams(
   card: CapabilityCard,
   workspaceId: string,
   params: Record<string, unknown>,
-  verb: "Adding" | "Connecting"
+  verb: "Adding" | "Connecting",
+  /** The key's grant refused the direct write: ask the person instead (true = asked). */
+  onGrantDenied?: () => Promise<boolean>
 ): Promise<boolean> {
   const spinner = ora({ text: `${verb} ${chalk.bold(card.name)}…`, color: "cyan" }).start();
   try {
@@ -895,7 +925,11 @@ async function applyTemplateWithParams(
     spinner.succeed(chalk.green(`${verb === "Adding" ? "Added" : "Connected"} ${chalk.bold(card.name)}.`));
     return true;
   } catch (err) {
-    spinner.fail(chalk.red(`Failed to ${verb.toLowerCase()} ${card.name}`));
+    if (onGrantDenied && grantDenialOf(err)) {
+      spinner.stop();
+      return onGrantDenied();
+    }
+    spinner.fail(chalk.red(`Failed to ${verb === "Adding" ? "add" : "connect"} ${card.name}`));
     renderHubError(err);
     return false;
   }
@@ -1001,24 +1035,23 @@ export async function capabilityAdd(
       return;
     }
   } else {
-    card = findCard(cards, name);
+    let match = matchCard(cards, name);
     // Not in the default catalog — it may still be a real, installable
     // template that's just excluded from the default sync (e.g. a paid
     // third-party connector like Unipile). One extra lookup by the exact
-    // name before giving up.
-    if (!card) {
+    // name before suggesting near names.
+    if (match.kind !== "exact") {
       const augmented = await fetchCatalog(cfg, workspaceId, name).catch(
         () => cards
       );
-      card = findCard(augmented, name);
+      const widened = matchCard(augmented, name);
+      if (widened.kind === "exact" || match.kind === "none") match = widened;
     }
+    card = await pickByName(match, capPick("add", name));
+    if (!card) process.exit(1);
   }
 
-  if (!card) {
-    log.error(`No capability named "${name}" in the catalog.`);
-    log.dim("Run `synap cap list` to see what's available.");
-    process.exit(1);
-  }
+  if (!card) process.exit(1);
 
   if (card.source === "installed") {
     log.heading(`${card.name} is already installed`);
@@ -1027,6 +1060,22 @@ export async function capabilityAdd(
     log.dim("Bad or expired credential? Fix it in place — no need to remove/re-add:");
     log.dim(`  synap cap connections list "${card.name}"`);
     log.dim(`  synap cap connections update "${card.name}" <id> --rotate`);
+    return;
+  }
+
+  // A limited key (an agent's or a computer's) may not write tools: it never
+  // asks for a credential it cannot use. It asks the person instead, who
+  // approves on the pod and enters the credential there (founder, 2026-11-16).
+  // Checked BEFORE any prompt; an older pod that does not say what the key may
+  // do is tried, and its refusal still ends in the same ask.
+  const installCard = card;
+  const askPerson = async (): Promise<boolean> => askPodToInstall(cfg, installCard);
+  const access = await fetchAuthStatus(cfg)
+    .then((s) => s.access)
+    // empty-ok: an unread grant is "unknown", not "allowed": the direct write is tried and the pod's refusal still ends in the ask
+    .catch(() => undefined);
+  if (directInstallAllowed(access) === "no") {
+    if (!(await askPerson())) process.exit(1);
     return;
   }
 
@@ -1040,14 +1089,25 @@ export async function capabilityAdd(
     const collected = await collectInstallParams(card);
     if (!collected) return; // cancelled
     params = collected;
-    const ok = await applyTemplateWithParams(cfg, card, workspaceId, params, "Adding");
+    let asked = false;
+    const ok = await applyTemplateWithParams(cfg, card, workspaceId, params, "Adding", async () => {
+      log.dim("This key may not add capabilities itself. The key you typed was not kept: you will enter it again when you approve.");
+      asked = true;
+      return askPerson();
+    });
     if (!ok) process.exit(1);
+    if (asked) return;
   } else {
     const addSpinner = ora({ text: `Adding ${chalk.bold(card.name)}…`, color: "cyan" }).start();
     try {
       await hubPost("/capabilities/apply", { templateKey: card.key, workspaceId }, cfg);
       addSpinner.succeed(chalk.green(`Added ${chalk.bold(card.name)}.`));
     } catch (err) {
+      if (grantDenialOf(err)) {
+        addSpinner.stop();
+        if (!(await askPerson())) process.exit(1);
+        return;
+      }
       addSpinner.fail(chalk.red(`Failed to add ${card.name}`));
       renderHubError(err);
       process.exit(1);
@@ -1222,7 +1282,6 @@ export async function capabilityEnable(
   let catalog: CapabilityCard[] = [];
   try {
     catalog = await fetchCatalog(cfg, workspaceId);
-    card = findCard(catalog, name);
     spinner.stop();
   } catch (err) {
     spinner.stop();
@@ -1235,7 +1294,8 @@ export async function capabilityEnable(
     process.exit(1);
   }
 
-  if (!card) {
+  const enableMatch = matchCard(catalog, name);
+  if (enableMatch.kind !== "exact") {
     // A verb name (e.g. `exa_search`) isn't a pack — `enable` takes the PACK
     // (`exa`). Point at the owning pack instead of dead-ending.
     const owner = findCardByVerb(catalog, name);
@@ -1244,17 +1304,17 @@ export async function capabilityEnable(
       log.dim(`Enable the pack (it lets you pick verbs):  synap cap enable "${owner.card.name}"`);
       process.exit(1);
     }
-    log.error(`No capability named "${name}".`);
-    log.dim("Run `synap cap list` to see what's available, or `synap cap add <name>` first.");
-    process.exit(1);
   }
+  card = await pickByName(enableMatch, capPick("enable", name));
+  if (!card) process.exit(1);
 
   // Not installed yet — add it first so it has verbs to enable.
   if (card.source === "available") {
     log.dim(`${card.name} isn't installed yet — adding it first…`);
-    await capabilityAdd(name, opts);
-    card = findCard(await fetchCatalog(cfg, workspaceId), name);
-    if (!card) return;
+    const added = card.name;
+    await capabilityAdd(added, opts);
+    card = findCard(await fetchCatalog(cfg, workspaceId), added);
+    if (!card || card.source !== "installed") return;
   }
 
   // (a) Ensure the connection FIRST when one is required and missing.
@@ -1262,7 +1322,7 @@ export async function capabilityEnable(
     const ok = await ensureConnection(cfg, workspaceId, card);
     if (!ok) return;
     // Re-fetch so verb runnability reflects the new connection.
-    const after = findCard(await fetchCatalog(cfg, workspaceId), name);
+    const after = findCard(await fetchCatalog(cfg, workspaceId), card.name);
     if (after) card = after;
   }
 
@@ -1549,8 +1609,9 @@ export async function capabilityConnect(
 
   const spinner = ora({ text: `Resolving ${chalk.bold(name)}…`, color: "cyan" }).start();
   let card: CapabilityCard | undefined;
+  let connectCatalog: CapabilityCard[];
   try {
-    card = findCard(await fetchCatalog(cfg, workspaceId), name);
+    connectCatalog = await fetchCatalog(cfg, workspaceId);
     spinner.stop();
   } catch (err) {
     spinner.stop();
@@ -1563,11 +1624,8 @@ export async function capabilityConnect(
     process.exit(1);
   }
 
-  if (!card) {
-    log.error(`No capability named "${name}".`);
-    log.dim("Run `synap cap list` to see what's available.");
-    process.exit(1);
-  }
+  card = await pickByName(matchCard(connectCatalog, name), capPick("connect", name));
+  if (!card) process.exit(1);
 
   if (!card.connection?.required) {
     log.heading(`${card.name} needs no connection`);
@@ -1736,8 +1794,9 @@ export async function capabilityShow(name: string, opts: CapShowOpts): Promise<v
 
   const spinner = opts.json ? null : ora({ text: `Fetching ${chalk.bold(name)}…`, color: "cyan" }).start();
   let card: CapabilityCard | undefined;
+  let showCatalog: CapabilityCard[];
   try {
-    card = findCard(await fetchCatalog(cfg, workspaceId), name);
+    showCatalog = await fetchCatalog(cfg, workspaceId);
     spinner?.stop();
   } catch (err) {
     spinner?.stop();
@@ -1750,11 +1809,8 @@ export async function capabilityShow(name: string, opts: CapShowOpts): Promise<v
     process.exit(1);
   }
 
-  if (!card) {
-    log.error(`No capability named "${name}".`);
-    log.dim("Run `synap cap list` to see what's available.");
-    process.exit(1);
-  }
+  card = await pickByName(matchCard(showCatalog, name), capPick("show", name, opts.json));
+  if (!card) process.exit(1);
 
   if (opts.json) {
     console.log(JSON.stringify(card, null, 2));
