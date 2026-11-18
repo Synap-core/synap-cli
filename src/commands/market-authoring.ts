@@ -301,6 +301,11 @@ function reportPublish(
     case "no-op":
       log.info(`${chalk.bold(r.slug)} is already up to date at ${chalk.dim(r.version)} (${vis}) — nothing to publish.`);
       break;
+    case "staged":
+      // Not published: a capability waits for the person to confirm it.
+      log.info(`${chalk.bold(r.slug)} ${chalk.dim(r.version)} is waiting for your confirmation — nothing is published yet.`);
+      if (r.confirmUrl) log.hint(`Confirm it on synap.live: ${r.confirmUrl}`);
+      break;
   }
   // Attribution is WRITE-TIME ONLY at the CP: `if (body.vendorId) {…}` with no
   // else, and no back-fill. Silence here is how every CLI-published package

@@ -475,8 +475,19 @@ export interface CpWriteDeps {
 }
 
 export interface PublishResult {
-  /** `created` (201) · `updated` (200, content changed) · `no-op` (200, identical content). */
-  outcome: "created" | "updated" | "no-op";
+  /**
+   * `created` (201) · `updated` (200, content changed) · `no-op` (200, identical
+   * content) · `staged` (202): a capability published from the CLI is a version
+   * that waits for the person to confirm it on the landing site (CP decision B4);
+   * nothing is live until then. `confirmUrl` says where.
+   */
+  outcome: "created" | "updated" | "no-op" | "staged";
+  /** `staged` only: the page where the person confirms this version. */
+  confirmUrl?: string;
+  /** `staged` only: the request id (`market_publish({request_id})` reads its fate). */
+  requestId?: string;
+  /** `staged` only: when the version stops waiting. */
+  expiresAt?: string;
   slug: string;
   displayName: string;
   /** The `h-<hash>` version the CP derived from the definition. */
@@ -771,6 +782,29 @@ export async function publishPackage(
   if (!res.ok) {
     const raw = await res.text().catch(() => "");
     throw new CpWriteError(res.status, extractServerMessage(raw, res.status));
+  }
+
+  // 202: held for the person (a capability from the CLI, CP decision B4). The
+  // body names the confirm page; there is no `package` yet.
+  if (res.status === 202) {
+    const staged = (await res.json()) as {
+      request_id?: string;
+      confirm_url?: string;
+      expires_at?: string;
+      version?: string;
+    };
+    return {
+      outcome: "staged",
+      slug,
+      displayName,
+      version: staged.version ?? "",
+      isPublic: opts.isPublic,
+      vendorAttached: !!vendorId,
+      officialVendorWithheld,
+      ...(staged.confirm_url ? { confirmUrl: staged.confirm_url } : {}),
+      ...(staged.request_id ? { requestId: staged.request_id } : {}),
+      ...(staged.expires_at ? { expiresAt: staged.expires_at } : {}),
+    };
   }
 
   const data = (await res.json()) as {
