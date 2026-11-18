@@ -9,7 +9,49 @@
  *
  * A FAILED call is never an empty result: transport and JSON-RPC errors throw,
  * and a tool error comes back as `isError: true` with the pod's text.
+ *
+ * A reply the pod CUT throws too (`McpReplyCappedError`): since backend#906
+ * every MCP reply over the pod's cap (16,000 characters) comes back as
+ * `{truncated: {...}, head}`, valid JSON that holds none of the fields a
+ * machine reads. The `head` is never parsed: a caller asks for less (a page,
+ * a narrowing parameter) or reads an uncapped door.
  */
+
+/** A reply the pod cut at its reply cap: names the tool, the size, the cap and how to narrow. */
+export class McpReplyCappedError extends Error {
+  constructor(
+    readonly tool: string,
+    readonly totalChars: number | null,
+    readonly limit: number | null,
+    readonly how: string | null
+  ) {
+    super(
+      `${tool}'s reply was cut by the pod's reply cap (${totalChars ?? "?"} characters, the limit is ${limit ?? "?"})` +
+        `; this synap must ask for less${how ? `: ${how}` : ""}`
+    );
+    this.name = "McpReplyCappedError";
+  }
+}
+
+/** The pod's reply-cap envelope (`{truncated:{reason,totalChars,...}, head}`), or null for any other reply. */
+export function readCapEnvelope(text: string): { totalChars: number | null; limit: number | null; how: string | null } | null {
+  // Wherever the key sits: a pod may wrap the envelope (orient's `yourTools`, before backend#932).
+  if (!text.includes('"truncated":{')) return null;
+  let d: { truncated?: { reason?: unknown; totalChars?: unknown; how?: unknown }; head?: unknown };
+  try {
+    d = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  const t = d?.truncated;
+  if (!t || typeof t !== "object" || typeof d.head !== "string") return null;
+  const limit = typeof t.reason === "string" ? /the limit is (\d+)/.exec(t.reason)?.[1] : undefined;
+  return {
+    totalChars: typeof t.totalChars === "number" ? t.totalChars : null,
+    limit: limit ? Number(limit) : null,
+    how: typeof t.how === "string" ? t.how : null,
+  };
+}
 
 export interface McpToolResult {
   isError: boolean;
@@ -127,7 +169,10 @@ export function createMcpClient(opts: McpCallOptions): McpCallClient {
         .filter((c) => c.type === "text" && typeof c.text === "string")
         .map((c) => c.text as string)
         .join("");
-      return { isError: Boolean(msg.result?.isError), text };
+      const isError = Boolean(msg.result?.isError);
+      const capped = isError ? null : readCapEnvelope(text);
+      if (capped) throw new McpReplyCappedError(tool, capped.totalChars, capped.limit, capped.how);
+      return { isError, text };
     },
   };
 }

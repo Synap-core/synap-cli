@@ -14,6 +14,7 @@
  * config at start, like `synap worker` and `synap box serve`.
  */
 
+import { randomUUID } from "node:crypto";
 import type { HubConfig } from "../hub-client.js";
 
 /**
@@ -28,6 +29,19 @@ export type HostJobKind = (typeof HOST_JOB_KINDS)[number];
 export const HOST_LOG_CAP = 64 * 1024;
 /** The pod refuses a body past this size (413). Mirrors `HOST_BODY_MAX_BYTES`. */
 export const HOST_BODY_MAX_BYTES = 2 * 1024 * 1024;
+
+/**
+ * The finish body's string and list limits, as `HostJobFinishBodySchema`
+ * declares them (a parity test reads the schema). A finish past one is
+ * refused whole (HTTP 400), so the pod never learns the job's outcome:
+ * {@link fitFinishBody} keeps every finish inside them.
+ */
+export const HOST_STEP_NAME_MAX = 100;
+export const HOST_STEP_DETAIL_MAX = 1000;
+export const HOST_STEPS_MAX = 100;
+export const HOST_INFRA_REASON_MAX = 1000;
+export const HOST_CLEANED_UP_ITEM_MAX = 300;
+export const HOST_CLEANED_UP_MAX = 100;
 
 /**
  * What an installation is (reconciliation f75fbb48 §3.1): `service` runs as
@@ -47,6 +61,13 @@ export interface HostLog {
   totalBytes?: number | null;
   truncated?: boolean;
 }
+
+/**
+ * This runner process's id, sent on every lease. Minted once per process: the
+ * pod reads a new one (or a long silence) as the runner coming back, and checks
+ * every tool on the computer again (backend services/host-jobs `noteHostRunner`).
+ */
+export const RUNNER_ID = randomUUID();
 
 /** A leased job, as the lease route answers it (`LeasedHostJob`). */
 export interface LeasedHostJob {
@@ -76,7 +97,44 @@ export interface LeasedHostJob {
   /** The job as queued (the op, its input). */
   spec: Record<string, unknown>;
   parameters: Record<string, unknown>;
+  /**
+   * A hosted verb's input files (kind `verb`): each `file` / `files` param of
+   * its recipe, as a link signed at this lease for the job's owner
+   * (`HostJobInputFile`). `parameters` keeps the pod file ids.
+   */
+  inputs?: Record<string, HostJobInputFile[]>;
 }
+
+/** One input file of a hosted verb. Mirrors `HostJobInputFile`. */
+export interface HostJobInputFile {
+  fileEntityId: string;
+  url: string;
+  expiresAt: string;
+  /** A safe file name to write it under, never a path. */
+  name: string;
+  mimeType: string | null;
+  size: number | null;
+}
+
+/** One output a hosted verb wrote, as the finish carries it. Mirrors `HostJobFileSchema`. */
+export interface HostJobFile {
+  param: string;
+  name: string;
+  size?: number;
+  uploadToken?: string;
+  error?: string;
+}
+
+/** The upload ticket `POST /host-jobs/:id/uploads` answers (the requester's presigned PUT). */
+export interface HostUploadTicket {
+  uploadUrl: string;
+  method: "PUT";
+  headers: Record<string, string>;
+  uploadToken: string;
+}
+
+/** Files one hosted verb run may return. Mirrors `HOST_VERB_MAX_FILES`. */
+export const HOST_VERB_MAX_FILES = 20;
 
 export interface HeartbeatAnswer {
   leaseExpiresAt: string;
@@ -148,6 +206,8 @@ export interface FinishBody extends Partial<ToolCheck> {
   output?: Record<string, unknown>;
   /** What the runner removed on a failure path. */
   cleanedUp?: string[];
+  /** A hosted verb's outputs, each uploaded first (`HostHub.upload`). */
+  files?: HostJobFile[];
 }
 
 /** 404 / 409: the pod no longer holds this lease for us. Stop, clean up, never report or finish. */
@@ -190,9 +250,57 @@ export interface HostHub {
   heartbeat(job: LeasedHostJob, phase: "setup" | "running"): Promise<HeartbeatAnswer>;
   report(job: LeasedHostJob, body: Omit<ReportBody, "leaseId">): Promise<unknown>;
   finish(job: LeasedHostJob, body: Omit<FinishBody, "leaseId">): Promise<unknown>;
+  /** A hosted verb's output: a presigned PUT minted for the run's requester. */
+  upload(job: LeasedHostJob, file: { filename: string; mimeType: string; size: number }): Promise<HostUploadTicket>;
 }
 
 export type FetchLike = (url: string, init: RequestInit) => Promise<Response>;
+
+/** Cut text to `max` characters, ending with "…" when it was cut. */
+function clip(text: string, max: number): string {
+  return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
+}
+
+/**
+ * A step's name as a short label within the pod's limit: past it, a URL
+ * becomes its file name, then an absolute path its file name, then the
+ * label is cut. The full text stays in the job's log.
+ */
+export function fitStepName(name: string, max = HOST_STEP_NAME_MAX): string {
+  if (name.length <= max) return name;
+  let short = name.replace(/\bhttps?:\/\/\S+/g, (u) => {
+    const last = u.replace(/[?#].*$/, "").replace(/\/+$/, "").split("/").pop();
+    return last || u;
+  });
+  if (short.length > max) short = short.replace(/(^|\s)(\/[^\s]+)/g, (_m, pre: string, p: string) => `${pre}${p.split("/").pop() || p}`);
+  return clip(short, max);
+}
+
+/** The finish body inside every limit of the pod's schema (names, details, lists). */
+export function fitFinishBody<T extends Omit<FinishBody, "leaseId">>(body: T): T {
+  const out: T = { ...body };
+  if (body.steps) {
+    out.steps = body.steps.slice(0, HOST_STEPS_MAX).map((s) => ({
+      ...s,
+      name: fitStepName(s.name) || "step",
+      ...(s.detail !== undefined ? { detail: clip(s.detail, HOST_STEP_DETAIL_MAX) } : {}),
+    }));
+  }
+  if (body.infraReason !== undefined) out.infraReason = clip(body.infraReason, HOST_INFRA_REASON_MAX);
+  if (body.cleanedUp) out.cleanedUp = body.cleanedUp.slice(0, HOST_CLEANED_UP_MAX).map((c) => clip(c, HOST_CLEANED_UP_ITEM_MAX));
+  return out;
+}
+
+/** The pod refused a request as malformed (HTTP 400): resending the same body cannot help. */
+export class HostRequestRefusedError extends Error {
+  constructor(
+    message: string,
+    readonly status: number
+  ) {
+    super(message);
+    this.name = "HostRequestRefusedError";
+  }
+}
 
 /** Cut a log end to the wire's cap (UTF-8 bytes), keeping its start (head) or its end (tail). */
 export function capLogEnd(text: string, end: "head" | "tail", cap = HOST_LOG_CAP): string {
@@ -222,7 +330,9 @@ export function createHostHub(cfg: Pick<HubConfig, "podUrl" | "apiKey">, fetchIm
     if (!res.ok) {
       // empty-ok: only the error's detail; the HTTP status is thrown either way.
       const text = await res.text().catch(() => "");
-      throw new Error(`POST host-jobs${path} failed (HTTP ${res.status})${text ? `: ${text.slice(0, 300)}` : ""}`);
+      const message = `POST host-jobs${path} failed (HTTP ${res.status})${text ? `: ${text.slice(0, 300)}` : ""}`;
+      if (res.status === 400) throw new HostRequestRefusedError(message, res.status);
+      throw new Error(message);
     }
     return res.json();
   }
@@ -231,7 +341,12 @@ export function createHostHub(cfg: Pick<HubConfig, "podUrl" | "apiKey">, fetchIm
 
   return {
     async lease(capacity) {
-      const body = (await post("/lease", capacity ? { capacity } : {})) as { job?: LeasedHostJob | null };
+      // Every lease says what this computer is, so the pod knows its processor before an
+      // install: a tool built for one processor is refused on another, before anyone approves.
+      // `runner` is this process: a new one (the worker restarted, the CLI was updated, the
+      // computer rebooted) is how the pod knows to check every tool here again (self-heal).
+      const seen = { os: process.platform, arch: process.arch, runner: RUNNER_ID };
+      const body = (await post("/lease", capacity ? { ...seen, capacity } : seen)) as { job?: LeasedHostJob | null };
       return body.job ?? null;
     },
     async heartbeat(job, phase) {
@@ -242,6 +357,9 @@ export function createHostHub(cfg: Pick<HubConfig, "podUrl" | "apiKey">, fetchIm
     },
     async finish(job, body) {
       return post(jobPath(job, "finish"), { leaseId: job.leaseId, ...body }, job.id);
+    },
+    async upload(job, file) {
+      return (await post(jobPath(job, "uploads"), { leaseId: job.leaseId, ...file }, job.id)) as HostUploadTicket;
     },
   };
 }

@@ -62,11 +62,11 @@ import {
   reportableModel,
   workerRunnerHeader,
 } from "../lib/conversation-headers.js";
-import { resolveHubConfig } from "../lib/hub-client.js";
+import { hubGet, resolveHubConfig } from "../lib/hub-client.js";
 import { unknownAgentMessage } from "../lib/agents-config.js";
 import { resolveAgentUserId } from "../lib/credential-class.js";
 import { ensureComputerEnrolled } from "../lib/device-connect.js";
-import { createMcpClient, type McpCallClient } from "../lib/mcp-call.js";
+import { createMcpClient, McpReplyCappedError, type McpCallClient } from "../lib/mcp-call.js";
 import {
   AccountPool,
   accountsFileTooOpen,
@@ -974,7 +974,7 @@ export type VerdictClaim =
   | { kind: "unreadable"; why: string };
 
 /**
- * The outcome a `done` verdict claims, from the `synap_get_session` read: the
+ * The outcome a `done` verdict claims, from the `synap_get_session` lean read: the
  * session's ONE open deliverable the agent owns (not a fact, not the person's,
  * not met, not withdrawn, never a PR, branch or commit). None, or several, and
  * nothing is claimed: which of several the run finished is the run's to say
@@ -992,6 +992,11 @@ export function verdictClaim(getSessionText: string): VerdictClaim {
   if (!o) return { kind: "unreadable", why: "the session read has no outcomes" };
   if (o.status !== "ok") return { kind: "unreadable", why: `outcomes ${String(o.status ?? "status missing")}` };
   if (!Array.isArray(o.outcomes)) return { kind: "unreadable", why: "outcomes list missing" };
+  // The lean read says whose each outcome is and whether it was withdrawn only
+  // from backend#932 on: without both, a person's slot could be claimed.
+  if (o.outcomes.some((x) => typeof x?.owner !== "string" || typeof x?.retired !== "boolean")) {
+    return { kind: "unreadable", why: "the pod's session read does not say whose each outcome is (pod older than backend#932)" };
+  }
   const open = o.outcomes.filter(
     (x) =>
       typeof x?.key === "string" &&
@@ -1006,12 +1011,38 @@ export function verdictClaim(getSessionText: string): VerdictClaim {
   return { kind: "one", key: open[0].key as string };
 }
 
+/**
+ * Newest room messages a follow-up read asks for first. The pod's reply cap
+ * (16,000 characters) cut 20 messages of one room (22,886 characters,
+ * 2026-11-09) and every poll failed with it; 5 is the newest turn or two, and
+ * `readRoomTail` halves it while the pod still cuts the reply.
+ */
+export const ROOM_READ_LIMIT = 5;
+
 export interface RoomMessage {
   id?: string;
   content?: string;
   timestamp?: string;
   authorType?: string;
   routedTeammateId?: string | null;
+}
+
+/**
+ * A room's newest messages, read in a size the pod's reply cap cannot cut:
+ * `limit` first, halved while the pod cuts the reply (5, 2, 1). A room whose
+ * single newest message is still over the cap throws the cap's named error;
+ * the caller skips that room, never the poll.
+ */
+export async function readRoomTail(mcp: McpCallClient, channelId: string, limit = ROOM_READ_LIMIT): Promise<RoomMessage[]> {
+  for (let n = Math.max(1, Math.floor(limit)); ; n = Math.max(1, Math.floor(n / 2))) {
+    try {
+      const t = await mcp.call("synap_get_thread_context", { threadId: channelId, limit: n });
+      if (t.isError) throw new Error(`thread ${channelId} refused: ${t.text.slice(0, 160)}`);
+      return (JSON.parse(t.text) as { messages?: RoomMessage[] }).messages ?? [];
+    } catch (err) {
+      if (!(err instanceof McpReplyCappedError) || n === 1) throw err;
+    }
+  }
 }
 
 /** At most this many follow-up resumes per session (a runaway-loop guard). */
@@ -1145,6 +1176,13 @@ export interface WorkerDeps {
   githubToken?: InstallationTokenSource;
   /** `git` for the worktree sweep (tests stub it). */
   git?: GitFn;
+  /**
+   * The whole briefing from the Hub `GET /orient` door, as text (tests stub
+   * it). Read only when the pod CUT the narrow orient read: a pod older than
+   * backend#932 ignores `only` and answers the whole briefing, which its reply
+   * cap cuts. Hub REST has no reply cap. Default: `hubGet("/orient")`.
+   */
+  readOrientRest?: () => Promise<string>;
 }
 
 export interface Worker {
@@ -1316,7 +1354,7 @@ export function createWorker(opts: WorkerOptions, deps: WorkerDeps): Worker {
     const headers = runEndHeaders(owed);
     const verdict = owed.verdict;
     try {
-      const s = await deps.mcp.call("synap_get_session", { sessionId: rec.sessionId }, { headers });
+      const s = await deps.mcp.call("synap_get_session", { sessionId: rec.sessionId, detail: "lean" }, { headers });
       if (s.isError) throw new Error(`get_session refused: ${s.text.slice(0, 160)}`);
       if (verdict) {
         const claim = verdict.status === "done" ? verdictClaim(s.text) : undefined;
@@ -1795,14 +1833,11 @@ export function createWorker(opts: WorkerOptions, deps: WorkerDeps): Worker {
 
   // ── the tick ──
   const roomFollowUps = async (sessionId: string, since: string): Promise<RoomMessage[]> => {
-    const s = await deps.mcp.call("synap_get_session", { sessionId });
+    const s = await deps.mcp.call("synap_get_session", { sessionId, detail: "lean" });
     if (s.isError) throw new Error(`get_session ${sessionId} refused: ${s.text.slice(0, 160)}`);
     const channelId = (findKey(JSON.parse(s.text), "channelId") as string | undefined) ?? null;
     if (!channelId) return [];
-    const t = await deps.mcp.call("synap_get_thread_context", { threadId: channelId });
-    if (t.isError) throw new Error(`thread ${channelId} refused: ${t.text.slice(0, 160)}`);
-    const messages = (JSON.parse(t.text) as { messages?: RoomMessage[] }).messages ?? [];
-    return followUpsSince(messages, since, deps.selfAgentId);
+    return followUpsSince(await readRoomTail(deps.mcp, channelId), since, deps.selfAgentId);
   };
 
   /**
@@ -1814,7 +1849,7 @@ export function createWorker(opts: WorkerOptions, deps: WorkerDeps): Worker {
     sessionId: string
   ): Promise<{ design: boolean; protocol: WorkerProtocol; channelId: string | null } | undefined> => {
     try {
-      const s = await deps.mcp.call("synap_get_session", { sessionId });
+      const s = await deps.mcp.call("synap_get_session", { sessionId, detail: "lean" });
       if (s.isError) throw new Error(`refused: ${s.text.slice(0, 160)}`);
       const design = isDesignSession(s.text);
       const protocol = design ? "code" : sessionProtocol(s.text);
@@ -1854,14 +1889,36 @@ export function createWorker(opts: WorkerOptions, deps: WorkerDeps): Worker {
   /** A recorded run's protocol, for a resume: a design run is `code`, a run from before protocols too. */
   const takesRecorded = (rec: RunRecord) => takes.has(rec.mode === "bg" ? "code" : (rec.protocol ?? "code"));
 
+  const readOrientRest =
+    deps.readOrientRest ?? (async () => JSON.stringify(await hubGet("/orient", {}, { podUrl: deps.podUrl, apiKey: deps.apiKey })));
+  /**
+   * The orient text that carries `handedToYou`: the narrow read (`only`), and
+   * only when the pod CUT it (a pod older than backend#932 answers the whole
+   * briefing, over its reply cap) the uncapped Hub door. The MCP call is made
+   * either way: its runner stamp is what tells the pod a process serves this agent.
+   */
+  const readHandedOrient = async (): Promise<string> => {
+    try {
+      const res = await deps.mcp.call("synap_orient", { only: "handedToYou" }, { headers: workerRunnerHeader() });
+      if (res.isError) throw new Error(`orient refused: ${res.text.slice(0, 200)}`);
+      return res.text;
+    } catch (err) {
+      if (!(err instanceof McpReplyCappedError)) throw err;
+      try {
+        return await readOrientRest();
+      } catch (rest) {
+        throw new Error(`${err.message}; the Hub orient door did not answer either (${(rest as Error).message}) — update the pod (backend#932)`);
+      }
+    }
+  };
+
   const tick = async () => {
     measuredThisTick = false;
     // The stamp rides on this poll only: it is what tells the pod a process serves this agent.
-    const res = await deps.mcp.call("synap_orient", {}, { headers: workerRunnerHeader() });
-    if (res.isError) throw new Error(`orient refused: ${res.text.slice(0, 200)}`);
+    const res = await readHandedOrient();
     // 0. Run ends the pod has not heard yet (a write that failed, a restart mid-write): retried.
     for (const rec of Object.values(state.runs)) if (rec.unsettled) await settleOwed(rec);
-    const items = parseHandedToYou(res.text);
+    const items = parseHandedToYou(res);
     await watch();
     const free = () => maxParallel - active();
     const handed = new Map(items.map((i) => [i.id, i]));
@@ -1925,7 +1982,16 @@ export function createWorker(opts: WorkerOptions, deps: WorkerDeps): Worker {
         continue;
       }
       if ((rec.resumes ?? 0) >= MAX_RESUMES) continue;
-      const follow = await roomFollowUps(item.id, rec.finishedAt);
+      // One room that cannot be read (cut by the reply cap, refused) skips that
+      // session's follow-ups this tick, said once per cause; it never fails the
+      // poll, so every other session is still launched and resumed.
+      let follow: RoomMessage[] = [];
+      try {
+        follow = await roomFollowUps(item.id, rec.finishedAt);
+      } catch (err) {
+        const msg = (err as Error).message;
+        sayOnce(`room:${item.id}:${msg}`, `session ${item.id}: its room could not be read (${msg}); its follow-ups are skipped, the other sessions go on; retried every tick`);
+      }
       const quiet = item.resume === true && rec.resumedQuietSince !== (item.quietSince ?? "") && !quietIsOwnRun(item, rec);
       if (!follow.length && !quiet) continue;
       const design = rec.mode === "bg";

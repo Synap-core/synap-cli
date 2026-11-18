@@ -310,6 +310,52 @@ describe("downloads, prerequisites and smoke runs", () => {
       expect(calls).toEqual([["ffmpeg", "-version"]]);
       expect(r.message).toBe("Transcribe on your computer needs ffmpeg first: you said no: nothing was installed");
     });
+
+    it("the tool's check runs with the approved prerequisite's programs FIRST on PATH, never another ffmpeg PATH finds first", async () => {
+      // The founder's Mac, 2026-11-09: a brew `ffmpeg` an x265 upgrade broke sits
+      // in /opt/homebrew/bin; mlx_whisper calls a bare `ffmpeg`.
+      const prefix = fs.mkdtempSync(path.join(os.tmpdir(), "ct-brew-"));
+      const full = path.join(prefix, "opt", "ffmpeg-full", "bin");
+      fs.mkdirSync(full, { recursive: true });
+      fs.writeFileSync(path.join(full, "ffmpeg"), "#!/bin/sh\n", { mode: 0o755 });
+      const pinned = readComputerManifest({
+        meta: { slug: "media-ffmpeg", name: "ffmpeg", version: "1.0.0" },
+        spec: {
+          placement: { runsOn: ["computer"] },
+          install: {
+            darwin: {
+              steps: [{ kind: "brew", package: "ffmpeg-full" }],
+              bins: { ffmpeg: "{brewPrefix}/opt/ffmpeg-full/bin/ffmpeg", ffprobe: "{brewPrefix}/opt/ffmpeg-full/bin/ffprobe" },
+            },
+          },
+          verify: { darwin: { command: ["ffmpeg", "-version"], expect: { exitCode: 0 } } },
+        },
+      }) as ComputerManifest;
+      const envs: Array<string | undefined> = [];
+      const run = async (argv: string[], o?: { env?: NodeJS.ProcessEnv }): Promise<ProcessResult> => {
+        envs.push(o?.env?.PATH);
+        return argv[0] === "mlx_whisper" ? HELP_OK : { exitCode: 0, stdout: "", stderr: "" };
+      };
+      try {
+        const ctx = ctxFor({ run, load: async () => ({ manifest: pinned }), values: { brewPrefix: prefix, home: "/h", models: "/h/models", workdir: "/h/work" }, env: { PATH: `${bin}:/usr/bin` } });
+        const r = await verifyTool(needsFfmpeg(), ctx);
+        expect(r.status).not.toBe("failed");
+        // ffprobe is pinned but absent on disk: only the folder of a program that exists goes first.
+        expect(envs[0]).toBe(`${full}:${bin}:/usr/bin`);
+        // An install checks the tool the same way, reading the prerequisite once.
+        envs.length = 0;
+        let loads = 0;
+        await installTool(needsFfmpeg(), { ...ctx, skipModels: true, load: async () => (loads++, { manifest: pinned }) });
+        expect(loads).toBe(1);
+        expect(envs.at(-1)).toBe(`${full}:${bin}:/usr/bin`);
+        // A tool with no prerequisite keeps the PATH it was given.
+        envs.length = 0;
+        await verifyTool(transcribe, ctx);
+        expect(envs[0]).toBe(`${bin}:/usr/bin`);
+      } finally {
+        fs.rmSync(prefix, { recursive: true, force: true });
+      }
+    });
   });
 });
 
@@ -329,6 +375,59 @@ describe("synap tools verify / remove", () => {
     expect(r.steps.map((x) => x.ok)).toEqual([true, true]);
     expect(r.status).toBe("removed");
     expect(r.message).toBe(`Removed mlx-whisper from ${computerName()} (downloaded models kept)`);
+  });
+});
+
+describe("a check that runs past its time (a cold first launch)", () => {
+  // media-ffmpeg as the catalog ships it: a 30 s check. ffmpeg-full's first launch after
+  // `brew install` took over 30 s on the founder's Mac (worker log, 2026-11-09), then 4 s, then 0.05 s.
+  const ffmpeg = readComputerManifest({
+    meta: { slug: "media-ffmpeg", name: "ffmpeg", version: "1.0.0" },
+    spec: {
+      placement: { runsOn: ["computer"] },
+      install: { darwin: { steps: [{ kind: "brew", package: "ffmpeg-full" }] } },
+      uninstall: { darwin: { steps: [{ kind: "brew", package: "ffmpeg-full" }] } },
+      verify: { timeoutSec: 30, darwin: { command: ["ffmpeg", "-version"], expect: { stdoutMatches: "^ffmpeg version (\\S+)" }, captureVersion: 1 } },
+    },
+  }) as ComputerManifest;
+  const COLD: ProcessResult = { exitCode: null, stdout: "", stderr: "", error: "ffmpeg took longer than 30 s and was stopped", timedOut: true };
+  const WARM: ProcessResult = { exitCode: 0, stdout: "ffmpeg version 8.0 Copyright", stderr: "" };
+
+  it("an install whose first check times out is checked once more, and the second answer counts", async () => {
+    const { run, calls } = fakeRun({ ffmpeg: [COLD, WARM] });
+    const ctx = ctxFor({ run });
+    const r = await installTool(ffmpeg, ctx);
+    expect(calls).toEqual([["brew", "install", "ffmpeg-full"], ["ffmpeg", "-version"], ["ffmpeg", "-version"]]);
+    expect(r).toMatchObject({ status: "installed", toolVersion: "8.0" });
+    expect(r.message).toBe(`Installed ffmpeg-full 8.0 on ${computerName()}, checked`);
+    expect(ctx.lines).toContain("ffmpeg took longer than 30 s to answer (a first launch can be slow): checking once more");
+  });
+
+  it("two timeouts say the check timed out, never that the tool does not work", async () => {
+    const { run, calls } = fakeRun({ ffmpeg: COLD });
+    const r = await verifyTool(ffmpeg, ctxFor({ run }));
+    expect(calls).toEqual([["ffmpeg", "-version"], ["ffmpeg", "-version"]]);
+    expect(r.status).toBe("verify_failed");
+    expect(r.message).not.toMatch(/does not work/);
+    expect(r.message).toBe(
+      `ffmpeg-full on ${computerName()} could not be checked: its check (ffmpeg -version) took longer than 30 s twice and was stopped. It may be installed; check it again with \`synap tools verify media-ffmpeg\``
+    );
+    expect(r.steps[0]).toMatchObject({ ok: false, detail: "its check (ffmpeg -version) took longer than 30 s twice and was stopped" });
+  });
+
+  it("a check that fails at once is not run again", async () => {
+    const { run, calls } = fakeRun({ ffmpeg: { exitCode: null, stdout: "", stderr: "", error: "ffmpeg is not installed on this computer" } });
+    const r = await verifyTool(ffmpeg, ctxFor({ run }));
+    expect(calls).toEqual([["ffmpeg", "-version"]]);
+    expect(r.message).toBe(`ffmpeg-full does not work on ${computerName()}: ffmpeg is not installed on this computer`);
+  });
+
+  it("a removal whose check times out is not reported removed", async () => {
+    const { run } = fakeRun({ ffmpeg: COLD });
+    const r = await removeTool(ffmpeg, ctxFor({ run }));
+    expect(r.status).toBe("failed");
+    expect(r.message).toMatch(/^ffmpeg-full on .* could not be checked after removing it: its check \(ffmpeg -version\) took longer than 30 s twice/);
+    expect(r.steps.at(-1)).toMatchObject({ name: "check it is gone: ffmpeg -version", ok: false });
   });
 });
 

@@ -6,6 +6,7 @@
  * dogfooded on the devbox (U14).
  */
 
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -24,21 +25,48 @@ import {
 } from "../src/lib/host/compose.js";
 import { runJob, serveHost, takeHostLock, type RunnerDeps } from "../src/lib/host/lease.js";
 import type { ProcessResult } from "../src/lib/host/tool.js";
-import type { RunContext } from "../src/lib/host/tool-run.js";
+import { defaultContext, type RunContext } from "../src/lib/host/tool-run.js";
 import { maskSecrets, toHostLog } from "../src/lib/host/logs.js";
 import { isTailnetIPv4, listenPortFor, parseProviderOp, planProviderOp, ProviderOpRefusal } from "../src/lib/host/provider-ops.js";
 import {
   createHostHub,
+  fitStepName,
   HOST_LOG_CAP,
+  HOST_STEP_NAME_MAX,
   HostDoorClosedError,
   HostLeaseLostError,
+  HostRequestRefusedError,
   installationKind,
+  RUNNER_ID,
   type FinishBody,
   type HeartbeatAnswer,
   type HostHub,
   type LeasedHostJob,
   type ReportBody,
 } from "../src/lib/host/wire.js";
+
+/** The catalog, as the loader reads it: media-ffmpeg only (no network in a test). */
+const catalogReads = vi.hoisted(() => [] as string[]);
+vi.mock("../src/lib/host/tool-manifest.js", async () => {
+  const { readComputerManifest } = await import("../src/lib/host/tool.js");
+  return {
+    loadComputerManifest: async (slug: string) => {
+      catalogReads.push(slug);
+      if (slug !== "media-ffmpeg") return { error: `no manifest for ${slug}` };
+      const m = readComputerManifest(
+        {
+          key: "media-ffmpeg",
+          name: "ffmpeg",
+          placement: { runsOn: ["computer"] },
+          install: { darwin: { steps: [{ kind: "brew", package: "ffmpeg-full" }] } },
+          verify: { timeoutSec: 30, darwin: { command: ["ffmpeg", "-version"], expect: { exitCode: 0 } } },
+        },
+        "media-ffmpeg"
+      );
+      return "error" in m ? m : { manifest: m, source: "the catalog" };
+    },
+  };
+});
 
 const D1 = `sha256:${"a".repeat(64)}`;
 const D2 = `sha256:${"b".repeat(64)}`;
@@ -202,6 +230,9 @@ function fakeHub(calls: Calls, opts: { heartbeat?: (n: number, phase: string) =>
       calls.order.push("finish");
       calls.finishes.push(body);
       return {};
+    },
+    async upload() {
+      throw new Error("no upload in these jobs");
     },
   };
 }
@@ -489,11 +520,12 @@ describe("runJob: update, remove, verb", () => {
     expect(fs.existsSync(instDir())).toBe(false);
   });
 
-  it("a hosted verb is answered failed with the reason (U8 runs them)", async () => {
+  it("a hosted verb whose recipe the approved manifest does not declare is answered failed with the reason (recipes: host-recipe-run.test.ts)", async () => {
     const calls = newCalls();
     const out = await runJob(job({ kind: "verb" }), deps(calls, fakeRuntime(calls), fakeHub(calls)));
     expect(out?.status).toBe("failed");
-    expect(out?.steps?.[0].detail).toMatch(/does not run hosted verbs yet/);
+    expect(out?.steps?.[0].detail).toMatch(/declares no recipe/);
+    expect(calls.order).not.toContain("heartbeat:running");
   });
 
   it("serve --once leases at most one job", async () => {
@@ -602,6 +634,9 @@ describe("wire", () => {
       "https://pod.example/api/hub/host-jobs/lease",
       `https://pod.example/api/hub/host-jobs/${job().id}/heartbeat`,
     ]);
+    // Every lease names this runner process, so the pod sees a restart and checks the tools again.
+    expect(seen[0]!.body).toEqual({ os: process.platform, arch: process.arch, runner: RUNNER_ID });
+    expect(RUNNER_ID).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
     expect(seen[1]).toMatchObject({ auth: "Bearer k1", body: { leaseId: job().leaseId, phase: "running" } });
     status = 409;
     await expect(hub.finish(job(), { status: "done" })).rejects.toBeInstanceOf(HostLeaseLostError);
@@ -740,6 +775,59 @@ describe("runJob: a tool installation", () => {
     expect(out?.steps?.find((s) => !s.ok)?.detail).toMatch(/needs admin rights .*run `synap tools install media-ffmpeg` on this computer yourself/);
   });
 
+  it("the worker reads a prerequisite's manifest: media-ffmpeg already works, so media-download installs", async () => {
+    // Worker log 2026-11-09: "media-download needs media-ffmpeg first, and this runner cannot read its manifest".
+    // The worker passes no toolContext: its jobs run with defaultContext, the same loader as the keyboard.
+    const calls = newCalls();
+    const bin = fs.mkdtempSync(path.join(root, "bin-"));
+    fs.writeFileSync(path.join(bin, "brew"), "#!/bin/sh\n", { mode: 0o755 });
+    const ran: string[][] = [];
+    const worker = (): RunContext =>
+      defaultContext({
+        os: "darwin",
+        arch: "arm64",
+        env: { PATH: bin },
+        values: { brewPrefix: "/opt/homebrew", home: root, models: root, workdir: root, tools: root },
+        interactive: false,
+        freeMb: () => 100_000,
+        run: async (argv) => (ran.push(argv), argv[0] === "yt-dlp" ? { exitCode: 0, stdout: "2025.10.22\n", stderr: "" } : FF_OK),
+      });
+    const download = toolJob();
+    download.installation.capabilityKey = "media-download";
+    download.installation.manifest = {
+      key: "media-download",
+      name: "Download media",
+      placement: { runsOn: ["computer"], requires: { capabilities: [{ slug: "media-ffmpeg" }] } },
+      install: { darwin: { steps: [{ kind: "brew", package: "yt-dlp" }] } },
+      verify: { darwin: { command: ["yt-dlp", "--version"], expect: { stdoutMatches: "^(\\S+)" }, captureVersion: 1 } },
+    };
+    catalogReads.length = 0;
+    const out = await runJob(download, deps(calls, fakeRuntime(calls), fakeHub(calls), { toolContext: worker }));
+    expect(catalogReads).toEqual(["media-ffmpeg"]);
+    expect(ran).toEqual([["ffmpeg", "-version"], ["brew", "install", "yt-dlp"], ["yt-dlp", "--version"]]);
+    expect(out).toMatchObject({ status: "done", observedVersion: "2025.10.22" });
+  });
+
+  it("the worker never installs a prerequisite: one that does not work yet is approved on the pod first", async () => {
+    const calls = newCalls();
+    const ran: string[][] = [];
+    const worker = (): RunContext =>
+      defaultContext({ os: "darwin", arch: "arm64", env: { PATH: root }, interactive: false, freeMb: () => 100_000, run: async (argv) => (ran.push(argv), FF_GONE) });
+    const download = toolJob();
+    download.installation.capabilityKey = "media-download";
+    download.installation.manifest = {
+      key: "media-download",
+      name: "Download media",
+      placement: { runsOn: ["computer"], requires: { capabilities: [{ slug: "media-ffmpeg" }] } },
+      install: { darwin: { steps: [{ kind: "brew", package: "yt-dlp" }] } },
+      verify: { darwin: { command: ["yt-dlp", "--version"] } },
+    };
+    const out = await runJob(download, deps(calls, fakeRuntime(calls), fakeHub(calls), { toolContext: worker }));
+    expect(ran).toEqual([["ffmpeg", "-version"]]);
+    expect(out?.status).toBe("failed");
+    expect(out?.steps?.find((s) => !s.ok)?.detail).toBe("Download media needs ffmpeg first: approve media-ffmpeg for this computer on the pod, then this one");
+  });
+
   it("a lease lost during the steps: nothing is reported or finished", async () => {
     const calls = newCalls();
     const { ctx: tctx } = toolCtx({ ffmpeg: FF_OK });
@@ -747,6 +835,81 @@ describe("runJob: a tool installation", () => {
     const out = await runJob(toolJob(), deps(calls, fakeRuntime(calls), hub, { toolContext: () => tctx }));
     expect(out).toBeNull();
     expect(calls.finishes).toEqual([]);
+  });
+
+  describe("the finish stays inside the pod's limits (job 7b8b69a3, 2026-11-09)", () => {
+    // media-matte's swift helper, as the catalog serves it, padded to 300 characters.
+    const LONG_URL = `https://cdn.jsdelivr.net/npm/@synap-core/workspace-templates@0.33.0/skills/facecam-edit/${"a".repeat(300 - 106)}/synap-matte.swift`;
+    const SWIFT = "print(1)\n";
+    const matteJob = () => {
+      const j = toolJob();
+      j.installation.capabilityKey = "media-matte";
+      j.installation.manifest = {
+        ...ffmpegSpec(),
+        key: "media-matte",
+        install: {
+          darwin: {
+            steps: [
+              { kind: "download", url: LONG_URL, sha256: createHash("sha256").update(SWIFT).digest("hex"), dest: "{home}/.synap/bin/synap-matte.swift" },
+              { kind: "brew", package: "ffmpeg" },
+            ],
+          },
+        },
+      };
+      return j;
+    };
+    /** The pod's schema: a step name past its limit refuses the whole finish (HTTP 400). */
+    const strictHub = (calls: Calls) => {
+      const hub = fakeHub(calls);
+      const finish = hub.finish;
+      hub.finish = async (j, body) => {
+        const long = body.steps?.find((st) => st.name.length > HOST_STEP_NAME_MAX);
+        if (long) throw new HostRequestRefusedError(`POST host-jobs/x/finish failed (HTTP 400): steps.name: Too big`, 400);
+        return finish(j, body);
+      };
+      return hub;
+    };
+    afterEach(() => vi.unstubAllGlobals());
+
+    it("a manifest step with a 300-character URL installs and the pod records the outcome, every step named in a short label", async () => {
+      expect(LONG_URL).toHaveLength(300);
+      vi.stubGlobal("fetch", vi.fn(async () => new Response(SWIFT)));
+      const calls = newCalls();
+      const { ctx: tctx } = toolCtx({ ffmpeg: FF_OK });
+      const out = await runJob(matteJob(), deps(calls, fakeRuntime(calls), strictHub(calls), { toolContext: () => tctx }));
+      expect(out?.status).toBe("done");
+      expect(calls.finishes).toHaveLength(1);
+      const names = calls.finishes[0]!.steps!.map((st) => st.name);
+      for (const n of names) expect(n.length).toBeLessThanOrEqual(HOST_STEP_NAME_MAX);
+      expect(names[1]).toMatch(/^download synap-matte\.swift to synap-matte\.swift/);
+    });
+
+    it("a finish the pod still refuses as malformed is sent again with the outcome alone, once", async () => {
+      const calls = newCalls();
+      const { ctx: tctx } = toolCtx({ ffmpeg: FF_OK });
+      const hub = fakeHub(calls);
+      const finish = hub.finish;
+      let tries = 0;
+      hub.finish = async (j, body) => {
+        tries += 1;
+        if (body.steps) throw new HostRequestRefusedError("POST host-jobs/x/finish failed (HTTP 400): something new", 400);
+        return finish(j, body);
+      };
+      const out = await runJob(toolJob(), deps(calls, fakeRuntime(calls), hub, { toolContext: () => tctx }));
+      expect(tries).toBe(2);
+      expect(out).toMatchObject({ status: "done", observedVersion: "7.1.1", verify: { ok: true } });
+      expect(calls.finishes[0]).not.toHaveProperty("steps");
+    });
+
+    it("a label: a URL becomes its file name, then a path; past that it is cut", () => {
+      expect(fitStepName("Homebrew: install ffmpeg")).toBe("Homebrew: install ffmpeg");
+      expect(fitStepName(`download ${LONG_URL} to /Users/x/.synap/bin/synap-matte.swift (checked against its sha256)`)).toBe(
+        "download synap-matte.swift to /Users/x/.synap/bin/synap-matte.swift (checked against its sha256)"
+      );
+      const cut = fitStepName("x".repeat(500));
+      expect(cut).toHaveLength(HOST_STEP_NAME_MAX);
+      expect(cut.endsWith("…")).toBe(true);
+    });
   });
 });
 

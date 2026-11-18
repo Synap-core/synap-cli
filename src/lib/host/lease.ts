@@ -21,7 +21,8 @@
  *   provider_op (provider-ops.ts);
  * - tool: install, update, remove and verify run the manifest's per-OS steps
  *   and check (tool-run.ts); the finish carries what the check found.
- * `verb` jobs (hosted verbs, plan U8) are answered `failed` with the reason.
+ * - verb (hosted verbs, plan U8): one recipe of a tool installed here, with its
+ *   input files from the pod and its outputs uploaded back (recipe-run.ts).
  *
  * State on the computer: `<installRoot>/<installation id>/compose.yaml` and
  * its volume folders. It never holds a key: the runner's own key stays in the
@@ -48,15 +49,19 @@ import {
   type ProviderPlan,
 } from "./provider-ops.js";
 import { readComputerManifest } from "./tool.js";
-import { defaultContext, installTool, removeTool, verifyTool, type RunContext } from "./tool-run.js";
+import { defaultContext, envWithPrerequisites, installTool, removeTool, verifyTool, type RunContext } from "./tool-run.js";
+import { runRecipe, type RecipeRunDeps } from "./recipe-run.js";
 import {
+  fitFinishBody,
   HostDoorClosedError,
   HostLeaseLostError,
+  HostRequestRefusedError,
   installationKind,
   type FinishBody,
   type FinishStep,
   type HealthReport,
   type HostHub,
+  type HostJobFile,
   type HostLog,
   type LeasedHostJob,
   type ToolCheck,
@@ -94,6 +99,8 @@ export interface RunnerDeps {
   secrets?: string[];
   /** Heartbeat cadence override (tests); default the job's interval, at least 5 s. */
   heartbeatMs?: number;
+  /** Where a hosted verb's job folders go (default `~/.synap/tools/work`). */
+  workRoot?: string;
   /**
    * How a `tool` job runs here: the worker has no person to ask (the default);
    * `synap tools` at the keyboard does, so admin steps and scripts are asked.
@@ -334,6 +341,8 @@ export async function runJob(job: LeasedHostJob, deps: RunnerDeps): Promise<Fini
   };
 
   let toolCheck: ToolCheck | undefined;
+  /** A hosted verb's outputs, uploaded (or why not): the finish carries them. */
+  let verbFiles: HostJobFile[] | undefined;
   const kind = installationKind(job);
 
   try {
@@ -506,11 +515,51 @@ export async function runJob(job: LeasedHostJob, deps: RunnerDeps): Promise<Fini
           break;
         }
 
-        case "verb":
+        case "verb": {
+          // A recipe of a tool installed here (recipe-run.ts): the RUNNING
+          // heartbeat comes once the inputs are down and before the first step.
+          const tctx: RunContext = deps.toolContext?.() ?? defaultContext({ interactive: false });
+          // The tool's prerequisites' pinned programs come first on PATH (a
+          // recipe step that calls a bare `ffmpeg` gets the approved one).
+          const approved = readComputerManifest(job.installation.manifest ?? {}, job.installation.capabilityKey);
+          const env = "error" in approved ? tctx.env : await envWithPrerequisites(approved, tctx);
+          try {
+            const r = await runRecipe(job, {
+              hub: deps.hub,
+              os: tctx.os,
+              values: tctx.values,
+              env,
+              ...(deps.fetchImpl ? { fetchImpl: deps.fetchImpl as RecipeRunDeps["fetchImpl"] } : {}),
+              ...(tctx.run ? { run: tctx.run } : {}),
+              signal: stop.signal,
+              beforeSteps: goRunning,
+              assertGoing,
+              ...(deps.workRoot ? { workRoot: deps.workRoot } : {}),
+              secrets: deps.secrets,
+              log: (l) => deps.log(`job ${job.id}: ${l}`),
+            });
+            steps.push(...r.steps);
+            verbFiles = r.files;
+            deps.log(`job ${job.id}: ${r.message}`);
+          } catch (err) {
+            const partial = err as Error & { steps?: FinishStep[]; files?: HostJobFile[] };
+            if (partial.steps) steps.push(...partial.steps);
+            if (partial.files) verbFiles = partial.files;
+            if (err instanceof LeaseGone || err instanceof StepFailure) throw err;
+            if (err instanceof HostLeaseLostError) {
+              lost = true;
+              throw new LeaseGone();
+            }
+            if (lost) throw new LeaseGone();
+            if (stopped) throw new StepFailure("a person asked to stop this job", "stopped");
+            if (deps.signal?.aborted) throw new StepFailure("the host runner was stopped mid-job", "infra");
+            throw new StepFailure((err as Error).message.slice(0, 1000));
+          }
+          break;
+        }
+
         default:
-          throw new StepFailure(
-            job.kind === "verb" ? "this host runner does not run hosted verbs yet (plan 64072312 U8)" : `unknown job kind "${String(job.kind)}"`
-          );
+          throw new StepFailure(`unknown job kind "${String(job.kind)}"`);
       }
     } catch (err) {
       if (err instanceof LeaseGone || lost) throw new LeaseGone();
@@ -540,7 +589,9 @@ export async function runJob(job: LeasedHostJob, deps: RunnerDeps): Promise<Fini
     return null;
   }
   const log = await collectLog();
-  const body: Omit<FinishBody, "leaseId"> = {
+  // Inside the pod's limits: a finish it refuses is an outcome it never learns
+  // (a tool installed and checked, then installed again by the self-heal).
+  let body: Omit<FinishBody, "leaseId"> = fitFinishBody({
     status: verdict,
     durationMs: now() - startedAt,
     ...(infraReason ? { infraReason } : {}),
@@ -549,9 +600,19 @@ export async function runJob(job: LeasedHostJob, deps: RunnerDeps): Promise<Fini
     ...(contractOutput ? { output: contractOutput } : {}),
     ...(cleanedUp.length ? { cleanedUp } : {}),
     ...(toolCheck ?? {}),
-  };
+    ...(verbFiles?.length ? { files: verbFiles } : {}),
+  });
   try {
-    await deps.hub.finish(job, body);
+    try {
+      await deps.hub.finish(job, body);
+    } catch (err) {
+      if (!(err instanceof HostRequestRefusedError)) throw err;
+      // Refused as malformed: send the outcome alone (verdict, check, a verb's files), once.
+      deps.log(`job ${job.id}: ${err.message}; finishing again with the outcome only (steps and log are in this computer's log)`);
+      const { steps: _s, log: _l, output: _o, cleanedUp: _c, ...outcome } = body;
+      body = outcome;
+      await deps.hub.finish(job, body);
+    }
     deps.log(`job ${job.id}: finished ${verdict}`);
   } catch (err) {
     if (err instanceof HostLeaseLostError) {

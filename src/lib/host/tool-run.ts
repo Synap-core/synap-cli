@@ -36,12 +36,16 @@ import {
   verifyArgv,
   verifyFor,
   type ComputerManifest,
+  type ComputerOs,
   type ComputerToolStatus,
   type PlaceholderValues,
   type PlannedStep,
   type ProcessResult,
+  type StepsBlock,
   type VerifyOutcome,
+  fillPlaceholders,
 } from "./tool.js";
+import { loadComputerManifest } from "./tool-manifest.js";
 import type { FinishStep, ToolCheck } from "./wire.js";
 
 // ── Where things live on this computer ────────────────────────────────────────
@@ -75,6 +79,46 @@ export function toolEnv(base: NodeJS.ProcessEnv = process.env, platform: string 
   return { ...base, PATH: [...have, ...extra.filter((d) => !have.includes(d))].join(path.delimiter) };
 }
 
+/**
+ * The env a tool's own programs run with: the folders of its prerequisites'
+ * pinned programs (`requires.capabilities` → their `install.<os>.bins`) FIRST
+ * on PATH. mlx_whisper (media-transcribe) calls a bare `ffmpeg`: it must get
+ * the approved media-ffmpeg build, never another `ffmpeg` that PATH order
+ * finds first (a brew `ffmpeg` whose x265 an upgrade replaced no longer loads,
+ * 2026-11-09). A prerequisite whose manifest cannot be read is said, and the
+ * PATH is left as it was for it.
+ */
+export async function envWithPrerequisites(
+  m: ComputerManifest,
+  ctx: Pick<RunContext, "env" | "os" | "values" | "load" | "say">
+): Promise<NodeJS.ProcessEnv> {
+  const loaded: ComputerManifest[] = [];
+  for (const dep of m.spec.placement?.requires?.capabilities ?? []) {
+    if ((dep.os && dep.os !== ctx.os) || dep.slug === m.slug || !ctx.load) continue;
+    const got = await ctx.load(dep.slug);
+    if ("error" in got) ctx.say(`${dep.slug}'s programs could not be put first on PATH: ${got.error}`);
+    else loaded.push(got.manifest);
+  }
+  return prerequisitesFirst(loaded, ctx);
+}
+
+/** The PATH with these prerequisites' pinned programs' folders first (only programs that exist on disk). */
+export function prerequisitesFirst(prerequisites: readonly ComputerManifest[], ctx: Pick<RunContext, "env" | "os" | "values">): NodeJS.ProcessEnv {
+  const first: string[] = [];
+  for (const dep of prerequisites) {
+    const bins = (dep.spec.install?.[ctx.os as ComputerOs] as StepsBlock | undefined)?.bins ?? {};
+    for (const raw of Object.values(bins)) {
+      const f = fillPlaceholders(raw, ctx.values);
+      if ("error" in f || !path.isAbsolute(f.value) || !fs.existsSync(f.value)) continue;
+      const dir = path.dirname(f.value);
+      if (!first.includes(dir)) first.push(dir);
+    }
+  }
+  if (first.length === 0) return ctx.env;
+  const rest = (ctx.env.PATH ?? "").split(path.delimiter).filter((d) => d && !first.includes(d));
+  return { ...ctx.env, PATH: [...first, ...rest].join(path.delimiter) };
+}
+
 /** Is `program` on this PATH? */
 export function onPath(program: string, env: NodeJS.ProcessEnv = toolEnv()): boolean {
   if (path.isAbsolute(program)) return fs.existsSync(program);
@@ -97,7 +141,7 @@ const OUTPUT_CAP = 256 * 1024;
 /** Run one argv (never a shell line), capture its output, optionally echo it. */
 export function runProcess(
   argv: string[],
-  opts: { env?: NodeJS.ProcessEnv; timeoutMs?: number; echo?: (chunk: string) => void } = {}
+  opts: { env?: NodeJS.ProcessEnv; timeoutMs?: number; echo?: (chunk: string) => void; cwd?: string; signal?: AbortSignal } = {}
 ): Promise<ProcessResult> {
   return new Promise((resolve) => {
     let stdout = "";
@@ -111,7 +155,7 @@ export function runProcess(
     };
     let child;
     try {
-      child = spawn(argv[0]!, argv.slice(1), { env: opts.env ?? toolEnv(), shell: false, windowsHide: true });
+      child = spawn(argv[0]!, argv.slice(1), { env: opts.env ?? toolEnv(), shell: false, windowsHide: true, ...(opts.cwd ? { cwd: opts.cwd } : {}) });
     } catch (err) {
       done({ exitCode: null, stdout, stderr, error: `${argv[0]} could not start: ${(err as Error).message}` });
       return;
@@ -119,9 +163,16 @@ export function runProcess(
     const timer = opts.timeoutMs
       ? setTimeout(() => {
           child.kill("SIGTERM");
-          done({ exitCode: null, stdout, stderr, error: `${argv[0]} took longer than ${Math.round(opts.timeoutMs! / 1000)} s and was stopped` });
+          done({ exitCode: null, stdout, stderr, error: `${argv[0]} took longer than ${Math.round(opts.timeoutMs! / 1000)} s and was stopped`, timedOut: true });
         }, opts.timeoutMs)
       : undefined;
+    // A stop (a person's Stop, the runner shutting down) ends the program, as a timeout does.
+    const onAbort = () => {
+      child.kill("SIGTERM");
+      done({ exitCode: null, stdout, stderr, error: `${argv[0]} was stopped` });
+    };
+    if (opts.signal?.aborted) onAbort();
+    else opts.signal?.addEventListener("abort", onAbort, { once: true });
     child.stdout?.on("data", (b: Buffer) => {
       const s = b.toString();
       if (stdout.length < OUTPUT_CAP) stdout += s;
@@ -139,6 +190,7 @@ export function runProcess(
     });
     child.on("close", (code) => {
       if (timer) clearTimeout(timer);
+      opts.signal?.removeEventListener("abort", onAbort);
       done({ exitCode: code, stdout, stderr });
     });
   });
@@ -183,6 +235,11 @@ export interface RunContext {
   freeMb?: () => number | undefined;
 }
 
+/**
+ * The context a job runs with: at the keyboard (`synap tools`) and in the
+ * worker alike. Both read a prerequisite's manifest through the same loader;
+ * only the keyboard can install one (`prerequisite`).
+ */
 export function defaultContext(over: Partial<RunContext> = {}): RunContext {
   const interactive = !!process.stdin.isTTY && !!process.stdout.isTTY;
   return {
@@ -192,6 +249,7 @@ export function defaultContext(over: Partial<RunContext> = {}): RunContext {
     values: localPlaceholders(),
     interactive,
     say: () => {},
+    load: (slug) => loadComputerManifest(slug),
     confirm: async (q) => {
       const prompts = (await import("prompts")).default;
       const { ok } = await prompts({ type: "confirm", name: "ok", message: q, initial: false });
@@ -227,7 +285,13 @@ function toolName(m: ComputerManifest, os: string): string {
 
 const refused = (message: string): ToolResult => ({ status: "refused", toolVersion: null, message, steps: [] });
 
-/** Run the OS's verify check. */
+/**
+ * Run the OS's verify check. A check that runs past its time is run ONCE more:
+ * the first launch of a program just installed (or after a restart) can be
+ * slow while macOS scans its libraries (ffmpeg-full links 84 of them: over
+ * 30 s cold, 4 s next, 0.05 s warm), so no manifest has to guess a cold
+ * launch's time. Two timeouts are said as a timeout, never as "does not work".
+ */
 export async function runVerify(
   m: ComputerManifest,
   ctx: RunContext
@@ -236,9 +300,16 @@ export async function runVerify(
   if (!check) return { outcome: { ok: false, toolVersion: null, reason: `no check for ${OS_LABEL[ctx.os] ?? ctx.os}` } };
   const filled = verifyArgv(m.spec, ctx.os, check.command, ctx.values);
   if ("error" in filled) return { outcome: { ok: false, toolVersion: null, reason: filled.error } };
-  const timeoutMs = (m.spec.verify?.timeoutSec ?? 60) * 1000;
-  const run = await (ctx.run ?? runProcess)(filled.argv, { env: ctx.env, timeoutMs });
-  return { outcome: matchVerify(run, check), run, argv: filled.argv };
+  const timeoutSec = m.spec.verify?.timeoutSec ?? 60;
+  const runOnce = () => (ctx.run ?? runProcess)(filled.argv, { env: ctx.env, timeoutMs: timeoutSec * 1000 });
+  let run = await runOnce();
+  if (run.timedOut) {
+    ctx.say(`${filled.argv[0]} took longer than ${timeoutSec} s to answer (a first launch can be slow): checking once more`);
+    run = await runOnce();
+  }
+  const outcome = matchVerify(run, check);
+  if (outcome.timedOut) outcome.reason = `its check (${filled.argv.join(" ")}) took longer than ${timeoutSec} s twice and was stopped`;
+  return { outcome, run, argv: filled.argv };
 }
 
 /**
@@ -256,8 +327,16 @@ export async function runSmoke(m: ComputerManifest, ctx: RunContext): Promise<{ 
   return { run, ok: matchVerify(run, { command: filled.argv, expect: smoke.expect }).ok };
 }
 
-/** Check the tool: the version it prints, and its smoke run when one is declared. */
+/**
+ * Check the tool: the version it prints, and its smoke run when one is
+ * declared, with its prerequisites' programs first on PATH.
+ */
 export async function verifyTool(m: ComputerManifest, ctx: RunContext): Promise<ToolResult> {
+  return checkTool(m, { ...ctx, env: await envWithPrerequisites(m, ctx) });
+}
+
+/** {@link verifyTool} with the env already built. */
+async function checkTool(m: ComputerManifest, ctx: RunContext): Promise<ToolResult> {
   if (ctx.os === "win32") ctx.say(chalk.yellow(WINDOWS_UNTESTED));
   const t0 = Date.now();
   const { outcome, run, argv } = await runVerify(m, ctx);
@@ -279,7 +358,9 @@ export async function verifyTool(m: ComputerManifest, ctx: RunContext): Promise<
       ? `${name}${v} works on ${computerName()}, checked${smokeWords}`
       : status === "drifted"
         ? `${name}${v} on ${computerName()} is outside the version ${m.slug} needs (${m.spec.placement?.requires?.tool?.version})`
-        : `${name} does not work on ${computerName()}: ${outcome.reason}`;
+        : outcome.timedOut
+          ? `${name} on ${computerName()} could not be checked: ${outcome.reason}. It may be installed; check it again with \`synap tools verify ${m.slug}\``
+          : `${name} does not work on ${computerName()}: ${outcome.reason}`;
   return { status, toolVersion: outcome.toolVersion, message, check, steps, smokeWords };
 }
 
@@ -443,13 +524,16 @@ export async function installTool(m: ComputerManifest, ctx: RunContext): Promise
   }
 
   // What it needs first (requires.capabilities): each is its own installation, its own yes (decision 2).
+  const prerequisites: ComputerManifest[] = [];
   for (const dep of m.spec.placement?.requires?.capabilities ?? []) {
     if ((dep.os && dep.os !== ctx.os) || dep.slug === m.slug) continue;
     if (!ctx.load) return refused(`${m.name} needs ${dep.slug} first, and this runner cannot read its manifest`);
     const loaded = await ctx.load(dep.slug);
     if ("error" in loaded) return refused(`${m.name} needs ${dep.slug} first: ${loaded.error}`);
+    prerequisites.push(loaded.manifest);
     const { outcome } = await runVerify(loaded.manifest, ctx);
     if (outcome.ok) continue;
+    if (outcome.timedOut) return refused(`${m.name} needs ${loaded.manifest.name} first, and ${outcome.reason}: check it again, then this one`);
     if (!ctx.prerequisite) {
       return refused(`${m.name} needs ${loaded.manifest.name} first: approve ${dep.slug} for this computer on the pod, then this one`);
     }
@@ -471,12 +555,14 @@ export async function installTool(m: ComputerManifest, ctx: RunContext): Promise
   const logFile = newLogFile(m.slug, "install");
   const steps: FinishStep[] = [];
   const ran = await runSteps(pre.planned, m, ctx, logFile, steps);
+  // The tool is checked with its prerequisites' programs first on PATH (read once, above).
+  const checkCtx = { ...ctx, env: prerequisitesFirst(prerequisites, ctx) };
   if ("error" in ran) {
     // Check anyway: the pod keeps the last check it was sent, so a failed install reports what is there now.
-    const now = await verifyTool(m, ctx);
+    const now = await checkTool(m, checkCtx);
     return { status: "failed", toolVersion: now.toolVersion, message: `${m.name} was not installed: ${ran.error}`, steps: [...steps, ...now.steps], check: now.check };
   }
-  const checked = await verifyTool(m, ctx);
+  const checked = await checkTool(m, checkCtx);
   const all = [...steps, ...checked.steps];
   if (checked.status === "installed") {
     const v = checked.toolVersion ? ` ${checked.toolVersion}` : "";
@@ -507,9 +593,12 @@ export async function removeTool(m: ComputerManifest, ctx: RunContext): Promise<
   if ("error" in ran) return { status: "failed", toolVersion: null, message: `${m.name} was not removed: ${ran.error}`, steps };
   const t0 = Date.now();
   const { outcome, run, argv } = await runVerify(m, ctx);
-  // Removed means the check no longer passes.
-  steps.push({ name: `check it is gone: ${argv?.join(" ") ?? "no check"}`, ok: !outcome.ok, durationMs: Date.now() - t0 });
+  // Removed means the check no longer passes; a check that timed out answered nothing.
+  steps.push({ name: `check it is gone: ${argv?.join(" ") ?? "no check"}`, ok: !outcome.ok && !outcome.timedOut, durationMs: Date.now() - t0 });
   const check = buildToolCheck({ toolVersion: outcome.toolVersion, os: ctx.os, arch: ctx.arch, ok: outcome.ok, run });
+  if (outcome.timedOut) {
+    return { status: "failed", toolVersion: null, message: `${toolName(m, ctx.os)} on ${computerName()} could not be checked after removing it: ${outcome.reason}. Log: ${logFile}`, steps, check };
+  }
   if (outcome.ok) {
     return {
       status: "failed",

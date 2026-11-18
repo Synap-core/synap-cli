@@ -19,6 +19,8 @@ import prompts from "prompts";
 import { resolveHubConfig, hubGet, hubPost, hubPatch, hubDelete, renderHubError } from "../lib/hub-client.js";
 import { unwrapList } from "../lib/unwrapList.js";
 import { log } from "../utils/logger.js";
+import { matchByName } from "../lib/name-match.js";
+import { pickByName } from "../lib/name-pick.js";
 
 type HubCfg = Awaited<ReturnType<typeof resolveHubConfig>>;
 
@@ -76,16 +78,17 @@ async function resolveInstalledCapabilityId(
     process.exit(1);
   }
 
-  const q = name.trim().toLowerCase();
-  const card =
-    cards.find((c) => c.name?.toLowerCase() === q) ??
-    cards.find((c) => c.key?.toLowerCase() === q);
-
-  if (!card) {
-    log.error(`No capability named "${name}" in the catalog.`);
-    log.dim("Run `synap cap list` to see what's available.");
-    process.exit(1);
-  }
+  const card = await pickByName(
+    matchByName(cards, name, (c) => ({ names: [c.name ?? "", c.key ?? ""] })),
+    {
+      query: name,
+      noun: "capability",
+      labelOf: (c) => c.name,
+      commandFor: (c) => `synap cap connections list "${c.name}"`,
+      listCommand: "synap cap list",
+    }
+  );
+  if (!card) process.exit(1);
   if (card.id == null) {
     log.error(`"${card.name}" isn't installed yet.`);
     log.dim(`Install it first:  synap cap add "${card.name}"`);

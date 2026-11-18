@@ -187,6 +187,34 @@ export function programDir(e: WorkerEngine): string | undefined {
   return e.kind === "program" ? path.dirname(e.programPath) : undefined;
 }
 
+/** Agents per roster page: ~850 characters each, so a page stays far under the pod's MCP reply cap (16,000). */
+export const ROSTER_PAGE = 10;
+
+/**
+ * The roster page that lists `selfAgentId`, paging `synap_list_agents` with
+ * `limit`/`offset` and following `nextOffset` (backend#906: the whole roster is
+ * over the pod's reply cap). A pod older than paging ignores both and answers
+ * the whole roster, with no `nextOffset`: read as one page. The last page read
+ * comes back when no page lists the agent, so `rosterTemplate` says so.
+ */
+export async function readRosterPageWithSelf(mcp: McpCallClient, selfAgentId: string): Promise<string> {
+  let offset = 0;
+  for (let pages = 0; pages < 100; pages++) {
+    const r = await mcp.call("synap_list_agents", { limit: ROSTER_PAGE, offset });
+    if (r.isError) throw new Error(`the pod's agent roster could not be read: ${r.text.slice(0, 160)}`);
+    let page: { agents?: Array<{ agentUserId?: unknown }>; nextOffset?: unknown };
+    try {
+      page = JSON.parse(r.text) as typeof page;
+    } catch {
+      return r.text; // rosterTemplate names the unreadable reply
+    }
+    if (!Array.isArray(page?.agents) || page.agents.some((a) => a?.agentUserId === selfAgentId)) return r.text;
+    if (typeof page.nextOffset !== "number" || page.nextOffset <= offset) return r.text;
+    offset = page.nextOffset;
+  }
+  throw new Error("the pod's agent roster did not end after 100 pages");
+}
+
 /**
  * The engine of the agent this key is (`selfAgentId`): the pod's roster names
  * its template, the installed catalog says how that template wakes. A roster
@@ -199,9 +227,7 @@ export async function resolveWorkerEngine(
   searchPath: string | undefined,
   readTemplate: (slug: string) => AgentTemplateWake | null = (slug) => readAgentTemplateWake(slug)
 ): Promise<WorkerEngine> {
-  const r = await mcp.call("synap_list_agents", {});
-  if (r.isError) throw new Error(`the pod's agent roster could not be read: ${r.text.slice(0, 160)}`);
-  const ref = rosterTemplate(r.text, selfAgentId);
+  const ref = rosterTemplate(await readRosterPageWithSelf(mcp, selfAgentId), selfAgentId);
   if (!ref) return engineFor(agent, null, null, searchPath);
   // The pod serves the block (an installed template): it is the source. A built-in template
   // (version null) or a pod older than the field serves none: this synap's catalog answers.

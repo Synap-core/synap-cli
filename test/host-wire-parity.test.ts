@@ -12,7 +12,20 @@ import fs from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { buildToolCheck, EXCERPT_MAX } from "../src/lib/host/tool.js";
-import { HOST_BODY_MAX_BYTES, HOST_FINISH_STATUSES, HOST_JOB_KINDS, HOST_LOG_CAP } from "../src/lib/host/wire.js";
+import {
+  HOST_BODY_MAX_BYTES,
+  HOST_CLEANED_UP_ITEM_MAX,
+  HOST_CLEANED_UP_MAX,
+  HOST_FINISH_STATUSES,
+  HOST_INFRA_REASON_MAX,
+  HOST_JOB_KINDS,
+  HOST_LOG_CAP,
+  HOST_STEP_DETAIL_MAX,
+  HOST_STEP_NAME_MAX,
+  HOST_STEPS_MAX,
+  HOST_VERB_MAX_FILES,
+  type HostJobFile,
+} from "../src/lib/host/wire.js";
 
 const source =
   process.env.HOST_WIRE_SOURCE ?? path.resolve(__dirname, "../../synap-backend/packages/types/src/host-jobs/index.ts");
@@ -63,5 +76,24 @@ describe.skipIf(!present)("host-job wire mirror = @synap-core/types/host-jobs", 
   it("heartbeat phases and the 127.0.0.1-only port report", () => {
     expect(text).toMatch(/phase: z\.enum\(\["setup", "running"\]\)/);
     expect(text).toMatch(/host: z\.literal\("127\.0\.0\.1"\)/);
+  });
+  it("the finish's limits are the pod's (a finish past one is refused whole: job 7b8b69a3)", () => {
+    const finish = /HostJobFinishBodySchema = z\s*\.object\(\{([\s\S]*?)\n {2}\}\)/.exec(text)?.[1] ?? "";
+    expect(finish, "HostJobFinishBodySchema not found").not.toBe("");
+    expect(finish).toMatch(new RegExp(`infraReason: z\\.string\\(\\)\\.max\\(${HOST_INFRA_REASON_MAX}\\)`));
+    expect(finish).toMatch(new RegExp(`name: z\\.string\\(\\)\\.min\\(1\\)\\.max\\(${HOST_STEP_NAME_MAX}\\)`));
+    expect(finish).toMatch(new RegExp(`detail: z\\.string\\(\\)\\.max\\(${HOST_STEP_DETAIL_MAX}\\)`));
+    expect(finish).toMatch(new RegExp(`\\)\\s*\\.max\\(${HOST_STEPS_MAX}\\)\\s*\\.optional\\(\\),\\s*log:`));
+    expect(finish).toMatch(new RegExp(`cleanedUp: z\\.array\\(z\\.string\\(\\)\\.max\\(${HOST_CLEANED_UP_ITEM_MAX}\\)\\)\\.max\\(${HOST_CLEANED_UP_MAX}\\)`));
+  });
+
+  it("a hosted verb's files: every field the runner sends is one the pod's schema reads, and the cap is the pod's", () => {
+    const schema = /HostJobFileSchema = z\.object\(\{([\s\S]*?)\n\}\);/.exec(text)?.[1] ?? "";
+    expect(schema, "HostJobFileSchema not found").not.toBe("");
+    const sent: Required<HostJobFile> = { param: "out", name: "a.mp4", size: 1, uploadToken: "t", error: "e" };
+    for (const k of Object.keys(sent)) expect(schema, `HostJobFileSchema has no "${k}"`).toMatch(new RegExp(`\\b${k}:`));
+    expect(text).toMatch(new RegExp(`HOST_VERB_MAX_FILES = ${HOST_VERB_MAX_FILES};`));
+    const upload = /HostJobUploadBodySchema = z\.object\(\{([\s\S]*?)\n\}\);/.exec(text)?.[1] ?? "";
+    for (const k of ["leaseId", "filename", "mimeType", "size"]) expect(upload, `upload body has no "${k}"`).toMatch(new RegExp(`\\b${k}:`));
   });
 });

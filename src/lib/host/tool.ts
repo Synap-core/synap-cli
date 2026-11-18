@@ -381,6 +381,8 @@ export interface ProcessResult {
   stderr: string;
   /** Spawn failed (the program is not installed) or it timed out. */
   error?: string;
+  /** It was stopped because it ran past its time: no answer, not a failure of the tool. */
+  timedOut?: boolean;
 }
 
 export interface VerifyOutcome {
@@ -389,11 +391,13 @@ export interface VerifyOutcome {
   toolVersion: string | null;
   /** Why it failed, in plain words. */
   reason?: string;
+  /** The check ran past its time: the tool's state is unknown, never "does not work". */
+  timedOut?: boolean;
 }
 
 /** Check a verify run against what the manifest expects (default: exit code 0). */
 export function matchVerify(run: ProcessResult, check: VerifyCheck): VerifyOutcome {
-  if (run.error) return { ok: false, toolVersion: null, reason: run.error };
+  if (run.error) return { ok: false, toolVersion: null, reason: run.error, ...(run.timedOut ? { timedOut: true } : {}) };
   const expect = check.expect ?? {};
   const wantExit = expect.exitCode ?? 0;
   if (run.exitCode !== wantExit) {
