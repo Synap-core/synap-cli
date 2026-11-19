@@ -110,5 +110,7 @@ runs it. Do not bump the version in a pull request.
 
 ## License
 
-By contributing, you agree that your contribution is licensed under the MIT
-license, as the package is (`license` in `package.json`).
+By contributing, you license your contribution to Synap on terms that let Synap
+distribute it under the project license (PolyForm Noncommercial 1.0.0, see
+`LICENSE`) and relicense it in the future. You keep your copyright. (Pending
+legal review.)
