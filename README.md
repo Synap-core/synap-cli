@@ -170,4 +170,5 @@ Run `synap login` and open the printed link on any device.
 
 ## License
 
-[MIT](LICENSE)
+[PolyForm Noncommercial 1.0.0](LICENSE): free for personal and non-commercial use;
+commercial use needs a license.
