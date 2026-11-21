@@ -324,9 +324,6 @@ export const MARKET_INSTALL_KINDS = [
   // An agent template (backend#890: `market.install` case "agent", one write,
   // `installAgentTemplate`). The catalog publishes it under category `agent`.
   "agent",
-  // Synap's own renderer bundle (`applyMarketInstall` → `installOfficialRendererBundle`):
-  // fetched from this pod's control plane, never from a supplied definition.
-  "renderer-bundle",
 ] as const;
 
 export type MarketInstallKind = (typeof MARKET_INSTALL_KINDS)[number];
@@ -360,8 +357,6 @@ export function marketInstallKind(type: string): MarketInstallKind | null {
       return "view";
     case "agent":
       return "agent";
-    case "renderer-bundle":
-      return "renderer-bundle";
     default:
       return null;
   }
@@ -1321,14 +1316,6 @@ export async function marketInstall(
       if (e instanceof HubError && /catalog cache/i.test(e.message)) {
         log.error(`"${entry.name}" isn't in the pod's marketplace cache yet.`);
         log.hint("The pod syncs the catalog every ~10 min — retry shortly, or install from the browser marketplace.");
-        process.exit(1);
-      }
-      // A renderer bundle is admitted by the pod and its control plane (a
-      // plan, a live pod, an enrolled pod): a refusal is FORBIDDEN with a
-      // sentence that says which. Print that sentence as the pod said it; the
-      // generic 403 hint ("credentials or scopes") would point at the wrong fix.
-      if (kind === "renderer-bundle" && e instanceof HubError && e.status === 403 && e.detail) {
-        log.error(e.detail);
         process.exit(1);
       }
       log.error(`${entry.name} failed`);
