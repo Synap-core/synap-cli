@@ -25,18 +25,9 @@
  * and a changed list is announced with `notifications/tools/list_changed` (the
  * pod declares `tools.listChanged`). No cache yet = today's behaviour exactly.
  *
- * THE LIVE CONVERSATION: Claude Code hands a stdio server its session id once,
- * at spawn, and a `/clear`, `/branch` or `/resume` moves the process to another
- * id without respawning it (finding 4902e762). The synap-bridge plugin sees the
- * move (SessionStart `clear` / `fork` / `resume`, 0.20.0) and writes the id the
- * process runs under now to `~/.synap/run/claude-code-process-<pid>.json`
- * (`{"sessionId", "process", "at"}`, `conversationHandoffPath`). The bridge
- * reads it for its Claude Code process (the parent) before every request and
- * names THAT conversation (`liveConversationReader`): the headers, `_meta` and
- * the model file follow it. Only a file whose `process` is this bridge's own
- * Claude Code process counts (a reused pid is another process); missing,
- * unreadable or foreign = the spawn-time id, as before. Without the plugin
- * nothing moves the id: CLI calls still send the live one (`hub-client.ts`).
+ * Known edge: the id is fixed at spawn. After `/clear` Claude Code starts a new
+ * session id, but MCP writes keep the pre-clear one (its transcript up to the
+ * clear stays resumable). CLI calls send the live id (`hub-client.ts`).
  *
  * THE MODEL: Claude Code gives a stdio server no model, and a plugin can set no
  * header on another MCP server's requests. The synap-bridge plugin (0.14.0)
@@ -44,9 +35,9 @@
  * (`{"model", "provider", "at"}`) whenever it changes; the bridge reads that
  * file for its spawn-time id and adds `X-Synap-Model` / `X-Synap-Model-
  * Provider` (re-read only when the file changed). Missing, unreadable or
- * invalid = no model headers, never an error, never a guess. After a `/clear`
- * the plugin writes under the new id, which the bridge reads as soon as the
- * live conversation names it.
+ * invalid = no model headers, never an error, never a guess. Same edge as the
+ * conversation: after `/clear` the plugin writes under the new id, which this
+ * bridge does not read, so those calls carry no model.
  */
 
 import { createHash } from "node:crypto";
@@ -60,8 +51,6 @@ import {
   CONVERSATION_CWD_META_KEY,
   CONVERSATION_HEADER,
   CONVERSATION_META_KEY,
-  claudeCodeConversation,
-  mcpBridgeHeaders,
   modelHeaders,
 } from "./conversation-headers.js";
 
@@ -71,12 +60,8 @@ type JsonRpcMessage = { jsonrpc?: string; id?: JsonRpcId | null; method?: string
 export interface McpBridgeOptions {
   url: string;
   apiKey: string;
-  /**
-   * Extra headers on every request (the conversation headers). A function is
-   * asked again for each request, so the headers follow a conversation that
-   * moved (`liveConversationReader`).
-   */
-  headers?: Record<string, string> | (() => Record<string, string>);
+  /** Extra headers on every request (the conversation headers). */
+  headers?: Record<string, string>;
   input?: NodeJS.ReadableStream;
   output?: NodeJS.WritableStream;
   fetchImpl?: typeof fetch;
@@ -87,11 +72,8 @@ export interface McpBridgeOptions {
   toolsListWaitMs?: number;
   /** How long a cached list may be served at all. Default 7 days. */
   toolsListMaxAgeMs?: number;
-  /**
-   * The model hand-off file the synap-bridge plugin writes (`modelHandoffPath`);
-   * absent = no model headers. A function is asked again for each request.
-   */
-  modelFile?: string | (() => string | undefined);
+  /** The model hand-off file the synap-bridge plugin writes (`modelHandoffPath`); absent = no model headers. */
+  modelFile?: string;
 }
 
 /** A Claude Code session id as a file name, as synap-bridge names it: nothing that walks a path. */
@@ -115,18 +97,15 @@ export function modelHandoffPath(sessionId: string | undefined, home: string = o
  * no headers; the values go through `modelHeaders` (a model the pod would
  * drop, or a provider that is not a slug, is left out).
  */
-export function modelHandoffReader(
-  fileOf: string | undefined | (() => string | undefined)
-): () => Record<string, string> {
+export function modelHandoffReader(file: string | undefined): () => Record<string, string> {
   let seen: string | undefined;
   let headers: Record<string, string> = {};
   return () => {
-    const file = typeof fileOf === "function" ? fileOf() : fileOf;
     if (!file) return {};
     let stamp: string;
     try {
       const st = fs.statSync(file);
-      stamp = `${file}:${st.mtimeMs}:${st.size}:${st.ino}`;
+      stamp = `${st.mtimeMs}:${st.size}:${st.ino}`;
     } catch {
       seen = undefined;
       headers = {};
@@ -144,76 +123,6 @@ export function modelHandoffReader(
       headers = {}; // unreadable or not JSON: unknown, never a guess
     }
     return headers;
-  };
-}
-
-/**
- * `~/.synap/run/claude-code-process-<pid>.json`, where the synap-bridge plugin
- * says which Claude Code session id the process `pid` runs under now (its
- * `conversationHandoffPath`). Undefined for a pid that is not one.
- */
-export function conversationHandoffPath(pid: number, home: string = os.homedir()): string | undefined {
-  if (!Number.isInteger(pid) || pid <= 1 || !path.isAbsolute(home)) return undefined;
-  return path.join(home, ".synap", "run", `claude-code-process-${pid}.json`);
-}
-
-/**
- * The Claude Code session id the hand-off file names for `processId` (this
- * bridge's Claude Code process, `claudeCodeProcess`), read again only when the
- * file changed. Undefined when there is no file, no process to check it
- * against, a file written for another process (a reused pid), or an id that is
- * not a Claude Code session id: the caller then keeps its spawn-time id.
- */
-export function liveConversationReader(
-  file: string | undefined,
-  processId: string | undefined
-): () => string | undefined {
-  let seen: string | undefined;
-  let live: string | undefined;
-  return () => {
-    if (!file || !processId) return undefined;
-    let stamp: string;
-    try {
-      const st = fs.statSync(file);
-      stamp = `${st.mtimeMs}:${st.size}:${st.ino}`;
-    } catch {
-      seen = undefined;
-      live = undefined;
-      return live; // no file: nothing says the conversation moved
-    }
-    if (stamp === seen) return live;
-    seen = stamp;
-    try {
-      const said = JSON.parse(fs.readFileSync(file, "utf8")) as { sessionId?: unknown; process?: unknown };
-      const id = typeof said?.sessionId === "string" ? said.sessionId.trim().toLowerCase() : "";
-      live = said?.process === processId && claudeCodeConversation(id) ? id : undefined;
-    } catch {
-      live = undefined; // unreadable or not JSON: never a guess
-    }
-    return live;
-  };
-}
-
-/**
- * The bridge's conversation, followed: the headers and the model file of the
- * id the Claude Code process runs under now (`liveConversationReader`), else
- * of the spawn-time id. What `synap mcp bridge` hands `runMcpBridge`.
- */
-export function followedConversation(o: {
-  /** `CLAUDE_CODE_SESSION_ID` at spawn. */
-  spawnId: string | undefined;
-  /** This bridge's Claude Code process (`claudeCodeProcess`), undefined outside Claude Code. */
-  processId: string | undefined;
-  /** `conversationHandoffPath(process.ppid)`. */
-  handoffFile: string | undefined;
-  cwd: string;
-  home?: string;
-}): { headers: () => Record<string, string>; modelFile: () => string | undefined } {
-  const live = liveConversationReader(o.handoffFile, o.processId);
-  const now = () => live() ?? o.spawnId;
-  return {
-    headers: () => mcpBridgeHeaders(now(), o.cwd, o.processId),
-    modelFile: () => modelHandoffPath(now(), o.home),
   };
 }
 
@@ -356,8 +265,6 @@ export async function runMcpBridge(opts: McpBridgeOptions): Promise<void> {
   };
 
   /** POST one message to the pod; what comes back goes to `emit`, a failure to `onFail`. */
-  const headersNow = () => (typeof opts.headers === "function" ? opts.headers() : opts.headers);
-
   const send = async (
     msg: unknown,
     ids: JsonRpcId[],
@@ -366,8 +273,6 @@ export async function runMcpBridge(opts: McpBridgeOptions): Promise<void> {
     signal?: AbortSignal
   ) => {
     const emitAll = (payload: unknown) => (Array.isArray(payload) ? payload.forEach(emit) : emit(payload));
-    // The conversation as it is NOW: a /clear or /branch since the last request moves it.
-    const conversation = headersNow();
     try {
       const res = await doFetch(opts.url, {
         ...(signal ? { signal } : {}),
@@ -378,10 +283,10 @@ export async function runMcpBridge(opts: McpBridgeOptions): Promise<void> {
           Accept: "application/json, text/event-stream",
           ...(sessionId ? { "Mcp-Session-Id": sessionId } : {}),
           ...(protocolVersion ? { "Mcp-Protocol-Version": protocolVersion } : {}),
-          ...conversation,
+          ...opts.headers,
           ...ranOn(),
         },
-        body: JSON.stringify(withConversationMeta(msg, conversation)),
+        body: JSON.stringify(withConversationMeta(msg, opts.headers)),
       });
       const minted = res.headers.get("mcp-session-id");
       if (minted) sessionId = minted;

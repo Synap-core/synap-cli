@@ -499,8 +499,8 @@ export async function mcpUiSetup(
  * stdout IS the protocol — nothing but JSON-RPC may be written to it.
  */
 export async function mcpBridge(opts: { url?: string }): Promise<void> {
-  const { conversationHandoffPath, followedConversation, runMcpBridge } = await import("../lib/mcp-bridge.js");
-  const { claudeCodeProcess } = await import("../lib/conversation-headers.js");
+  const { modelHandoffPath, runMcpBridge } = await import("../lib/mcp-bridge.js");
+  const { claudeCodeProcess, mcpBridgeHeaders } = await import("../lib/conversation-headers.js");
   const fromEnv = process.env.SYNAP_MCP_API_KEY || process.env.SYNAP_HUB_API_KEY;
   const cfg = fromEnv && opts.url ? null : await resolveHubConfig();
   const apiKey = fromEnv || cfg?.apiKey;
@@ -510,17 +510,15 @@ export async function mcpBridge(opts: { url?: string }): Promise<void> {
     process.exit(1);
   }
   // The spawn-time id (a stdio server's env), never a lens fallback.
-  const spawnId = process.env.CLAUDE_CODE_SESSION_ID;
-  // The conversation and the model it runs on, as the synap-bridge plugin
-  // hands them over: the id Claude Code's own process (the parent, read once,
-  // only inside Claude Code) runs under NOW, as a /clear or /branch moves it.
-  const conversation = followedConversation({
-    spawnId,
-    processId: spawnId ? claudeCodeProcess() : undefined,
-    handoffFile: conversationHandoffPath(process.ppid),
-    cwd: process.cwd(),
+  const sessionId = process.env.CLAUDE_CODE_SESSION_ID;
+  await runMcpBridge({
+    url,
+    apiKey,
+    // Claude Code's own process (the parent), read once: only inside Claude Code.
+    headers: mcpBridgeHeaders(sessionId, process.cwd(), sessionId ? claudeCodeProcess() : undefined),
+    // What the conversation runs on, handed over by the synap-bridge plugin.
+    modelFile: modelHandoffPath(sessionId),
   });
-  await runMcpBridge({ url, apiKey, headers: conversation.headers, modelFile: conversation.modelFile });
 }
 
 /**
