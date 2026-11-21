@@ -57,6 +57,10 @@ describe("marketInstallKind", () => {
     expect(marketInstallKind("workspace")).toBeNull();
   });
 
+  it("maps a renderer bundle to the renderer-bundle kind", () => {
+    expect(marketInstallKind("renderer-bundle")).toBe("renderer-bundle");
+  });
+
   it("returns null for an unknown type", () => {
     expect(marketInstallKind("something-new")).toBeNull();
   });
@@ -73,6 +77,19 @@ describe("market.install workspace requirement", () => {
     expect(marketInstallNeedsWorkspace("skill")).toBe(false);
     expect(marketInstallNeedsWorkspace("template")).toBe(false);
     expect(marketInstallNeedsWorkspace("agent")).toBe(false);
+    // A renderer bundle is pod-wide: `applyRendererBundleInstall` takes no workspace.
+    expect(marketInstallNeedsWorkspace("renderer-bundle")).toBe(false);
+  });
+});
+
+describe("a renderer bundle refusal reaches the person as the pod said it", () => {
+  // The pod refuses a bundle with FORBIDDEN and a sentence (renderer_bundle_plan_required,
+  // _pod_not_live, ...). The generic 403 path prints a "credentials or scopes" hint, which
+  // sends the person to the wrong fix, so the install catch prints `detail` itself.
+  it("prints the pod's own sentence for a 403 on kind renderer-bundle", () => {
+    const src = stripComments(readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), "../src/commands/market.ts"), "utf-8"), "ts");
+    const branch = /kind === "renderer-bundle"\s*&&\s*e instanceof HubError\s*&&\s*e\.status === 403[\s\S]{0,120}?log\.error\(e\.detail\)/.exec(src);
+    expect(branch, "the renderer-bundle refusal branch is gone from market install").toBeTruthy();
   });
 });
 
@@ -109,7 +126,7 @@ describe("door parity: CLI kinds vs the pod verb's zod enum", () => {
 
       // Comments out first: the enum's own comment quotes a kind (`case "agent"`,
       // backend#890), which would otherwise be counted as a second kind.
-      const podKinds = [...stripComments(enumBlock![1], "ts").matchAll(/"([a-z_]+)"/g)].map((m) => m[1]);
+      const podKinds = [...stripComments(enumBlock![1], "ts").matchAll(/"([a-z_-]+)"/g)].map((m) => m[1]);
       expect(podKinds.length).toBeGreaterThan(0);
 
       // Same set, order-insensitive.
