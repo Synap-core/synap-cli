@@ -121,7 +121,7 @@ describe("door parity: CLI kinds vs the pod verb's zod enum", () => {
       const block = /const marketInstallParams = z\.object\(\{[\s\S]*?\n\}\);/.exec(src);
       expect(block, "marketInstallParams not found — did it move or get renamed?").toBeTruthy();
 
-      const enumBlock = /kind:\s*z\.enum\(\[([\s\S]*?)\]\)/.exec(block![0]);
+      const enumBlock = /kind:\s*(?:\w+\(\s*)?z\.enum\(\[([\s\S]*?)\]\)/.exec(block![0]);
       expect(enumBlock, "kind: z.enum([...]) not found in marketInstallParams").toBeTruthy();
 
       // Comments out first: the enum's own comment quotes a kind (`case "agent"`,
