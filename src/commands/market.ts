@@ -1424,7 +1424,8 @@ export async function marketInstall(
   const type = declared;
   if (opts.kind && marketInstallKind(type) !== opts.kind) {
     log.error(`"${entry.name}" is a ${type} package, but --kind says ${opts.kind}.`);
-    log.hint(`Nothing was installed. Drop --kind, or use: --kind ${marketInstallKind(type) ?? type}`);
+    const right = marketInstallKind(type);
+    log.hint(`Nothing was installed. ${right ? `Use --kind ${right}, or drop --kind` : "Drop --kind"}: synap market install ${slug}`);
     process.exit(1);
   }
 
