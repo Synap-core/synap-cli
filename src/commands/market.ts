@@ -1162,6 +1162,189 @@ function renderPreflightReport(entry: CatalogEntry, r: PreflightReport): void {
   if (!hasAny) log.hint("Run without --dry-run to install.");
 }
 
+/**
+ * The pod's ONE kind-agnostic install door for a non-workspace package: the `market.install`
+ * verb. `entry` is only a display name: the catalog row for a listed package, or the bare
+ * slug for a `renderer-bundle`, which is never listed (the pod fetches it from its control plane).
+ */
+async function installViaVerb(
+  slug: string,
+  entry: { name: string },
+  type: string,
+  opts: Parameters<typeof marketInstall>[1],
+  applyTimeoutMs: number
+): Promise<void> {
+  const kind = marketInstallKind(type);
+  if (!kind) {
+    log.warn(`"${entry.name}" is a ${type} package — the CLI can't install this type yet.`);
+    log.hint("Install it from the browser marketplace (Marketplace → find it → Install).");
+    return;
+  }
+
+  let cfg;
+  try {
+    cfg = await resolveHubConfig(opts);
+  } catch (e) {
+    renderHubError(e);
+    process.exit(1);
+  }
+
+  // An `automation`/`workflow` install is added TO a workspace, and a `view`
+  // package needs a workspace to place its views in — the backend
+  // `market.install` verb hard-requires `workspaceId` for both
+  // (marketplace-install.ts) and 400s without it. Resolve it from the
+  // explicit `--workspace` flag, else the active lens (`synap use` / env),
+  // and fail with an actionable message rather than passing null downstream.
+  // Every OTHER kind (cell/capability/skill) lands pod-wide — leave
+  // workspaceId undefined so that deliberate pod-wide branch is preserved.
+  let workspaceId: string | undefined;
+  if (marketInstallNeedsWorkspace(kind)) {
+    workspaceId = opts.workspace ?? cfg.workspaceId;
+    if (!workspaceId) {
+      log.error(`Installing "${entry.name}" (a ${type}) needs an acting workspace to add it to.`);
+      log.hint("Pass one: synap market install " + slug + " --workspace <workspaceId>");
+      log.hint("Or set a default lens: synap use <workspace>   (see: synap orient)");
+      process.exit(1);
+    }
+  }
+
+  const s = opts.json ? null : ora(`Installing ${entry.name}…`).start();
+  let res: Record<string, unknown>;
+  try {
+    // Pod-wide install by default: no workspaceId (a capability/cell lands on
+    // the pod). An automation/workflow carries the resolved `workspaceId`
+    // (required — see above). `market.install` is a WRITE builtin — an
+    // operator run owner-bypasses the gate and runs it in-process.
+    res = (await hubPost(
+      "/capabilities/execute",
+      {
+        verbId: "market.install",
+        parameters: { slug, kind },
+        ...(workspaceId ? { workspaceId } : {}),
+      },
+      cfg,
+      applyTimeoutMs
+    )) as Record<string, unknown>;
+  } catch (e) {
+    s?.stop();
+    // 404 = this pod predates the seeded `market.install` verb (older deploy).
+    if (e instanceof HubError && e.status === 404) {
+      log.error(`This pod doesn't expose the market.install verb yet.`);
+      log.hint("It needs a newer pod deploy — meanwhile install from the browser marketplace.");
+      process.exit(1);
+    }
+    // The verb throws NOT_FOUND (surfaced as a 500) when the CP kind hasn't
+    // synced into `cp_catalog_cache` yet — say so actionably, not opaquely.
+    if (e instanceof HubError && /catalog cache/i.test(e.message)) {
+      log.error(`"${entry.name}" isn't in the pod's marketplace cache yet.`);
+      log.hint("The pod syncs the catalog every ~10 min — retry shortly, or install from the browser marketplace.");
+      process.exit(1);
+    }
+    // A renderer bundle is admitted by the pod and its control plane (a
+    // plan, a live pod, an enrolled pod): a refusal is FORBIDDEN with a
+    // sentence that says which. Print that sentence as the pod said it; the
+    // generic 403 hint ("credentials or scopes") would point at the wrong fix.
+    if (kind === "renderer-bundle" && e instanceof HubError && e.status === 403 && e.detail) {
+      log.error(e.detail);
+      process.exit(1);
+    }
+    log.error(`${entry.name} failed`);
+    renderHubError(e);
+    process.exit(1);
+  }
+  s?.stop();
+
+  // The execute door wraps the verb's return as { status:"run", result: <MarketInstallOutcome> }.
+  //
+  // ⚠️ DO NOT default this to "installed". A governed install comes back as a
+  // PROPOSAL, and the envelope's discriminator is `kind` — not `status`
+  // (`execute-capability.ts`: `{ kind:"proposed", proposalId, reviewUrl,
+  // ackState:"proposed" }`). Some hops flatten that to `{ proposed:true, … }`.
+  // Either way `outcome.status` is undefined, so `?? "installed"` printed a
+  // green "✓ Installed" for a write that had NOT happened — found by
+  // dogfooding `synap market install task-views-pack` on a live pod
+  // 2026-09-05, which returned `outcome:"installed"` alongside
+  // `proposed:true`. This is the same defaulted-discriminator class as the
+  // `changeType ?? "update"` bug that once titled every capability run
+  // "Update Capability".
+  //
+  // So: read every honest marker, and when none is present say so rather than
+  // assuming success.
+  const outcome = (res.result ?? res) as Record<string, unknown>;
+  const isProposed =
+    outcome.kind === "proposed" ||
+    outcome.status === "proposed" ||
+    outcome.ackState === "proposed" ||
+    outcome.proposed === true;
+  const status = isProposed
+    ? "proposed"
+    : outcome.status
+      ? String(outcome.status)
+      : outcome.ackState === "applied" || outcome.result !== undefined
+        ? "installed"
+        : "unknown";
+
+  if (opts.json) {
+    console.log(JSON.stringify({ slug, kind, outcome: status, result: outcome }, null, 2));
+    return;
+  }
+
+  if (status === "proposed") {
+    const proposalId = outcome.proposalId ? String(outcome.proposalId) : undefined;
+    const reviewUrl = outcome.reviewUrl ? String(outcome.reviewUrl) : undefined;
+    log.info(`${entry.name} — proposed (under review, NOT installed yet).`);
+    if (proposalId) log.hint(`Review and approve: synap open proposal ${proposalId}`);
+    if (reviewUrl) log.hint(`Review: ${reviewUrl}`);
+    return;
+  }
+
+  if (status === "unknown") {
+    // The pod answered with a shape carrying no honest marker at all. Saying
+    // "installed" here is exactly the lie this block exists to prevent.
+    log.warn(
+      `${entry.name} — the pod returned an unrecognised result; nothing is assumed installed. Check \`synap market installed\` before retrying.`
+    );
+    return;
+  }
+
+  // A kind:automation (workflow) install returns PER-ITEM results with
+  // per-item isolation — each automation can be {status:"error"} while the
+  // verb overall still reports {status:"installed"} (marketplace-install.ts
+  // automation case). A bare "✓ Installed" here would lie when every item
+  // errored (0 automations created). Inspect the per-item array and report
+  // the real outcome: N created · N reused · N error, surfacing each error's
+  // message, and exit non-zero if NOTHING was created. Other kinds carry no
+  // such array — `summarizeItemInstall` returns null and we fall through to
+  // the unchanged success line.
+  const installed = (outcome.result ?? outcome) as Record<string, unknown>;
+  const summary = summarizeItemInstall(installed);
+  if (summary) {
+    const { created, reused, errored, okCount } = summary;
+    const counts = `${created} created · ${reused} reused · ${errored.length} error`;
+
+    if (errored.length > 0) {
+      // Never print a bare success when any item failed.
+      if (okCount === 0) {
+        log.error(`${entry.name} — install failed (${counts}).`);
+      } else {
+        log.warn(`${entry.name} — installed partially (${counts}).`);
+      }
+      for (const e of errored) {
+        log.error(`${e.name ?? "(unnamed)"} — ${e.message ?? "unknown error"}`);
+      }
+      // Total failure (nothing created or reused) exits non-zero so scripts
+      // and users see the real outcome; a partial install stays exit 0.
+      if (okCount === 0) process.exit(1);
+      return;
+    }
+    log.success(`Installed ${entry.name} (${counts}).`);
+    return;
+  }
+
+  log.success(installedLine(entry.name, status));
+  return;
+}
+
 // ── `synap market install <slug>` ───────────────────────────────────────────
 
 export async function marketInstall(
@@ -1181,9 +1364,27 @@ export async function marketInstall(
      * lives in a workspace). Defaults to the active lens (`synap use` / env); a
      * pod-wide kind (cell/capability) ignores it. */
     workspace?: string;
+    /** The pod `market.install` kind, named by the person (`--kind`). Required for a `renderer-bundle`, which the catalog never lists; for any other kind it must agree with the package's category. */
+    kind?: string;
   }
 ): Promise<void> {
   const applyTimeoutMs = parseApplyTimeoutMs(opts.timeout);
+  if (opts.kind !== undefined && !(MARKET_INSTALL_KINDS as readonly string[]).includes(opts.kind)) {
+    log.error(`Unknown kind "${opts.kind}".`);
+    log.hint(`Kinds: ${MARKET_INSTALL_KINDS.join(", ")}`);
+    process.exit(1);
+  }
+  // A renderer bundle is private by design and absent from every catalog read,
+  // so there is no entry to find: ask the pod, which fetches it from its control plane.
+  if (opts.kind === "renderer-bundle") {
+    if (opts.dryRun) {
+      log.error("--dry-run isn't available for renderer-bundle packages.");
+      log.hint(`Nothing was installed. To install for real: synap market install ${slug} --kind renderer-bundle`);
+      process.exit(1);
+    }
+    await installViaVerb(slug, { name: slug }, "renderer-bundle", opts, applyTimeoutMs);
+    return;
+  }
   // `installedTemplates` (not just `cat.installed`'s slug set) is fetched here
   // too — it carries per-slug VERSION, which is what lets the stamp-
   // contradiction check below tell "genuinely unchanged" apart from "the pod
@@ -1193,6 +1394,7 @@ export async function marketInstall(
   if (!entry) {
     log.error(`No package "${slug}" found.`);
     log.hint("Browse what's available: synap market --list");
+    log.hint(`Synap's renderer bundle is not listed: synap market install ${slug} --kind renderer-bundle`);
     process.exit(1);
   }
 
@@ -1220,6 +1422,11 @@ export async function marketInstall(
     process.exit(1);
   }
   const type = declared;
+  if (opts.kind && marketInstallKind(type) !== opts.kind) {
+    log.error(`"${entry.name}" is a ${type} package, but --kind says ${opts.kind}.`);
+    log.hint(`Nothing was installed. Drop --kind, or use: --kind ${marketInstallKind(type) ?? type}`);
+    process.exit(1);
+  }
 
   // `--dry-run` promises "writes nothing". Only the WORKSPACE path below can
   // keep that promise: it has a write-free preflight (`/packages/preflight`).
@@ -1257,174 +1464,7 @@ export async function marketInstall(
   // by (kind, slug), tier-gates, and — for the CLI's OPERATOR hub key (no
   // agentUserId) — installs directly; an agent call would file a proposal.
   if (type !== "workspace") {
-    const kind = marketInstallKind(type);
-    if (!kind) {
-      log.warn(`"${entry.name}" is a ${type} package — the CLI can't install this type yet.`);
-      log.hint("Install it from the browser marketplace (Marketplace → find it → Install).");
-      return;
-    }
-
-    let cfg;
-    try {
-      cfg = await resolveHubConfig(opts);
-    } catch (e) {
-      renderHubError(e);
-      process.exit(1);
-    }
-
-    // An `automation`/`workflow` install is added TO a workspace, and a `view`
-    // package needs a workspace to place its views in — the backend
-    // `market.install` verb hard-requires `workspaceId` for both
-    // (marketplace-install.ts) and 400s without it. Resolve it from the
-    // explicit `--workspace` flag, else the active lens (`synap use` / env),
-    // and fail with an actionable message rather than passing null downstream.
-    // Every OTHER kind (cell/capability/skill) lands pod-wide — leave
-    // workspaceId undefined so that deliberate pod-wide branch is preserved.
-    let workspaceId: string | undefined;
-    if (marketInstallNeedsWorkspace(kind)) {
-      workspaceId = opts.workspace ?? cfg.workspaceId;
-      if (!workspaceId) {
-        log.error(`Installing "${entry.name}" (a ${type}) needs an acting workspace to add it to.`);
-        log.hint("Pass one: synap market install " + slug + " --workspace <workspaceId>");
-        log.hint("Or set a default lens: synap use <workspace>   (see: synap orient)");
-        process.exit(1);
-      }
-    }
-
-    const s = opts.json ? null : ora(`Installing ${entry.name}…`).start();
-    let res: Record<string, unknown>;
-    try {
-      // Pod-wide install by default: no workspaceId (a capability/cell lands on
-      // the pod). An automation/workflow carries the resolved `workspaceId`
-      // (required — see above). `market.install` is a WRITE builtin — an
-      // operator run owner-bypasses the gate and runs it in-process.
-      res = (await hubPost(
-        "/capabilities/execute",
-        {
-          verbId: "market.install",
-          parameters: { slug, kind },
-          ...(workspaceId ? { workspaceId } : {}),
-        },
-        cfg,
-        applyTimeoutMs
-      )) as Record<string, unknown>;
-    } catch (e) {
-      s?.stop();
-      // 404 = this pod predates the seeded `market.install` verb (older deploy).
-      if (e instanceof HubError && e.status === 404) {
-        log.error(`This pod doesn't expose the market.install verb yet.`);
-        log.hint("It needs a newer pod deploy — meanwhile install from the browser marketplace.");
-        process.exit(1);
-      }
-      // The verb throws NOT_FOUND (surfaced as a 500) when the CP kind hasn't
-      // synced into `cp_catalog_cache` yet — say so actionably, not opaquely.
-      if (e instanceof HubError && /catalog cache/i.test(e.message)) {
-        log.error(`"${entry.name}" isn't in the pod's marketplace cache yet.`);
-        log.hint("The pod syncs the catalog every ~10 min — retry shortly, or install from the browser marketplace.");
-        process.exit(1);
-      }
-      // A renderer bundle is admitted by the pod and its control plane (a
-      // plan, a live pod, an enrolled pod): a refusal is FORBIDDEN with a
-      // sentence that says which. Print that sentence as the pod said it; the
-      // generic 403 hint ("credentials or scopes") would point at the wrong fix.
-      if (kind === "renderer-bundle" && e instanceof HubError && e.status === 403 && e.detail) {
-        log.error(e.detail);
-        process.exit(1);
-      }
-      log.error(`${entry.name} failed`);
-      renderHubError(e);
-      process.exit(1);
-    }
-    s?.stop();
-
-    // The execute door wraps the verb's return as { status:"run", result: <MarketInstallOutcome> }.
-    //
-    // ⚠️ DO NOT default this to "installed". A governed install comes back as a
-    // PROPOSAL, and the envelope's discriminator is `kind` — not `status`
-    // (`execute-capability.ts`: `{ kind:"proposed", proposalId, reviewUrl,
-    // ackState:"proposed" }`). Some hops flatten that to `{ proposed:true, … }`.
-    // Either way `outcome.status` is undefined, so `?? "installed"` printed a
-    // green "✓ Installed" for a write that had NOT happened — found by
-    // dogfooding `synap market install task-views-pack` on a live pod
-    // 2026-09-05, which returned `outcome:"installed"` alongside
-    // `proposed:true`. This is the same defaulted-discriminator class as the
-    // `changeType ?? "update"` bug that once titled every capability run
-    // "Update Capability".
-    //
-    // So: read every honest marker, and when none is present say so rather than
-    // assuming success.
-    const outcome = (res.result ?? res) as Record<string, unknown>;
-    const isProposed =
-      outcome.kind === "proposed" ||
-      outcome.status === "proposed" ||
-      outcome.ackState === "proposed" ||
-      outcome.proposed === true;
-    const status = isProposed
-      ? "proposed"
-      : outcome.status
-        ? String(outcome.status)
-        : outcome.ackState === "applied" || outcome.result !== undefined
-          ? "installed"
-          : "unknown";
-
-    if (opts.json) {
-      console.log(JSON.stringify({ slug, kind, outcome: status, result: outcome }, null, 2));
-      return;
-    }
-
-    if (status === "proposed") {
-      const proposalId = outcome.proposalId ? String(outcome.proposalId) : undefined;
-      const reviewUrl = outcome.reviewUrl ? String(outcome.reviewUrl) : undefined;
-      log.info(`${entry.name} — proposed (under review, NOT installed yet).`);
-      if (proposalId) log.hint(`Review and approve: synap open proposal ${proposalId}`);
-      if (reviewUrl) log.hint(`Review: ${reviewUrl}`);
-      return;
-    }
-
-    if (status === "unknown") {
-      // The pod answered with a shape carrying no honest marker at all. Saying
-      // "installed" here is exactly the lie this block exists to prevent.
-      log.warn(
-        `${entry.name} — the pod returned an unrecognised result; nothing is assumed installed. Check \`synap market installed\` before retrying.`
-      );
-      return;
-    }
-
-    // A kind:automation (workflow) install returns PER-ITEM results with
-    // per-item isolation — each automation can be {status:"error"} while the
-    // verb overall still reports {status:"installed"} (marketplace-install.ts
-    // automation case). A bare "✓ Installed" here would lie when every item
-    // errored (0 automations created). Inspect the per-item array and report
-    // the real outcome: N created · N reused · N error, surfacing each error's
-    // message, and exit non-zero if NOTHING was created. Other kinds carry no
-    // such array — `summarizeItemInstall` returns null and we fall through to
-    // the unchanged success line.
-    const installed = (outcome.result ?? outcome) as Record<string, unknown>;
-    const summary = summarizeItemInstall(installed);
-    if (summary) {
-      const { created, reused, errored, okCount } = summary;
-      const counts = `${created} created · ${reused} reused · ${errored.length} error`;
-
-      if (errored.length > 0) {
-        // Never print a bare success when any item failed.
-        if (okCount === 0) {
-          log.error(`${entry.name} — install failed (${counts}).`);
-        } else {
-          log.warn(`${entry.name} — installed partially (${counts}).`);
-        }
-        for (const e of errored) {
-          log.error(`${e.name ?? "(unnamed)"} — ${e.message ?? "unknown error"}`);
-        }
-        // Total failure (nothing created or reused) exits non-zero so scripts
-        // and users see the real outcome; a partial install stays exit 0.
-        if (okCount === 0) process.exit(1);
-        return;
-      }
-      log.success(`Installed ${entry.name} (${counts}).`);
-      return;
-    }
-
-    log.success(installedLine(entry.name, status));
+    await installViaVerb(slug, entry, type, opts, applyTimeoutMs);
     return;
   }
 

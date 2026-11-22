@@ -2940,6 +2940,7 @@ market
   .description("Install a package by slug into a project — workspaces install now; other types route you to the right surface")
   .option("--project <id>", "Optionally tag the seeded entities to a project (installs are pod-wide by default)")
   .option("--workspace <id>", "Acting workspace (UUID) a workflow/automation package is added to (required for that kind; defaults to your active lens). Ignored for pod-wide kinds")
+  .option("--kind <kind>", "The pod's install kind: capability, automation, template, cell, skill, view, agent or renderer-bundle. A renderer-bundle (Synap's renderers, never listed in the catalog) is asked of the pod directly; for other kinds it must match the package's category")
   .option("--onto <workspaceId>", "Reconcile this template ONTO an existing workspace (additive) instead of creating a new one")
   .option("--dry-run", "Preview the create path write-free — report would-create / reuse / conflicts, install nothing")
   .option("--timeout <seconds>", "How long to wait for the apply to finish (default: 120)")
