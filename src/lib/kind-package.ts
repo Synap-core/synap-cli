@@ -108,6 +108,7 @@ export const STANDALONE_KINDS = [
   "skill",
   "workflow",
   "capability",
+  "renderer-bundle",
 ] as const;
 export type StandaloneKind = (typeof STANDALONE_KINDS)[number];
 
@@ -395,6 +396,26 @@ export function validateStandalonePackage(
         );
       }
     }
+  } else if (pkg.category === "renderer-bundle") {
+    // Renderer bundle definition follows the spec in synap-app/packages/workspace-templates/schema/renderer-bundle.ts
+    // The YAML has: top-level meta, workspace, profiles; definition = spec (delivery, cells, defaults)
+    const rb = pkg.definition;
+    if (!rb || typeof rb !== "object" || Array.isArray(rb)) {
+      errors.push(
+        `category "renderer-bundle" requires a definition object (the RendererBundleSpec — delivery, cells, defaults).`,
+      );
+    } else {
+      const d = rb as Record<string, unknown>;
+      if (!d.delivery || typeof d.delivery !== "string" || !d.delivery.trim()) {
+        errors.push(`renderer-bundle requires definition.delivery (must be "plan-pods").`);
+      }
+      if (!Array.isArray(d.cells) || d.cells.length === 0) {
+        errors.push(`renderer-bundle requires definition.cells (non-empty array).`);
+      }
+      if (d.defaults !== undefined && (typeof d.defaults !== "object" || Array.isArray(d.defaults))) {
+        errors.push(`renderer-bundle definition.defaults must be an object.`);
+      }
+    }
   }
   return errors;
 }
@@ -560,6 +581,7 @@ export const SCAFFOLDABLE_KINDS = [
   "view",
   "workflow",
   "capability",
+  "renderer-bundle",
   "skill",
 ] as const;
 export type ScaffoldableKind = (typeof SCAFFOLDABLE_KINDS)[number];
@@ -784,6 +806,34 @@ function scaffoldDefinition(
             `and the DO NOTs — this is the instruction a space applies when it declares this skill.\n`,
         },
       };
+    case "renderer-bundle": {
+      return {
+        category: "renderer-bundle",
+        slug,
+        name: displayName,
+        description: `What ${displayName} provides — replace this before publishing.`,
+        definition: {
+          meta: {
+            slug,
+            name: displayName,
+            description: `What ${displayName} provides — replace this before publishing.`,
+            icon: "box",
+            color: "blue",
+          },
+          workspace: {
+            name: displayName,
+            description: `What ${displayName} provides — replace this before publishing.`,
+          },
+          profiles: [],
+          spec: {
+            delivery: "plan-pods",
+            cells: [],
+            defaults: {},
+          },
+          dependencies: [],
+        },
+      };
+    }
     default: {
       const unhandled: never = kind;
       throw new Error(
