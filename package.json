@@ -34,7 +34,7 @@
     "@types/prompts": "^2.4.9",
     "@types/qrcode": "^1.5.5",
     "tsx": "^4.0.0",
-    "typescript": "^5.7.0",
+    "typescript": "^5.9.3",
     "vitest": "^3.2.4"
   },
   "files": [
