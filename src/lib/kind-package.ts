@@ -398,22 +398,25 @@ export function validateStandalonePackage(
     }
   } else if (pkg.category === "renderer-bundle") {
     // Renderer bundle definition follows the spec in synap-app/packages/workspace-templates/schema/renderer-bundle.ts
-    // The YAML has: top-level meta, workspace, profiles; definition = spec (delivery, cells, defaults)
+    // The YAML has meta, workspace, profiles at top level of definition, and spec fields (delivery, cells, defaults) either
+    // at definition.spec or directly at definition level
     const rb = pkg.definition;
     if (!rb || typeof rb !== "object" || Array.isArray(rb)) {
       errors.push(
-        `category "renderer-bundle" requires a definition object (the RendererBundleSpec — delivery, cells, defaults).`,
+        `category "renderer-bundle" requires a definition object (the RendererBundleSpec — meta, workspace, profiles, spec).`,
       );
     } else {
       const d = rb as Record<string, unknown>;
-      if (!d.delivery || typeof d.delivery !== "string" || !d.delivery.trim()) {
-        errors.push(`renderer-bundle requires definition.delivery (must be "plan-pods").`);
+      // Check for spec either at definition.spec or directly on definition
+      const spec = (d.spec as Record<string, unknown>) || d;
+      if (!spec.delivery || typeof spec.delivery !== "string" || !spec.delivery.trim()) {
+        errors.push(`renderer-bundle requires definition.spec.delivery (must be "plan-pods").`);
       }
-      if (!Array.isArray(d.cells) || d.cells.length === 0) {
-        errors.push(`renderer-bundle requires definition.cells (non-empty array).`);
+      if (!Array.isArray(spec.cells) || spec.cells.length === 0) {
+        errors.push(`renderer-bundle requires definition.spec.cells (non-empty array).`);
       }
-      if (d.defaults !== undefined && (typeof d.defaults !== "object" || Array.isArray(d.defaults))) {
-        errors.push(`renderer-bundle definition.defaults must be an object.`);
+      if (spec.defaults !== undefined && (typeof spec.defaults !== "object" || Array.isArray(spec.defaults))) {
+        errors.push(`renderer-bundle definition.spec.defaults must be an object.`);
       }
     }
   }
@@ -811,27 +814,35 @@ function scaffoldDefinition(
         category: "renderer-bundle",
         slug,
         name: displayName,
+        displayName,
         description: `What ${displayName} provides — replace this before publishing.`,
-        definition: {
-          meta: {
-            slug,
-            name: displayName,
-            description: `What ${displayName} provides — replace this before publishing.`,
-            icon: "box",
-            color: "blue",
-          },
-          workspace: {
-            name: displayName,
-            description: `What ${displayName} provides — replace this before publishing.`,
-          },
-          profiles: [],
-          spec: {
-            delivery: "plan-pods",
-            cells: [],
-            defaults: {},
-          },
-          dependencies: [],
+        meta: {
+          slug,
+          name: displayName,
+          description: `What ${displayName} provides — replace this before publishing.`,
+          icon: "box",
+          color: "blue",
+          isPublic: false,
+          syncByDefault: false,
         },
+        workspace: {
+          name: displayName,
+          description: `What ${displayName} provides — replace this before publishing.`,
+        },
+        profiles: [],
+        spec: {
+          delivery: "plan-pods",
+          cells: [
+            {
+              key: "main",
+              name: "Main",
+              contentKind: "widget",
+              source: "packages/web/src/renderer-bundle/cells/main.tsx",
+            },
+          ],
+          defaults: {},
+        },
+        dependencies: [],
       };
     }
     default: {
