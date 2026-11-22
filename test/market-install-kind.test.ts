@@ -14,17 +14,63 @@
  * than against a second hand-written list, because a hand-written expectation
  * would just pin the same lie.
  */
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import { readFileSync, existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
+import { log } from "../src/utils/logger.js";
 import { stripComments } from "./helpers/strip-comments.mjs";
 import {
+  marketInstall,
+  buildMarketCatalog,
   installedLine,
   marketInstallKind,
   marketInstallNeedsWorkspace,
   MARKET_INSTALL_KINDS,
 } from "../src/commands/market.js";
+
+// `--kind` tests: the catalog (CP + installed reads) and the pod door are replaced by spies, so
+// "no catalog call" is asserted on the real command path rather than read off its source.
+const catalogCalls = vi.hoisted(() => ({ n: 0 }));
+const hubPostSpy = vi.hoisted(() => vi.fn());
+vi.mock("../src/lib/cp-packages.js", async (orig) => {
+  const real = await orig<typeof import("../src/lib/cp-packages.js")>();
+  const hit = <T>(v: T) => async () => {
+    catalogCalls.n++;
+    return v;
+  };
+  return {
+    ...real,
+    fetchPublicBrowseRows: hit([]),
+    fetchMyRows: hit([]),
+    fetchAvailableSlugs: hit(null),
+    fetchRetiredWorkspaceSlugs: hit(null),
+    fetchPackageRecord: hit(null),
+  };
+});
+vi.mock("../src/lib/installed.js", async (orig) => {
+  const real = await orig<typeof import("../src/lib/installed.js")>();
+  return {
+    ...real,
+    fetchInstalledSlugs: async () => {
+      catalogCalls.n++;
+      return new Set<string>();
+    },
+    fetchInstalledTemplates: async () => {
+      catalogCalls.n++;
+      return [];
+    },
+  };
+});
+vi.mock("../src/lib/auth.js", async (orig) => ({
+  ...(await orig<typeof import("../src/lib/auth.js")>()),
+  getStoredToken: () => null,
+}));
+vi.mock("../src/lib/hub-client.js", async (orig) => ({
+  ...(await orig<typeof import("../src/lib/hub-client.js")>()),
+  resolveHubConfig: async () => ({ podUrl: "http://pod.test", apiKey: "k", userId: "cli" }),
+  hubPost: hubPostSpy,
+}));
 
 describe("marketInstallKind", () => {
   it("maps a capability to the capability kind (the primary CLI case)", () => {
@@ -90,6 +136,60 @@ describe("a renderer bundle refusal reaches the person as the pod said it", () =
     const src = stripComments(readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), "../src/commands/market.ts"), "utf-8"), "ts");
     const branch = /kind === "renderer-bundle"\s*&&\s*e instanceof HubError\s*&&\s*e\.status === 403[\s\S]{0,120}?log\.error\(e\.detail\)/.exec(src);
     expect(branch, "the renderer-bundle refusal branch is gone from market install").toBeTruthy();
+  });
+});
+
+describe("market install --kind", () => {
+  beforeEach(() => {
+    catalogCalls.n = 0;
+    hubPostSpy.mockReset();
+    hubPostSpy.mockResolvedValue({ result: { status: "installed" } });
+    vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`exit:${code}`);
+    }) as never);
+  });
+
+  it("registers --kind on `market install`, listing every pod kind", () => {
+    const index = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), "../src/index.ts"), "utf-8");
+    const start = index.indexOf('.command("install <slug>")');
+    const block = index.slice(start, index.indexOf(".action(", start));
+    expect(block).toContain('"--kind <kind>"');
+    for (const k of MARKET_INSTALL_KINDS) expect(block).toContain(k);
+  });
+
+  it("renderer-bundle asks the pod directly: no catalog call, no workspace", async () => {
+    await marketInstall("synap-renderers", { kind: "renderer-bundle", json: true });
+    expect(catalogCalls.n).toBe(0);
+    expect(hubPostSpy).toHaveBeenCalledTimes(1);
+    const [path, body] = hubPostSpy.mock.calls[0];
+    expect(path).toBe("/capabilities/execute");
+    expect(body).toEqual({
+      verbId: "market.install",
+      parameters: { slug: "synap-renderers", kind: "renderer-bundle" },
+    });
+  });
+
+  it("refuses an unknown --kind before any call", async () => {
+    await expect(marketInstall("x", { kind: "nonsense" })).rejects.toThrow("exit:1");
+    expect(catalogCalls.n).toBe(0);
+    expect(hubPostSpy).not.toHaveBeenCalled();
+  });
+
+  it("refuses --dry-run for a renderer-bundle without writing", async () => {
+    await expect(marketInstall("synap-renderers", { kind: "renderer-bundle", dryRun: true })).rejects.toThrow("exit:1");
+    expect(hubPostSpy).not.toHaveBeenCalled();
+  });
+
+  it("refuses a --kind that disagrees with the package's category, installing nothing", async () => {
+    const cat = await buildMarketCatalog();
+    const entry = cat.entries[0];
+    expect(entry, "the bundled catalog has at least one entry").toBeTruthy();
+    // A bundled template is a `workspace`; asking for kind skill must be refused.
+    const errors = vi.spyOn(log, "error").mockImplementation(() => {});
+    await expect(marketInstall(entry.slug, { kind: "skill" })).rejects.toThrow("exit:1");
+    expect(hubPostSpy).not.toHaveBeenCalled();
+    // Names both sides, and is THIS refusal rather than the unknown-category one.
+    expect(String(errors.mock.calls[0]?.[0])).toMatch(/package, but --kind says skill/);
   });
 });
 
