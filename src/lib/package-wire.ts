@@ -99,6 +99,18 @@ export interface CapabilityElement {
   mcpServers?: unknown;
   metadata?: Record<string, unknown>;
   _generated?: unknown;
+  /** Where it runs and how a computer installs, checks and removes its tool (`schema/computer.ts`). */
+  placement?: Record<string, unknown>;
+  install?: Record<string, unknown>;
+  verify?: Record<string, unknown>;
+  uninstall?: Record<string, unknown>;
+  permissions?: Record<string, unknown>;
+  /** SPDX expression; set on every capability that runs on a computer. */
+  licence?: string;
+  /** The containers a `service` capability runs on a computer (`schema/computer.ts`). */
+  services?: Array<Record<string, unknown>>;
+  /** Stored recipes the computer runs (`schema/recipe.ts`). */
+  recipes?: Array<Record<string, unknown>>;
 }
 
 /** capability: `{ profiles: [], description, capability }`. */
