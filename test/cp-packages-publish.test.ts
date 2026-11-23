@@ -70,6 +70,28 @@ describe("publishPackage", () => {
     expect(r.isPublic).toBe(false);
   });
 
+  it("reports 'staged' with the confirm page on a 202 (a capability waits for the person, CP decision B4)", async () => {
+    const fetchImpl = cpDouble([], () =>
+      json(
+        {
+          status: "awaiting_confirmation",
+          request_id: "6f1c1d2e-0000-4000-8000-000000000001",
+          confirm_url: "https://synap.live/account/creator/confirm/6f1c1d2e-0000-4000-8000-000000000001",
+          expires_at: "2026-11-25T10:00:00.000Z",
+          version: "h-staged",
+        },
+        202,
+      ),
+    );
+    const r = await publishPackage(DEF, { isPublic: false, category: "capability" }, deps(fetchImpl));
+    expect(r.outcome).toBe("staged");
+    expect(r.version).toBe("h-staged");
+    expect(r.confirmUrl).toBe(
+      "https://synap.live/account/creator/confirm/6f1c1d2e-0000-4000-8000-000000000001",
+    );
+    expect(r.requestId).toBe("6f1c1d2e-0000-4000-8000-000000000001");
+  });
+
   it("reports 'no-op' when the caller's row already carries the returned version", async () => {
     const fetchImpl = cpDouble(
       [{ slug: "my-space", displayName: "My Space", version: "h-same" }],

@@ -16,6 +16,7 @@ const prompt = vi.hoisted(() => vi.fn());
 vi.mock("prompts", () => ({ default: prompt }));
 
 const REVIEW = "https://pod.test/open/prop-1";
+const reviewOverride = vi.hoisted(() => ({ url: null as string | null }));
 
 const pod = vi.hoisted(() => ({
   /** `/auth/status` `access`; undefined = an older pod that does not say. */
@@ -76,10 +77,19 @@ vi.mock("../src/lib/hub-client.js", async (importOriginal) => {
             method: "POST",
           });
         }
-        return { status: "proposed", proposalId: "prop-1", reviewUrl: REVIEW, message: "Proposed." };
+        return { status: "proposed", proposalId: "prop-1", reviewUrl: reviewOverride.url ?? REVIEW, message: "Proposed." };
       }
       throw new Error(`unexpected POST ${path}`);
     }),
+  };
+});
+
+const opened = vi.hoisted(() => [] as string[]);
+vi.mock("../src/lib/safe-open.js", async (importOriginal) => {
+  const real = await importOriginal<typeof import("../src/lib/safe-open.js")>();
+  return {
+    ...real,
+    openPodPage: (url: string, podUrl: string) => real.openPodPage(url, podUrl, (u) => void opened.push(u)),
   };
 });
 
@@ -98,6 +108,7 @@ beforeEach(() => {
   pod.refuseApply = false;
   pod.podTargetUnknown = false;
   pod.calls.length = 0;
+  opened.length = 0;
   prompt.mockReset();
   out = [];
   vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
@@ -189,5 +200,42 @@ describe("cap add by a near name", () => {
     expect(prompt).toHaveBeenCalledTimes(1);
     expect(prompt.mock.calls[0]![0]).toMatchObject({ type: "confirm" });
     expect(posts()).toEqual(["/installations/request"]);
+  });
+});
+
+describe("cap add on a limited key opens the approval page", () => {
+  const asTerminal = async (run: () => Promise<void>, tty = true) => {
+    const was = process.stdout.isTTY;
+    Object.defineProperty(process.stdout, "isTTY", { value: tty, configurable: true });
+    try {
+      await run();
+    } finally {
+      Object.defineProperty(process.stdout, "isTTY", { value: was, configurable: true });
+    }
+  };
+
+  it("in a terminal: opens the pod's review page, and still prints it", async () => {
+    pod.access = LIMITED;
+    await asTerminal(() => capabilityAdd("Cal.com Scheduling", {}));
+    expect(opened).toEqual([REVIEW]);
+    expect(printed()).toContain(REVIEW);
+  });
+
+  it("not in a terminal (a script, CI): prints the link and opens nothing", async () => {
+    pod.access = LIMITED;
+    await asTerminal(() => capabilityAdd("Cal.com Scheduling", {}), false);
+    expect(opened).toEqual([]);
+    expect(printed()).toContain(REVIEW);
+  });
+
+  it("a review link off this pod is printed, never opened", async () => {
+    pod.access = LIMITED;
+    reviewOverride.url = "https://evil.example/open/prop-1";
+    try {
+      await asTerminal(() => capabilityAdd("Cal.com Scheduling", {}));
+    } finally {
+      reviewOverride.url = null;
+    }
+    expect(opened).toEqual([]);
   });
 });

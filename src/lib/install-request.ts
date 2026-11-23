@@ -19,6 +19,7 @@ import { covers } from "@synap-core/types/grants";
 import { hubPost, HubError, renderHubError, type HubConfig } from "./hub-client.js";
 import type { KeyAccess } from "./credential-class.js";
 import { log } from "../utils/logger.js";
+import { openPodPage } from "./safe-open.js";
 
 /** The first write a direct `/capabilities/apply` makes, and the one its refusal names. */
 export const DIRECT_INSTALL_PERMISSION = "tool.create";
@@ -103,8 +104,14 @@ export async function askPodToInstall(cfg: HubConfig, card: InstallableCard): Pr
   }
 
   log.success(`Asked to add ${chalk.bold(card.name)}. Nothing is installed until you approve it.`);
-  if (answer.reviewUrl) console.log(`    Approve it here: ${chalk.cyan(answer.reviewUrl)}`);
-  else if (answer.proposalId) console.log(`    Approve it with: synap open proposal ${answer.proposalId}`);
+  if (answer.reviewUrl) {
+    console.log(`    Approve it here: ${chalk.cyan(answer.reviewUrl)}`);
+    // A person at a terminal gets the page opened for them (founder, 2026-11-18:
+    // "it should automatically open a link to pod admin to validate"). Only a
+    // page on this pod or its pod-admin origin is opened (`openPodPage`); a
+    // script or CI run (no terminal) only gets the printed link.
+    if (process.stdout.isTTY) openPodPage(answer.reviewUrl, cfg.podUrl);
+  } else if (answer.proposalId) console.log(`    Approve it with: synap open proposal ${answer.proposalId}`);
   const owed = (card.installParams ?? []).filter((p) => p.required);
   if (owed.length > 0) {
     const labels = owed.map((p) => p.label ?? p.name).join(", ");
