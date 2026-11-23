@@ -3751,7 +3751,7 @@ Write a minimal valid <slug>.template.yaml to edit in place (refuses to overwrit
 
 | Option | Description | Default |
 |---|---|---|
-| `--kind <kind>` | Scaffold a standalone package instead of a workspace template: cell, view, workflow, capability, skill |  |
+| `--kind <kind>` | Scaffold a standalone package instead of a workspace template: cell, view, workflow, capability, skill, renderer-bundle |  |
 | `--json` | Output as JSON |  |
 
 ## `synap market validate`

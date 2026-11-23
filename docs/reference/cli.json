@@ -7929,7 +7929,7 @@
               {
                 "flags": "--kind <kind>",
                 "long": "--kind",
-                "description": "Scaffold a standalone package instead of a workspace template: cell, view, workflow, capability, skill",
+                "description": "Scaffold a standalone package instead of a workspace template: cell, view, workflow, capability, skill, renderer-bundle",
                 "takesValue": "required"
               },
               {
