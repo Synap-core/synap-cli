@@ -98,7 +98,6 @@ beforeAll(async () => {
       }
       other.push(`${req.method} ${req.url}`);
       if (req.url === "/api/hub/users/me") return json(200, { id: "human-1", scopes: [] });
-      if (req.url === "/api/hub/workspaces/enroll-agent") return json(200, { enrolled: [] });
       if (req.url?.startsWith("/mcp")) return json(500, { error: "not in this test" });
       return json(404, { error: "no" });
     });

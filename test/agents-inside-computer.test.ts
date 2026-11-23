@@ -69,7 +69,6 @@ beforeAll(async () => {
       if (req.url === "/api/hub/auth/key-state") {
         return json(200, { state: "active", keyId: "11111111-2222-4333-8444-555555555555", agentType: "claude-code" });
       }
-      if (req.url === "/api/hub/workspaces/enroll-agent") return json(200, { enrolled: [] });
       return json(404, { error: "no" });
     });
   });

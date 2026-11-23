@@ -8,11 +8,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const POD = "https://pod.reuse.example.test";
 const provisionAgentKey = vi.fn(async () => ({ hubApiKey: "client-key", agentUserId: "agent-1", reused: false }));
-const enrollAgentIfNeeded = vi.fn(async () => undefined);
 vi.mock("../src/lib/targets.js", async (orig) => ({
   ...(await orig<typeof import("../src/lib/targets.js")>()),
   provisionAgentKey,
-  enrollAgentIfNeeded,
 }));
 vi.mock("../src/lib/hub-client.js", async (orig) => ({
   ...(await orig<typeof import("../src/lib/hub-client.js")>()),

@@ -15,7 +15,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 const provisionAgentKey = vi.fn();
-const enrollAgentIfNeeded = vi.fn();
 const verifyMcpConnection = vi.fn();
 const configureAgentContext = vi.fn();
 const addAgent = vi.fn();
@@ -25,7 +24,6 @@ vi.mock("../src/lib/targets.js", async (importOriginal) => {
   return {
     ...real,
     provisionAgentKey: (...a: unknown[]) => provisionAgentKey(...a),
-    enrollAgentIfNeeded: (...a: unknown[]) => enrollAgentIfNeeded(...a),
     verifyMcpConnection: (...a: unknown[]) => verifyMcpConnection(...a),
     configureAgentContext: (...a: unknown[]) => configureAgentContext(...a),
   };
@@ -73,7 +71,6 @@ beforeEach(() => {
   profile.credential = "computer";
   profile.hubApiKey = "computer-key";
   provisionAgentKey.mockResolvedValue({ hubApiKey: "agent-key", agentUserId: "agent-1", reused: false });
-  enrollAgentIfNeeded.mockResolvedValue(undefined);
   verifyMcpConnection.mockResolvedValue({ ok: true, toolCount: 12 });
   configureAgentContext.mockResolvedValue(undefined);
   vi.spyOn(console, "log").mockImplementation(() => {});
@@ -118,7 +115,7 @@ describe("routeConnect — agent or tool", () => {
 });
 
 describe("custom agent through the real entry points", () => {
-  it("agents add --name: approval is NOT bypassed and enrollment is pod-wide", async () => {
+  it("agents add --name: approval is NOT bypassed and the agent is pod-wide", async () => {
     await agentsAdd(undefined, { name: "Researcher" });
 
     expect(provisionAgentKey).toHaveBeenCalledTimes(1);
@@ -126,9 +123,7 @@ describe("custom agent through the real entry points", () => {
     expect([podUrl, mintKey, agentType]).toEqual(["https://pod.test", "computer-key", "researcher"]);
     expect(mintOpts.requireApproval).not.toBe(false);
 
-    expect(enrollAgentIfNeeded).toHaveBeenCalledTimes(1);
     // the profile's own workspace ("ws-profile") must NOT leak in as a pin
-    expect(enrollAgentIfNeeded.mock.calls[0][3]).toBeUndefined();
     expect(addAgent.mock.calls[0][0]).toBe("researcher");
     expect(addAgent.mock.calls[0][1].workspaceId).toBeUndefined();
     expect(process.exitCode).toBeUndefined();
@@ -136,15 +131,12 @@ describe("custom agent through the real entry points", () => {
 
   it("deprecated agents create no longer forces a workspace", async () => {
     await agentsCreate({ name: "bob" });
-    expect(enrollAgentIfNeeded).toHaveBeenCalledTimes(1);
-    expect(enrollAgentIfNeeded.mock.calls[0][3]).toBeUndefined();
     expect(provisionAgentKey.mock.calls[0][3].requireApproval).not.toBe(false);
   });
 
-  it("an asked-for workspace is passed through, with the role", async () => {
-    await agentsAdd("researcher", { workspace: "ws-9", role: "viewer" });
-    expect(enrollAgentIfNeeded.mock.calls[0][3]).toBe("ws-9");
-    expect(enrollAgentIfNeeded.mock.calls[0][4]).toMatchObject({ role: "viewer" });
+  it("an asked-for workspace is saved as the agent's scope", async () => {
+    await agentsAdd("researcher", { workspace: "ws-9" });
+    expect(addAgent.mock.calls[0][1].workspaceId).toBe("ws-9");
   });
 
   it("a name that slugs to a client type is refused before anything is minted", async () => {
@@ -184,7 +176,6 @@ describe("a computer that never enrolled enrols first (founder, 2026-10-31)", ()
     await agentsAdd(undefined, { name: "Researcher" });
     await agentsAdd("cursor", {});
     expect(provisionAgentKey).not.toHaveBeenCalled();
-    expect(enrollAgentIfNeeded).not.toHaveBeenCalled();
     expect(process.exitCode).toBe(1);
     expect(errors.join("\n")).toContain("This computer is not enrolled on pod.test: run `synap login --reconnect home` to connect it, then run this again.");
   });

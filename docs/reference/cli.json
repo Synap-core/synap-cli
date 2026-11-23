@@ -5491,12 +5491,6 @@
                 "takesValue": "required"
               },
               {
-                "flags": "--role <role>",
-                "long": "--role",
-                "description": "Workspace role: admin | editor | viewer (default: editor)",
-                "takesValue": "required"
-              },
-              {
                 "flags": "--workspace <id>",
                 "long": "--workspace",
                 "description": "Focus on one workspace (default: pod-wide)",
@@ -5583,12 +5577,6 @@
                 "flags": "--type <type>",
                 "long": "--type",
                 "description": "Agent type string for custom agents (default: matches template)",
-                "takesValue": "required"
-              },
-              {
-                "flags": "--role <role>",
-                "long": "--role",
-                "description": "Workspace role: admin | editor | viewer (default: editor)",
                 "takesValue": "required"
               },
               {
@@ -7941,7 +7929,7 @@
               {
                 "flags": "--kind <kind>",
                 "long": "--kind",
-                "description": "Scaffold a standalone package instead of a workspace template: cell, view, workflow, capability, skill",
+                "description": "Scaffold a standalone package instead of a workspace template: cell, view, workflow, capability, skill, renderer-bundle",
                 "takesValue": "required"
               },
               {

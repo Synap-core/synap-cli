@@ -48,7 +48,6 @@ beforeEach(() => {
         mintBodies.push(JSON.parse(String(init?.body ?? "{}")));
         return json({ hubApiKey: KEY, agentUserId: "agent-raycast" });
       }
-      if (u.pathname === "/api/hub/workspaces/enroll-agent") return json({ enrolled: [] });
       if (u.pathname === "/api/hub/auth/key-state") return json({ state: "active" });
       throw new TypeError(`unexpected call ${url}`);
     })
