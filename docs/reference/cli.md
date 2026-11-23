@@ -2629,7 +2629,6 @@ Bring an agent into the pod: a program on this computer (claude-code, codex, her
 | `--name <name>` | Name your own agent (e.g. researcher) — prints a URL + key to paste; with an agent template's --type it only labels that program on this computer |  |
 | `--template <tmpl>` | Your own agent's template: twin \| assistant \| custom (default: custom) |  |
 | `--type <type>` | Explicit agent type (default: a slug of --name); an agent template's type (hermes, …) is that program on this computer, never a custom agent |  |
-| `--role <role>` | Workspace role: admin \| editor \| viewer (default: editor) |  |
 | `--workspace <id>` | Focus on one workspace (default: pod-wide) |  |
 | `--project <id>` | Focus on one project (composable with --workspace) |  |
 | `--api-key <key>` | Register a key you already hold, on this machine only (mints nothing) |  |
@@ -2665,7 +2664,6 @@ Deprecated — use `synap agents add` (same flags)
 | `--template <tmpl>` | Agent template: twin \| assistant \| custom (default: custom) |  |
 | `--name <name>` | Agent name (not needed for twin — auto-generated) |  |
 | `--type <type>` | Agent type string for custom agents (default: matches template) |  |
-| `--role <role>` | Workspace role: admin \| editor \| viewer (default: editor) |  |
 | `--workspace <id>` | Focus on one workspace (default: pod-wide) |  |
 | `--project <id>` | Focus on one project |  |
 

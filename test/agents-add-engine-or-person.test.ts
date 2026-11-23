@@ -97,7 +97,6 @@ function stubPod(setupAgent?: (body: Record<string, unknown>) => { status: numbe
         keyStatePolls.push(auth ?? "");
         return json(approved ? { state: "active" } : { state: "awaiting_approval", keyId: "tok-1", approvalUrl: REVIEW_URL });
       }
-      if (url.endsWith("/api/hub/workspaces/enroll-agent")) return json({ enrolled: [] });
       return json({ error: "no" }, 404);
     })
   );

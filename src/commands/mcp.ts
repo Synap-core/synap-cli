@@ -20,7 +20,6 @@ import { probeAuthStatus, KEY_PROBE_LABEL } from "../lib/credential-class.js";
 import {
   buildMcpUrl,
   provisionAgentKey,
-  enrollAgentIfNeeded,
   isTargetName,
   type TargetName,
 } from "../lib/targets.js";
@@ -109,15 +108,6 @@ export async function mcpUrl(
       if (near.length) log.hint(`Did you mean: ${near.map((n) => `\`${n}\``).join(", ")}? (synap mcp url --client ${near[0]})`);
     }
     const { hubApiKey, agentUserId } = await mintReusableKey(cfg, surface);
-
-    // Enroll the fresh agent into the user's workspace(s). Without this the
-    // agent authenticates but sees ZERO workspaces — every ask/capture then
-    // fails with "Access denied to workspace". `connect` already does this via
-    // prepareMcpSurface; `mcp url` must too or its key is inert. Best-effort:
-    // a missing enrollment shouldn't block printing the connection.
-    await enrollAgentIfNeeded(cfg.podUrl, cfg.apiKey, agentUserId, workspaceId, {
-      quiet: opts.json === true, // keep --json stdout pure JSON
-    }).catch(() => {});
 
     if (opts.json) {
       console.log(

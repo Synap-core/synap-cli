@@ -57,7 +57,6 @@ import {
   podNotFoundError,
 } from "../lib/pod.js";
 import {
-  enrollAgentIfNeeded,
   ensureAgentGovernance,
   provisionAgentKey,
   configureAgentContext,
@@ -1222,7 +1221,7 @@ async function applyAutomationTemplates(
  *
  * @param podUrl      Pod base URL.
  * @param operatorKey The operator's raw hub key (authorizes the provisioning).
- * @param workspaceId Workspace to enroll the agent into (omit for all).
+ * @param workspaceId Unused: an agent acts through its person's membership.
  * @param existingContextPath Path to the CONTEXT.md a previous run already
  *   wrote — when set, the agent-template wizard is SKIPPED (same reuse-and-say-so
  *   contract as the agent key itself). Pass null to run it.
@@ -1264,10 +1263,6 @@ async function provisionDiscordAgentKey(
 
   // Persist so downstream steps (governance lookup, .env write) can read it back.
   setSurfaceAgentKey("discord", { hubApiKey, agentUserId });
-
-  // Enroll the agent user into the operator's workspace(s) using the OPERATOR
-  // key (before the bridge ever uses the agent key).
-  await enrollAgentIfNeeded(podUrl, operatorKey, agentUserId, workspaceId);
 
   // Same CONTEXT.md routing file every other provisioned agent gets — written
   // once. A re-run keeps the template the operator already picked.

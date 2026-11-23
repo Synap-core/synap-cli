@@ -48,7 +48,6 @@ function podStub(opts: {
     }
     if (url.endsWith("/api/hub/auth/status")) return json({ userId: "agent-1" });
     if (url.includes("/governance")) return json({ posture: null, configured: true });
-    if (url.endsWith("/api/hub/workspaces/enroll-agent")) return json({ enrolled: [] });
     return new Response("not found", { status: 404 });
   });
 }

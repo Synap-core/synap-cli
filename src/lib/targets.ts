@@ -440,8 +440,8 @@ export function buildMcpUrl(
 }
 
 /**
- * Shared preamble for MCP surface installers: provision a dedicated agent key,
- * enroll the agent into the caller's workspaces, and resolve the scoped MCP URL.
+ * Shared preamble for MCP surface installers: provision a dedicated agent key
+ * and resolve the scoped MCP URL.
  */
 async function prepareMcpSurface(
   cfg: TargetConnectionConfig,
@@ -460,7 +460,6 @@ async function prepareMcpSurface(
     agentType,
     { idempotent: opts?.idempotent ?? true, toolProfile: opts?.toolProfile }
   );
-  await enrollAgentIfNeeded(cfg.podUrl, cfg.apiKey, agentUserId, cfg.workspaceId);
   return { effectiveApiKey, agentUserId, mcpUrl: buildMcpUrl(cfg.podUrl, cfg.workspaceId, cfg.projectId) };
 }
 
@@ -480,8 +479,8 @@ export async function configureAgentContext(
   log.heading("Configure your agent");
   // Agent scope model (mirrors the user model): an agent is a POD-WIDE actor —
   // it is NOT bound to a workspace. Its memory is automatic (the user/global/work
-  // lanes), so there's no "memory workspace" to pick. It was already enrolled
-  // across the pod's workspaces; focus is a runtime lens (a project), not a
+  // lanes), so there's no "memory workspace" to pick. It acts through its person's membership;
+  // focus is a runtime lens (a project), not a
   // setup-time workspace choice. So the only thing to configure is the template.
   log.dim("This agent is pod-wide. Its memory is automatic — nothing to scope here. Just pick a behaviour template.");
 
@@ -836,10 +835,6 @@ export async function writeClaudeCodeEnv(
   // works in CLI sessions outside of this env (e.g. terminal, not just inside Claude Code).
   const { setSurfaceAgentKey: saveSurfaceKey } = await import("./pod.js");
   saveSurfaceKey("claude-code", { hubApiKey: effectiveApiKey, agentUserId: agentSetup.agentUserId ?? "", podUrl: cfg.podUrl });
-
-  // Enroll the new agent user into the caller's workspaces using the HUMAN key
-  // (before switching to the agent key). Scoped to one workspace when chosen.
-  await enrollAgentIfNeeded(cfg.podUrl, cfg.apiKey, agentSetup.agentUserId ?? "", cfg.workspaceId);
 
   // Set per-agent governance — read before write, so it never overwrites a
   // choice. Unattended (`synap init`) writes NOTHING: a new agent follows the
@@ -1383,7 +1378,7 @@ export async function provisionAgentKey(
     );
   }
   if (body.requiresApproval && body.pendingToken && body.reviewUrl) {
-    // The pre-approved key is handed to an installer that enrolls and scopes
+    // The pre-approved key is handed to an installer that scopes
     // by this id: an empty one would connect an agent the pod cannot name.
     if (!body.agentUserId) {
       throw new AgentKeyMintError(agentType, `The pod minted a ${agentType} key but named no agent for it.`);
@@ -1481,56 +1476,6 @@ async function awaitApprovalOrThrow(args: {
   throw new AgentKeyAwaitingApprovalError(args.agentType, args.approvalUrl);
 }
 
-/**
- * Enroll an agent user into the caller's workspaces via POST /api/hub/workspaces/enroll-agent.
- * Non-fatal — logs on failure so connect flow is never blocked by enrollment errors.
- *
- * @param callerKey  The key of the user whose workspaces to enroll into (pod profile key).
- * @param agentUserId  The agent user to enroll.
- * @param workspaceId  When set, enroll in that one workspace only; omit for all.
- * @param opts.role  Workspace role to grant the agent. Defaults to "editor" — the
- *   one safe default callers get unless they explicitly ask for another role.
- */
-export async function enrollAgentIfNeeded(
-  podUrl: string,
-  callerKey: string,
-  agentUserId: string,
-  workspaceId?: string,
-  opts?: { quiet?: boolean; role?: string }
-): Promise<void> {
-  if (!agentUserId) return;
-  const quiet = opts?.quiet === true; // suppress status logs (e.g. --json callers)
-  const role = opts?.role ?? "editor";
-  const podBase = podUrl.replace(/\/$/, "");
-  try {
-    const res = await fetch(`${podBase}/api/hub/workspaces/enroll-agent`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${callerKey}` },
-      body: JSON.stringify({
-        agentUserId,
-        ...(workspaceId ? { workspaceId } : {}),
-        role,
-      }),
-      signal: AbortSignal.timeout(30000),
-    });
-    if (res.ok) {
-      const data = await res.json() as { enrolled?: string[] };
-      if (data.enrolled?.length && !quiet) {
-        log.dim(`  Agent enrolled in ${data.enrolled.length} workspace(s).`);
-      }
-    } else if (!quiet) {
-      const text = await res.text().catch(() => res.statusText);
-      log.warn(`  Workspace enrollment failed (HTTP ${res.status}): ${text}`);
-      log.dim("  Access can be added manually via pod settings.");
-    }
-  } catch (err) {
-    if (!quiet) {
-      log.warn(`  Workspace enrollment unreachable: ${(err as Error).message}`);
-      log.dim("  Access can be added manually via pod settings.");
-    }
-  }
-}
-
 // ─── Claude Desktop ──────────────────────────────────────────────────────────
 
 async function installClaudeDesktop(
@@ -1554,7 +1499,6 @@ async function installClaudeDesktop(
   );
   const { setSurfaceAgentKey: saveDesktopKey } = await import("./pod.js");
   saveDesktopKey("claude-desktop", { hubApiKey: effectiveApiKey, agentUserId, podUrl: cfg.podUrl });
-  await enrollAgentIfNeeded(cfg.podUrl, cfg.apiKey, agentUserId, cfg.workspaceId);
   const desktopMcpUrl = buildMcpUrl(cfg.podUrl, cfg.workspaceId, cfg.projectId);
   // Pod-derived name so connecting a SECOND pod adds an entry instead of
   // overwriting the first (same rule as Claude Code / Cursor / Grok).
@@ -1628,7 +1572,6 @@ async function installCursor(
   );
   const { setSurfaceAgentKey: saveCursorKey } = await import("./pod.js");
   saveCursorKey("cursor", { hubApiKey: effectiveApiKey, agentUserId, podUrl: cfg.podUrl });
-  await enrollAgentIfNeeded(cfg.podUrl, cfg.apiKey, agentUserId, cfg.workspaceId);
   const cursorMcpUrl = buildMcpUrl(cfg.podUrl, cfg.workspaceId, cfg.projectId);
   // Pod-derived name so multi-pod connects don't overwrite each other (peer of Grok).
   const serverName = mcpServerNameFromPodUrl(cfg.podUrl);
@@ -1780,7 +1723,6 @@ async function installChatGpt(cfg: TargetConnectionConfig): Promise<boolean> {
   );
   const { setSurfaceAgentKey } = await import("./pod.js");
   setSurfaceAgentKey("chatgpt", { hubApiKey: effectiveApiKey, agentUserId, podUrl: cfg.podUrl });
-  await enrollAgentIfNeeded(cfg.podUrl, cfg.apiKey, agentUserId, cfg.workspaceId);
   const mcpUrl = buildMcpUrl(cfg.podUrl, cfg.workspaceId, cfg.projectId);
 
   const synapDir = path.join(os.homedir(), ".synap");
@@ -2233,7 +2175,6 @@ async function installCodex(
   );
   const { setSurfaceAgentKey } = await import("./pod.js");
   setSurfaceAgentKey("codex", { hubApiKey: effectiveApiKey, agentUserId, podUrl: cfg.podUrl });
-  await enrollAgentIfNeeded(cfg.podUrl, cfg.apiKey, agentUserId, cfg.workspaceId);
   const mcpUrl = buildMcpUrl(cfg.podUrl, cfg.workspaceId, cfg.projectId);
 
   // Build TOML block for HTTP MCP server
@@ -2425,7 +2366,6 @@ export async function installOpencode(cfg: ProviderInstallConfig & { workspaceId
     "opencode",
     { idempotent: true }
   );
-  await enrollAgentIfNeeded(cfg.podUrl, cfg.apiKey, agentUserId, cfg.workspaceId);
   const podBase = cfg.podUrl.replace(/\/$/, "");
   const mcpUrl = buildMcpUrl(cfg.podUrl, cfg.workspaceId, cfg.projectId);
 

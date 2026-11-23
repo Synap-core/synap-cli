@@ -2128,7 +2128,6 @@ agents
   .option("--name <name>", "Name your own agent (e.g. researcher) — prints a URL + key to paste; with an agent template's --type it only labels that program on this computer")
   .option("--template <tmpl>", "Your own agent's template: twin | assistant | custom (default: custom)")
   .option("--type <type>", "Explicit agent type (default: a slug of --name); an agent template's type (hermes, …) is that program on this computer, never a custom agent")
-  .option("--role <role>", "Workspace role: admin | editor | viewer (default: editor)")
   .option("--workspace <id>", "Focus on one workspace (default: pod-wide)")
   .option("--project <id>", "Focus on one project (composable with --workspace)")
   .addOption(new Option("--with-mcp", "deprecated, ignored: Raycast always gets the pod's MCP server").hideHelp())
@@ -2155,7 +2154,6 @@ agents
   .option("--template <tmpl>", "Agent template: twin | assistant | custom (default: custom)")
   .option("--name <name>", "Agent name (not needed for twin — auto-generated)")
   .option("--type <type>", "Agent type string for custom agents (default: matches template)")
-  .option("--role <role>", "Workspace role: admin | editor | viewer (default: editor)")
   .option("--workspace <id>", "Focus on one workspace (default: pod-wide)")
   .option("--project <id>", "Focus on one project")
   .action(async (opts) => {

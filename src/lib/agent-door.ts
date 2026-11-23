@@ -40,7 +40,6 @@ import {
 } from "./pod.js";
 import {
   buildMcpUrl,
-  enrollAgentIfNeeded,
   installForTarget,
   isTargetName,
   mcpServerNameFromPodUrl,
@@ -57,9 +56,7 @@ import { writeTemplateMcp } from "./template-mcp.js";
 // ─── Plan (pure) ──────────────────────────────────────────────────────────────
 
 export type AgentTemplate = "twin" | "assistant" | "custom";
-export type AgentRole = "admin" | "editor" | "viewer";
 export const AGENT_TEMPLATES: readonly AgentTemplate[] = ["twin", "assistant", "custom"];
-export const AGENT_ROLES: readonly AgentRole[] = ["admin", "editor", "viewer"];
 
 /** Where the agent looks. Both unset = pod-wide. */
 export interface AgentScope {
@@ -290,7 +287,6 @@ export interface CustomAgentRequest {
   template?: string;
   /** Explicit agent type (rare). Default: a slug of the name. */
   type?: string;
-  role?: string;
   label?: string;
 }
 
@@ -305,13 +301,6 @@ export async function createCustomAgent(
     log.error(`Unknown template '${template}'. Use: ${AGENT_TEMPLATES.join(" | ")}`);
     return false;
   }
-  // Validate up front: the pod treats an unknown role as a non-fatal warning,
-  // so a typo would otherwise print as applied.
-  if (req.role && !AGENT_ROLES.includes(req.role as AgentRole)) {
-    log.error(`Invalid --role "${req.role}". Valid roles: ${AGENT_ROLES.join(", ")}.`);
-    return false;
-  }
-  const role: AgentRole = template === "twin" ? "editor" : ((req.role as AgentRole | undefined) ?? "editor");
 
   if (!(await podIsHealthy(pod.podUrl))) return false;
 
@@ -382,10 +371,6 @@ export async function createCustomAgent(
     log.error(err instanceof Error ? err.message : String(err));
     return false;
   }
-
-  // No workspace = enrolled across every workspace (pod-wide). Quiet: the card
-  // below states the scope; a progress line here only pushes the key up.
-  await enrollAgentIfNeeded(pod.podUrl, pod.apiKey, agentUserId, scope.workspaceId, { role, quiet: true });
 
   const verifySpinner = ora(`Verifying ${agentName} can reach Synap…`).start();
   const v = await verifyMcpConnection(pod.podUrl, hubApiKey, { timeoutMs: 20_000 }).catch(
@@ -462,7 +447,6 @@ function customAgentCommand(name: string, template: AgentTemplate, req: CustomAg
   const parts = ["synap agents add", `--name ${q(name)}`];
   if (req.type) parts.push(`--type ${q(req.type)}`);
   if (template !== "custom") parts.push(`--template ${template}`);
-  if (req.role) parts.push(`--role ${req.role}`);
   if (scope.workspaceId) parts.push(`--workspace ${q(scope.workspaceId)}`);
   if (scope.projectId) parts.push(`--project ${q(scope.projectId)}`);
   return parts.join(" ");

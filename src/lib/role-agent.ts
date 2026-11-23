@@ -38,7 +38,6 @@ export interface RoleAgentPod {
 export interface RoleAgentDeps {
   feature?: (podUrl: string) => Promise<PodFeature>;
   provision?: typeof import("./targets.js").provisionAgentKey;
-  enroll?: typeof import("./targets.js").enrollAgentIfNeeded;
   save?: (name: string, profile: AgentProfile) => void;
   instanceId?: (surface: string) => string;
 }
@@ -68,8 +67,7 @@ export function planRoleAgent(engine: string, label: string): { ok: true; job: A
 
 /**
  * Add the agent (`engine`, `job`) on this computer: check the pod knows jobs,
- * mint its key with the computer's key (the person approves it), enrol it
- * pod-wide unless `workspaceId`, save it as `agents.<role>`.
+ * mint its key with the computer's key (the person approves it), save it as `agents.<role>`.
  */
 export async function addRoleAgent(
   pod: RoleAgentPod,
@@ -84,7 +82,6 @@ export async function addRoleAgent(
 
   const targets = await import("./targets.js");
   const provision = deps.provision ?? targets.provisionAgentKey;
-  const enroll = deps.enroll ?? targets.enrollAgentIfNeeded;
   const instanceId = deps.instanceId ?? (await import("./machine-instance.js")).machineInstanceId;
 
   let minted: Awaited<ReturnType<typeof provision>>;
@@ -101,8 +98,6 @@ export async function addRoleAgent(
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }
-
-  await enroll(pod.podUrl, pod.computerKey, minted.agentUserId, scope.workspaceId, { quiet: true });
 
   (deps.save ?? addAgent)(job.role, {
     podName: pod.podName ?? "default",

@@ -29,7 +29,6 @@ function pod(
     if (url.endsWith("/api/hub/users/me")) return json({ id: "human-1" });
     if (url.endsWith("/api/hub/setup/agent")) return json(setupAgent);
     if (url.endsWith("/api/hub/auth/status")) return json({ userId: "agent-1" });
-    if (url.endsWith("/api/hub/workspaces/enroll-agent")) return json({ enrolled: [] });
     if (url.includes("/governance") && method === "GET")
       return governance === "missing"
         ? new Response("not found", { status: 404 })
