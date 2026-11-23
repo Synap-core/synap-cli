@@ -406,7 +406,6 @@ export interface AgentsAddOpts {
   name?: string;
   template?: string;
   type?: string;
-  role?: string;
   workspace?: string;
   project?: string;
   apiKey?: string;
@@ -455,7 +454,6 @@ export async function agentsAdd(kind: string | undefined, opts: AgentsAddOpts = 
         template: opts.template,
         // `agents add <slug>` of a catalog agent template (hermes, …): its agents' type, so the pod links it.
         type: opts.type ?? (kind && !opts.name ? catalogTypeForSlug(kind) : undefined),
-        role: opts.role,
         label: opts.label,
       },
       scope
