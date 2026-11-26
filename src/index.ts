@@ -2480,6 +2480,7 @@ view
   .option("--profile <slug>", "Entity profile to display (passed as profileId)")
   .option("--name <name>", "View name")
   .option("--workspace <id>", "Workspace ID")
+  .option("--for <kind:id>", "Attach the new view to one object, e.g. entity:<id> (a surface on it; see synap surfaces)")
   .option("--json", "JSON output")
   .option("--pod-url <url>", "Pod URL override")
   .option("--api-key <key>", "API key override")
@@ -2503,8 +2504,8 @@ view
 
 view
   .command("arrange <viewId>")
-  .description("Replace the widget arrangement of a bento view")
-  .option("--file <path>", "JSON file containing widget layout (array or { widgets: [...] })")
+  .description("Replace the cell arrangement of a bento view")
+  .option("--file <path>", "JSON file containing the cell layout (array or { widgets: [...] })")
   .option("--workspace <id>", "Workspace ID")
   .option("--json", "JSON output")
   .option("--pod-url <url>", "Pod URL override")
@@ -2514,8 +2515,8 @@ Examples:
   synap view arrange <viewId> --file layout.json
   echo '[{"id":"w1","kind":"widget","x":0,"y":0,"w":6,"h":4}]' | synap view arrange <viewId>
 
-Layout format (array of BentoWidget):
-  [{ "id": "<widgetId>", "kind": "widget|view|entity", "x": 0, "y": 0, "w": 6, "h": 4, "config": {} }]
+Layout format (array of bento cells; "widget" is the wire name of a plain cell):
+  [{ "id": "<cellId>", "kind": "widget|view|entity", "x": 0, "y": 0, "w": 6, "h": 4, "config": {} }]
   `)
   .action(async (viewId: string, opts) => {
     const { viewArrange } = await import("./commands/view.js");
@@ -2537,20 +2538,33 @@ program
 program
   .command("open <kind-or-id> [id]")
   .description("Open in the Synap desktop app. Use: open <kind> <id> or open <id> (auto-resolves type)")
-  .action(async (kindOrId: string, id?: string) => {
-    if (id) {
-      // open <kind> <id> — the browser's object-nav.ts is the one route
-      // table for openable kinds (21 and growing); the CLI doesn't
-      // duplicate it here. An unroutable kind still opens the app and
-      // is reported via the printed deep link (objectNavTarget decides
-      // routability on the other side).
-      const { openInBrowser } = await import("./commands/open.js");
-      await openInBrowser({ kind: kindOrId, id });
-    } else {
-      // open <id> — resolve type automatically
-      const { resolveAndOpen } = await import("./commands/open.js");
-      await resolveAndOpen(kindOrId);
-    }
+  .option("--surface <surfaceId>", "Open the object on one surface attached to it (needs <kind> <id>; list them with synap surfaces)")
+  .action(async (kindOrId: string, id: string | undefined, opts: { surface?: string }) => {
+    const { openCommand } = await import("./commands/open.js");
+    await openCommand(kindOrId, id, opts);
+  });
+
+// ─── surfaces ─────────────────────────────────────────────────────────────────
+
+program
+  .command("surfaces <kind> <id>")
+  .description("Every surface one object carries: views, documents, bentos, cells and pages anchored to it")
+  .option("--workspace <id>", "Read in this workspace")
+  .option("--json", "JSON output")
+  .option("--pod-url <url>", "Pod URL override")
+  .option("--api-key <key>", "API key override")
+  .addHelpText("after", `
+<kind>: entity | profile | workspace | project | track | playbook | session (a profile also by its slug).
+A store the pod could not read is listed as "unavailable": that is not "nothing there".
+
+Examples:
+  synap surfaces entity <id>
+  synap surfaces profile task --json
+  synap open entity <id> --surface <surfaceId>
+  `)
+  .action(async (kind: string, id: string, opts) => {
+    const { surfacesList } = await import("./commands/surfaces.js");
+    await surfacesList(kind, id, opts);
   });
 
 // ─── doc ──────────────────────────────────────────────────────────────────────
@@ -2570,6 +2584,7 @@ doc
     "markdown (default) or html: a page pod admin runs at /open/<id> in an isolated frame (inline only, no CDN, at most 2 MB)"
   )
   .option("--workspace <id>", "Workspace to create the document in")
+  .option("--for <kind:id>", "Attach the new document to one object, e.g. entity:<id> (a surface on it; see synap surfaces)")
   .option("--open", "Open in the Synap desktop app after creation")
   .option("--json", "JSON output")
   .option("--pod-url <url>", "Pod URL override")
@@ -2580,6 +2595,7 @@ Examples:
   synap doc create --title "My Notes" --file ./notes.md --open
   echo "# Draft" | synap doc create --title "Draft"
   synap doc create --title "Weekly report" --file ./report.html
+  synap doc create --title "Brief" --file ./brief.md --for entity:<id>
   `)
   .action(async (opts) => {
     const { docCreate } = await import("./commands/doc.js");
@@ -2650,7 +2666,7 @@ cell
   )
   .option(
     "--content-kind <kind>",
-    "What this cell renders — entity-detail | entity-card | entity-profile | collection | widget (default: widget, which is placeable but never offered as a profile renderer)"
+    "What this cell renders — entity-detail | entity-card | entity-profile | collection | widget (default: widget, the wire value of a plain cell: placeable, but never offered as a profile renderer)"
   )
   // NOT "omit for pod-wide": `cell.ts` resolves `opts.workspace ?? cfg.workspaceId`,
   // and `cfg.workspaceId` is the resolved lens (session › directory › env ›
@@ -2705,7 +2721,7 @@ cell
     "Override the emitted deps map (JSON). The frame refuses runtime deps; leave it out"
   )
   .option("--view-types <list>", 'Comma-separated view-renderer affinity (used with --define), e.g. "list,table"')
-  .option("--content-kind <kind>", "entity-detail | entity-card | entity-profile | collection | widget (used with --define)")
+  .option("--content-kind <kind>", "entity-detail | entity-card | entity-profile | collection | widget (= a plain cell; used with --define)")
   .option("--workspace <id>", "Workspace (used with --define)")
   .option("--description <text>", "Description (used with --define)")
   .option("--open", "Open in browser after define (used with --define)")
@@ -2735,13 +2751,13 @@ Examples:
 
 const artifact = program
   .command("artifact")
-  .description("Create HTML artifacts as Synap cells: an HTML/JS page that opens in the desktop app and can read pod data");
+  .description("Retired: an HTML artifact is an html document now (synap doc create --type html)");
 
 artifact
   .command("create")
-  .description("Define a cell from a local HTML file (governed: an agent key files a proposal)")
+  .description("Retired alias of `synap doc create --type html --file <file>`: makes an html document (to define a cell from source: synap cell define)")
   .requiredOption("--html <file>", "HTML file to upload")
-  .option("--name <name>", "Cell name (default: filename)")
+  .option("--name <name>", "Document title (default: filename)")
   .option("--workspace <id>", "Workspace context")
   .option("--open", "Open in the Synap desktop app after creation")
   .option("--json", "JSON output")

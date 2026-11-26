@@ -101,8 +101,8 @@ function sectionViews(): void {
   console.log(chalk.dim("    table | kanban | bento | list | grid | gallery"));
   console.log(chalk.dim("    calendar | masonry | flow | matrix | branch_tree | whiteboard"));
   console.log("");
-  console.log(chalk.dim("  Bento views hold a widget arrangement (react-grid-layout)."));
-  console.log(chalk.dim("  Each bento widget: { id, kind: view|entity|widget|<custom>, x, y, w, h, config }"));
+  console.log(chalk.dim("  Bento views hold a cell arrangement (react-grid-layout)."));
+  console.log(chalk.dim("  Each bento cell: { id, kind: view|entity|widget|<custom>, x, y, w, h, config } (widget = a plain cell)"));
 }
 
 function sectionGovernance(): void {
@@ -175,9 +175,11 @@ function sectionQuickRef(): void {
   console.log(`  ${chalk.cyan("synap open view <id>")}       ${chalk.dim("→ open view in main panel")}`);
   console.log(`  ${chalk.cyan("synap open cell <typeKey>")}  ${chalk.dim("→ open any registered cell in side panel")}`);
   console.log("");
-  console.log(chalk.dim("  AI-generated cells (Capability B)"));
-  console.log(`  ${chalk.cyan("synap artifact create --html <file>")}  ${chalk.dim("→ define a frame cell from HTML source")}`);
-  console.log(`  ${chalk.cyan("  --name <name> --open")}               ${chalk.dim("→ set cell name + open immediately in browser")}`);
+  console.log(chalk.dim("  Surfaces (UI anchored to an object)"));
+  console.log(`  ${chalk.cyan("synap surfaces <kind> <id>")}            ${chalk.dim("→ every surface one object carries")}`);
+  console.log(`  ${chalk.cyan("synap open <kind> <id> --surface <id>")} ${chalk.dim("→ open the object on one of them")}`);
+  console.log(`  ${chalk.cyan("synap doc create --type html --file <f>")} ${chalk.dim("→ an HTML artifact (an html document); add --for <kind>:<id> to attach it")}`);
+  console.log(`  ${chalk.cyan("synap cell define --name <n> --file <f>")} ${chalk.dim("→ define a cell from source (list them: synap_list_cells)")}`);
   console.log("");
   console.log(chalk.dim("  Context for this session"));
   console.log(`  ${chalk.cyan("synap context")}              ${chalk.dim("→ knowledge + proposals + tasks")}`);

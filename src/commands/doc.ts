@@ -32,6 +32,7 @@ import {
 } from "../lib/hub-client.js";
 import { writeGovernance } from "../lib/capture-lane.js";
 import { openInBrowser } from "./open.js";
+import { attachSurfaceFor, parseForAnchor, reportAttach } from "./surfaces.js";
 
 export interface DocCreateOpts {
   title: string;
@@ -40,6 +41,8 @@ export interface DocCreateOpts {
   /** "markdown" (default) or "html"; a `.html` / `.htm` --file means html. */
   type?: string;
   workspace?: string;
+  /** `<kind>:<id>`: attach the new document to that object (POST /surfaces/attach). */
+  for?: string;
   open?: boolean;
   json?: boolean;
   podUrl?: string;
@@ -113,6 +116,11 @@ export function resolveDocType(
 }
 
 export async function docCreate(opts: DocCreateOpts): Promise<void> {
+  const anchor = opts.for !== undefined ? parseForAnchor(opts.for) : null;
+  if (opts.for !== undefined && !anchor) {
+    log.error(`--for takes <kind>:<id> (e.g. entity:<uuid>), not "${opts.for}".`);
+    process.exit(1);
+  }
   try {
     const type = resolveDocType(opts.type, opts.file);
     const cfg = await resolveHubConfig(opts);
@@ -144,9 +152,18 @@ export async function docCreate(opts: DocCreateOpts): Promise<void> {
     const doc =
       (res.document as Record<string, unknown> | undefined) ?? res;
     const id = String(doc.id ?? res.id ?? "");
+    const isProposed = res.status === "proposed" || Boolean(res.proposalId);
+
+    // --for: put the new document on that object. A proposed document has no
+    // id yet, so there is nothing to attach until it is approved.
+    const attach =
+      anchor && !isProposed && id
+        ? await attachSurfaceFor(cfg, anchor, { type: "document", id })
+        : undefined;
 
     if (opts.json) {
-      console.log(JSON.stringify(res, null, 2));
+      console.log(JSON.stringify(attach ? { ...res, attach } : res, null, 2));
+      if (attach && typeof attach.error === "string") process.exitCode = 1;
       return;
     }
 
@@ -156,13 +173,15 @@ export async function docCreate(opts: DocCreateOpts): Promise<void> {
       for (const w of res.warnings) log.warn(String(w));
     }
 
-    const isProposed = res.status === "proposed" || Boolean(res.proposalId);
     if (isProposed) {
       // A proposal is normal — the write is queued for review, not a failure.
       log.info(`Document: ${opts.title} — proposed (under review)`);
       const proposalId = String(res.proposalId ?? "");
       if (proposalId) log.dim(`  proposal: ${proposalId}`);
       if (res.reviewUrl) log.dim(`  review: ${String(res.reviewUrl)}`);
+      if (anchor) {
+        log.dim(`  Once approved, attach it: synap_attach_surface (anchor ${anchor.kind}:${anchor.id})`);
+      }
       return;
     }
 
@@ -170,6 +189,7 @@ export async function docCreate(opts: DocCreateOpts): Promise<void> {
     log.dim(`  id: ${id}`);
     if (type === "html") log.dim(`  a page: pod admin runs it at /open/${id}`);
     log.dim(`  open in browser: synap open document ${id}`);
+    if (attach && anchor) reportAttach(attach, anchor, cfg.podUrl);
 
     if (opts.open && id) {
       await openInBrowser({ kind: "document", id });

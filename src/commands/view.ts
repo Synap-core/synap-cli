@@ -23,12 +23,15 @@ import chalk from "chalk";
 import { log } from "../utils/logger.js";
 import { resolveHubConfig, resolveUserId, hubGet, hubPost } from "../lib/hub-client.js";
 import { unwrapList } from "../lib/unwrapList.js";
+import { attachSurfaceFor, parseForAnchor, reportAttach } from "./surfaces.js";
 
 export interface ViewCreateOpts {
   type: string;
   profile?: string;
   name?: string;
   workspace?: string;
+  /** `<kind>:<id>`: attach the new view to that object (POST /surfaces/attach). */
+  for?: string;
   json?: boolean;
   podUrl?: string;
   apiKey?: string;
@@ -43,6 +46,11 @@ export interface ViewListOpts {
 }
 
 export async function viewCreate(opts: ViewCreateOpts): Promise<void> {
+  const anchor = opts.for !== undefined ? parseForAnchor(opts.for) : null;
+  if (opts.for !== undefined && !anchor) {
+    log.error(`--for takes <kind>:<id> (e.g. entity:<uuid>), not "${opts.for}".`);
+    process.exit(1);
+  }
   try {
     const cfg = await resolveHubConfig(opts);
     const userId = await resolveUserId(cfg);
@@ -73,24 +81,37 @@ export async function viewCreate(opts: ViewCreateOpts): Promise<void> {
 
     const res = await hubPost("/views", body, cfg) as Record<string, unknown>;
 
+    const isProposed = res.status === "proposed" || Boolean(res.proposalId);
+    const created = res.view as Record<string, unknown> | undefined;
+    const id = created?.id ?? res.id;
+
+    // --for: put the new view on that object. A proposed view has no id yet,
+    // so there is nothing to attach until it is approved: say so, never guess.
+    const attach =
+      anchor && !isProposed && id
+        ? await attachSurfaceFor(cfg, anchor, { type: "view", id: String(id) })
+        : undefined;
+
     if (opts.json) {
-      console.log(JSON.stringify(res, null, 2));
+      console.log(JSON.stringify(attach ? { ...res, attach } : res, null, 2));
+      if (attach && typeof attach.error === "string") process.exitCode = 1;
       return;
     }
 
-    const isProposed = res.status === "proposed" || Boolean(res.proposalId);
     if (isProposed) {
       log.warn(`Queued for approval (proposal: ${String(res.proposalId ?? "")})`);
       if (res.reviewUrl) log.dim(`  Review: ${String(res.reviewUrl)}`);
+      if (anchor) {
+        log.dim(`  Once approved, attach it: synap_attach_surface (anchor ${anchor.kind}:${anchor.id})`);
+      }
     } else {
-      const created = res.view as Record<string, unknown> | undefined;
-      const id = created?.id ?? res.id;
       log.success(`View created: ${String(res.name ?? created?.name ?? name)}`);
       log.dim(`id: ${String(id ?? "")}`);
       if (res.type ?? created?.type) {
         log.dim(`type: ${String(res.type ?? created?.type)}`);
       }
       if (id) log.dim(`open: ${cfg.podUrl}/open/${id}`);
+      if (attach && anchor) reportAttach(attach, anchor, cfg.podUrl);
     }
   } catch (e) {
     log.error("Error: " + (e as Error).message);
@@ -184,7 +205,7 @@ export async function viewArrange(
     } else {
       log.error(
         "Provide layout JSON via --file <path> or pipe stdin.\n" +
-          "  Format: array of { key, x, y, w?, h?, config? } objects (key = a widget key from `synap_list_widgets`), or { widgets: [...] }."
+          "  Format: array of { key, x, y, w?, h?, config? } objects (key = a cell key from `synap_list_cells`), or { widgets: [...] }."
       );
       process.exit(1);
     }
