@@ -264,7 +264,7 @@ const KIND_HEADINGS: Record<string, string> = {
   workflow: "Automations",
   automation: "Automations",
   view: "Views",
-  cell: "Cards",
+  cell: "Cells",
   workspace: "Spaces",
 };
 
