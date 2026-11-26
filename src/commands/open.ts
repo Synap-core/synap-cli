@@ -19,6 +19,7 @@ import { homedir } from "os";
 import { join } from "path";
 import { openAppUrl } from "@synap-core/hub-rest-client";
 import { HubError, HubNetworkError, hubGet, renderHubError, resolveHubConfig } from "../lib/hub-client.js";
+import { isUuid } from "../lib/id.js";
 import { log } from "../utils/logger.js";
 
 /**
@@ -217,6 +218,12 @@ export async function openCommand(
   if (opts.surface !== undefined && !id) {
     log.error(
       "--surface needs the object's kind and id: synap open <kind> <id> --surface <surfaceId>",
+    );
+    process.exit(1);
+  }
+  if (opts.surface !== undefined && !isUuid(opts.surface)) {
+    log.error(
+      `--surface takes a surface id (a UUID; list them with synap surfaces ${kindOrId} ${id}), not "${opts.surface}".`,
     );
     process.exit(1);
   }

@@ -23,14 +23,14 @@ import chalk from "chalk";
 import { log } from "../utils/logger.js";
 import { resolveHubConfig, resolveUserId, hubGet, hubPost } from "../lib/hub-client.js";
 import { unwrapList } from "../lib/unwrapList.js";
-import { attachSurfaceFor, parseForAnchor, reportAttach } from "./surfaces.js";
+import { createSurfaceFor, parseForAnchor, reportSurfaceCreate, type CreateSurfaceRequest } from "./surfaces.js";
 
 export interface ViewCreateOpts {
   type: string;
   profile?: string;
   name?: string;
   workspace?: string;
-  /** `<kind>:<id>`: attach the new view to that object (POST /surfaces/attach). */
+  /** `<kind>:<id>`: make the view FOR that object, in one act (POST /surfaces). */
   for?: string;
   json?: boolean;
   podUrl?: string;
@@ -51,11 +51,33 @@ export async function viewCreate(opts: ViewCreateOpts): Promise<void> {
     log.error(`--for takes <kind>:<id> (e.g. entity:<uuid>), not "${opts.for}".`);
     process.exit(1);
   }
+  if (anchor && opts.profile) {
+    log.error("--profile and --for do not go together yet: make the view with --for, then set what it shows.");
+    process.exit(1);
+  }
   try {
     const cfg = await resolveHubConfig(opts);
-    const userId = await resolveUserId(cfg);
-
     const name = opts.name ?? `${opts.type} view`;
+
+    // --for: the view and its link to the object are ONE governed act
+    // (POST /surfaces). Stored in the object's space unless --workspace says.
+    if (anchor) {
+      const req: CreateSurfaceRequest = {
+        anchor,
+        body: opts.type === "bento" || opts.type === "whiteboard" ? opts.type : "view",
+        title: name,
+        spec: {
+          ...(opts.type !== "bento" && opts.type !== "whiteboard" ? { viewType: opts.type } : {}),
+          ...(opts.workspace ? { workspaceId: opts.workspace } : {}),
+        },
+      };
+      const made = await createSurfaceFor(cfg, req);
+      if (opts.json) console.log(JSON.stringify(made, null, 2));
+      else reportSurfaceCreate(made, req, cfg.podUrl);
+      return;
+    }
+
+    const userId = await resolveUserId(cfg);
     const workspaceId = opts.workspace ?? cfg.workspaceId;
 
     // Resolve profile slug → UUID (backend requires UUID for profileId)
@@ -85,25 +107,14 @@ export async function viewCreate(opts: ViewCreateOpts): Promise<void> {
     const created = res.view as Record<string, unknown> | undefined;
     const id = created?.id ?? res.id;
 
-    // --for: put the new view on that object. A proposed view has no id yet,
-    // so there is nothing to attach until it is approved: say so, never guess.
-    const attach =
-      anchor && !isProposed && id
-        ? await attachSurfaceFor(cfg, anchor, { type: "view", id: String(id) })
-        : undefined;
-
     if (opts.json) {
-      console.log(JSON.stringify(attach ? { ...res, attach } : res, null, 2));
-      if (attach && typeof attach.error === "string") process.exitCode = 1;
+      console.log(JSON.stringify(res, null, 2));
       return;
     }
 
     if (isProposed) {
       log.warn(`Queued for approval (proposal: ${String(res.proposalId ?? "")})`);
       if (res.reviewUrl) log.dim(`  Review: ${String(res.reviewUrl)}`);
-      if (anchor) {
-        log.dim(`  Once approved, attach it: synap_attach_surface (anchor ${anchor.kind}:${anchor.id})`);
-      }
     } else {
       log.success(`View created: ${String(res.name ?? created?.name ?? name)}`);
       log.dim(`id: ${String(id ?? "")}`);
@@ -111,7 +122,6 @@ export async function viewCreate(opts: ViewCreateOpts): Promise<void> {
         log.dim(`type: ${String(res.type ?? created?.type)}`);
       }
       if (id) log.dim(`open: ${cfg.podUrl}/open/${id}`);
-      if (attach && anchor) reportAttach(attach, anchor, cfg.podUrl);
     }
   } catch (e) {
     log.error("Error: " + (e as Error).message);

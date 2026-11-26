@@ -1,23 +1,26 @@
 /**
  * synap surfaces <kind> <id>        — every surface one object carries
  * synap view create … --for <kind>:<id>
- * synap doc create … --for <kind>:<id>  — attach what you just made to that object
+ * synap doc create … --for <kind>:<id>  — make it FOR that object, in one act
  *
  * A surface is UI anchored to an object: its kind's renderers, its body
  * document, views pinned or attached to it, its home or start page, session
  * outputs and Sites. The pod answers from ONE read (`GET /api/hub/surfaces`,
  * the same service as MCP `synap_find_surfaces` and tRPC
- * `surfaces.forObject`); attaching goes through ONE door
- * (`POST /api/hub/surfaces/attach`, MCP `synap_attach_surface`).
+ * `surfaces.forObject`); making one for an object is ONE governed act
+ * (`POST /api/hub/surfaces {anchor, body, title, spec}`, the `surface/create`
+ * door MCP and tRPC call too): the body and its link to the object land
+ * together, or as one proposal, never a body left unattached.
  *
  * A store the pod could not read comes back in `unavailable`. It is printed
  * as its own line and never folded into "no surfaces": an empty list and a
- * failed read are different facts.
+ * failed read are different facts. An answer that is not a surface list at
+ * all is a failed read too, never "none yet".
  *
  * Wire: these call the Hub REST doors through the CLI's own `hubGet` /
  * `hubPost`, because `@synap-core/hub-rest-client`'s `listSurfaces` /
- * `attachSurface` ship in 1.5.0, which is not on npm yet (latest 1.4.0). The
- * shapes below mirror its `HubSurfacesForObject` / `HubAttachSurfaceResult`;
+ * `createSurface` ship in 1.5.0, which is not on npm yet (latest 1.4.0). The
+ * shapes below mirror its `HubSurfacesForObject` / `HubCreateSurfaceResult`;
  * switch to `makeHubClient(cfg).listSurfaces` once the CLI can depend on it.
  */
 
@@ -87,6 +90,13 @@ export function formatUnavailable(u: { source: string; error: string }): string 
   return `  unavailable: ${u.source} could not be read (${u.error})`;
 }
 
+/** The contract's shape: both lists present. Anything else is a failed read. */
+export function isSurfacesForObject(res: unknown): res is SurfacesForObject {
+  if (!res || typeof res !== "object") return false;
+  const r = res as Record<string, unknown>;
+  return Array.isArray(r.rows) && Array.isArray(r.unavailable);
+}
+
 export async function surfacesList(
   kind: string,
   id: string,
@@ -97,15 +107,20 @@ export async function surfacesList(
     const params: Record<string, string> = { kind, id };
     const workspaceId = opts.workspace;
     if (workspaceId) params.workspaceId = workspaceId;
-    const res = (await hubGet("/surfaces", params, cfg)) as SurfacesForObject;
+    const res = await hubGet("/surfaces", params, cfg);
+    if (!isSurfacesForObject(res)) {
+      log.error(
+        `Could not list the surfaces of ${kind} ${id}: the pod's answer is not a surface list (an older pod, or a proxy in the way).`
+      );
+      process.exit(1);
+    }
 
     if (opts.json) {
       console.log(JSON.stringify(res, null, 2));
       return;
     }
 
-    const rows = Array.isArray(res.rows) ? res.rows : [];
-    const unavailable = Array.isArray(res.unavailable) ? res.unavailable : [];
+    const { rows, unavailable } = res;
 
     log.heading(`Surfaces on ${kind} ${id.slice(0, 8)}…`);
     if (rows.length === 0) {
@@ -137,48 +152,42 @@ export function parseForAnchor(value: string): { kind: string; id: string } | nu
   return { kind: value.slice(0, at), id: value.slice(at + 1) };
 }
 
-/**
- * Put a surface the CLI just made on one object (`POST /surfaces/attach`).
- * An agent key's attach is a proposal: reported as such, not as a failure.
- * A refused or failed attach comes back as `{ error }`, so the caller can
- * still report what it made before saying the attach did not happen.
- */
-export async function attachSurfaceFor(
-  cfg: HubConfig,
-  anchor: { kind: string; id: string },
-  surface: { type: "view" | "document"; id: string }
-): Promise<Record<string, unknown>> {
-  try {
-    return (await hubPost(
-      "/surfaces/attach",
-      { anchor, surface },
-      cfg
-    )) as Record<string, unknown>;
-  } catch (e) {
-    return { error: (e as Error).message };
-  }
+/** What `POST /surfaces` makes: a body, with what it holds (hub-rest-client `HubCreateSurfaceInput`). */
+export interface CreateSurfaceRequest {
+  anchor: { kind: string; id: string };
+  body: "view" | "bento" | "whiteboard" | "document" | "html";
+  title: string;
+  spec?: { viewType?: string; content?: string; workspaceId?: string };
 }
 
-/** Print the attach answer: attached / already there / proposed / failed. */
-export function reportAttach(
+/**
+ * Make a surface FOR one object (`POST /surfaces`): the body and its link to
+ * the object in one governed act. An agent key's create is ONE proposal that
+ * carries both. A refusal throws (HubError) with the pod's words.
+ */
+export async function createSurfaceFor(
+  cfg: HubConfig,
+  req: CreateSurfaceRequest
+): Promise<Record<string, unknown>> {
+  return (await hubPost("/surfaces", req, cfg)) as Record<string, unknown>;
+}
+
+/** Print the create answer: made (with its link on the object) or proposed. */
+export function reportSurfaceCreate(
   res: Record<string, unknown>,
-  anchor: { kind: string; id: string },
+  req: CreateSurfaceRequest,
   podUrl: string
 ): void {
-  const where = `${anchor.kind} ${anchor.id.slice(0, 8)}…`;
-  if (typeof res.error === "string") {
-    log.error(`Not attached to ${where}: ${res.error}`);
-    process.exitCode = 1;
-    return;
-  }
+  const where = `${req.anchor.kind} ${req.anchor.id.slice(0, 8)}…`;
   if (res.status === "proposed") {
-    log.info(`Attach to ${where}: proposed (under review)`);
+    // A proposal is normal: the body and its link land together on approval.
+    log.info(`${humanizeToken(req.body)} for ${where}: ${req.title} — proposed (under review)`);
     if (res.proposalId) log.dim(`  proposal: ${String(res.proposalId)}`);
     if (res.reviewUrl) log.dim(`  review: ${String(res.reviewUrl)}`);
     return;
   }
-  log.success(
-    res.status === "exists" ? `Already attached to ${where}` : `Attached to ${where}`
-  );
+  const surface = res.surface as { id?: unknown } | undefined;
+  log.success(`${humanizeToken(req.body)} made for ${where}: ${req.title}`);
+  if (surface?.id) log.dim(`  id: ${String(surface.id)}`);
   if (typeof res.openUrl === "string") log.dim(`  open: ${absoluteLink(res.openUrl, podUrl)}`);
 }

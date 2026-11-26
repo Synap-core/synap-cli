@@ -3095,7 +3095,7 @@ Create a view (table, kanban, bento, …)
 | `--profile <slug>` | Entity profile to display (passed as profileId) |  |
 | `--name <name>` | View name |  |
 | `--workspace <id>` | Workspace ID |  |
-| `--for <kind:id>` | Attach the new view to one object, e.g. entity:<id> (a surface on it; see synap surfaces) |  |
+| `--for <kind:id>` | Make the view for one object, e.g. entity:<id>: the view and its link land in one act (a surface on it; see synap surfaces) |  |
 | `--json` | JSON output |  |
 | `--pod-url <url>` | Pod URL override |  |
 | `--api-key <key>` | API key override |  |
@@ -3229,7 +3229,7 @@ Create a new document: markdown, or an html page pod admin runs
 | `--file <path>` | Read content from a file (.html / .htm means --type html) |  |
 | `--type <type>` | markdown (default) or html: a page pod admin runs at /open/<id> in an isolated frame (inline only, no CDN, at most 2 MB) |  |
 | `--workspace <id>` | Workspace to create the document in |  |
-| `--for <kind:id>` | Attach the new document to one object, e.g. entity:<id> (a surface on it; see synap surfaces) |  |
+| `--for <kind:id>` | Make the document for one object, e.g. entity:<id>: the document and its link land in one act (a surface on it; see synap surfaces) |  |
 | `--open` | Open in the Synap desktop app after creation |  |
 | `--json` | JSON output |  |
 | `--pod-url <url>` | Pod URL override |  |

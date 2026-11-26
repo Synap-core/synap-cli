@@ -32,7 +32,7 @@ import {
 } from "../lib/hub-client.js";
 import { writeGovernance } from "../lib/capture-lane.js";
 import { openInBrowser } from "./open.js";
-import { attachSurfaceFor, parseForAnchor, reportAttach } from "./surfaces.js";
+import { createSurfaceFor, parseForAnchor, reportSurfaceCreate, type CreateSurfaceRequest } from "./surfaces.js";
 
 export interface DocCreateOpts {
   title: string;
@@ -41,7 +41,7 @@ export interface DocCreateOpts {
   /** "markdown" (default) or "html"; a `.html` / `.htm` --file means html. */
   type?: string;
   workspace?: string;
-  /** `<kind>:<id>`: attach the new document to that object (POST /surfaces/attach). */
+  /** `<kind>:<id>`: make the document FOR that object, in one act (POST /surfaces). */
   for?: string;
   open?: boolean;
   json?: boolean;
@@ -124,6 +124,30 @@ export async function docCreate(opts: DocCreateOpts): Promise<void> {
   try {
     const type = resolveDocType(opts.type, opts.file);
     const cfg = await resolveHubConfig(opts);
+
+    // --for: the document and its link to the object are ONE governed act
+    // (POST /surfaces). Stored in the object's space unless --workspace says.
+    if (anchor) {
+      const content = await resolveContent(opts.content, opts.file);
+      const req: CreateSurfaceRequest = {
+        anchor,
+        body: type === "html" ? "html" : "document",
+        title: opts.title,
+        spec: {
+          ...(content !== undefined ? { content } : {}),
+          ...(opts.workspace ? { workspaceId: opts.workspace } : {}),
+        },
+      };
+      const made = await createSurfaceFor(cfg, req);
+      if (opts.json) console.log(JSON.stringify(made, null, 2));
+      else reportSurfaceCreate(made, req, cfg.podUrl);
+      const surface = made.surface as { id?: unknown } | undefined;
+      if (opts.open && made.status !== "proposed" && typeof surface?.id === "string") {
+        await openInBrowser({ kind: "document", id: surface.id });
+      }
+      return;
+    }
+
     const userId = await resolveUserId(cfg);
     const workspaceId = opts.workspace ?? cfg.workspaceId;
 
@@ -154,16 +178,8 @@ export async function docCreate(opts: DocCreateOpts): Promise<void> {
     const id = String(doc.id ?? res.id ?? "");
     const isProposed = res.status === "proposed" || Boolean(res.proposalId);
 
-    // --for: put the new document on that object. A proposed document has no
-    // id yet, so there is nothing to attach until it is approved.
-    const attach =
-      anchor && !isProposed && id
-        ? await attachSurfaceFor(cfg, anchor, { type: "document", id })
-        : undefined;
-
     if (opts.json) {
-      console.log(JSON.stringify(attach ? { ...res, attach } : res, null, 2));
-      if (attach && typeof attach.error === "string") process.exitCode = 1;
+      console.log(JSON.stringify(res, null, 2));
       return;
     }
 
@@ -179,9 +195,6 @@ export async function docCreate(opts: DocCreateOpts): Promise<void> {
       const proposalId = String(res.proposalId ?? "");
       if (proposalId) log.dim(`  proposal: ${proposalId}`);
       if (res.reviewUrl) log.dim(`  review: ${String(res.reviewUrl)}`);
-      if (anchor) {
-        log.dim(`  Once approved, attach it: synap_attach_surface (anchor ${anchor.kind}:${anchor.id})`);
-      }
       return;
     }
 
@@ -189,7 +202,6 @@ export async function docCreate(opts: DocCreateOpts): Promise<void> {
     log.dim(`  id: ${id}`);
     if (type === "html") log.dim(`  a page: pod admin runs it at /open/${id}`);
     log.dim(`  open in browser: synap open document ${id}`);
-    if (attach && anchor) reportAttach(attach, anchor, cfg.podUrl);
 
     if (opts.open && id) {
       await openInBrowser({ kind: "document", id });

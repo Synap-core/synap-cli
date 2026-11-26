@@ -2480,7 +2480,7 @@ view
   .option("--profile <slug>", "Entity profile to display (passed as profileId)")
   .option("--name <name>", "View name")
   .option("--workspace <id>", "Workspace ID")
-  .option("--for <kind:id>", "Attach the new view to one object, e.g. entity:<id> (a surface on it; see synap surfaces)")
+  .option("--for <kind:id>", "Make the view for one object, e.g. entity:<id>: the view and its link land in one act (a surface on it; see synap surfaces)")
   .option("--json", "JSON output")
   .option("--pod-url <url>", "Pod URL override")
   .option("--api-key <key>", "API key override")
@@ -2584,7 +2584,7 @@ doc
     "markdown (default) or html: a page pod admin runs at /open/<id> in an isolated frame (inline only, no CDN, at most 2 MB)"
   )
   .option("--workspace <id>", "Workspace to create the document in")
-  .option("--for <kind:id>", "Attach the new document to one object, e.g. entity:<id> (a surface on it; see synap surfaces)")
+  .option("--for <kind:id>", "Make the document for one object, e.g. entity:<id>: the document and its link land in one act (a surface on it; see synap surfaces)")
   .option("--open", "Open in the Synap desktop app after creation")
   .option("--json", "JSON output")
   .option("--pod-url <url>", "Pod URL override")
