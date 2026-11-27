@@ -152,6 +152,7 @@ async function attempt<T>(fn: () => Promise<T> | T): Promise<T | undefined> {
   try {
     return await fn();
   } catch {
+    // empty-ok: the probe's contract is "a failed probe omits its field"; nothing is invented
     return undefined;
   }
 }
@@ -323,10 +324,11 @@ export function createDeviceReporter(deps: DeviceReporterDeps = {}): DeviceRepor
           return;
         }
         if (!res.ok) return;
+        // empty-ok: an unreadable ack only drops the refused-manifest note; the report itself went through
         const ack = (await res.json().catch(() => null)) as { device?: { manifest?: string; error?: string } } | null;
         if (ack?.device?.manifest === "refused") log(`the pod refused this computer's device manifest: ${ack.device.error ?? "unknown field"}`);
       } catch {
-        // a report is best effort: the computer keeps working
+        // empty-ok: a report is best effort: the computer keeps working, the next due send tries again
       }
     },
   };

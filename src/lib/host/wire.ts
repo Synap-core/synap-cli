@@ -350,6 +350,7 @@ export function createHostHub(
       // install: a tool built for one processor is refused on another, before anyone approves.
       // `runner` is this process: a new one (the worker restarted, the CLI was updated, the
       // computer rebooted) is how the pod knows to check every tool here again (self-heal).
+      // empty-ok: a manifest that cannot be built never blocks a lease; the lease goes without it
       const m = manifest ? await manifest().catch(() => undefined) : undefined;
       const seen = { os: process.platform, arch: process.arch, runner: RUNNER_ID, ...(m ? { manifest: m } : {}) };
       const body = (await post("/lease", capacity ? { ...seen, capacity } : seen)) as { job?: LeasedHostJob | null };

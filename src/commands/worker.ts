@@ -2174,6 +2174,7 @@ export async function workerCommand(opts: WorkerOptions): Promise<void> {
 function computerFlags(podUrl: string, computerKey: string, hostsServices: boolean) {
   return async (): Promise<ComputerFlags> => {
     const { fetchWakeList } = await import("./waker.js");
+    // empty-ok: an unreadable pod leaves "wakesAgents" out of the manifest (never invented)
     const list = await fetchWakeList(podUrl, computerKey).catch(() => undefined);
     return { hostsServices, ...(list ? { wakesAgents: list.wakesAgents } : {}) };
   };

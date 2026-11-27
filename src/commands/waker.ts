@@ -188,7 +188,7 @@ export function createWaker(deps: WakerDeps): Waker {
       try {
         deps.onPoll?.(list);
       } catch {
-        // a device report never fails a poll
+        // empty-ok: a device report never fails a poll
       }
       if (!list.wakesAgents) {
         sayOnce("off", `"Wakes agents" is off for ${list.computer.name ?? "this computer"}: nothing is started. ${list.why ?? ""}`.trim());
