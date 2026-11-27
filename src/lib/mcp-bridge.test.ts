@@ -12,6 +12,9 @@ import path from "node:path";
 import { PassThrough } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
 import {
+  conversationHandoffPath,
+  followedConversation,
+  liveConversationReader,
   modelHandoffPath,
   modelHandoffReader,
   runMcpBridge,
@@ -363,5 +366,123 @@ describe("model hand-off (synap-bridge writes what the conversation runs on)", (
     expect(sent.map((h) => h["X-Synap-Model-Provider"])).toEqual(["anthropic", "anthropic", undefined]);
     // The conversation headers are untouched.
     expect(sent.every((h) => h["X-Synap-Conversation"] === `claude-code:${SID}`)).toBe(true);
+  });
+});
+
+describe("the live conversation (a /clear or /branch moves the process to another id, finding 4902e762)", () => {
+  const PROC = "host-a:4242:1795231258000";
+  const BRANCH = "0b7f8d4e-1c2a-4e3b-9a5d-6f7e8d9c0b1a";
+  const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), "synap-bridge-live-"));
+  let tick = 1_700_000_000;
+  const handOff = (file: string, said: unknown) => {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, typeof said === "string" ? said : JSON.stringify(said));
+    tick += 10;
+    fs.utimesSync(file, tick, tick);
+  };
+
+  it("the path is the plugin's: ~/.synap/run/claude-code-process-<pid>.json; no pid names none", () => {
+    expect(conversationHandoffPath(4242, "/home/a")).toBe("/home/a/.synap/run/claude-code-process-4242.json");
+    for (const bad of [0, 1, -3, 1.5, Number.NaN]) expect(conversationHandoffPath(bad, "/home/a")).toBeUndefined();
+    expect(conversationHandoffPath(4242, "relative/home")).toBeUndefined();
+  });
+
+  it("only this process's file, naming a Claude Code id, moves it; anything else is no move", () => {
+    const file = conversationHandoffPath(4242, tmp())!;
+    const live = liveConversationReader(file, PROC);
+    expect(live()).toBeUndefined(); // no file yet
+    handOff(file, { sessionId: BRANCH, process: PROC, at: 1 });
+    expect(live()).toBe(BRANCH);
+    // Upper-case is the same id, as the conversation header writes it.
+    handOff(file, { sessionId: BRANCH.toUpperCase(), process: PROC, at: 2 });
+    expect(live()).toBe(BRANCH);
+    // A reused pid: the file is another process's.
+    handOff(file, { sessionId: BRANCH, process: "host-a:4242:1", at: 3 });
+    expect(live()).toBeUndefined();
+    // Not a Claude Code id, no process, not JSON: never a guess.
+    handOff(file, { sessionId: "../../etc", process: PROC, at: 4 });
+    expect(live()).toBeUndefined();
+    handOff(file, { sessionId: BRANCH, at: 5 });
+    expect(live()).toBeUndefined();
+    handOff(file, "{\"sessionId\": ");
+    expect(live()).toBeUndefined();
+    // Gone: no move, not the last value.
+    handOff(file, { sessionId: BRANCH, process: PROC, at: 6 });
+    expect(live()).toBe(BRANCH);
+    fs.rmSync(file);
+    expect(live()).toBeUndefined();
+    // No process to check against (outside Claude Code): nothing is read.
+    handOff(file, { sessionId: BRANCH, process: PROC, at: 7 });
+    expect(liveConversationReader(file, undefined)()).toBeUndefined();
+  });
+
+  it("after a /branch, the next request names the branch: headers, _meta and the model file", async () => {
+    const home = tmp();
+    const file = conversationHandoffPath(4242, home)!;
+    handOff(modelHandoffPath(SID, home)!, { model: "claude-opus-5-5", provider: "anthropic", at: 1 });
+    handOff(modelHandoffPath(BRANCH, home)!, { model: "claude-sonnet-5-5", provider: "anthropic", at: 1 });
+    const conversation = followedConversation({
+      spawnId: SID,
+      processId: PROC,
+      handoffFile: file,
+      cwd: "/Users/a/code",
+      home,
+    });
+    const input = new PassThrough();
+    const output = new PassThrough();
+    const sent: Array<{ headers: Record<string, string>; body: { params?: { _meta?: Record<string, string> } } }> = [];
+    const fetchImpl = (async (_u: string, init: RequestInit) => {
+      const body = JSON.parse(String(init.body));
+      sent.push({ headers: init.headers as Record<string, string>, body });
+      return json({ jsonrpc: "2.0", id: body.id, result: {} });
+    }) as unknown as typeof fetch;
+    const done = runMcpBridge({
+      url: "u",
+      apiKey: "k",
+      headers: conversation.headers,
+      modelFile: conversation.modelFile,
+      input,
+      output,
+      fetchImpl,
+      log: () => {},
+    });
+    const call = async (id: number) => {
+      input.write(JSON.stringify({ jsonrpc: "2.0", id, method: "tools/call", params: { name: "synap_capture" } }) + "\n");
+      await new Promise((r) => setTimeout(r, 20));
+    };
+    await call(1); // before the plugin wrote anything: the spawn-time id
+    handOff(file, { sessionId: BRANCH, process: PROC, at: 2 }); // the /branch
+    await call(2);
+    handOff(file, { sessionId: SID, process: PROC, at: 3 }); // /resume back to the parent
+    await call(3);
+    input.end();
+    await done;
+    expect(sent.map((s) => s.headers["X-Synap-Conversation"])).toEqual([
+      `claude-code:${SID}`,
+      `claude-code:${BRANCH}`,
+      `claude-code:${SID}`,
+    ]);
+    expect(sent.map((s) => s.body.params?._meta?.["live.synap/conversation"])).toEqual([
+      `claude-code:${SID}`,
+      `claude-code:${BRANCH}`,
+      `claude-code:${SID}`,
+    ]);
+    expect(sent.map((s) => s.headers["X-Synap-Model"])).toEqual([
+      "claude-opus-5-5",
+      "claude-sonnet-5-5",
+      "claude-opus-5-5",
+    ]);
+    // The process and the cwd ride along unchanged.
+    expect(sent.every((s) => s.headers["X-Synap-Process"] === PROC)).toBe(true);
+    expect(sent.every((s) => s.headers["X-Synap-Conversation-Cwd"] === "/Users/a/code")).toBe(true);
+  });
+
+  it("CONTROL: another process's file never moves this bridge", async () => {
+    const home = tmp();
+    const file = conversationHandoffPath(4242, home)!;
+    handOff(file, { sessionId: BRANCH, process: "host-b:4242:99", at: 1 });
+    const conversation = followedConversation({ spawnId: SID, processId: PROC, handoffFile: file, cwd: "/c", home });
+    expect(conversation.headers()["X-Synap-Conversation"]).toBe(`claude-code:${SID}`);
+    expect(conversation.modelFile()).toBe(modelHandoffPath(SID, home));
   });
 });
