@@ -2,8 +2,8 @@
  * `synap session list --kind` — the population-lens filter and its column.
  *
  * The Hub REST `GET /focus-sessions` door (backend: `routers/hub-protocol/
- * rest/focus-sessions.ts`) accepts `kind: work|run|receipt|all` (default
- * "all") and projects `kind` onto every returned row
+ * rest/focus-sessions.ts`) accepts `kind: work|run|receipt|all` (omitted =
+ * every kind except automation-opened sessions, since backend #1363; "all" = no filter) and projects `kind` onto every returned row
  * (`services/focus-sessions/session-kind.ts`). Before this the CLI neither
  * forwarded a kind filter nor rendered the field it already received —
  * `synap session list` printed receipts and runs indistinguishable from a
@@ -43,7 +43,7 @@ describe("session list — --kind forwarding", () => {
     expect(params.kind).toBe("run");
   });
 
-  it("omits kind entirely for the default 'all' — the door's own default", async () => {
+  it("forwards kind=all explicitly — omitting it hides automation sessions (backend #1363)", async () => {
     const { listSessions } = await import("../src/commands/sessions.js");
     await listSessions({ workspace: "ws-1", kind: "all", json: true });
 
@@ -51,7 +51,7 @@ describe("session list — --kind forwarding", () => {
       string,
       Record<string, unknown>,
     ];
-    expect(params).not.toHaveProperty("kind");
+    expect(params.kind).toBe("all");
   });
 
   it("omits kind when --kind is not given at all", async () => {
