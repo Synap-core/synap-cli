@@ -305,9 +305,10 @@ export async function listSessions(
     if (opts.status) params.status = opts.status;
     if (opts.limit) params.limit = parseInt(opts.limit, 10);
     // Population lens (`services/focus-sessions/session-kind.ts` on the pod).
-    // The Hub REST door defaults to "all" itself, so omit rather than send a
-    // redundant param when the flag isn't given.
-    if (opts.kind && opts.kind !== "all") params.kind = opts.kind;
+    // Omitting `kind` is NOT "all": since backend #1363 the door's default
+    // returns every kind except sessions an automation opened. "all" is the
+    // explicit no-filter value, so forward whatever --kind says, "all" included.
+    if (opts.kind) params.kind = opts.kind;
 
     // The Hub REST GET /focus-sessions returns a bare array of sessions.
     // (Tolerate a { sessions: [...] } envelope too, for forward-compat.)
