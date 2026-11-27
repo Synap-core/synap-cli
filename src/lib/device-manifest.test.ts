@@ -8,7 +8,9 @@ import {
   MANIFEST_TTL_MS,
   parseDf,
   parseNvidiaSmi,
+  parseIoregPlatformUuid,
   parseOsReleaseVersion,
+  readHardwareUuid,
   parseSystemProfilerGpus,
   REPORT_EVERY_MS,
   validateDeviceManifest,
@@ -127,6 +129,53 @@ describe("collectDeviceManifest", () => {
   });
 });
 
+const IOREG = `+-o J416sAP  <class IOPlatformExpertDevice, id 0x100000213, registered, matched, active, busy 0 (0 ms), retain 44>
+    {
+      "IOPlatformSerialNumber" = "XXXXXXXXXX"
+      "IOPlatformUUID" = "3F2504E0-4F89-11D3-9A0C-0305E82C3301"
+      "model" = <"Mac15,9">
+    }
+`;
+
+describe("identity.hardwareId", () => {
+  it("macOS: the IOPlatformUUID from ioreg", async () => {
+    const calls: string[] = [];
+    const run: RunProbe = async (cmd, args) => {
+      calls.push([cmd, ...args].join(" "));
+      if (cmd === "ioreg") return IOREG;
+      throw new Error("no");
+    };
+    const m = await collectDeviceManifest({}, { run, os: fakeOs, platform: "darwin", readText: unreadable });
+    expect(calls).toContain("ioreg -rd1 -c IOPlatformExpertDevice");
+    expect(m.identity?.hardwareId).toBe("3F2504E0-4F89-11D3-9A0C-0305E82C3301");
+    expect(validateDeviceManifest(m)).toBeNull();
+  });
+
+  it("linux: product_uuid when it can be read", async () => {
+    const readText = async (p: string) => {
+      if (p === "/sys/class/dmi/id/product_uuid") return "4c4c4544-0042-3510-8051-b4c04f4e3732\n";
+      throw new Error("EACCES");
+    };
+    const m = await collectDeviceManifest({}, { run: unreadable, os: fakeOs, platform: "linux", readText });
+    expect(m.identity?.hardwareId).toBe("4c4c4544-0042-3510-8051-b4c04f4e3732");
+  });
+
+  it("left out when root-only (the usual Linux case), when ioreg fails, and on other systems; never throws", async () => {
+    for (const platform of ["linux", "darwin", "win32"] as const) {
+      const m = await collectDeviceManifest({}, { run: unreadable, os: fakeOs, platform, readText: unreadable });
+      expect(m.identity).not.toHaveProperty("hardwareId");
+    }
+  });
+
+  it("only a real UUID: placeholders and garbage are left out", () => {
+    expect(readHardwareUuid("00000000-0000-0000-0000-000000000000")).toBeUndefined();
+    expect(readHardwareUuid("FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF")).toBeUndefined();
+    expect(readHardwareUuid("Not Settable")).toBeUndefined();
+    expect(parseIoregPlatformUuid("no uuid here")).toBeUndefined();
+    expect(validateDeviceManifest({ manifestVersion: 1, identity: { hardwareId: "x".repeat(65) } })).toMatch(/hardwareId/);
+  });
+});
+
 describe("identity.osVersion", () => {
   it("macOS: the product version from sw_vers, not the Darwin kernel's", async () => {
     const run: RunProbe = async (cmd, args) => {
@@ -142,7 +191,7 @@ describe("identity.osVersion", () => {
     const paths: string[] = [];
     const readText = async (p: string) => (paths.push(p), UBUNTU_OS_RELEASE);
     const m = await collectDeviceManifest({}, { run: unreadable, os: fakeOs, platform: "linux", readText });
-    expect(paths).toEqual(["/etc/os-release"]);
+    expect(paths).toContain("/etc/os-release");
     expect(m.identity?.osVersion).toBe("24.04");
   });
 

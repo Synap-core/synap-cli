@@ -57,7 +57,7 @@ export interface DeviceDisk {
 }
 export interface DeviceManifest {
   manifestVersion: 1;
-  identity?: { os?: string; osVersion?: string; arch?: string; hostname?: string };
+  identity?: { os?: string; osVersion?: string; arch?: string; hostname?: string; hardwareId?: string };
   resources?: {
     cpu?: { model?: string; cores?: number };
     memoryMb?: number;
@@ -160,6 +160,24 @@ export function parseOsReleaseVersion(text: string): string | undefined {
   return v ? v.slice(0, 120) : undefined;
 }
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * A firmware UUID, or undefined: only the UUID shape, and never the all-zero
+ * or all-F placeholder some boards and VMs carry (it would match every one of them).
+ */
+export function readHardwareUuid(text: string): string | undefined {
+  const v = text.trim();
+  if (!UUID.test(v) || /^[0-]+$/.test(v) || /^[f-]+$/i.test(v)) return undefined;
+  return v;
+}
+
+/** `ioreg -rd1 -c IOPlatformExpertDevice` → its IOPlatformUUID. */
+export function parseIoregPlatformUuid(text: string): string | undefined {
+  const m = /"IOPlatformUUID"\s*=\s*"([^"]+)"/.exec(text);
+  return m ? readHardwareUuid(m[1]!) : undefined;
+}
+
 // ─── Probes ─────────────────────────────────────────────────────────────────
 
 /** Runs a program with a timeout; rejects on any failure (missing, non-zero, timeout). */
@@ -218,15 +236,17 @@ export async function collectDeviceManifest(flags: ComputerFlags = {}, deps: Col
     return mb;
   });
 
-  const [disks, nvidia, mac, osVersion] = await Promise.all([
+  const [disks, nvidia, mac, osVersion, hardwareId] = await Promise.all([
     attempt(async () => parseDf(await run("df", ["-kP"], 5_000))),
     attempt(async () => parseNvidiaSmi(await run("nvidia-smi", ["--query-gpu=name,memory.total", "--format=csv,noheader"], 3_000))),
     platform === "darwin"
       ? attempt(async () => parseSystemProfilerGpus(await run("system_profiler", ["SPDisplaysDataType", "-json"], 1_500)))
       : Promise.resolve(undefined),
     attempt(() => readOsVersion(platform, run, readText, o)),
+    attempt(() => readHardwareId(platform, run, readText)),
   ]);
   if (identity && osVersion) identity.osVersion = osVersion;
+  if (identity && hardwareId) identity.hardwareId = hardwareId;
   const gpus = [...(nvidia ?? []), ...(mac ?? [])].slice(0, 32);
 
   const resources: NonNullable<DeviceManifest["resources"]> = {};
@@ -262,6 +282,21 @@ async function readOsVersion(
   return v || undefined;
 }
 
+/**
+ * The firmware's UUID, which a hypervisor also knows of its VM (the pod
+ * matches a Proxmox guest to its computer by it). On Linux the file is
+ * usually root-only, so it is mostly left out there.
+ */
+async function readHardwareId(
+  platform: NodeJS.Platform,
+  run: RunProbe,
+  readText: (path: string) => Promise<string>
+): Promise<string | undefined> {
+  if (platform === "darwin") return parseIoregPlatformUuid(await run("ioreg", ["-rd1", "-c", "IOPlatformExpertDevice"], 1_500));
+  if (platform === "linux") return readHardwareUuid(await readText("/sys/class/dmi/id/product_uuid"));
+  return undefined;
+}
+
 // ─── Local mirror of the schema's checks ────────────────────────────────────
 
 const CAPABILITY_NAME = /^[a-z][a-z0-9-]*(\.[a-z0-9][a-z0-9-]*)+$/;
@@ -277,6 +312,7 @@ export function validateDeviceManifest(m: unknown): string | null {
   if (id !== undefined) {
     if (id.os !== undefined && !word(id.os, 64)) return "identity.os";
     if (id.osVersion !== undefined && !word(id.osVersion, 120)) return "identity.osVersion";
+    if (id.hardwareId !== undefined && !word(id.hardwareId, 64)) return "identity.hardwareId";
     if (id.arch !== undefined && !word(id.arch, 32)) return "identity.arch";
     if (id.hostname !== undefined && !word(id.hostname, 253)) return "identity.hostname";
   }

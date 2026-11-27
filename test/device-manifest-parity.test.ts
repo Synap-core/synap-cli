@@ -2,7 +2,7 @@
  * The CLI mirrors the backend's device manifest v1 (src/lib/device-manifest.ts).
  * When the backend is checked out beside this repo and carries the module,
  * the version, the capability-name pattern, the reporter-name pattern, the
- * osVersion limit and the windows the report cadence must fit in agree.
+ * osVersion and hardwareId limits and the windows the report cadence must fit in agree.
  * Skips when absent (older backend main, or no checkout), like the other
  * parity tests.
  */
@@ -41,6 +41,10 @@ describe.skipIf(!present)("device manifest parity with the backend", () => {
   });
   it("identity.osVersion is a Word(120)", () => {
     expect(text).toContain("osVersion: Word(120).optional(),");
+  });
+  // The field lands in backend #1342 after this test was written: checked once it is there.
+  it.skipIf(!/\bhardwareId\b/.test(text))("identity.hardwareId holds at most 64 characters", () => {
+    expect(text).toMatch(/hardwareId:[^\n]*\b64\b/);
   });
   it("a running process reports inside the capability TTL and the online window", () => {
     const worstGap = REPORT_EVERY_MS + REPORT_CHECK_MS;
