@@ -143,7 +143,11 @@ describe("the run's MCP server is pinned to the worker agent's own key", () => {
         [RUN_MCP_SERVER]: {
           type: "http",
           url: "https://pod.example/mcp",
-          headers: { Authorization: "Bearer synap_hub_k", "X-Synap-Model-Provider": "anthropic" },
+          headers: {
+            Authorization: "Bearer synap_hub_k",
+            "X-Synap-Client": expect.stringMatching(/^synap-worker\/\S+$/),
+            "X-Synap-Model-Provider": "anthropic",
+          },
         },
       },
     });
@@ -154,6 +158,7 @@ describe("the run's MCP server is pinned to the worker agent's own key", () => {
     const cfg = runMcpConfig("https://pod.example", "k", sid) as { mcpServers: Record<string, { headers: Record<string, string> }> };
     expect(cfg.mcpServers[RUN_MCP_SERVER]!.headers).toEqual({
       Authorization: "Bearer k",
+      "X-Synap-Client": expect.stringMatching(/^synap-worker\/\S+$/),
       "X-Synap-Conversation": `claude-code:${sid}`,
       "X-Synap-Model-Provider": "anthropic",
     });

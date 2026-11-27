@@ -23,7 +23,7 @@ export const CONVERSATION_CWD_HEADER = "X-Synap-Conversation-Cwd";
  * can be told apart. Never an identity: it only labels the count.
  */
 export const CLIENT_HEADER = "X-Synap-Client";
-export type SynapClientName = "synap-cli" | "synap-cli-mcp";
+export type SynapClientName = "synap-cli" | "synap-cli-mcp" | "synap-worker" | "synap-waker";
 
 /** A header value must be visible ASCII: an odd version reads `unknown` and never fails the call. */
 function headerVersion(version: string): string {

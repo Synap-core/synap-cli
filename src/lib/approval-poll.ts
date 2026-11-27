@@ -12,6 +12,8 @@
  * failure resolves to a clean rejected/timeout instead of a dead browser tab.
  */
 
+import { clientHeader } from "./conversation-headers.js";
+
 export interface PollForApprovalOptions<T> {
   /** Endpoint to GET each tick. */
   url: string;
@@ -85,7 +87,8 @@ export async function pollForApproval<T>(
     try {
       res = await fetch(opts.url, {
         method: opts.method ?? "GET",
-        headers: opts.body ? { "Content-Type": "application/json", ...opts.headers } : opts.headers,
+        // Every poll names its program, so the pod's usage telemetry counts it (callers' own headers win).
+        headers: { ...clientHeader("synap-cli"), ...(opts.body ? { "Content-Type": "application/json" } : {}), ...opts.headers },
         ...(opts.body ? { body: opts.body } : {}),
         signal: AbortSignal.timeout(requestTimeoutMs),
       });
