@@ -13,6 +13,7 @@ import { createDockerRuntime } from "./compose.js";
 import { readHostConfig } from "./config.js";
 import { serveHost, statfsFreeMb, takeHostLock, type RunnerDeps, type ServeOptions } from "./lease.js";
 import type { RunContext } from "./tool-run.js";
+import { deviceReporter } from "../device-manifest.js";
 import { createHostHub } from "./wire.js";
 
 export const hostLockFile = (): string => path.join(os.homedir(), ".synap", "host", "runner.lock");
@@ -29,7 +30,7 @@ export interface HostRunnerOptions {
 
 export function createHostRunner(o: HostRunnerOptions): RunnerDeps {
   return {
-    hub: createHostHub({ podUrl: o.podUrl, apiKey: o.computerKey }),
+    hub: createHostHub({ podUrl: o.podUrl, apiKey: o.computerKey }, fetch, () => deviceReporter.manifest({ hostsServices: true })),
     runtime: createDockerRuntime(),
     config: readHostConfig(o.hostConfig),
     log: o.log,

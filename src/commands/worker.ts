@@ -66,6 +66,7 @@ import { hubGet, resolveHubConfig } from "../lib/hub-client.js";
 import { unknownAgentMessage } from "../lib/agents-config.js";
 import { resolveAgentUserId } from "../lib/credential-class.js";
 import { ensureComputerEnrolled } from "../lib/device-connect.js";
+import { deviceReporter, type ComputerFlags } from "../lib/device-manifest.js";
 import { createMcpClient, McpReplyCappedError, type McpCallClient } from "../lib/mcp-call.js";
 import {
   AccountPool,
@@ -2124,6 +2125,8 @@ export async function workerCommand(opts: WorkerOptions): Promise<void> {
   let failures = 0;
   let paused = false;
   while (!stopping) {
+    // Beside each poll, this computer says what it is (probes cached ~10 min, never throws).
+    void deviceReporter.report(cfg.podUrl, enrol.computerKey, computerFlags(cfg.podUrl, enrol.computerKey, !!host));
     try {
       const r = await worker.tick();
       failures = 0;
@@ -2164,6 +2167,19 @@ export async function workerCommand(opts: WorkerOptions): Promise<void> {
 }
 
 /**
+ * This computer's flags for its device manifest, read only when a report is due:
+ * "Wakes agents" from the pod (the wake list), "Installs from the pod" from whether
+ * this process runs the host runner. A pod that cannot be read leaves a flag out.
+ */
+function computerFlags(podUrl: string, computerKey: string, hostsServices: boolean) {
+  return async (): Promise<ComputerFlags> => {
+    const { fetchWakeList } = await import("./waker.js");
+    const list = await fetchWakeList(podUrl, computerKey).catch(() => undefined);
+    return { hostsServices, ...(list ? { wakesAgents: list.wakesAgents } : {}) };
+  };
+}
+
+/**
  * The host runner beside the agent's work. Its failures are said, never the
  * worker's: a computer that does not install from the pod, or a broken host
  * config, leaves the agent working. Undefined when it cannot start.
@@ -2199,6 +2215,7 @@ export async function hostOnlyCommand(opts: Pick<WorkerOptions, "once" | "hostCo
   const { createHostRunner, hostRunnerLine, runHostLoop } = await import("../lib/host/runner.js");
   const deps = createHostRunner({ podUrl: cfg.podUrl, computerKey: enrol.computerKey, hostConfig: opts.hostConfig, log: say });
   say(hostRunnerLine(deps, cfg.podUrl));
+  void deviceReporter.report(cfg.podUrl, enrol.computerKey, computerFlags(cfg.podUrl, enrol.computerKey, true));
   const stop = new AbortController();
   for (const sig of ["SIGINT", "SIGTERM"] as const) process.once(sig, () => stop.abort());
   await runHostLoop(deps, { idleMs: 10_000, errorWaitMs: 30_000, once: opts.once, signal: stop.signal });
