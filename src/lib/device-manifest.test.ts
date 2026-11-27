@@ -1,12 +1,16 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   capabilitiesFrom,
   collectDeviceManifest,
   createDeviceReporter,
+  DEVICE_REPORTER_NAME,
+  DEVICE_REPORTERS,
   MANIFEST_TTL_MS,
   parseDf,
   parseNvidiaSmi,
+  parseOsReleaseVersion,
   parseSystemProfilerGpus,
+  REPORT_EVERY_MS,
   validateDeviceManifest,
   type RunProbe,
 } from "./device-manifest.js";
@@ -69,6 +73,18 @@ const fakeOs = {
   platform: () => "darwin" as NodeJS.Platform,
   arch: () => "arm64",
   hostname: () => "mac.local",
+  release: () => "25.5.0",
+};
+
+const UBUNTU_OS_RELEASE = `PRETTY_NAME="Ubuntu 24.04.1 LTS"
+NAME="Ubuntu"
+VERSION_ID="24.04"
+VERSION="24.04.1 LTS (Noble Numbat)"
+ID=ubuntu
+`;
+const readUbuntu = async () => UBUNTU_OS_RELEASE;
+const unreadable = async (): Promise<string> => {
+  throw new Error("ENOENT");
 };
 
 describe("collectDeviceManifest", () => {
@@ -79,12 +95,12 @@ describe("collectDeviceManifest", () => {
   };
 
   it("builds a valid manifest from every probe", async () => {
-    const m = await collectDeviceManifest({ wakesAgents: true }, { run, os: fakeOs, platform: "linux" });
+    const m = await collectDeviceManifest({ wakesAgents: true }, { run, os: fakeOs, platform: "linux", readText: readUbuntu });
     expect(m.resources?.cpu).toEqual({ model: "Apple M3 Pro", cores: 2 });
     expect(m.resources?.memoryMb).toBe(36864);
     expect(m.resources?.gpus).toEqual([{ model: "NVIDIA GeForce RTX 4090", vramMb: 24564 }]);
     expect(m.resources?.disks?.map((d) => d.mount)).toEqual(["/", "/data"]);
-    expect(m.identity).toEqual({ os: "darwin", arch: "arm64", hostname: "mac.local" });
+    expect(m.identity).toEqual({ os: "darwin", osVersion: "24.04", arch: "arm64", hostname: "mac.local" });
     expect(m.capabilities).toEqual(["wake.agent"]);
     expect(validateDeviceManifest(m)).toBeNull();
     expect(JSON.stringify(m)).not.toContain("tier");
@@ -104,10 +120,56 @@ describe("collectDeviceManifest", () => {
 
   it("survives an os module that throws", async () => {
     const broken = { ...fakeOs, cpus: () => { throw new Error("x"); }, totalmem: () => { throw new Error("x"); } };
-    const m = await collectDeviceManifest({}, { run, os: broken, platform: "linux" });
+    const m = await collectDeviceManifest({}, { run, os: broken, platform: "linux", readText: readUbuntu });
     expect(m.resources?.cpu).toBeUndefined();
     expect(m.resources?.memoryMb).toBeUndefined();
     expect(m.resources?.disks).toBeDefined();
+  });
+});
+
+describe("identity.osVersion", () => {
+  it("macOS: the product version from sw_vers, not the Darwin kernel's", async () => {
+    const run: RunProbe = async (cmd, args) => {
+      if (cmd === "sw_vers" && args[0] === "-productVersion") return "15.1\n";
+      throw new Error("no");
+    };
+    const m = await collectDeviceManifest({}, { run, os: fakeOs, platform: "darwin", readText: unreadable });
+    expect(m.identity?.osVersion).toBe("15.1");
+    expect(validateDeviceManifest(m)).toBeNull();
+  });
+
+  it("linux: VERSION_ID from /etc/os-release", async () => {
+    const paths: string[] = [];
+    const readText = async (p: string) => (paths.push(p), UBUNTU_OS_RELEASE);
+    const m = await collectDeviceManifest({}, { run: unreadable, os: fakeOs, platform: "linux", readText });
+    expect(paths).toEqual(["/etc/os-release"]);
+    expect(m.identity?.osVersion).toBe("24.04");
+  });
+
+  it("falls back to the kernel release when the OS's own version cannot be read", async () => {
+    const m = await collectDeviceManifest({}, { run: unreadable, os: fakeOs, platform: "linux", readText: unreadable });
+    expect(m.identity?.osVersion).toBe("25.5.0");
+  });
+
+  it("is left out, never invented, when nothing can be read; the collector does not throw", async () => {
+    const noRelease = { ...fakeOs, release: () => { throw new Error("x"); } };
+    for (const platform of ["darwin", "linux", "win32"] as const) {
+      const m = await collectDeviceManifest({}, { run: unreadable, os: noRelease, platform, readText: unreadable });
+      expect(m.identity).toEqual({ os: "darwin", arch: "arm64", hostname: "mac.local" });
+      expect(validateDeviceManifest(m)).toBeNull();
+    }
+  });
+
+  it("parseOsReleaseVersion: quoted, bare, absent", () => {
+    expect(parseOsReleaseVersion(UBUNTU_OS_RELEASE)).toBe("24.04");
+    expect(parseOsReleaseVersion("ID=debian\nVERSION_ID=12\n")).toBe("12");
+    expect(parseOsReleaseVersion("NAME=\"Arch Linux\"\nID=arch\n")).toBeUndefined();
+    expect(parseOsReleaseVersion('VERSION_ID=""\n')).toBeUndefined();
+  });
+
+  it("the local check holds osVersion to the backend's Word(120)", () => {
+    expect(validateDeviceManifest({ manifestVersion: 1, identity: { osVersion: "x".repeat(121) } })).toMatch(/osVersion/);
+    expect(validateDeviceManifest({ manifestVersion: 1, identity: { osVersion: " " } })).toMatch(/osVersion/);
   });
 });
 
@@ -126,49 +188,127 @@ describe("capabilitiesFrom / validateDeviceManifest", () => {
 
 describe("createDeviceReporter", () => {
   const manifest = { manifestVersion: 1 as const, resources: { memoryMb: 100 } };
+  const ok = () => vi.fn(async () => new Response(JSON.stringify({ device: { manifest: "accepted" } }), { status: 200 }));
+  const bodyOf = (fetchImpl: ReturnType<typeof ok>, i: number) =>
+    JSON.parse(String((fetchImpl.mock.calls[i] as unknown as [string, RequestInit])[1].body)) as { reporter: string; manifest: Record<string, unknown> };
 
-  it("probes at most once per TTL and recomputes capabilities per call", async () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("probes at most once per TTL; capabilities follow the flags on every call, an empty set included", async () => {
     let t = 0;
     const collect = vi.fn(async () => manifest);
-    const r = createDeviceReporter({ collect, now: () => t });
+    const r = createDeviceReporter({ reporter: "worker", collect, now: () => t });
     expect((await r.manifest({ wakesAgents: true }))?.capabilities).toEqual(["wake.agent"]);
-    expect((await r.manifest({}))?.capabilities).toBeUndefined();
+    expect((await r.manifest({}))?.capabilities).toEqual([]);
+    expect(await r.manifest()).not.toHaveProperty("capabilities");
     expect(collect).toHaveBeenCalledTimes(1);
     t = MANIFEST_TTL_MS;
     await r.manifest({});
     expect(collect).toHaveBeenCalledTimes(2);
   });
 
-  it("posts to the report door at most once per TTL", async () => {
+  it("posts to the report door, naming its process, at most once per REPORT_EVERY_MS", async () => {
     let t = 0;
-    const fetchImpl = vi.fn(async () => new Response(JSON.stringify({ device: { manifest: "accepted" } }), { status: 200 }));
-    const r = createDeviceReporter({ collect: async () => manifest, now: () => t, fetchImpl: fetchImpl as never });
+    const fetchImpl = ok();
+    const r = createDeviceReporter({ reporter: "worker", collect: async () => manifest, now: () => t, fetchImpl: fetchImpl as never });
     await r.report("https://pod.example/", "key", {});
     await r.report("https://pod.example/", "key", {});
     expect(fetchImpl).toHaveBeenCalledTimes(1);
-    const [url, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
+    const [url] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
     expect(url).toBe("https://pod.example/api/hub/computers/me/report");
-    expect(JSON.parse(String(init.body))).toEqual({ manifest });
-    t = MANIFEST_TTL_MS;
+    expect(bodyOf(fetchImpl, 0)).toEqual({ reporter: "worker", manifest: { ...manifest, capabilities: [] } });
+    t = REPORT_EVERY_MS - 1;
+    await r.report("https://pod.example/", "key", {});
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    t = REPORT_EVERY_MS;
     await r.report("https://pod.example/", "key", {});
     expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
+  it("each process sends its own name, and every name passes the backend's DEVICE_REPORTER", async () => {
+    const backend = /^[a-z][a-z0-9-]{0,31}$/;
+    expect(DEVICE_REPORTER_NAME.source).toBe(backend.source);
+    expect([...DEVICE_REPORTERS].sort()).toEqual(["host", "waker", "worker"]);
+    for (const reporter of DEVICE_REPORTERS) {
+      expect(reporter).toMatch(backend);
+      const fetchImpl = ok();
+      await createDeviceReporter({ reporter, collect: async () => manifest, fetchImpl: fetchImpl as never }).report("https://x", "k", {});
+      expect(bodyOf(fetchImpl, 0).reporter).toBe(reporter);
+    }
+  });
+
+  it("a change of capabilities is sent at once (a flag turned off says []); unknown flags leave them out", async () => {
+    const fetchImpl = ok();
+    const r = createDeviceReporter({ reporter: "waker", collect: async () => manifest, now: () => 0, fetchImpl: fetchImpl as never });
+    await r.report("https://x", "k", { wakesAgents: true });
+    await r.report("https://x", "k", { wakesAgents: true });
+    await r.report("https://x", "k", { wakesAgents: false });
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(bodyOf(fetchImpl, 0).manifest.capabilities).toEqual(["wake.agent"]);
+    expect(bodyOf(fetchImpl, 1).manifest.capabilities).toEqual([]);
+    // Unknown is not a change: nothing is due.
+    await r.report("https://x", "k", () => undefined);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    const later = ok();
+    await createDeviceReporter({ reporter: "waker", collect: async () => manifest, fetchImpl: later as never }).report("https://x", "k", () => undefined);
+    expect(bodyOf(later, 0).manifest).not.toHaveProperty("capabilities");
+  });
+
+  it("keepReporting: reports at once, then never more than 10 minutes apart, and stops when told", async () => {
+    vi.useFakeTimers();
+    const sentAt: number[] = [];
+    const fetchImpl = vi.fn(async () => {
+      sentAt.push(Date.now());
+      // A plain answer: only microtasks between the fake timers.
+      return { ok: true, status: 200, json: async () => ({}) } as unknown as Response;
+    });
+    const start = Date.now();
+    const r = createDeviceReporter({ reporter: "host", collect: async () => manifest, now: () => Date.now(), fetchImpl: fetchImpl as never });
+    const stop = r.keepReporting("https://x", "k", { hostsServices: true });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(sentAt).toEqual([start]);
+    await vi.advanceTimersByTimeAsync(61 * 60_000);
+    const gaps = sentAt.slice(1).map((at, i) => at - sentAt[i]!);
+    expect(gaps.length).toBeGreaterThanOrEqual(6);
+    for (const gap of gaps) expect(gap).toBeLessThanOrEqual(10 * 60_000);
+    expect(Date.now() - sentAt.at(-1)!).toBeLessThanOrEqual(10 * 60_000);
+    expect(bodyOf(fetchImpl as never, 0)).toEqual({ reporter: "host", manifest: { ...manifest, capabilities: ["serve.http"] } });
+    stop();
+    const n = fetchImpl.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(60 * 60_000);
+    expect(fetchImpl).toHaveBeenCalledTimes(n);
+  });
+
+  it("one send at a time: a slow pod never piles reports up", async () => {
+    let release!: () => void;
+    const fetchImpl = vi.fn(() => new Promise<Response>((res) => (release = () => res(new Response("{}", { status: 200 })))));
+    const r = createDeviceReporter({ reporter: "worker", collect: async () => manifest, now: () => 0, fetchImpl: fetchImpl as never });
+    const first = r.report("https://x", "k", { wakesAgents: true });
+    await vi.waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(1));
+    await r.report("https://x", "k", { wakesAgents: false });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    release();
+    await first;
   });
 
   it("a pod without the door (404) is left alone for an hour; a thrown fetch never throws", async () => {
     let t = 0;
     const fetchImpl = vi.fn(async () => new Response("nf", { status: 404 }));
-    const r = createDeviceReporter({ collect: async () => manifest, now: () => t, fetchImpl: fetchImpl as never });
+    const r = createDeviceReporter({ reporter: "worker", collect: async () => manifest, now: () => t, fetchImpl: fetchImpl as never });
     await r.report("https://old.pod", "k");
     t = MANIFEST_TTL_MS + 1;
-    await r.report("https://old.pod", "k");
+    await r.report("https://old.pod", "k", { wakesAgents: true });
     expect(fetchImpl).toHaveBeenCalledTimes(1);
-    const boom = createDeviceReporter({ collect: async () => manifest, fetchImpl: (async () => { throw new Error("net"); }) as never });
+    const boom = createDeviceReporter({ reporter: "worker", collect: async () => manifest, fetchImpl: (async () => { throw new Error("net"); }) as never });
     await expect(boom.report("https://x", "k")).resolves.toBeUndefined();
+    await expect(boom.report("https://x", "k", () => { throw new Error("flags"); })).resolves.toBeUndefined();
   });
 
   it("never sends an invalid manifest", async () => {
     const fetchImpl = vi.fn();
-    const r = createDeviceReporter({ collect: async () => ({ manifestVersion: 1, capabilities: ["NOPE"] }) as never, fetchImpl: fetchImpl as never, log: () => {} });
+    const r = createDeviceReporter({ reporter: "worker", collect: async () => ({ manifestVersion: 1, capabilities: ["NOPE"] }) as never, fetchImpl: fetchImpl as never, log: () => {} });
     await r.report("https://x", "k");
     expect(fetchImpl).not.toHaveBeenCalled();
   });

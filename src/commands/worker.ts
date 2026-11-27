@@ -66,7 +66,7 @@ import { hubGet, resolveHubConfig } from "../lib/hub-client.js";
 import { unknownAgentMessage } from "../lib/agents-config.js";
 import { resolveAgentUserId } from "../lib/credential-class.js";
 import { ensureComputerEnrolled } from "../lib/device-connect.js";
-import { deviceReporter, type ComputerFlags } from "../lib/device-manifest.js";
+import { createDeviceReporter, type DeviceReporter } from "../lib/device-manifest.js";
 import { createMcpClient, McpReplyCappedError, type McpCallClient } from "../lib/mcp-call.js";
 import {
   AccountPool,
@@ -2110,10 +2110,15 @@ export async function workerCommand(opts: WorkerOptions): Promise<void> {
   // This computer's host jobs (one installer, reconciliation f75fbb48 §3.3):
   // what the person approved on the pod gets installed, updated, removed and
   // checked here, as THIS computer (its own key), one runner per computer.
-  const host = await startHostRunner(cfg.podUrl, enrol.computerKey, opts);
+  const device = createDeviceReporter({ reporter: "worker", log: (l) => say(`device: ${l}`) });
+  const host = await startHostRunner(cfg.podUrl, enrol.computerKey, opts, device);
+  // On a timer, not beside each poll: a poll can wait hours (`--interval`, backoff), and
+  // capabilities the pod has not heard about for 30 min are dropped.
+  const stopReporting = device.keepReporting(cfg.podUrl, enrol.computerKey, { hostsServices: !!host });
   const stopAll = () => {
     stop();
     host?.stop.abort();
+    stopReporting();
   };
   process.removeListener("SIGTERM", stop);
   process.removeListener("SIGINT", stop);
@@ -2125,8 +2130,6 @@ export async function workerCommand(opts: WorkerOptions): Promise<void> {
   let failures = 0;
   let paused = false;
   while (!stopping) {
-    // Beside each poll, this computer says what it is (probes cached ~10 min, never throws).
-    void deviceReporter.report(cfg.podUrl, enrol.computerKey, computerFlags(cfg.podUrl, enrol.computerKey, !!host));
     try {
       const r = await worker.tick();
       failures = 0;
@@ -2163,21 +2166,8 @@ export async function workerCommand(opts: WorkerOptions): Promise<void> {
     }
   }
   host?.stop.abort();
+  stopReporting();
   await hostLoop;
-}
-
-/**
- * This computer's flags for its device manifest, read only when a report is due:
- * "Wakes agents" from the pod (the wake list), "Installs from the pod" from whether
- * this process runs the host runner. A pod that cannot be read leaves a flag out.
- */
-function computerFlags(podUrl: string, computerKey: string, hostsServices: boolean) {
-  return async (): Promise<ComputerFlags> => {
-    const { fetchWakeList } = await import("./waker.js");
-    // empty-ok: an unreadable pod leaves "wakesAgents" out of the manifest (never invented)
-    const list = await fetchWakeList(podUrl, computerKey).catch(() => undefined);
-    return { hostsServices, ...(list ? { wakesAgents: list.wakesAgents } : {}) };
-  };
 }
 
 /**
@@ -2188,7 +2178,8 @@ function computerFlags(podUrl: string, computerKey: string, hostsServices: boole
 async function startHostRunner(
   podUrl: string,
   computerKey: string,
-  opts: Pick<WorkerOptions, "hostConfig" | "dryRun">
+  opts: Pick<WorkerOptions, "hostConfig" | "dryRun">,
+  device: DeviceReporter
 ): Promise<{ stop: AbortController; loop: () => Promise<void>; once: () => Promise<void> } | undefined> {
   if (opts.dryRun) {
     say("host: --dry-run: this computer's host jobs are not leased");
@@ -2197,7 +2188,7 @@ async function startHostRunner(
   const { createHostRunner, runHostLoop } = await import("../lib/host/runner.js");
   let deps;
   try {
-    deps = createHostRunner({ podUrl, computerKey, hostConfig: opts.hostConfig, log: (l) => say(`host: ${l}`) });
+    deps = createHostRunner({ podUrl, computerKey, hostConfig: opts.hostConfig, log: (l) => say(`host: ${l}`), device });
   } catch (err) {
     say(`host: this computer's host jobs do not run: ${(err as Error).message}`);
     return undefined;
@@ -2214,12 +2205,19 @@ export async function hostOnlyCommand(opts: Pick<WorkerOptions, "once" | "hostCo
   const enrol = await ensureComputerEnrolled(cfg.podUrl, "run `synap worker --host-only` again", { interactive: false });
   if (!enrol.enrolled) throw new Error(enrol.message);
   const { createHostRunner, hostRunnerLine, runHostLoop } = await import("../lib/host/runner.js");
-  const deps = createHostRunner({ podUrl: cfg.podUrl, computerKey: enrol.computerKey, hostConfig: opts.hostConfig, log: say });
+  const device = createDeviceReporter({ reporter: "host", log: (l) => say(`device: ${l}`) });
+  const deps = createHostRunner({ podUrl: cfg.podUrl, computerKey: enrol.computerKey, hostConfig: opts.hostConfig, log: say, device });
   say(hostRunnerLine(deps, cfg.podUrl));
-  void deviceReporter.report(cfg.podUrl, enrol.computerKey, computerFlags(cfg.podUrl, enrol.computerKey, true));
+  // The same flags as the manifest on each lease (also filed as `host`), so the two never disagree.
+  // The timer covers a long job, during which no lease is sent.
+  const stopReporting = device.keepReporting(cfg.podUrl, enrol.computerKey, { hostsServices: true });
   const stop = new AbortController();
   for (const sig of ["SIGINT", "SIGTERM"] as const) process.once(sig, () => stop.abort());
-  await runHostLoop(deps, { idleMs: 10_000, errorWaitMs: 30_000, once: opts.once, signal: stop.signal });
+  try {
+    await runHostLoop(deps, { idleMs: 10_000, errorWaitMs: 30_000, once: opts.once, signal: stop.signal });
+  } finally {
+    stopReporting();
+  }
 }
 
 /**

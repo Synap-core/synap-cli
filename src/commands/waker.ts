@@ -486,12 +486,14 @@ export async function wakerCommand(opts: { interval?: string; once?: boolean; pr
   const intervalMs = parseWakerInterval(opts.interval, parseInterval);
   const { podUrl, computerKey } = await computerOfThisPod();
   const extra = opts.protocols ? ["--protocols", opts.protocols] : [];
-  const { deviceReporter } = await import("../lib/device-manifest.js");
+  const { createDeviceReporter } = await import("../lib/device-manifest.js");
+  const device = createDeviceReporter({ reporter: "waker", log: (l) => console.error(`[synap-waker] device: ${l}`) });
   const waker = createWaker({
     podUrl,
     computerKey,
     startWorker: (name) => spawnWorker(name, extra),
-    onPoll: (list) => void deviceReporter.report(podUrl, computerKey, { wakesAgents: list.wakesAgents }),
+    // The poll (every 5-60 s) is the waker's timer: the report goes when due or when "Wakes agents" changed.
+    onPoll: (list) => void device.report(podUrl, computerKey, { wakesAgents: list.wakesAgents }),
   });
   console.log(`[synap-waker] waking this computer's agents for ${podUrl}, every ${intervalMs / 1000}s`);
   const stop = new AbortController();

@@ -11,12 +11,18 @@
  * omits its field, nothing is invented; no storage tier is guessed.
  *
  * Doors (backend `computer-report.ts`, `host-jobs.ts`):
- *   POST /api/hub/computers/me/report  { manifest }   every computer's own key
- *   POST /api/hub/host-jobs/lease      { …, manifest } the host runner (extra field ignored by older pods)
+ *   POST /api/hub/computers/me/report  { manifest, reporter } every computer's own key
+ *   POST /api/hub/host-jobs/lease      { …, manifest }       the host runner (the pod names it `host`)
  * The pod answers `device.manifest`: accepted | absent | refused.
+ *
+ * One computer runs several of these processes, each knowing part of what it
+ * can do. Each names itself (`reporter`), the pod keeps each one's
+ * capabilities apart and counts them for 30 minutes after its last report, so
+ * a running process re-reports well inside that window.
  */
 
 import { execFile } from "node:child_process";
+import { readFile } from "node:fs/promises";
 import os from "node:os";
 
 export const DEVICE_MANIFEST_VERSION = 1 as const;
@@ -24,6 +30,24 @@ export const DEVICE_MANIFEST_VERSION = 1 as const;
 export const MANIFEST_TTL_MS = 10 * 60_000;
 /** A pod that does not know the report door is not asked again for this long. */
 export const REPORT_UNSUPPORTED_MS = 60 * 60_000;
+/**
+ * A running process reports at least this often: the pod drops a reporter's
+ * capabilities 30 min after its last report (`DEVICE_CAPABILITY_TTL_MS`) and
+ * counts the device online for 5 min after a report (`DEVICE_ONLINE_WINDOW_MS`).
+ */
+export const REPORT_EVERY_MS = 4 * 60_000;
+/** How often {@link DeviceReporter.keepReporting} asks whether a report is due (it costs nothing when none is). */
+export const REPORT_CHECK_MS = 30_000;
+
+/** The backend's `DEVICE_REPORTER`: a name the pod does not match is filed under its default, `runner`. */
+export const DEVICE_REPORTER_NAME = /^[a-z][a-z0-9-]{0,31}$/;
+/**
+ * The processes of this CLI that report. `waker` and `host` are also the names
+ * the pod gives the waker's polls and each host lease, so a process's own
+ * reports and the pod's bookkeeping of it land on one entry.
+ */
+export const DEVICE_REPORTERS = ["waker", "worker", "host"] as const;
+export type DeviceReporterName = (typeof DEVICE_REPORTERS)[number];
 
 export interface DeviceDisk {
   mount: string;
@@ -33,7 +57,7 @@ export interface DeviceDisk {
 }
 export interface DeviceManifest {
   manifestVersion: 1;
-  identity?: { os?: string; arch?: string; hostname?: string };
+  identity?: { os?: string; osVersion?: string; arch?: string; hostname?: string };
   resources?: {
     cpu?: { model?: string; cores?: number };
     memoryMb?: number;
@@ -129,6 +153,13 @@ export function parseSystemProfilerGpus(text: string): Array<{ model: string; vr
   return out;
 }
 
+/** `/etc/os-release` → its `VERSION_ID` ("24.04"), quotes removed; undefined when absent. */
+export function parseOsReleaseVersion(text: string): string | undefined {
+  const m = /^VERSION_ID=(.*)$/m.exec(text);
+  const v = m?.[1]?.trim().replace(/^(["'])(.*)\1$/, "$2").trim();
+  return v ? v.slice(0, 120) : undefined;
+}
+
 // ─── Probes ─────────────────────────────────────────────────────────────────
 
 /** Runs a program with a timeout; rejects on any failure (missing, non-zero, timeout). */
@@ -143,8 +174,9 @@ export const runProbe: RunProbe = (cmd, args, timeoutMs) =>
 
 export interface CollectDeps {
   run?: RunProbe;
-  os?: Pick<typeof os, "cpus" | "totalmem" | "platform" | "arch" | "hostname">;
+  os?: Pick<typeof os, "cpus" | "totalmem" | "platform" | "arch" | "hostname" | "release">;
   platform?: NodeJS.Platform;
+  readText?: (path: string) => Promise<string>;
 }
 
 /** One probe, never throws: undefined when it failed. */
@@ -162,6 +194,7 @@ export async function collectDeviceManifest(flags: ComputerFlags = {}, deps: Col
   const run = deps.run ?? runProbe;
   const o = deps.os ?? os;
   const platform = deps.platform ?? process.platform;
+  const readText = deps.readText ?? ((p: string) => readFile(p, "utf8"));
 
   const identity = await attempt(() => {
     const id: NonNullable<DeviceManifest["identity"]> = {};
@@ -185,13 +218,15 @@ export async function collectDeviceManifest(flags: ComputerFlags = {}, deps: Col
     return mb;
   });
 
-  const [disks, nvidia, mac] = await Promise.all([
+  const [disks, nvidia, mac, osVersion] = await Promise.all([
     attempt(async () => parseDf(await run("df", ["-kP"], 5_000))),
     attempt(async () => parseNvidiaSmi(await run("nvidia-smi", ["--query-gpu=name,memory.total", "--format=csv,noheader"], 3_000))),
     platform === "darwin"
       ? attempt(async () => parseSystemProfilerGpus(await run("system_profiler", ["SPDisplaysDataType", "-json"], 1_500)))
       : Promise.resolve(undefined),
+    attempt(() => readOsVersion(platform, run, readText, o)),
   ]);
+  if (identity && osVersion) identity.osVersion = osVersion;
   const gpus = [...(nvidia ?? []), ...(mac ?? [])].slice(0, 32);
 
   const resources: NonNullable<DeviceManifest["resources"]> = {};
@@ -209,6 +244,24 @@ export async function collectDeviceManifest(flags: ComputerFlags = {}, deps: Col
   };
 }
 
+/**
+ * The OS release a person recognises: the macOS version (`os.release()` there
+ * is the Darwin kernel's), the distribution's on Linux; the kernel release
+ * when neither can be read.
+ */
+async function readOsVersion(
+  platform: NodeJS.Platform,
+  run: RunProbe,
+  readText: (path: string) => Promise<string>,
+  o: Pick<typeof os, "release">
+): Promise<string | undefined> {
+  let v: string | undefined;
+  if (platform === "darwin") v = (await attempt(async () => (await run("sw_vers", ["-productVersion"], 1_500)).trim()))?.slice(0, 120);
+  if (platform === "linux") v = await attempt(async () => parseOsReleaseVersion(await readText("/etc/os-release")));
+  if (!v) v = (await attempt(() => o.release().trim()))?.slice(0, 120);
+  return v || undefined;
+}
+
 // ─── Local mirror of the schema's checks ────────────────────────────────────
 
 const CAPABILITY_NAME = /^[a-z][a-z0-9-]*(\.[a-z0-9][a-z0-9-]*)+$/;
@@ -223,6 +276,7 @@ export function validateDeviceManifest(m: unknown): string | null {
   const id = x.identity;
   if (id !== undefined) {
     if (id.os !== undefined && !word(id.os, 64)) return "identity.os";
+    if (id.osVersion !== undefined && !word(id.osVersion, 120)) return "identity.osVersion";
     if (id.arch !== undefined && !word(id.arch, 32)) return "identity.arch";
     if (id.hostname !== undefined && !word(id.hostname, 253)) return "identity.hostname";
   }
@@ -250,10 +304,16 @@ export function validateDeviceManifest(m: unknown): string | null {
 
 // ─── Cache + report ─────────────────────────────────────────────────────────
 
-/** Flags now, or a resolver run only when a send is due (so a poll loop pays nothing between sends). */
-export type FlagsSource = ComputerFlags | (() => Promise<ComputerFlags>);
+/**
+ * What this process can do now, or a reader of it (called on every check, so
+ * it must be cheap). Undefined means unknown: the report then carries no
+ * capabilities and the pod keeps this reporter's last ones.
+ */
+export type FlagsSource = ComputerFlags | undefined | (() => ComputerFlags | undefined);
 
 export interface DeviceReporterDeps {
+  /** Which process this is: the pod keeps each reporter's capabilities apart. */
+  reporter: DeviceReporterName;
   collect?: (flags: ComputerFlags) => Promise<DeviceManifest>;
   now?: () => number;
   fetchImpl?: typeof fetch;
@@ -261,13 +321,23 @@ export interface DeviceReporterDeps {
 }
 
 export interface DeviceReporter {
-  /** The manifest, probes cached for {@link MANIFEST_TTL_MS}; capabilities follow `flags` on every call. */
+  /**
+   * The manifest, probes cached for {@link MANIFEST_TTL_MS}. Its capabilities
+   * follow `flags` on every call, an empty list included (a flag turned off is
+   * said); without `flags` they are left out.
+   */
   manifest(flags?: ComputerFlags): Promise<DeviceManifest | undefined>;
-  /** Sends the manifest to the report door when due (at most every TTL); never throws. */
+  /**
+   * Sends the manifest to the report door when due: {@link REPORT_EVERY_MS}
+   * after the last send, or at once when the capabilities changed. Never throws.
+   */
   report(podUrl: string, computerKey: string, flags?: FlagsSource): Promise<void>;
+  /** Reports now, then whenever due while the process runs (an unref'd timer). Returns the stop. */
+  keepReporting(podUrl: string, computerKey: string, flags: FlagsSource): () => void;
 }
 
-export function createDeviceReporter(deps: DeviceReporterDeps = {}): DeviceReporter {
+export function createDeviceReporter(deps: DeviceReporterDeps): DeviceReporter {
+  const reporter = deps.reporter;
   const collect = deps.collect ?? ((f) => collectDeviceManifest(f));
   const now = deps.now ?? Date.now;
   const f = deps.fetchImpl ?? fetch;
@@ -275,13 +345,15 @@ export function createDeviceReporter(deps: DeviceReporterDeps = {}): DeviceRepor
   let cached: { at: number; manifest: DeviceManifest } | undefined;
   let inflight: Promise<DeviceManifest | undefined> | undefined;
   let lastSentAt = -Infinity;
+  let lastSentCapabilities: string | undefined;
   let unsupportedUntil = -Infinity;
+  let sending = false;
   let saidInvalid = false;
 
-  async function manifest(flags: ComputerFlags = {}): Promise<DeviceManifest | undefined> {
+  async function manifest(flags?: ComputerFlags): Promise<DeviceManifest | undefined> {
     if (!cached || now() - cached.at >= MANIFEST_TTL_MS) {
       inflight ??= attempt(async () => {
-        const m = await collect(flags);
+        const m = await collect(flags ?? {});
         const bad = validateDeviceManifest(m);
         if (bad) {
           if (!saidInvalid) log(`device manifest not sent (${bad})`);
@@ -296,43 +368,58 @@ export function createDeviceReporter(deps: DeviceReporterDeps = {}): DeviceRepor
       const fresh = await inflight;
       if (!fresh) return undefined;
     }
-    const base = cached!.manifest;
-    const capabilities = capabilitiesFrom(flags);
-    const { capabilities: _old, ...rest } = base;
-    return { ...rest, ...(capabilities.length ? { capabilities } : {}) };
+    const { capabilities: _old, ...rest } = cached!.manifest;
+    return flags ? { ...rest, capabilities: capabilitiesFrom(flags) } : rest;
+  }
+
+  async function report(podUrl: string, computerKey: string, flags?: FlagsSource): Promise<void> {
+    // One send at a time: a slow pod never piles reports up behind it.
+    if (sending) return;
+    sending = true;
+    try {
+      const t = now();
+      if (t < unsupportedUntil) return;
+      const resolved = typeof flags === "function" ? flags() : flags;
+      const capabilities = resolved ? capabilitiesFrom(resolved).join(",") : undefined;
+      const changed = capabilities !== undefined && capabilities !== lastSentCapabilities;
+      if (!changed && t - lastSentAt < REPORT_EVERY_MS) return;
+      const m = await manifest(resolved);
+      if (!m) return;
+      // A failed send waits its turn as well: never a retry storm.
+      lastSentAt = t;
+      if (capabilities !== undefined) lastSentCapabilities = capabilities;
+      const res = await f(`${podUrl.replace(/\/+$/, "")}/api/hub/computers/me/report`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${computerKey}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ reporter, manifest: m }),
+        signal: AbortSignal.timeout(15_000),
+      });
+      if ([404, 405, 501].includes(res.status)) {
+        // A pod that predates the registry: say nothing is wrong, ask again in an hour.
+        unsupportedUntil = t + REPORT_UNSUPPORTED_MS;
+        return;
+      }
+      if (!res.ok) return;
+      // empty-ok: an unreadable ack only drops the refused-manifest note; the report itself went through
+      const ack = (await res.json().catch(() => null)) as { device?: { manifest?: string; error?: string } } | null;
+      if (ack?.device?.manifest === "refused") log(`the pod refused this computer's device manifest: ${ack.device.error ?? "unknown field"}`);
+    // empty-ok: a report is best effort: the computer keeps working, the next due send tries again
+    } catch {
+    } finally {
+      sending = false;
+    }
   }
 
   return {
     manifest,
-    async report(podUrl, computerKey, flags = {}) {
-      try {
-        const t = now();
-        if (t < unsupportedUntil || t - lastSentAt < MANIFEST_TTL_MS) return;
-        const resolved = typeof flags === "function" ? await attempt(flags) : flags;
-        const m = await manifest(resolved ?? {});
-        if (!m) return;
-        lastSentAt = t; // a failed send waits a TTL as well: never a retry storm
-        const res = await f(`${podUrl.replace(/\/+$/, "")}/api/hub/computers/me/report`, {
-          method: "POST",
-          headers: { Authorization: `Bearer ${computerKey}`, "Content-Type": "application/json" },
-          body: JSON.stringify({ manifest: m }),
-          signal: AbortSignal.timeout(15_000),
-        });
-        if ([404, 405, 501].includes(res.status)) {
-          // A pod that predates the registry: say nothing is wrong, ask again in an hour.
-          unsupportedUntil = t + REPORT_UNSUPPORTED_MS;
-          return;
-        }
-        if (!res.ok) return;
-        // empty-ok: an unreadable ack only drops the refused-manifest note; the report itself went through
-        const ack = (await res.json().catch(() => null)) as { device?: { manifest?: string; error?: string } } | null;
-        if (ack?.device?.manifest === "refused") log(`the pod refused this computer's device manifest: ${ack.device.error ?? "unknown field"}`);
-      // empty-ok: a report is best effort: the computer keeps working, the next due send tries again
-      } catch {
-      }
+    report,
+    keepReporting(podUrl, computerKey, flags) {
+      const check = () => void report(podUrl, computerKey, flags);
+      check();
+      const timer = setInterval(check, REPORT_CHECK_MS);
+      // The timer never keeps a finished process alive.
+      timer.unref?.();
+      return () => clearInterval(timer);
     },
   };
 }
-
-/** The process's one reporter: the waker, the worker and the host runner share its cache. */
-export const deviceReporter: DeviceReporter = createDeviceReporter({ log: (l) => console.error(`[device] ${l}`) });
