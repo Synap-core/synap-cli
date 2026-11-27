@@ -4,7 +4,7 @@
 
 Synap CLI — connect AI agents to your data pod
 
-246 commands. Hidden commands and hidden options are omitted here (5 hidden commands); `cli.json` lists them with `"hidden": true`.
+247 commands. Hidden commands and hidden options are omitted here (5 hidden commands); `cli.json` lists them with `"hidden": true`.
 
 Every command also accepts `-h, --help`.
 
@@ -184,9 +184,10 @@ Every command also accepts `-h, --help`.
 - [`synap view`](#synap-view) — Manage views
   - [`synap view create`](#synap-view-create) — Create a view (table, kanban, bento, …)
   - [`synap view list`](#synap-view-list) — List views in the active workspace
-  - [`synap view arrange`](#synap-view-arrange) — Replace the widget arrangement of a bento view
+  - [`synap view arrange`](#synap-view-arrange) — Replace the cell arrangement of a bento view
 - [`synap explain`](#synap-explain) — Full capability map — what Synap can do and how (no network required)
 - [`synap open`](#synap-open) — Open in the Synap desktop app. Use: open <kind> <id> or open <id> (auto-resolves type)
+- [`synap surfaces`](#synap-surfaces) — Every surface one object carries: views, documents, bentos, cells and pages anchored to it
 - [`synap doc`](#synap-doc) — Create and update documents on the pod (markdown, or an html page)
   - [`synap doc create`](#synap-doc-create) — Create a new document: markdown, or an html page pod admin runs
   - [`synap doc update`](#synap-doc-update) — Update a document's content: the whole body, or one section (--section). Governed: an agent's edit is proposed.
@@ -194,8 +195,8 @@ Every command also accepts `-h, --help`.
 - [`synap cell`](#synap-cell) — Define and bundle frame cells for the Synap runtime
   - [`synap cell define`](#synap-cell-define) — Create or update a frame cell on the pod from ESM source
   - [`synap cell build`](#synap-cell-build) — Bundle a multi-file cell/app into a single ESM module the runtime expects
-- [`synap artifact`](#synap-artifact) — Create HTML artifacts as Synap cells: an HTML/JS page that opens in the desktop app and can read pod data
-  - [`synap artifact create`](#synap-artifact-create) — Define a cell from a local HTML file (governed: an agent key files a proposal)
+- [`synap artifact`](#synap-artifact) — Retired: an HTML artifact is an html document now (synap doc create --type html)
+  - [`synap artifact create`](#synap-artifact-create) — Retired alias of `synap doc create --type html --file <file>`: makes an html document (to define a cell from source: synap cell define)
 - [`synap connect-service`](#synap-connect-service) — Connect an external service (Google, GitHub, Notion, Linear, Slack, …)
 - [`synap tools`](#synap-tools) — Install, check and remove a capability's tool on this computer (connect/sync/disconnect/schema: deprecated, use `synap cap`)
   - [`synap tools list`](#synap-tools-list) — List the tools the pod records on this computer, with their state and last check
@@ -3094,6 +3095,7 @@ Create a view (table, kanban, bento, …)
 | `--profile <slug>` | Entity profile to display (passed as profileId) |  |
 | `--name <name>` | View name |  |
 | `--workspace <id>` | Workspace ID |  |
+| `--for <kind:id>` | Make the view for one object, e.g. entity:<id>: the view and its link land in one act (a surface on it; see synap surfaces) |  |
 | `--json` | JSON output |  |
 | `--pod-url <url>` | Pod URL override |  |
 | `--api-key <key>` | API key override |  |
@@ -3120,7 +3122,7 @@ List views in the active workspace
 synap view arrange [options] <viewId>
 ```
 
-Replace the widget arrangement of a bento view
+Replace the cell arrangement of a bento view
 
 | Argument | Required | Description |
 |---|---|---|
@@ -3128,7 +3130,7 @@ Replace the widget arrangement of a bento view
 
 | Option | Description | Default |
 |---|---|---|
-| `--file <path>` | JSON file containing widget layout (array or { widgets: [...] }) |  |
+| `--file <path>` | JSON file containing the cell layout (array or { widgets: [...] }) |  |
 | `--workspace <id>` | Workspace ID |  |
 | `--json` | JSON output |  |
 | `--pod-url <url>` | Pod URL override |  |
@@ -3139,8 +3141,8 @@ Examples:
   synap view arrange <viewId> --file layout.json
   echo '[{"id":"w1","kind":"widget","x":0,"y":0,"w":6,"h":4}]' | synap view arrange <viewId>
 
-Layout format (array of BentoWidget):
-  [{ "id": "<widgetId>", "kind": "widget|view|entity", "x": 0, "y": 0, "w": 6, "h": 4, "config": {} }]
+Layout format (array of bento cells; "widget" is the wire name of a plain cell):
+  [{ "id": "<cellId>", "kind": "widget|view|entity", "x": 0, "y": 0, "w": 6, "h": 4, "config": {} }]
 ```
 
 ## `synap explain`
@@ -3168,6 +3170,40 @@ Open in the Synap desktop app. Use: open <kind> <id> or open <id> (auto-resolves
 | `kind-or-id` | yes |  |
 | `id` | no |  |
 
+| Option | Description | Default |
+|---|---|---|
+| `--surface <surfaceId>` | Open the object on one surface attached to it (needs <kind> <id>; list them with synap surfaces) |  |
+
+## `synap surfaces`
+
+```
+synap surfaces [options] <kind> <id>
+```
+
+Every surface one object carries: views, documents, bentos, cells and pages anchored to it
+
+| Argument | Required | Description |
+|---|---|---|
+| `kind` | yes |  |
+| `id` | yes |  |
+
+| Option | Description | Default |
+|---|---|---|
+| `--workspace <id>` | Read in this workspace |  |
+| `--json` | JSON output |  |
+| `--pod-url <url>` | Pod URL override |  |
+| `--api-key <key>` | API key override |  |
+
+```text
+<kind>: entity | profile | workspace | project | track | playbook | session (a profile also by its slug).
+A store the pod could not read is listed as "unavailable": that is not "nothing there".
+
+Examples:
+  synap surfaces entity <id>
+  synap surfaces profile task --json
+  synap open entity <id> --surface <surfaceId>
+```
+
 ## `synap doc`
 
 ```
@@ -3193,6 +3229,7 @@ Create a new document: markdown, or an html page pod admin runs
 | `--file <path>` | Read content from a file (.html / .htm means --type html) |  |
 | `--type <type>` | markdown (default) or html: a page pod admin runs at /open/<id> in an isolated frame (inline only, no CDN, at most 2 MB) |  |
 | `--workspace <id>` | Workspace to create the document in |  |
+| `--for <kind:id>` | Make the document for one object, e.g. entity:<id>: the document and its link land in one act (a surface on it; see synap surfaces) |  |
 | `--open` | Open in the Synap desktop app after creation |  |
 | `--json` | JSON output |  |
 | `--pod-url <url>` | Pod URL override |  |
@@ -3204,6 +3241,7 @@ Examples:
   synap doc create --title "My Notes" --file ./notes.md --open
   echo "# Draft" | synap doc create --title "Draft"
   synap doc create --title "Weekly report" --file ./report.html
+  synap doc create --title "Brief" --file ./brief.md --for entity:<id>
 ```
 
 ## `synap doc update`
@@ -3289,7 +3327,7 @@ Create or update a frame cell on the pod from ESM source
 | `--type-key <key>` | Explicit typeKey (default: generated:<slug>) |  |
 | `--deps <json>` | Dependency map JSON. Leave it out: the frame refuses runtime deps, so bundle libraries with `synap cell build` instead |  |
 | `--view-types <list>` | Comma-separated view types this cell can render as a VIEW RENDERER, e.g. "list,table,kanban". Omit to leave an existing affinity untouched; pass "" to clear it |  |
-| `--content-kind <kind>` | What this cell renders — entity-detail \| entity-card \| entity-profile \| collection \| widget (default: widget, which is placeable but never offered as a profile renderer) |  |
+| `--content-kind <kind>` | What this cell renders — entity-detail \| entity-card \| entity-profile \| collection \| widget (default: widget, the wire value of a plain cell: placeable, but never offered as a profile renderer) |  |
 | `--workspace <id>` | Workspace to scope the cell to (default: your active workspace lens — run `synap lens` to see it) |  |
 | `--description <text>` | Short description |  |
 | `--open` | Open in the Synap desktop app after define |  |
@@ -3333,7 +3371,7 @@ Bundle a multi-file cell/app into a single ESM module the runtime expects
 | `--type-key <key>` | Explicit typeKey (used with --define) |  |
 | `--deps <json>` | Override the emitted deps map (JSON). The frame refuses runtime deps; leave it out |  |
 | `--view-types <list>` | Comma-separated view-renderer affinity (used with --define), e.g. "list,table" |  |
-| `--content-kind <kind>` | entity-detail \| entity-card \| entity-profile \| collection \| widget (used with --define) |  |
+| `--content-kind <kind>` | entity-detail \| entity-card \| entity-profile \| collection \| widget (= a plain cell; used with --define) |  |
 | `--workspace <id>` | Workspace (used with --define) |  |
 | `--description <text>` | Description (used with --define) |  |
 | `--open` | Open in browser after define (used with --define) |  |
@@ -3362,7 +3400,7 @@ Examples:
 synap artifact [options] [command]
 ```
 
-Create HTML artifacts as Synap cells: an HTML/JS page that opens in the desktop app and can read pod data
+Retired: an HTML artifact is an html document now (synap doc create --type html)
 
 Subcommands: [`create`](#synap-artifact-create)
 
@@ -3372,12 +3410,12 @@ Subcommands: [`create`](#synap-artifact-create)
 synap artifact create [options]
 ```
 
-Define a cell from a local HTML file (governed: an agent key files a proposal)
+Retired alias of `synap doc create --type html --file <file>`: makes an html document (to define a cell from source: synap cell define)
 
 | Option | Description | Default |
 |---|---|---|
 | `--html <file>` | HTML file to upload (required) |  |
-| `--name <name>` | Cell name (default: filename) |  |
+| `--name <name>` | Document title (default: filename) |  |
 | `--workspace <id>` | Workspace context |  |
 | `--open` | Open in the Synap desktop app after creation |  |
 | `--json` | JSON output |  |

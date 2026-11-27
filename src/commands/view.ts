@@ -23,12 +23,15 @@ import chalk from "chalk";
 import { log } from "../utils/logger.js";
 import { resolveHubConfig, resolveUserId, hubGet, hubPost } from "../lib/hub-client.js";
 import { unwrapList } from "../lib/unwrapList.js";
+import { createSurfaceFor, parseForAnchor, reportSurfaceCreate, type CreateSurfaceRequest } from "./surfaces.js";
 
 export interface ViewCreateOpts {
   type: string;
   profile?: string;
   name?: string;
   workspace?: string;
+  /** `<kind>:<id>`: make the view FOR that object, in one act (POST /surfaces). */
+  for?: string;
   json?: boolean;
   podUrl?: string;
   apiKey?: string;
@@ -43,11 +46,38 @@ export interface ViewListOpts {
 }
 
 export async function viewCreate(opts: ViewCreateOpts): Promise<void> {
+  const anchor = opts.for !== undefined ? parseForAnchor(opts.for) : null;
+  if (opts.for !== undefined && !anchor) {
+    log.error(`--for takes <kind>:<id> (e.g. entity:<uuid>), not "${opts.for}".`);
+    process.exit(1);
+  }
+  if (anchor && opts.profile) {
+    log.error("--profile and --for do not go together yet: make the view with --for, then set what it shows.");
+    process.exit(1);
+  }
   try {
     const cfg = await resolveHubConfig(opts);
-    const userId = await resolveUserId(cfg);
-
     const name = opts.name ?? `${opts.type} view`;
+
+    // --for: the view and its link to the object are ONE governed act
+    // (POST /surfaces). Stored in the object's space unless --workspace says.
+    if (anchor) {
+      const req: CreateSurfaceRequest = {
+        anchor,
+        body: opts.type === "bento" || opts.type === "whiteboard" ? opts.type : "view",
+        title: name,
+        spec: {
+          ...(opts.type !== "bento" && opts.type !== "whiteboard" ? { viewType: opts.type } : {}),
+          ...(opts.workspace ? { workspaceId: opts.workspace } : {}),
+        },
+      };
+      const made = await createSurfaceFor(cfg, req);
+      if (opts.json) console.log(JSON.stringify(made, null, 2));
+      else reportSurfaceCreate(made, req, cfg.podUrl);
+      return;
+    }
+
+    const userId = await resolveUserId(cfg);
     const workspaceId = opts.workspace ?? cfg.workspaceId;
 
     // Resolve profile slug → UUID (backend requires UUID for profileId)
@@ -73,18 +103,19 @@ export async function viewCreate(opts: ViewCreateOpts): Promise<void> {
 
     const res = await hubPost("/views", body, cfg) as Record<string, unknown>;
 
+    const isProposed = res.status === "proposed" || Boolean(res.proposalId);
+    const created = res.view as Record<string, unknown> | undefined;
+    const id = created?.id ?? res.id;
+
     if (opts.json) {
       console.log(JSON.stringify(res, null, 2));
       return;
     }
 
-    const isProposed = res.status === "proposed" || Boolean(res.proposalId);
     if (isProposed) {
       log.warn(`Queued for approval (proposal: ${String(res.proposalId ?? "")})`);
       if (res.reviewUrl) log.dim(`  Review: ${String(res.reviewUrl)}`);
     } else {
-      const created = res.view as Record<string, unknown> | undefined;
-      const id = created?.id ?? res.id;
       log.success(`View created: ${String(res.name ?? created?.name ?? name)}`);
       log.dim(`id: ${String(id ?? "")}`);
       if (res.type ?? created?.type) {
@@ -184,7 +215,7 @@ export async function viewArrange(
     } else {
       log.error(
         "Provide layout JSON via --file <path> or pipe stdin.\n" +
-          "  Format: array of { key, x, y, w?, h?, config? } objects (key = a widget key from `synap_list_widgets`), or { widgets: [...] }."
+          "  Format: array of { key, x, y, w?, h?, config? } objects (key = a cell key from `synap_list_cells`), or { widgets: [...] }."
       );
       process.exit(1);
     }

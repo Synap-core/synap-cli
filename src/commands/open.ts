@@ -5,6 +5,7 @@
  * synap open cell <typeKey>
  * synap open document <id>
  * synap open <id>                            ← resolves type automatically
+ * synap open <kind> <id> --surface <surfaceId> ← the object, on one surface attached to it
  *
  * Sends a synap:// deep link to the Electron browser app. The OS routes the
  * URL to the registered handler. On macOS we target the installed Synap.app
@@ -18,6 +19,7 @@ import { homedir } from "os";
 import { join } from "path";
 import { openAppUrl } from "@synap-core/hub-rest-client";
 import { HubError, HubNetworkError, hubGet, renderHubError, resolveHubConfig } from "../lib/hub-client.js";
+import { isUuid } from "../lib/id.js";
 import { log } from "../utils/logger.js";
 
 /**
@@ -196,4 +198,42 @@ export async function resolveAndOpen(id: string): Promise<void> {
     );
     process.exit(1);
   }
+}
+
+/**
+ * `synap open <kind-or-id> [id] [--surface <surfaceId>]`.
+ *
+ * `open <kind> <id>`: the browser's object-nav.ts is the one route table for
+ * openable kinds; the CLI does not duplicate it (an unroutable kind still opens
+ * the app and the printed link shows what was sent). `--surface` rides as the
+ * link's `surface` parameter (`synap://open/<kind>/<id>?surface=<id>`, the
+ * grammar of hub-rest-client `openPath`), so it needs the kind and the id.
+ * `open <id>`: resolve the type on the pod first.
+ */
+export async function openCommand(
+  kindOrId: string,
+  id: string | undefined,
+  opts: { surface?: string } = {},
+): Promise<void> {
+  if (opts.surface !== undefined && !id) {
+    log.error(
+      "--surface needs the object's kind and id: synap open <kind> <id> --surface <surfaceId>",
+    );
+    process.exit(1);
+  }
+  if (opts.surface !== undefined && !isUuid(opts.surface)) {
+    log.error(
+      `--surface takes a surface id (a UUID; list them with synap surfaces ${kindOrId} ${id}), not "${opts.surface}".`,
+    );
+    process.exit(1);
+  }
+  if (id) {
+    await openInBrowser({
+      kind: kindOrId,
+      id,
+      ...(opts.surface !== undefined ? { params: { surface: opts.surface } } : {}),
+    });
+    return;
+  }
+  await resolveAndOpen(kindOrId);
 }

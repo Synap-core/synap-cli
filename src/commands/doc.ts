@@ -32,6 +32,7 @@ import {
 } from "../lib/hub-client.js";
 import { writeGovernance } from "../lib/capture-lane.js";
 import { openInBrowser } from "./open.js";
+import { createSurfaceFor, parseForAnchor, reportSurfaceCreate, type CreateSurfaceRequest } from "./surfaces.js";
 
 export interface DocCreateOpts {
   title: string;
@@ -40,6 +41,8 @@ export interface DocCreateOpts {
   /** "markdown" (default) or "html"; a `.html` / `.htm` --file means html. */
   type?: string;
   workspace?: string;
+  /** `<kind>:<id>`: make the document FOR that object, in one act (POST /surfaces). */
+  for?: string;
   open?: boolean;
   json?: boolean;
   podUrl?: string;
@@ -113,9 +116,38 @@ export function resolveDocType(
 }
 
 export async function docCreate(opts: DocCreateOpts): Promise<void> {
+  const anchor = opts.for !== undefined ? parseForAnchor(opts.for) : null;
+  if (opts.for !== undefined && !anchor) {
+    log.error(`--for takes <kind>:<id> (e.g. entity:<uuid>), not "${opts.for}".`);
+    process.exit(1);
+  }
   try {
     const type = resolveDocType(opts.type, opts.file);
     const cfg = await resolveHubConfig(opts);
+
+    // --for: the document and its link to the object are ONE governed act
+    // (POST /surfaces). Stored in the object's space unless --workspace says.
+    if (anchor) {
+      const content = await resolveContent(opts.content, opts.file);
+      const req: CreateSurfaceRequest = {
+        anchor,
+        body: type === "html" ? "html" : "document",
+        title: opts.title,
+        spec: {
+          ...(content !== undefined ? { content } : {}),
+          ...(opts.workspace ? { workspaceId: opts.workspace } : {}),
+        },
+      };
+      const made = await createSurfaceFor(cfg, req);
+      if (opts.json) console.log(JSON.stringify(made, null, 2));
+      else reportSurfaceCreate(made, req, cfg.podUrl);
+      const surface = made.surface as { id?: unknown } | undefined;
+      if (opts.open && made.status !== "proposed" && typeof surface?.id === "string") {
+        await openInBrowser({ kind: "document", id: surface.id });
+      }
+      return;
+    }
+
     const userId = await resolveUserId(cfg);
     const workspaceId = opts.workspace ?? cfg.workspaceId;
 
@@ -144,6 +176,7 @@ export async function docCreate(opts: DocCreateOpts): Promise<void> {
     const doc =
       (res.document as Record<string, unknown> | undefined) ?? res;
     const id = String(doc.id ?? res.id ?? "");
+    const isProposed = res.status === "proposed" || Boolean(res.proposalId);
 
     if (opts.json) {
       console.log(JSON.stringify(res, null, 2));
@@ -156,7 +189,6 @@ export async function docCreate(opts: DocCreateOpts): Promise<void> {
       for (const w of res.warnings) log.warn(String(w));
     }
 
-    const isProposed = res.status === "proposed" || Boolean(res.proposalId);
     if (isProposed) {
       // A proposal is normal — the write is queued for review, not a failure.
       log.info(`Document: ${opts.title} — proposed (under review)`);
