@@ -187,8 +187,8 @@ export function createWaker(deps: WakerDeps): Waker {
       const list = await fetchWakeList(deps.podUrl, deps.computerKey, deps.fetchImpl);
       try {
         deps.onPoll?.(list);
+      // empty-ok: a device report never fails a poll
       } catch {
-        // empty-ok: a device report never fails a poll
       }
       if (!list.wakesAgents) {
         sayOnce("off", `"Wakes agents" is off for ${list.computer.name ?? "this computer"}: nothing is started. ${list.why ?? ""}`.trim());
