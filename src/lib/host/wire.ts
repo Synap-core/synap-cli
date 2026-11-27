@@ -311,7 +311,12 @@ export function capLogEnd(text: string, end: "head" | "tail", cap = HOST_LOG_CAP
   return cut.toString("utf8").replace(/^�|�$/g, "");
 }
 
-export function createHostHub(cfg: Pick<HubConfig, "podUrl" | "apiKey">, fetchImpl: FetchLike = fetch): HostHub {
+export function createHostHub(
+  cfg: Pick<HubConfig, "podUrl" | "apiKey">,
+  fetchImpl: FetchLike = fetch,
+  /** The device manifest v1 (cached by the caller); rides each lease. An older pod's lease schema passes the extra field through and ignores it. */
+  manifest?: () => Promise<unknown>
+): HostHub {
   const base = `${cfg.podUrl.replace(/\/+$/, "")}/api/hub/host-jobs`;
 
   async function post(path: string, body: unknown, jobId?: string): Promise<unknown> {
@@ -345,7 +350,9 @@ export function createHostHub(cfg: Pick<HubConfig, "podUrl" | "apiKey">, fetchIm
       // install: a tool built for one processor is refused on another, before anyone approves.
       // `runner` is this process: a new one (the worker restarted, the CLI was updated, the
       // computer rebooted) is how the pod knows to check every tool here again (self-heal).
-      const seen = { os: process.platform, arch: process.arch, runner: RUNNER_ID };
+      // empty-ok: a manifest that cannot be built never blocks a lease; the lease goes without it
+      const m = manifest ? await manifest().catch(() => undefined) : undefined;
+      const seen = { os: process.platform, arch: process.arch, runner: RUNNER_ID, ...(m ? { manifest: m } : {}) };
       const body = (await post("/lease", capacity ? { ...seen, capacity } : seen)) as { job?: LeasedHostJob | null };
       return body.job ?? null;
     },

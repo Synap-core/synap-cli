@@ -13,6 +13,7 @@ import { createDockerRuntime } from "./compose.js";
 import { readHostConfig } from "./config.js";
 import { serveHost, statfsFreeMb, takeHostLock, type RunnerDeps, type ServeOptions } from "./lease.js";
 import type { RunContext } from "./tool-run.js";
+import { createDeviceReporter, type DeviceReporter } from "../device-manifest.js";
 import { createHostHub } from "./wire.js";
 
 export const hostLockFile = (): string => path.join(os.homedir(), ".synap", "host", "runner.lock");
@@ -25,11 +26,15 @@ export interface HostRunnerOptions {
   hostConfig?: string;
   log: (line: string) => void;
   toolContext?: () => RunContext;
+  /** The process's device reporter, whose manifest rides each lease (its probe cache is shared with the process's own reports). */
+  device?: Pick<DeviceReporter, "manifest">;
 }
 
 export function createHostRunner(o: HostRunnerOptions): RunnerDeps {
+  const device = o.device ?? createDeviceReporter({ reporter: "host" });
   return {
-    hub: createHostHub({ podUrl: o.podUrl, apiKey: o.computerKey }),
+    // The pod files every lease under the reporter `host`: these are the host runner's own capabilities.
+    hub: createHostHub({ podUrl: o.podUrl, apiKey: o.computerKey }, fetch, () => device.manifest({ hostsServices: true })),
     runtime: createDockerRuntime(),
     config: readHostConfig(o.hostConfig),
     log: o.log,

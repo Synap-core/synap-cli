@@ -158,6 +158,8 @@ export interface WakerDeps {
   saved?: () => Map<string, string>;
   now?: () => number;
   say?: (line: string) => void;
+  /** Called after each good poll with what the pod said ("Wakes agents"); the device report rides here. Never awaited. */
+  onPoll?: (list: WakeList) => void;
 }
 
 export interface Waker {
@@ -183,6 +185,11 @@ export function createWaker(deps: WakerDeps): Waker {
   return {
     async tick() {
       const list = await fetchWakeList(deps.podUrl, deps.computerKey, deps.fetchImpl);
+      try {
+        deps.onPoll?.(list);
+      // empty-ok: a device report never fails a poll
+      } catch {
+      }
       if (!list.wakesAgents) {
         sayOnce("off", `"Wakes agents" is off for ${list.computer.name ?? "this computer"}: nothing is started. ${list.why ?? ""}`.trim());
         return { wakesAgents: false, started: [] };
@@ -479,7 +486,15 @@ export async function wakerCommand(opts: { interval?: string; once?: boolean; pr
   const intervalMs = parseWakerInterval(opts.interval, parseInterval);
   const { podUrl, computerKey } = await computerOfThisPod();
   const extra = opts.protocols ? ["--protocols", opts.protocols] : [];
-  const waker = createWaker({ podUrl, computerKey, startWorker: (name) => spawnWorker(name, extra) });
+  const { createDeviceReporter } = await import("../lib/device-manifest.js");
+  const device = createDeviceReporter({ reporter: "waker", log: (l) => console.error(`[synap-waker] device: ${l}`) });
+  const waker = createWaker({
+    podUrl,
+    computerKey,
+    startWorker: (name) => spawnWorker(name, extra),
+    // The poll (every 5-60 s) is the waker's timer: the report goes when due or when "Wakes agents" changed.
+    onPoll: (list) => void device.report(podUrl, computerKey, { wakesAgents: list.wakesAgents }),
+  });
   console.log(`[synap-waker] waking this computer's agents for ${podUrl}, every ${intervalMs / 1000}s`);
   const stop = new AbortController();
   for (const sig of ["SIGTERM", "SIGINT"] as const) process.once(sig, () => stop.abort());
