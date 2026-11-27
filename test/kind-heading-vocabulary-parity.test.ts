@@ -24,7 +24,7 @@ const REGISTRY = join(
 );
 const SRC = join(process.cwd(), "src/commands/market.ts");
 
-/** `cell: { label: "Card", labelPlural: "Cards" }` → ["Card", "Cards"] */
+/** `cell: { label: "Cell", labelPlural: "Cells" }` → ["Cell", "Cells"] */
 function registryLabels(src: string, kind: string): { label: string; plural: string } | null {
   const at = src.search(new RegExp(`^\\s{2}${kind}:\\s*\\{`, "m"));
   if (at < 0) return null;

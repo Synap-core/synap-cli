@@ -27,7 +27,7 @@ import { execFile, spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { wakerRunnerHeader } from "../lib/conversation-headers.js";
+import { clientHeader, wakerRunnerHeader } from "../lib/conversation-headers.js";
 import { savedAgentsById } from "../lib/agents-config.js";
 
 /** How often the waker polls (and renews its lease). */
@@ -68,7 +68,7 @@ export async function fetchWakeList(
   fetchImpl: typeof fetch = fetch
 ): Promise<WakeList> {
   const res = await fetchImpl(`${podUrl.replace(/\/+$/, "")}/api/hub/computers/me/wakes`, {
-    headers: { Authorization: `Bearer ${computerKey}`, ...wakerRunnerHeader() },
+    headers: { Authorization: `Bearer ${computerKey}`, ...clientHeader("synap-waker"), ...wakerRunnerHeader() },
     signal: AbortSignal.timeout(20_000),
   });
   const text = await res.text();

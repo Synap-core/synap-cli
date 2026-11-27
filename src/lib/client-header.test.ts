@@ -24,6 +24,10 @@ vi.mock("./mcp-bridge.js", async (orig) => {
 import { hubGet } from "./hub-client.js";
 import { mcpBridgeHeaders, CLIENT_HEADER, RUNNER_HEADER, claudeCodeProcess, clientHeader } from "./conversation-headers.js";
 import { mcpBridge } from "../commands/mcp.js";
+import { createMcpClient } from "./mcp-call.js";
+import { fetchWakeList } from "../commands/waker.js";
+import { runMcpConfig, RUN_MCP_SERVER } from "../commands/worker.js";
+import { pollForApproval } from "./approval-poll.js";
 
 const VERSION = (
   JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8")) as { version: string }
@@ -108,5 +112,56 @@ describe("X-Synap-Client", () => {
     vi.stubEnv("CLAUDE_CODE_SESSION_ID", "");
     await mcpBridge({ url: "https://pod/mcp" });
     expect(captured.opts?.headers?.["X-Synap-Process"]).toBeUndefined();
+  });
+
+  // The senders that used to name no client (finding 53cace30): 71% of pod calls were unlabelled.
+  it("`synap worker`'s MCP calls (handshake included) send synap-worker/<version>", async () => {
+    const sent: Record<string, string>[] = [];
+    const fetchImpl = (async (_u: string, init: RequestInit) => {
+      sent.push(init.headers as Record<string, string>);
+      return new Response(JSON.stringify({ jsonrpc: "2.0", id: sent.length, result: { content: [{ type: "text", text: "{}" }] } }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as unknown as typeof fetch;
+    await createMcpClient({ url: "https://pod/mcp", apiKey: "k", fetchImpl }).call("synap_orient", {});
+    expect(sent.length).toBeGreaterThanOrEqual(2);
+    for (const h of sent) expect(h[CLIENT_HEADER]).toBe(`synap-worker/${VERSION}`);
+  });
+
+  it("`synap waker`'s poll sends synap-waker/<version>", async () => {
+    const sent: Record<string, string>[] = [];
+    const fetchImpl = (async (_u: string, init: RequestInit) => {
+      sent.push(init.headers as Record<string, string>);
+      return new Response("{}", { status: 200 });
+    }) as unknown as typeof fetch;
+    await fetchWakeList("https://pod", "k", fetchImpl).catch(() => undefined);
+    expect(sent[0]![CLIENT_HEADER]).toBe(`synap-waker/${VERSION}`);
+  });
+
+  it("the headless run's `claude --mcp-config` carries synap-worker/<version>", () => {
+    const cfg = runMcpConfig("https://pod", "k") as { mcpServers: Record<string, { headers: Record<string, string> }> };
+    expect(cfg.mcpServers[RUN_MCP_SERVER]!.headers[CLIENT_HEADER]).toBe(`synap-worker/${VERSION}`);
+  });
+
+  it("every approval poll sends synap-cli/<version>, and a caller's own headers still ride", async () => {
+    const sent: Record<string, string>[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_u: string, init: RequestInit) => {
+        sent.push(init.headers as Record<string, string>);
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      })
+    );
+    await pollForApproval({
+      url: "https://pod/x",
+      intervalMs: 1,
+      headers: { Authorization: "Bearer k" },
+      isApproved: () => true,
+      isRejected: () => false,
+      onApproved: () => 1,
+    });
+    expect(sent[0]![CLIENT_HEADER]).toBe(`synap-cli/${VERSION}`);
+    expect(sent[0]!.Authorization).toBe("Bearer k");
   });
 });

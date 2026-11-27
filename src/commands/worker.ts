@@ -61,6 +61,7 @@ import {
   modelHeaders,
   reportableModel,
   workerRunnerHeader,
+  clientHeader,
 } from "../lib/conversation-headers.js";
 import { hubGet, resolveHubConfig } from "../lib/hub-client.js";
 import { unknownAgentMessage } from "../lib/agents-config.js";
@@ -394,6 +395,7 @@ export function runMcpConfig(
         url: `${podUrl.replace(/\/+$/, "")}/mcp`,
         headers: {
           Authorization: `Bearer ${apiKey}`,
+          ...clientHeader("synap-worker"),
           ...(conversation ? { [CONVERSATION_HEADER]: conversation } : {}),
           // A headless run calls the pod only inside its turn, so while it calls it is busy (a
           // wait for the person's answer included, as the bridge reports an interactive turn).

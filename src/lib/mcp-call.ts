@@ -18,6 +18,8 @@
  */
 
 /** A reply the pod cut at its reply cap: names the tool, the size, the cap and how to narrow. */
+import { clientHeader } from "./conversation-headers.js";
+
 export class McpReplyCappedError extends Error {
   constructor(
     readonly tool: string,
@@ -95,6 +97,7 @@ export function createMcpClient(opts: McpCallOptions): McpCallClient {
 
   const post = async (message: Record<string, unknown>, extra: Record<string, string> = {}) => {
     const headers: Record<string, string> = {
+      ...clientHeader("synap-worker"),
       ...extra,
       Authorization: `Bearer ${opts.apiKey}`,
       "Content-Type": "application/json",
